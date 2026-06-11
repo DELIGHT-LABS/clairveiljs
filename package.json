@@ -1,0 +1,170 @@
+{
+  "name": "clairveiljs",
+  "version": "0.1.0",
+  "description": "Clairveil JavaScript SDK for privacy core, Cosmos transport, EVM transport, wallet, note, transfer, withdraw, disclosure, and prover flows.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "sideEffects": false,
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "files": [
+    "src",
+    "examples",
+    "proto",
+    "tools",
+    "test/e2e-local.e2e.js",
+    "telescope.config.json",
+    "tsconfig.codegen.json",
+    "README.md",
+    "README.ko.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DELIGHT-LABS/clairveiljs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DELIGHT-LABS/clairveiljs/issues"
+  },
+  "homepage": "https://github.com/DELIGHT-LABS/clairveiljs#readme",
+  "keywords": [
+    "clairveil",
+    "privacy",
+    "cosmos",
+    "cosmjs",
+    "wallet",
+    "sdk",
+    "zero-knowledge",
+    "selective-disclosure"
+  ],
+  "scripts": {
+    "codegen:proto": "telescope transpile --config ./telescope.config.json && node tools/patch-generated-helpers.js codegen/generated/helpers.ts && tsc -p tsconfig.codegen.json && node tools/patch-generated-helpers.js src/generated/helpers.js",
+    "check:codegen": "node tools/patch-generated-helpers.js --check codegen/generated/helpers.ts src/generated/helpers.js",
+    "check:generated": "find src/generated -name '*.js' -exec node --check {} \\;",
+    "check": "find src -path src/generated -prune -o -name '*.js' -exec node --check {} \\; && find examples -name '*.js' -exec node --check {} \\; && find tools -name '*.js' -exec node --check {} \\; && npm run check:generated && npm run check:codegen",
+    "typecheck": "tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --strict test/types.ts",
+    "test": "node --test test/*.test.js",
+    "test:conformance": "node --test test/conformance.test.js test/prover-contract.test.js test/disclosure-conformance.test.js",
+    "test:conformance:required": "node --import ./tools/require-conformance-fixtures.js --test test/conformance.test.js test/prover-contract.test.js test/disclosure-conformance.test.js",
+    "test:e2e:local": "node --test test/e2e-local.e2e.js",
+    "prepublishOnly": "npm run check && npm run typecheck && npm test && npm run test:conformance:required"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./core": {
+      "types": "./src/core/index.d.ts",
+      "import": "./src/core/index.js"
+    },
+    "./conformance": {
+      "types": "./src/conformance.d.ts",
+      "import": "./src/conformance.js"
+    },
+    "./cosmos": {
+      "types": "./src/transport/cosmos.d.ts",
+      "import": "./src/transport/cosmos.js"
+    },
+    "./cosmos-client": {
+      "types": "./src/transport/cosmos-client.d.ts",
+      "import": "./src/transport/cosmos-client.js"
+    },
+    "./evm": {
+      "types": "./src/transport/evm.d.ts",
+      "import": "./src/transport/evm.js"
+    },
+    "./crypto": {
+      "types": "./src/core/crypto.d.ts",
+      "import": "./src/core/crypto.js"
+    },
+    "./browser-crypto": {
+      "types": "./src/core/browser-crypto.d.ts",
+      "import": "./src/core/browser-crypto.js"
+    },
+    "./browser-public": {
+      "types": "./src/browser/public-client.d.ts",
+      "import": "./src/browser/public-client.js"
+    },
+    "./browser-wallet": {
+      "types": "./src/browser/wallet-client.d.ts",
+      "import": "./src/browser/wallet-client.js"
+    },
+    "./browser-dapp": {
+      "types": "./src/browser/wallet-client.d.ts",
+      "import": "./src/browser/wallet-client.js"
+    },
+    "./disclosure": {
+      "types": "./src/core/disclosure.d.ts",
+      "import": "./src/core/disclosure.js"
+    },
+    "./errors": {
+      "types": "./src/core/errors.d.ts",
+      "import": "./src/core/errors.js"
+    },
+    "./note": {
+      "types": "./src/core/note.d.ts",
+      "import": "./src/core/note.js"
+    },
+    "./note-store": {
+      "types": "./src/privacy/note-store.d.ts",
+      "import": "./src/privacy/note-store.js"
+    },
+    "./payload": {
+      "types": "./src/privacy/payload.d.ts",
+      "import": "./src/privacy/payload.js"
+    },
+    "./planner": {
+      "types": "./src/privacy/planner.d.ts",
+      "import": "./src/privacy/planner.js"
+    },
+    "./prover": {
+      "types": "./src/privacy/prover.d.ts",
+      "import": "./src/privacy/prover.js"
+    },
+    "./scan": {
+      "types": "./src/privacy/scan.d.ts",
+      "import": "./src/privacy/scan.js"
+    },
+    "./schemas": {
+      "types": "./src/core/schemas.d.ts",
+      "import": "./src/core/schemas.js"
+    },
+    "./wallet-adapter": {
+      "types": "./src/wallet/adapter.d.ts",
+      "import": "./src/wallet/adapter.js"
+    },
+    "./generated/*.js": {
+      "types": "./src/generated/*.d.ts",
+      "import": "./src/generated/*.js"
+    },
+    "./generated/*": {
+      "types": "./src/generated/*.d.ts",
+      "import": "./src/generated/*.js"
+    }
+  },
+  "dependencies": {
+    "@cosmjs/encoding": "^0.39.0",
+    "@cosmjs/proto-signing": "^0.39.0",
+    "@cosmjs/stargate": "^0.39.0",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "cosmjs-types": "^0.11.0",
+    "js-sha3": "^0.9.3"
+  },
+  "devDependencies": {
+    "@cosmjs/encoding": "^0.39.0",
+    "@cosmjs/proto-signing": "^0.39.0",
+    "@cosmjs/stargate": "^0.39.0",
+    "@hyperweb/telescope": "^2.2.4",
+    "cosmjs-types": "^0.11.0",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

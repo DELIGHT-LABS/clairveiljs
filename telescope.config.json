@@ -1,0 +1,68 @@
+{
+  "protoDirs": ["./proto"],
+  "outPath": "./codegen/generated",
+  "options": {
+    "env": "v-next",
+    "useInterchainJs": false,
+    "useSDKTypes": false,
+    "restoreImportExtension": ".js",
+    "removeUnusedImports": true,
+    "prototypes": {
+      "enabled": true,
+      "parser": {
+        "keepCase": false
+      },
+      "methods": {
+        "fromJSON": false,
+        "toJSON": false,
+        "encode": true,
+        "decode": true,
+        "fromPartial": true,
+        "toAmino": false,
+        "fromAmino": false,
+        "fromProto": false,
+        "toProto": false,
+        "fromProtoMsg": false,
+        "toProtoMsg": false,
+        "toAminoMsg": false,
+        "fromAminoMsg": false
+      },
+      "addTypeUrlToObjects": true,
+      "addTypeUrlToDecoders": false,
+      "addAminoTypeToObjects": false,
+      "typingsFormat": {
+        "duration": "duration",
+        "timestamp": "date",
+        "useExact": false,
+        "useDeepPartial": true,
+        "num64": "bigint",
+        "useTelescopeGeneratedType": true,
+        "autoFixUndefinedEnumDefault": true
+      },
+      "includes": {
+        "packages": ["clairveil.privacy.v1"]
+      }
+    },
+    "aminoEncoding": {
+      "enabled": false
+    },
+    "interfaces": {
+      "enabled": false
+    },
+    "bundle": {
+      "enabled": false
+    },
+    "stargateClients": {
+      "enabled": false
+    },
+    "lcdClients": {
+      "enabled": false
+    },
+    "rpcClients": {
+      "enabled": false
+    },
+    "helperFunctions": {
+      "enabled": false
+    }
+  }
+}
