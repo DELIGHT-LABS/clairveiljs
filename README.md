@@ -26,7 +26,7 @@ It uses CosmJS as the transport/signing foundation and provides Clairveil-specif
 - planner results for transfer and withdraw UX states
 - stable `ClairveilError` codes for planner/prover/wallet failures
 - prepared transfer payload building
-- prepared withdraw prover/final payload building
+- prepared withdraw and relay withdraw prover/final payload building
 - HTTP prover adapter for `/v1/prover/transfer` and `/v1/prover/withdraw`
 - async job prover adapter for remote queue/poll prover deployments
 - direct sign-doc construction for Keplr `signDirect`
@@ -82,7 +82,7 @@ Current boundary:
 - User disclosure decoding is handled in JS.
 - Auditor disclosure decoding is handled in JS with a request-level disclosure private scalar supplied by a trusted admin/backend/local auditor runtime.
 - Cosmos transport uses CosmJS/Keplr-style signing. EVM transport uses the Clairveil-compatible `IPrivacy` precompile calldata contract.
-- Relayed withdraw is future/scope-out for the current high-level SDK and browser DApp surface. The package keeps low-level prepared withdraw payload builders and validation helpers for handoff compatibility, but production relayer UX and one-call relayed withdraw APIs are intentionally deferred.
+- Relay withdraw is supported as a two-party handoff: the wallet/DApp prepares the final withdraw payload, and a relayer validates that payload before signing `MsgWithdraw` as the relayer creator. The transport between wallet and relayer is product-defined.
 - The SDK files are ESM and avoid direct `node:crypto` imports. Browser bundlers still need to provide normal web APIs such as `fetch`, `TextEncoder`, `TextDecoder`, and `crypto.getRandomValues`.
 - The default prefixes are the Clairveil reference prefixes (`clair` accounts and `clairs` shielded addresses), but account and shielded prefixes are runtime configuration. Use `accountPrefix`/`shieldedPrefix` when targeting a downstream Cosmos chain that embeds the Clairveil privacy module.
 
@@ -118,7 +118,7 @@ npm run test:conformance:required
 
 `prepublishOnly` runs the strict conformance command.
 
-These tests verify root seed/key/address derivation, browser signer adapter behavior, note scan results, prepared transfer and withdraw payload hashes, prover HTTP contract behavior, disclosure decoding, and withdraw/relay payload rejection cases against the Go-generated fixtures. They do not mark the high-level relayed withdraw product flow as in-scope for the current release.
+These tests verify root seed/key/address derivation, browser signer adapter behavior, note scan results, prepared transfer and withdraw payload hashes, prover HTTP contract behavior, disclosure decoding, and withdraw/relay payload validation helpers.
 
 Downstream packages can reuse the same fixture loading policy:
 
@@ -139,7 +139,7 @@ if (!result.skipped) {
 
 The handoff e2e item is intentionally not part of `prepublishOnly`. Running a Clairveil node and prover is the chain repository's responsibility; this package only proves that the published SDK surface can attach to those services and execute the full wallet flow.
 
-Current local e2e scope is deposit, wallet note scan, shielded transfer, disclosure decode, and direct withdraw. Relayed withdraw is future/scope-out for this release and should be validated through the low-level conformance fixtures until the relayer UX/API is promoted.
+Current local e2e scope is deposit, wallet note scan, shielded transfer, disclosure decode, and direct withdraw. Relay withdraw payload/signDoc construction is covered by SDK surface/type tests; full relayer service e2e depends on the product's relayer transport and deployment.
 
 Run the optional smoke/e2e command with a local Clairveil node:
 
@@ -475,8 +475,6 @@ Withdraw requires one exact-match note. If the planner returns `exact_note_requi
 
 `MsgWithdraw` has no output note fields. Do not send legacy `newNoteCommitment`, `encryptedNote`, or dummy zero-byte output-note values.
 
-Relayed withdraw is future/scope-out for the current high-level SDK surface. Use direct withdraw for the supported wallet flow. Low-level prepared withdraw payload helpers remain available for conformance and future relayer integration work, but the production relayer API/UX is not part of this release.
-
 ```js
 const withdraw = await clairveil.prepareWithdraw({
   wallet,
@@ -491,6 +489,33 @@ if (withdraw.status === "ready") {
     signDoc: withdraw.signDoc
   });
 }
+```
+
+For relay withdraw, the wallet/DApp prepares a final payload and sends it to a product-defined relayer endpoint. The relayer must validate the payload hash, chain ID, recipient, expiry, and address prefix before signing. The relayer address becomes `MsgWithdraw.creator`; the payload recipient remains the transparent withdraw target.
+
+```js
+const prepared = await clairveil.createRelayWithdrawPayload({
+  wallet,
+  amount: "5uclair",
+  recipient: "clair1...",
+  proverAdapter
+});
+
+await fetch("/relayer/withdraw", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ payload: prepared.payload })
+});
+```
+
+```js
+const relay = await relayerClient.createRelayWithdrawSignDoc({
+  payload,
+  relayer: relayerAddress,
+  pubKeyHex: relayerPubKeyHex,
+  expectedChainId: "clairveil-1",
+  expectedRecipient: payload.recipient
+});
 ```
 
 ## Async Prover Jobs

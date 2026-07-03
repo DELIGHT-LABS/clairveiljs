@@ -228,12 +228,31 @@ export interface WithdrawMessageBuildResult {
   message: WithdrawMessage;
 }
 
+export interface RelayWithdrawPayloadBuildResult {
+  selectedNote: FoundNote;
+  proverPayload: PreparedWithdrawProverPayload;
+  proof: PreparedWithdrawProof;
+  payload: PreparedWithdrawPayload;
+}
+
+export interface RelayWithdrawRelayOptions {
+  nowUnix?: number;
+  expectedChainId?: string;
+  expectedRecipient?: ClairAddress | string;
+  accountPrefix?: string;
+}
+
 export function buildPreparedWithdrawProverPayload(input: PreparedWithdrawProverPayloadInput): Promise<PreparedWithdrawProverPayloadResult>;
 export function computePreparedWithdrawPayloadHash(payload: PreparedWithdrawPayload): Hex;
 export function validatePreparedWithdrawProof(proverPayload: PreparedWithdrawProverPayload, proof: PreparedWithdrawProof, nowUnix?: number): true;
 export function buildPreparedWithdrawPayloadFromProof(proverPayload: PreparedWithdrawProverPayload, proof: PreparedWithdrawProof, nowUnix?: number): PreparedWithdrawPayload;
 export function validatePreparedWithdrawPayload(payload: PreparedWithdrawPayload, nowUnix?: number): true;
-export function buildWithdrawMsgFromPayload(payload: PreparedWithdrawPayload, creator: ClairAddress | string): WithdrawMessage;
+export function validateRelayWithdrawPayload(payload: PreparedWithdrawPayload, options?: RelayWithdrawRelayOptions): true;
+export function buildWithdrawMsgFromPayload(payload: PreparedWithdrawPayload, creator: ClairAddress | string, nowUnix?: number): WithdrawMessage;
+export function buildRelayWithdrawMsgFromPayload(payload: PreparedWithdrawPayload, relayer: ClairAddress | string, options?: RelayWithdrawRelayOptions): WithdrawMessage;
+export function buildRelayWithdrawPayload(input?: PreparedWithdrawProverPayloadInput & {
+  proverAdapter?: ProverAdapter;
+}): Promise<RelayWithdrawPayloadBuildResult>;
 export function buildWithdrawMessage(input?: PreparedWithdrawProverPayloadInput & {
   proverAdapter?: ProverAdapter;
   creator?: ClairAddress | string;

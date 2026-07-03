@@ -632,6 +632,70 @@ export class ClairveilBrowserClient {
     };
   }
 
+  async prepareRelayWithdraw(body) {
+    const walletType = walletTypeFromBody(body);
+    const material = this.privacyMaterial(body, walletType);
+    const amount = body.amount;
+    const rawRecipient = body.recipient;
+    const evmRecipient = isEvmAddress(rawRecipient) ? normalizeEvmAddress(rawRecipient, "withdraw recipient") : "";
+    const recipient = evmRecipient ? evmAddressToBech32(evmRecipient, this.accountPrefix) : rawRecipient;
+    const prepared = await this.cosmos.prepareRelayWithdraw({
+      proverAdapter: this.proverAdapter(),
+      material,
+      amount,
+      recipient,
+      scan: scanOptionsFromBody(body),
+      expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix
+    });
+    if (prepared.status !== "ready") throw plannerError(prepared);
+    return {
+      payload: prepared.payload,
+      prepared: {
+        shieldedAddress: prepared.privacyAccount.shielded_address,
+        amount: prepared.payload.amount,
+        recipient: prepared.payload.recipient,
+        evmRecipient,
+        selectedNoteNullifier: prepared.selectedNote?.nullifier || prepared.payload.nullifier_hex,
+        expiresAtUnix: prepared.payload.expires_at_unix,
+        payload: prepared.payload,
+        proof: prepared.proof
+      },
+      plan: prepared.plan
+    };
+  }
+
+  buildRelayWithdrawMessageFromPayload(body = {}) {
+    return this.cosmos.buildRelayWithdrawMessageFromPayload({
+      payload: body.payload,
+      relayer: body.relayer ?? body.creator ?? body.address,
+      nowUnix: body.nowUnix ?? body.now_unix,
+      expectedChainId: body.expectedChainId ?? body.expected_chain_id,
+      expectedRecipient: body.expectedRecipient ?? body.expected_recipient,
+      accountPrefix: body.accountPrefix ?? body.account_prefix
+    });
+  }
+
+  async createRelayWithdrawSignDoc(body = {}) {
+    const result = await this.cosmos.createRelayWithdrawSignDoc({
+      payload: body.payload,
+      relayer: body.relayer ?? body.creator ?? body.address,
+      pubKeyHex: body.pubKeyHex ?? body.pub_key_hex,
+      gasLimit: body.gasLimit ?? body.gas_limit,
+      feeAmount: body.feeAmount ?? body.fee_amount ?? [],
+      memo: body.memo,
+      nowUnix: body.nowUnix ?? body.now_unix,
+      expectedChainId: body.expectedChainId ?? body.expected_chain_id,
+      expectedRecipient: body.expectedRecipient ?? body.expected_recipient,
+      accountPrefix: body.accountPrefix ?? body.account_prefix
+    });
+    return {
+      signDoc: result.signDoc,
+      message: result.message,
+      payload: result.payload,
+      relayer: result.relayer
+    };
+  }
+
   async scanWalletNotes(body) {
     const material = this.privacyMaterial(body);
     const {

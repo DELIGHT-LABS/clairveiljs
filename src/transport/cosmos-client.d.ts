@@ -46,6 +46,8 @@ import type {
   PreparedWithdrawProverPayload,
   PreparedWithdrawProverPayloadInput,
   PreparedWithdrawProverPayloadResult,
+  RelayWithdrawPayloadBuildResult,
+  RelayWithdrawRelayOptions,
   TransferInputSelection,
   TransferMessage,
   TransferMessageBuildResult,
@@ -200,6 +202,25 @@ export interface PreparedWithdraw {
   privacyAccount: PrivacyAccountSummary;
 }
 
+export interface PreparedRelayWithdraw {
+  status: string;
+  plan: WithdrawPlan;
+  scan: ScanResult;
+  proverPayload?: PreparedWithdrawProverPayload;
+  proof?: PreparedWithdrawProof;
+  payload?: PreparedWithdrawPayload;
+  selectedNote?: FoundNote;
+  privacyAccount: PrivacyAccountSummary;
+}
+
+export interface PreparedRelayWithdrawSignDoc {
+  status: "ready";
+  relayer: ClairAddress | string;
+  payload: PreparedWithdrawPayload;
+  message: WithdrawMessage;
+  signDoc: SignDocBase64;
+}
+
 export function createClairveilRegistry(extraTypes?: Array<[string, object]>): object;
 export function normalizeRpcEndpoint(rpc: string): string;
 export function normalizeRestEndpoint(rest: string): string;
@@ -332,18 +353,50 @@ export class ClairveilJS {
     maxPages?: number;
     scan?: PrivacyScanOptions;
   }): Promise<PreparedWithdraw>;
+  prepareRelayWithdraw(input: {
+    wallet?: WalletAdapterLike;
+    material?: PrivacyMaterial;
+    amount: CoinString;
+    recipient: ClairAddress;
+    proverAdapter: ProverAdapter;
+    denom?: string;
+    assetDenom?: string;
+    limit?: number;
+    maxPages?: number;
+    scan?: PrivacyScanOptions;
+    expiresAtUnix?: number;
+  }): Promise<PreparedRelayWithdraw>;
   createDepositSignDoc(input: Parameters<ClairveilJS["prepareDeposit"]>[0]): Promise<PreparedDeposit>;
   createTransferSignDoc(input: Parameters<ClairveilJS["prepareTransfer"]>[0]): Promise<PreparedTransfer & { status: "ready"; signDoc: SignDocBase64 }>;
   createWithdrawSignDoc(input: Parameters<ClairveilJS["prepareWithdraw"]>[0]): Promise<PreparedWithdraw & { status: "ready"; signDoc: SignDocBase64 }>;
+  createRelayWithdrawPayload(input: Parameters<ClairveilJS["prepareRelayWithdraw"]>[0]): Promise<PreparedRelayWithdraw & { status: "ready"; payload: PreparedWithdrawPayload }>;
   buildPreparedTransferPayload(input: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;
   buildTransferMessage(input: PreparedTransferPayloadInput & {
     proverAdapter?: ProverAdapter;
   }): Promise<TransferMessageBuildResult>;
   buildPreparedWithdrawProverPayload(input: PreparedWithdrawProverPayloadInput): Promise<PreparedWithdrawProverPayloadResult>;
+  buildRelayWithdrawPayload(input: PreparedWithdrawProverPayloadInput & {
+    proverAdapter?: ProverAdapter;
+  }): Promise<RelayWithdrawPayloadBuildResult>;
   buildWithdrawMessage(input: PreparedWithdrawProverPayloadInput & {
     proverAdapter?: ProverAdapter;
     creator?: ClairAddress | string;
   }): Promise<WithdrawMessageBuildResult>;
+  buildRelayWithdrawMessageFromPayload(input: {
+    payload: PreparedWithdrawPayload;
+    relayer?: ClairAddress | string;
+    creator?: ClairAddress | string;
+  } & RelayWithdrawRelayOptions): WithdrawMessage;
+  createRelayWithdrawSignDoc(input: {
+    payload: PreparedWithdrawPayload;
+    relayer?: ClairAddress | string;
+    creator?: ClairAddress | string;
+    pubKeyHex?: Hex;
+    pub_key_hex?: Hex;
+    gasLimit?: number;
+    feeAmount?: Array<object>;
+    memo?: string;
+  } & RelayWithdrawRelayOptions): Promise<PreparedRelayWithdrawSignDoc>;
   decodeUserDisclosure(input: {
     txHash?: Hex;
     tx_hash?: Hex;

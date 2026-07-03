@@ -5,6 +5,9 @@ import {
   type DecodeAuditDisclosureInput,
   type PrepareDepositInput,
   type PreparedDeposit,
+  type PrepareRelayWithdrawInput,
+  type PreparedRelayWithdraw,
+  type PreparedRelayWithdrawSignDoc,
   type PrepareTransferInput,
   type PreparedTransfer,
   type PrepareWithdrawInput,
@@ -85,6 +88,10 @@ const withdrawInput: PrepareWithdrawInput = {
     maxPages: 1000
   }
 };
+const relayWithdrawInput: PrepareRelayWithdrawInput = {
+  ...withdrawInput,
+  expiresAtUnix: 4102448400
+};
 const scanInput: ScanWalletNotesInput = {
   ...walletIdentity,
   limit: 50,
@@ -99,6 +106,7 @@ const invalidWalletType: PrepareDepositInput = { ...walletIdentity, walletType: 
 const depositResult: Promise<PreparedDeposit> = dappClient.prepareDeposit(depositInput);
 const transferResult: Promise<PreparedTransfer> = dappClient.prepareTransfer(transferInput);
 const withdrawResult: Promise<PreparedWithdraw> = dappClient.prepareWithdraw(withdrawInput);
+const relayWithdrawResult: Promise<PreparedRelayWithdraw> = dappClient.prepareRelayWithdraw(relayWithdrawInput);
 const scanResult: Promise<ScanWalletNotesResult> = dappClient.scanWalletNotes(scanInput);
 const nullifierResult: Promise<object & { used?: boolean }> = dappClient.checkNullifier("00".repeat(32));
 const auditDisclosureInput: DecodeAuditDisclosureInput = {
@@ -135,6 +143,15 @@ async function browserDappTypeSmoke() {
   const withdraw = await withdrawResult;
   const withdrawRecipient: string = withdraw.prepared.recipient;
   const withdrawExpiry: number = withdraw.prepared.expiresAtUnix;
+  const relayWithdraw = await relayWithdrawResult;
+  const relayWithdrawPayloadHash: string = relayWithdraw.payload.payload_hash;
+  const relaySignDocResult: Promise<PreparedRelayWithdrawSignDoc> = dappClient.createRelayWithdrawSignDoc({
+    payload: relayWithdraw.payload,
+    address: "demo1relayer",
+    pubKeyHex: "02".padEnd(66, "0")
+  });
+  const relaySignDoc = await relaySignDocResult;
+  const relaySigner: string = relaySignDoc.relayer;
 
   const scan = await scanResult;
   const spendableTotal: string = scan.summary.total_spendable;
@@ -152,6 +169,8 @@ async function browserDappTypeSmoke() {
     transferRecipient,
     withdrawRecipient,
     withdrawExpiry,
+    relayWithdrawPayloadHash,
+    relaySigner,
     spendableTotal,
     nextScanAfterHeight,
     nullifierUsed,
@@ -180,12 +199,14 @@ void {
   depositInput,
   transferInput,
   withdrawInput,
+  relayWithdrawInput,
   scanInput,
   auditDisclosureInput,
   invalidWalletType,
   depositResult,
   transferResult,
   withdrawResult,
+  relayWithdrawResult,
   scanResult,
   auditDisclosureResult,
   conformanceResult,

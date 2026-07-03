@@ -57,6 +57,8 @@ test("browser-dapp entrypoint instantiates a DApp client", async () => {
   assert.equal(typeof client.prepareDeposit, "function");
   assert.equal(typeof client.prepareTransfer, "function");
   assert.equal(typeof client.prepareWithdraw, "function");
+  assert.equal(typeof client.prepareRelayWithdraw, "function");
+  assert.equal(typeof client.createRelayWithdrawSignDoc, "function");
   assert.equal(typeof client.scanWalletNotes, "function");
   assert.equal(typeof client.checkNullifier, "function");
   assert.equal(typeof browserDapp.ClairveilBrowserDappClient, "function");

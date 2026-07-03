@@ -18,7 +18,7 @@ English documentation: [README.md](./README.md)
 - Keplr/custom signer용 wallet adapter
 - memory/localStorage 기반 note store
 - transfer/withdraw planner와 안정적인 `ClairveilError` 코드
-- prepared transfer/withdraw payload builder
+- prepared transfer/withdraw/relay withdraw payload builder
 - `/v1/prover/transfer`, `/v1/prover/withdraw` HTTP prover adapter
 - Keplr `signDirect`용 sign doc 생성, signed tx 조립, broadcast
 - EIP-1193 wallet용 Clairveil-compatible `IPrivacy` EVM precompile calldata adapter
@@ -183,11 +183,47 @@ to
 
 User disclosure decode는 JS SDK에서 처리합니다. Audit disclosure decode도 JS SDK에서 처리할 수 있지만, disclosure private scalar는 trusted admin/backend/local auditor runtime에서 주입해야 합니다.
 
-## Withdraw와 Relayed Withdraw
+## Withdraw와 Relay Withdraw
 
-현재 고수준 SDK와 browser DApp surface에서 supported wallet flow는 direct withdraw입니다.
+Withdraw는 exact-match note 하나가 필요합니다. planner가 `exact_note_required`를 반환하면 먼저 shielded self-transfer로 정확한 금액의 note를 만들어야 합니다.
 
-Relayed withdraw는 이번 릴리스에서 future/scope-out입니다. 패키지는 handoff compatibility와 future relayer integration을 위해 low-level prepared withdraw payload builder와 validation helper를 유지하지만, production relayer UX와 one-call relayed withdraw API는 의도적으로 뒤로 미뤄져 있습니다.
+Direct withdraw는 wallet/DApp이 `MsgWithdraw` sign doc까지 준비합니다.
+
+```js
+const withdraw = await clairveil.prepareWithdraw({
+  wallet,
+  amount: "5uclair",
+  recipient: "clair1...",
+  proverAdapter
+});
+```
+
+Relay withdraw는 two-party handoff로 지원합니다. wallet/DApp은 final withdraw payload를 만들고, product-defined relayer endpoint로 전달합니다. relayer는 payload hash, chain ID, recipient, expiry, address prefix를 검증한 뒤 자기 주소를 `MsgWithdraw.creator`로 넣어 sign doc을 만듭니다. payload의 `recipient`는 그대로 transparent withdraw target입니다.
+
+```js
+const prepared = await clairveil.createRelayWithdrawPayload({
+  wallet,
+  amount: "5uclair",
+  recipient: "clair1...",
+  proverAdapter
+});
+
+await fetch("/relayer/withdraw", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ payload: prepared.payload })
+});
+```
+
+```js
+const relay = await relayerClient.createRelayWithdrawSignDoc({
+  payload,
+  relayer: relayerAddress,
+  pubKeyHex: relayerPubKeyHex,
+  expectedChainId: "clairveil-1",
+  expectedRecipient: payload.recipient
+});
+```
 
 ## Handoff Conformance
 
@@ -221,9 +257,7 @@ npm run test:conformance:required
 - prepared transfer/withdraw payload hash
 - prover HTTP contract behavior
 - disclosure decode
-- withdraw/relay payload rejection case
-
-이 테스트는 high-level relayed withdraw product flow를 이번 release scope로 표시하지 않습니다.
+- withdraw/relay payload validation helper
 
 ## Optional Local Node E2E
 
@@ -236,6 +270,8 @@ Local node e2e는 `prepublishOnly`의 필수 gate가 아닙니다. Clairveil nod
 - shielded transfer
 - disclosure decode
 - direct withdraw
+
+Relay withdraw payload/signDoc 생성은 SDK surface/type test로 확인합니다. 실제 relayer service e2e는 product-defined relayer transport와 배포 환경에 맞춰 별도로 구성하세요.
 
 ```bash
 CLAIRVEIL_E2E_LOCAL=1 npm run test:e2e:local

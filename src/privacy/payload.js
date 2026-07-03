@@ -774,6 +774,12 @@ export async function buildPreparedWithdrawProverPayload({
   if (!signer) {
     throw new Error("spendNoteHashSigner or rootSeed is required");
   }
+  const normalizedExpiresAtUnix = assertFutureUnixTimestamp(
+    expiresAtUnix,
+    Math.floor(Date.now() / 1000),
+    "withdraw prover payload expired",
+    "withdraw prover payload expires_at_unix"
+  );
   const signature = await resolveWithdrawSignature(signer, computeWithdrawNoteHash(selected.note, recipientBytes));
   const payload = {
     version: preparedWithdrawProverPayloadVersion,
@@ -785,7 +791,7 @@ export async function buildPreparedWithdrawProverPayload({
     recipient: String(recipient),
     recipient_bytes_hex: hexFromBytes(recipientBytes),
     chain_id: String(chainId || "").trim(),
-    expires_at_unix: Number(expiresAtUnix),
+    expires_at_unix: normalizedExpiresAtUnix,
     note_randomness_hex: canonicalFieldHex(selected.note.randomness),
     spend_pubkey_hex: noteSpendPubKeyHex(selected.note),
     view_pubkey_hex: noteViewPubKeyHex(selected.note),
@@ -823,9 +829,12 @@ export function validatePreparedWithdrawProof(proverPayload, proof, nowUnix = Ma
   if (proof.payload_hash !== proverPayload.payload_hash) {
     throw new Error("withdraw proof payload hash mismatch");
   }
-  if (Number(proverPayload.expires_at_unix) <= nowUnix) {
-    throw new Error("withdraw prover payload expired");
-  }
+  assertFutureUnixTimestamp(
+    proverPayload.expires_at_unix,
+    nowUnix,
+    "withdraw prover payload expired",
+    "withdraw prover payload expires_at_unix"
+  );
   normalizeHex(proof.proof_hex, "withdraw proof");
   return true;
 }
@@ -847,21 +856,76 @@ export function buildPreparedWithdrawPayloadFromProof(proverPayload, proof, nowU
   return payload;
 }
 
+function assertFutureUnixTimestamp(value, nowUnix, expiredMessage, label) {
+  const timestamp = Number(value);
+  if (!Number.isSafeInteger(timestamp)) {
+    throw new Error(`${label} must be a safe integer unix timestamp`);
+  }
+  if (timestamp <= nowUnix) {
+    throw new Error(expiredMessage);
+  }
+  return timestamp;
+}
+
 export function validatePreparedWithdrawPayload(payload, nowUnix = Math.floor(Date.now() / 1000)) {
   if (payload.version !== preparedWithdrawPayloadVersion) {
     throw new Error(`unsupported withdraw payload version ${JSON.stringify(payload.version)}`);
   }
-  if (Number(payload.expires_at_unix) <= nowUnix) {
-    throw new Error("withdraw payload expired");
-  }
+  assertFutureUnixTimestamp(
+    payload.expires_at_unix,
+    nowUnix,
+    "withdraw payload expired",
+    "withdraw payload expires_at_unix"
+  );
   if (payload.payload_hash !== computePreparedWithdrawPayloadHash(payload)) {
     throw new Error("withdraw payload hash mismatch");
   }
   return true;
 }
 
-export function buildWithdrawMsgFromPayload(payload, creator) {
-  validatePreparedWithdrawPayload(payload);
+export function validateRelayWithdrawPayload(payload, {
+  nowUnix,
+  expectedChainId,
+  expectedRecipient,
+  accountPrefix
+} = {}) {
+  validatePreparedWithdrawPayload(payload, nowUnix);
+  if (!String(payload.chain_id || "").trim()) {
+    throw new Error("withdraw payload chain_id is required");
+  }
+  const coinText = String(payload.amount || "").trim();
+  if (!/^(0|[1-9][0-9]*)[a-zA-Z][a-zA-Z0-9/:._-]*$/.test(coinText)) {
+    throw new Error("withdraw payload amount must be a positive coin string with denom");
+  }
+  positiveBigInt(parseCoin(coinText).amount, "withdraw payload amount");
+  const proofHex = normalizeHex(payload.proof_hex, "withdraw proof");
+  if (!proofHex) {
+    throw new Error("withdraw proof is required");
+  }
+  if (normalizeHex(payload.root_hex, "withdraw root").length !== 64) {
+    throw new Error("withdraw root must be a 32-byte hex string");
+  }
+  if (normalizeHex(payload.nullifier_hex, "withdraw nullifier").length !== 64) {
+    throw new Error("withdraw nullifier must be a 32-byte hex string");
+  }
+  const recipientDecoded = fromBech32(payload.recipient);
+  if (accountPrefix != null) {
+    const expectedPrefix = normalizeBech32Prefix(accountPrefix, "accountPrefix");
+    if (recipientDecoded.prefix !== expectedPrefix) {
+      throw new Error(`withdraw recipient prefix mismatch: expected ${expectedPrefix}, got ${recipientDecoded.prefix}`);
+    }
+  }
+  if (expectedChainId != null && String(payload.chain_id) !== String(expectedChainId)) {
+    throw new Error(`withdraw payload chain_id mismatch: expected ${expectedChainId}, got ${payload.chain_id}`);
+  }
+  if (expectedRecipient != null && String(payload.recipient) !== String(expectedRecipient)) {
+    throw new Error(`withdraw payload recipient mismatch: expected ${expectedRecipient}, got ${payload.recipient}`);
+  }
+  return true;
+}
+
+export function buildWithdrawMsgFromPayload(payload, creator, nowUnix) {
+  validatePreparedWithdrawPayload(payload, nowUnix);
   return {
     creator: String(creator || ""),
     proof: hexToBytes(payload.proof_hex, "withdraw proof"),
@@ -874,7 +938,23 @@ export function buildWithdrawMsgFromPayload(payload, creator) {
   };
 }
 
-export async function buildWithdrawMessage({ proverAdapter, creator, ...input } = {}) {
+export function buildRelayWithdrawMsgFromPayload(payload, relayer, options = {}) {
+  validateRelayWithdrawPayload(payload, options);
+  const creator = String(relayer || "").trim();
+  if (!creator) {
+    throw new Error("relayer is required for relay withdraw");
+  }
+  const relayerDecoded = fromBech32(creator);
+  if (options.accountPrefix != null) {
+    const expectedPrefix = normalizeBech32Prefix(options.accountPrefix, "accountPrefix");
+    if (relayerDecoded.prefix !== expectedPrefix) {
+      throw new Error(`relayer prefix mismatch: expected ${expectedPrefix}, got ${relayerDecoded.prefix}`);
+    }
+  }
+  return buildWithdrawMsgFromPayload(payload, creator, options.nowUnix);
+}
+
+export async function buildRelayWithdrawPayload({ proverAdapter, ...input } = {}) {
   if (!proverAdapter?.proveWithdraw) {
     throw new Error("proverAdapter.proveWithdraw is required");
   }
@@ -885,6 +965,19 @@ export async function buildWithdrawMessage({ proverAdapter, creator, ...input } 
   });
   const proof = response?.proof || response;
   const payload = buildPreparedWithdrawPayloadFromProof(proverPayload, proof);
+  return {
+    selectedNote,
+    proverPayload,
+    proof,
+    payload
+  };
+}
+
+export async function buildWithdrawMessage({ proverAdapter, creator, ...input } = {}) {
+  const { selectedNote, proverPayload, proof, payload } = await buildRelayWithdrawPayload({
+    proverAdapter,
+    ...input
+  });
   return {
     selectedNote,
     proverPayload,

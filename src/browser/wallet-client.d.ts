@@ -202,6 +202,8 @@ export interface PrepareWithdrawInput extends BrowserWalletIdentityInput {
   maxPages?: number;
   max_pages?: number;
   scan?: PrivacyScanOptions;
+  expiresAtUnix?: number;
+  expires_at_unix?: number;
 }
 
 export interface PreparedWithdrawSummary {
@@ -231,6 +233,48 @@ export interface PreparedEvmWithdraw {
 }
 
 export type PreparedWithdraw = PreparedCosmosWithdraw | PreparedEvmWithdraw;
+
+export interface PrepareRelayWithdrawInput extends PrepareWithdrawInput {}
+
+export interface PreparedRelayWithdrawSummary extends PreparedWithdrawSummary {
+  payload: PreparedWithdrawPayload;
+  proof?: PreparedWithdrawProof;
+}
+
+export interface PreparedRelayWithdraw {
+  payload: PreparedWithdrawPayload;
+  prepared: PreparedRelayWithdrawSummary;
+  plan: WithdrawPlan;
+}
+
+export interface CreateRelayWithdrawSignDocInput {
+  payload: PreparedWithdrawPayload;
+  relayer?: ClairAddress | string;
+  creator?: ClairAddress | string;
+  address?: ClairAddress | string;
+  pubKeyHex?: Hex;
+  pub_key_hex?: Hex;
+  gasLimit?: number;
+  gas_limit?: number;
+  feeAmount?: Array<object>;
+  fee_amount?: Array<object>;
+  memo?: string;
+  nowUnix?: number;
+  now_unix?: number;
+  expectedChainId?: string;
+  expected_chain_id?: string;
+  expectedRecipient?: ClairAddress | string;
+  expected_recipient?: ClairAddress | string;
+  accountPrefix?: string;
+  account_prefix?: string;
+}
+
+export interface PreparedRelayWithdrawSignDoc {
+  signDoc: SignDocBase64;
+  message: WithdrawMessage;
+  payload: PreparedWithdrawPayload;
+  relayer: ClairAddress | string;
+}
 
 export interface ScanWalletNotesInput extends BrowserWalletIdentityInput, PrivacyScanOptions {
   includeFoundNotes?: boolean;
@@ -275,6 +319,9 @@ export class ClairveilBrowserClient {
   prepareDeposit(input: PrepareDepositInput): Promise<PreparedDeposit>;
   prepareTransfer(input: PrepareTransferInput): Promise<PreparedTransfer>;
   prepareWithdraw(input: PrepareWithdrawInput): Promise<PreparedWithdraw>;
+  prepareRelayWithdraw(input: PrepareRelayWithdrawInput): Promise<PreparedRelayWithdraw>;
+  buildRelayWithdrawMessageFromPayload(input: CreateRelayWithdrawSignDocInput): WithdrawMessage;
+  createRelayWithdrawSignDoc(input: CreateRelayWithdrawSignDocInput): Promise<PreparedRelayWithdrawSignDoc>;
   scanWalletNotes(input: ScanWalletNotesInput): Promise<ScanWalletNotesResult>;
   checkNullifier(nullifierHex: Hex): Promise<object & { used?: boolean; Used?: boolean }>;
   decodeUserDisclosure(input: DecodeUserDisclosureInput): Promise<DisclosureReport>;

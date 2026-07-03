@@ -26,6 +26,8 @@ import {
   buildPreparedTransferPayload as buildPreparedTransferPayloadCore,
   buildTransferMessage as buildTransferMessageCore,
   buildPreparedWithdrawProverPayload as buildPreparedWithdrawProverPayloadCore,
+  buildRelayWithdrawMsgFromPayload as buildRelayWithdrawMsgFromPayloadCore,
+  buildRelayWithdrawPayload as buildRelayWithdrawPayloadCore,
   buildWithdrawMessage as buildWithdrawMessageCore,
   createRestMerklePathProvider
 } from "../privacy/payload.js";
@@ -893,6 +895,82 @@ export class ClairveilJS {
     };
   }
 
+  async prepareRelayWithdraw({
+    wallet,
+    material,
+    amount,
+    recipient,
+    proverAdapter,
+    denom,
+    assetDenom,
+    scan,
+    afterHeight,
+    after_height,
+    page,
+    limit = 200,
+    maxPages = defaultPrepareScanMaxPages,
+    max_pages,
+    eventTypes,
+    event_types,
+    expiresAtUnix
+  } = {}) {
+    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
+    const scanOptions = resolveScanOptions({
+      scan,
+      afterHeight,
+      after_height,
+      page,
+      limit,
+      maxPages,
+      max_pages,
+      eventTypes,
+      event_types
+    });
+    const scanResult = await this.scanNotes({
+      rootSeed: privacy.rootSeed,
+      ...scanOptions,
+      limit: scanOptions.limit ?? 200,
+      maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
+      includeFoundNotes: true
+    });
+    const plan = planWithdrawNotes({
+      notes: scanResult.foundNotes,
+      amount,
+      denom: assetDenom ?? denom ?? this.defaultDenom
+    });
+    if (!plan.canBuildTx) {
+      return {
+        status: plan.status,
+        plan,
+        scan: scanResult,
+        privacyAccount: publicPrivacyAccount(privacy)
+      };
+    }
+    assertPlanCanBuildTx(plan);
+
+    const built = await this.buildRelayWithdrawPayload({
+      proverAdapter,
+      notes: scanResult.foundNotes,
+      amount,
+      assetDenom: assetDenom ?? denom ?? this.defaultDenom,
+      recipient,
+      rootSeed: privacy.rootSeed,
+      chainId: this.chainId,
+      expiresAtUnix
+    });
+
+    return {
+      status: "ready",
+      plan,
+      scan: scanResult,
+      proverPayload: built.proverPayload,
+      proof: built.proof,
+      payload: built.payload,
+      selectedNote: built.selectedNote,
+      privacyAccount: publicPrivacyAccount(privacy)
+    };
+  }
+
   async createDepositSignDoc(input) {
     return this.prepareDeposit(input);
   }
@@ -909,6 +987,14 @@ export class ClairveilJS {
     const result = await this.prepareWithdraw(input);
     if (result.status !== "ready") {
       throw new Error(result.plan?.message || `withdraw is not ready: ${result.status}`);
+    }
+    return result;
+  }
+
+  async createRelayWithdrawPayload(input) {
+    const result = await this.prepareRelayWithdraw(input);
+    if (result.status !== "ready") {
+      throw new Error(result.plan?.message || `relay withdraw is not ready: ${result.status}`);
     }
     return result;
   }
@@ -941,6 +1027,16 @@ export class ClairveilJS {
     });
   }
 
+  async buildRelayWithdrawPayload(input) {
+    return buildRelayWithdrawPayloadCore({
+      merklePathProvider: this,
+      accountPrefix: this.accountPrefix,
+      assetDenom: input?.assetDenom ?? input?.denom ?? this.defaultDenom,
+      ...input,
+      chainId: input?.chainId ?? this.chainId
+    });
+  }
+
   async buildWithdrawMessage(input) {
     return buildWithdrawMessageCore({
       merklePathProvider: this,
@@ -949,6 +1045,71 @@ export class ClairveilJS {
       ...input,
       chainId: input?.chainId ?? this.chainId
     });
+  }
+
+  buildRelayWithdrawMessageFromPayload({
+    payload,
+    relayer,
+    creator,
+    nowUnix,
+    expectedChainId,
+    expectedRecipient,
+    accountPrefix
+  } = {}) {
+    if (!payload) {
+      throw new Error("payload is required for relay withdraw");
+    }
+    return buildRelayWithdrawMsgFromPayloadCore(payload, relayer ?? creator, {
+      nowUnix,
+      expectedChainId: expectedChainId ?? this.chainId,
+      expectedRecipient,
+      accountPrefix: accountPrefix ?? this.accountPrefix
+    });
+  }
+
+  async createRelayWithdrawSignDoc({
+    payload,
+    relayer,
+    creator,
+    pubKeyHex,
+    pub_key_hex,
+    gasLimit = 5000000,
+    feeAmount = [],
+    memo = "Clairveil relay withdraw",
+    nowUnix,
+    expectedChainId,
+    expectedRecipient,
+    accountPrefix
+  } = {}) {
+    const signer = relayer ?? creator;
+    const message = this.buildRelayWithdrawMessageFromPayload({
+      payload,
+      relayer: signer,
+      nowUnix,
+      expectedChainId,
+      expectedRecipient,
+      accountPrefix
+    });
+    const signDoc = await this.buildDirectSignDoc({
+      signer: String(signer || ""),
+      pubKeyHex: pubKeyHex ?? pub_key_hex,
+      gasLimit,
+      feeAmount,
+      messages: [
+        {
+          typeUrl: msgWithdrawTypeUrl,
+          value: message
+        }
+      ],
+      memo
+    });
+    return {
+      status: "ready",
+      relayer: message.creator,
+      payload,
+      message,
+      signDoc
+    };
   }
 
   async decodeUserDisclosure({
