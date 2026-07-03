@@ -1,5 +1,16 @@
 import type { Base64, ClairAddress, Hex, PrivacyMaterial } from "../core/crypto.js";
 
+export type PrefixedHex = `0x${string}`;
+
+export type PrivacyRootSignature =
+  | Uint8Array
+  | PrefixedHex
+  | { signature: Uint8Array | PrefixedHex }
+  | { signatureHex: Hex }
+  | { signature_hex: Hex }
+  | { signatureBase64: Base64 }
+  | { signature_base64: Base64 };
+
 export interface WalletAdapterLike {
   address?: ClairAddress;
   pubKeyHex?: Hex;
@@ -10,7 +21,7 @@ export interface WalletAdapterLike {
   signPrivacyRoot?: (
     messageBytes: Uint8Array,
     context?: object
-  ) => Promise<Uint8Array | Base64 | { signature: Base64 }> | Uint8Array | Base64 | { signature: Base64 };
+  ) => Promise<PrivacyRootSignature> | PrivacyRootSignature;
   signPrivacyRootBase64?: (messageBytes: Uint8Array, context?: object) => Promise<Base64> | Base64;
   signDirect?: (signDoc: object, context?: object) => Promise<object> | object;
   broadcastSignedTx?: (signedTx: object, context?: object) => Promise<object> | object;

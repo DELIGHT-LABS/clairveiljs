@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   decodeAuditDisclosureFromEvent,
+  decodeSelfViewDisclosureFromEvent,
   decodeUserDisclosureFromEvent,
   publicPayloadReport,
   userDisclosureModeRecipientEncrypted
@@ -10,6 +11,9 @@ import {
   fixtureTestOptions,
   readFixture
 } from "./helpers.js";
+import {
+  createClairveilClient
+} from "clairveiljs/cosmos";
 
 const policyLabels = new Map([
   [0, "all-private"],
@@ -33,7 +37,9 @@ function transferDisclosureEvent(payload, txHash = "AABBCC") {
       { key: "user_disclosure_payload", value: payload.user_disclosure_payload_hex },
       { key: "audit_disclosure_target_pubkey", value: payload.audit_disclosure_target_pubkey_hex },
       { key: "audit_disclosure_digest", value: payload.audit_disclosure_digest_hex },
-      { key: "audit_disclosure_payload", value: payload.audit_disclosure_payload_hex }
+      { key: "audit_disclosure_payload", value: payload.audit_disclosure_payload_hex },
+      { key: "self_view_disclosure_digest", value: payload.self_view_disclosure_digest_hex },
+      { key: "self_view_disclosure_payload", value: payload.self_view_disclosure_payload_hex }
     ]
   };
 }
@@ -114,4 +120,39 @@ test("audit disclosure decodes and verifies against the send-capable fixture", f
   );
 
   assert.deepEqual(compactReport(report), expectedDisclosure(flow.transfer.audit_disclosure));
+});
+
+test("self-view disclosure decodes and verifies against the send-capable fixture", fixtureTestOptions, () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const flow = readFixture("privacy_send_capable_reference_flow.json");
+  const payload = examples.transfer.request.payload;
+  const report = decodeSelfViewDisclosureFromEvent(
+    transferDisclosureEvent(payload),
+    89n,
+    "AABBCC",
+    { shieldedPrefix: "clairs" }
+  );
+
+  assert.deepEqual(compactReport(report), expectedDisclosure(flow.transfer.self_view_disclosure));
+});
+
+test("Cosmos client decodes self-view disclosure through the high-level API", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const flow = readFixture("privacy_send_capable_reference_flow.json");
+  const payload = examples.transfer.request.payload;
+  const client = createClairveilClient({
+    rest: "http://127.0.0.1:1317",
+    rpc: "http://127.0.0.1:26657",
+    chainId: "clairveil-local-1",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs"
+  });
+  client.findPrivacyEventByTxHash = async txHash => transferDisclosureEvent(payload, txHash);
+
+  const report = await client.decodeSelfViewDisclosure({
+    txHash: "AABBCC",
+    disclosureScalar: 89n
+  });
+
+  assert.deepEqual(compactReport(report), expectedDisclosure(flow.transfer.self_view_disclosure));
 });

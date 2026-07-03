@@ -73,6 +73,17 @@ export function planTransferNotes({ notes, amount, denom = defaultAssetDenom } =
     selectedTotal: selection.total
   });
 
+  if (requested <= 0n) {
+    return {
+      status: "invalid_amount",
+      canBuildTx: false,
+      action: "enter_positive_amount",
+      message: "Transfer amount must be greater than 0.",
+      facts,
+      selection
+    };
+  }
+
   if (selection.needsZeroDummy) {
     return {
       status: "zero_dummy_required",
@@ -85,14 +96,11 @@ export function planTransferNotes({ notes, amount, denom = defaultAssetDenom } =
   }
 
   if (selection.total === 0n || (!selection.isFinal && spendableTotal < requested)) {
-    const message = requested === 0n
-      ? "No zero note is available; a 0uclair helper deposit is required."
-      : `Need ${coin.raw}, but spendable total is ${spendableTotal}${coin.denom}.`;
     return {
       status: "insufficient_balance",
       canBuildTx: false,
       action: "deposit_or_receive_notes",
-      message,
+      message: `Need ${coin.raw}, but spendable total is ${spendableTotal}${coin.denom}.`,
       facts,
       selection
     };
@@ -133,6 +141,17 @@ export function planWithdrawNotes({ notes, amount, denom = defaultAssetDenom } =
     spendable,
     selectedTotal: selected ? selected.note.amount : 0n
   });
+
+  if (requested <= 0n) {
+    return {
+      status: "invalid_amount",
+      canBuildTx: false,
+      action: "enter_positive_amount",
+      message: "Withdraw amount must be greater than 0.",
+      facts,
+      selectedNote: null
+    };
+  }
 
   if (selected) {
     return {

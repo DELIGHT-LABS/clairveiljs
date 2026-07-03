@@ -59,6 +59,10 @@ export interface MsgDeposit {
    * 복구용 암호화 데이터
    */
   encryptedNote: Uint8Array;
+  /**
+   * commitment가 amount/asset에 묶였다는 ZK proof
+   */
+  proof: Uint8Array;
 }
 /**
  * MsgWithdraw: 익명 자산 -> 투명 자산 변환
@@ -138,6 +142,13 @@ export interface MsgTransfer {
   auditDisclosureDigest: Uint8Array;
   auditDisclosureTargetPubkey: Uint8Array;
   auditDisclosurePayload: Uint8Array;
+  /**
+   * Optional sender self-view disclosure.
+   * The payload is encrypted to the sender's own disclosure key. The target
+   * public key is intentionally omitted to avoid sender clustering.
+   */
+  selfViewDisclosureDigest: Uint8Array;
+  selfViewDisclosurePayload: Uint8Array;
 }
 /**
  * MsgDepositResponse
@@ -165,7 +176,8 @@ function createBaseMsgDeposit(): MsgDeposit {
     creator: "",
     amount: "",
     noteCommitment: new Uint8Array(),
-    encryptedNote: new Uint8Array()
+    encryptedNote: new Uint8Array(),
+    proof: new Uint8Array()
   };
 }
 /**
@@ -189,6 +201,9 @@ export const MsgDeposit = {
     if (message.encryptedNote.length !== 0) {
       writer.uint32(34).bytes(message.encryptedNote);
     }
+    if (message.proof.length !== 0) {
+      writer.uint32(42).bytes(message.proof);
+    }
     return writer;
   },
   decode(input: BinaryReader | Uint8Array, length?: number): MsgDeposit {
@@ -210,6 +225,9 @@ export const MsgDeposit = {
         case 4:
           message.encryptedNote = reader.bytes();
           break;
+        case 5:
+          message.proof = reader.bytes();
+          break;
         default:
           reader.skipType(tag & 7);
           break;
@@ -223,6 +241,7 @@ export const MsgDeposit = {
     message.amount = object.amount ?? "";
     message.noteCommitment = object.noteCommitment ?? new Uint8Array();
     message.encryptedNote = object.encryptedNote ?? new Uint8Array();
+    message.proof = object.proof ?? new Uint8Array();
     return message;
   }
 };
@@ -339,7 +358,9 @@ function createBaseMsgTransfer(): MsgTransfer {
     userDisclosurePayload: new Uint8Array(),
     auditDisclosureDigest: new Uint8Array(),
     auditDisclosureTargetPubkey: new Uint8Array(),
-    auditDisclosurePayload: new Uint8Array()
+    auditDisclosurePayload: new Uint8Array(),
+    selfViewDisclosureDigest: new Uint8Array(),
+    selfViewDisclosurePayload: new Uint8Array()
   };
 }
 /**
@@ -393,6 +414,12 @@ export const MsgTransfer = {
     if (message.auditDisclosurePayload.length !== 0) {
       writer.uint32(114).bytes(message.auditDisclosurePayload);
     }
+    if (message.selfViewDisclosureDigest.length !== 0) {
+      writer.uint32(122).bytes(message.selfViewDisclosureDigest);
+    }
+    if (message.selfViewDisclosurePayload.length !== 0) {
+      writer.uint32(130).bytes(message.selfViewDisclosurePayload);
+    }
     return writer;
   },
   decode(input: BinaryReader | Uint8Array, length?: number): MsgTransfer {
@@ -444,6 +471,12 @@ export const MsgTransfer = {
         case 14:
           message.auditDisclosurePayload = reader.bytes();
           break;
+        case 15:
+          message.selfViewDisclosureDigest = reader.bytes();
+          break;
+        case 16:
+          message.selfViewDisclosurePayload = reader.bytes();
+          break;
         default:
           reader.skipType(tag & 7);
           break;
@@ -467,6 +500,8 @@ export const MsgTransfer = {
     message.auditDisclosureDigest = object.auditDisclosureDigest ?? new Uint8Array();
     message.auditDisclosureTargetPubkey = object.auditDisclosureTargetPubkey ?? new Uint8Array();
     message.auditDisclosurePayload = object.auditDisclosurePayload ?? new Uint8Array();
+    message.selfViewDisclosureDigest = object.selfViewDisclosureDigest ?? new Uint8Array();
+    message.selfViewDisclosurePayload = object.selfViewDisclosurePayload ?? new Uint8Array();
     return message;
   }
 };

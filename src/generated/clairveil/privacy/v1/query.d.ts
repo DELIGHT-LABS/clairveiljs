@@ -216,6 +216,27 @@ export interface QueryCircuitConfigResponse {
     artifacts: QueryCircuitArtifact[];
 }
 /**
+ * @name QueryReserveRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryReserveRequest
+ */
+export interface QueryReserveRequest {
+    denom: string;
+}
+/**
+ * @name QueryReserveResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryReserveResponse
+ */
+export interface QueryReserveResponse {
+    denom: string;
+    moduleBalance: string;
+    totalDeposited: string;
+    totalWithdrawn: string;
+    expectedModuleBalance: string;
+    invariantHolds: boolean;
+}
+/**
  * QueryCheckNullifierRequest
  * @name QueryCheckNullifierRequest
  * @package clairveil.privacy.v1
@@ -427,4 +448,26 @@ export declare const QueryCircuitConfigResponse: {
     encode(message: QueryCircuitConfigResponse, writer?: BinaryWriter): BinaryWriter;
     decode(input: BinaryReader | Uint8Array, length?: number): QueryCircuitConfigResponse;
     fromPartial(object: DeepPartial<QueryCircuitConfigResponse>): QueryCircuitConfigResponse;
+};
+/**
+ * @name QueryReserveRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryReserveRequest
+ */
+export declare const QueryReserveRequest: {
+    typeUrl: string;
+    encode(message: QueryReserveRequest, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryReserveRequest;
+    fromPartial(object: DeepPartial<QueryReserveRequest>): QueryReserveRequest;
+};
+/**
+ * @name QueryReserveResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryReserveResponse
+ */
+export declare const QueryReserveResponse: {
+    typeUrl: string;
+    encode(message: QueryReserveResponse, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryReserveResponse;
+    fromPartial(object: DeepPartial<QueryReserveResponse>): QueryReserveResponse;
 };

@@ -33,6 +33,7 @@ message MsgDeposit {
   string amount = 2;         // 금액 (예: 100uclair)
   bytes note_commitment = 3; // 머클 트리에 들어갈 해시
   bytes encrypted_note = 4;  // 복구용 암호화 데이터
+  bytes proof = 5;           // commitment가 amount/asset에 묶였다는 ZK proof
 }
 
 // MsgWithdraw: 익명 자산 -> 투명 자산 변환
@@ -84,6 +85,12 @@ message MsgTransfer {
   bytes audit_disclosure_digest = 12;
   bytes audit_disclosure_target_pubkey = 13;
   bytes audit_disclosure_payload = 14;
+
+  // Optional sender self-view disclosure.
+  // The payload is encrypted to the sender's own disclosure key. The target
+  // public key is intentionally omitted to avoid sender clustering.
+  bytes self_view_disclosure_digest = 15;
+  bytes self_view_disclosure_payload = 16;
 }
 
 // MsgDepositResponse

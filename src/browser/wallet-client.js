@@ -20,6 +20,9 @@ import {
   plannerStatusToErrorCode
 } from "../core/errors.js";
 import {
+  parseCoin
+} from "../core/note.js";
+import {
   assertPlanCanBuildTx,
   planTransferNotes,
   planWithdrawNotes
@@ -29,6 +32,7 @@ import {
 } from "../privacy/prover.js";
 
 const defaultPrepareScanMaxPages = 1000;
+const defaultFetchTimeoutMs = 30000;
 
 function trimTrailingSlash(value) {
   return String(value || "").replace(/\/$/, "");
@@ -38,33 +42,76 @@ function normalizeRpcEndpoint(value) {
   return trimTrailingSlash(String(value || "").replace(/^tcp:\/\//, "http://"));
 }
 
+function normalizeRestEndpoints(primary, restEndpoints = []) {
+  const endpoints = [];
+  for (const endpoint of [primary, ...(Array.isArray(restEndpoints) ? restEndpoints : [])]) {
+    const normalized = trimTrailingSlash(endpoint);
+    if (normalized && !endpoints.includes(normalized)) {
+      endpoints.push(normalized);
+    }
+  }
+  if (!endpoints.length) {
+    throw new Error("rest endpoint is required");
+  }
+  return endpoints;
+}
+
 function browserJsonReplacer(_key, value) {
   return typeof value === "bigint" ? value.toString() : value;
 }
 
+function normalizeTimeoutMs(value, label = "timeoutMs") {
+  const timeoutMs = Number(value);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`${label} must be positive`);
+  }
+  return timeoutMs;
+}
+
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      accept: "application/json",
-      ...(options.body ? { "content-type": "application/json" } : {}),
-      ...(options.headers || {})
-    }
-  });
-  const text = await response.text();
-  let data = null;
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { error: text };
+  const { timeoutMs = defaultFetchTimeoutMs, ...fetchOptions } = options;
+  const resolvedTimeoutMs = normalizeTimeoutMs(timeoutMs, "fetch timeoutMs");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), resolvedTimeoutMs);
+  if (fetchOptions.signal) {
+    if (fetchOptions.signal.aborted) {
+      controller.abort();
+    } else {
+      fetchOptions.signal.addEventListener("abort", () => controller.abort(), { once: true });
     }
   }
-  if (!response.ok || data?.error) {
-    const message = data?.error?.message || data?.error || response.statusText;
-    throw new Error(message);
+  try {
+    const response = await fetch(url, {
+      ...fetchOptions,
+      headers: {
+        accept: "application/json",
+        ...(fetchOptions.body ? { "content-type": "application/json" } : {}),
+        ...(fetchOptions.headers || {})
+      },
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let data = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { error: text };
+      }
+    }
+    if (!response.ok || data?.error) {
+      const message = data?.error?.message || data?.error || response.statusText;
+      throw new Error(message);
+    }
+    return data;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`fetch request timed out after ${resolvedTimeoutMs}ms: ${url}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return data;
 }
 
 function privacyEventsQuery({
@@ -92,8 +139,8 @@ function privacyEventsQuery({
   return query ? `?${query}` : "";
 }
 
-function walletTypeFromBody(body = {}) {
-  const walletType = body.walletType ?? body.wallet_type ?? "cosmos";
+function walletTypeFromBody(body = {}, fallback = "cosmos") {
+  const walletType = body.walletType ?? body.wallet_type ?? fallback;
   if (walletType === "cosmos" || walletType === "evm") return walletType;
   throw new ClairveilError(
     ClairveilErrorCode.INVALID_ARGUMENT,
@@ -116,6 +163,17 @@ function scanOptionsFromBody(body = {}) {
     maxPages: scan.maxPages ?? scan.max_pages ?? body.scanMaxPages ?? body.scan_max_pages ?? body.maxPages ?? body.max_pages,
     eventTypes: scan.eventTypes ?? scan.event_types ?? body.eventTypes ?? body.event_types
   };
+}
+
+function positiveCoinForDenom(amount, denom, label) {
+  const coin = parseCoin(amount, denom);
+  if (coin.denom !== denom) {
+    throw new Error(`${label} denom must be ${denom}, got ${coin.denom}`);
+  }
+  if (BigInt(coin.amount) <= 0n) {
+    throw new Error(`${label} amount must be greater than 0.`);
+  }
+  return coin;
 }
 
 function txEventAttribute(event, key) {
@@ -204,12 +262,17 @@ export class ClairveilBrowserClient {
     profile,
     rpc,
     rest,
+    restEndpoints,
     chainId,
     accountPrefix,
     shieldedPrefix,
     denom,
     proverUrl,
     proverTimeoutMs = 120000,
+    queryTimeoutMs = defaultFetchTimeoutMs,
+    fetchTimeoutMs,
+    queryRetry,
+    nullifierFailover,
     evmRpc,
     evmChainId,
     evmPrivacyPrecompileAddress,
@@ -218,14 +281,20 @@ export class ClairveilBrowserClient {
   } = {}) {
     const resolved = profile || {};
     this.profile = resolved;
+    this.defaultWalletType = walletTypeFromBody({}, resolved.transport ?? "cosmos");
     this.rpc = normalizeRpcEndpoint(resolved.rpc || rpc);
-    this.rest = trimTrailingSlash(resolved.rest || rest);
+    this.restEndpoints = normalizeRestEndpoints(
+      resolved.rest || rest,
+      resolved.restEndpoints || restEndpoints
+    );
+    this.rest = this.restEndpoints[0];
     this.chainId = resolved.chainId || chainId;
     this.accountPrefix = resolved.accountPrefix || accountPrefix || "clair";
     this.shieldedPrefix = resolved.shieldedPrefix || shieldedPrefix || `${this.accountPrefix}s`;
     this.denom = resolved.denom || denom || "uclair";
     this.proverUrl = trimTrailingSlash(resolved.proverUrl || proverUrl || "");
     this.proverTimeoutMs = proverTimeoutMs;
+    this.queryTimeoutMs = normalizeTimeoutMs(fetchTimeoutMs ?? queryTimeoutMs, "queryTimeoutMs");
     this.evmRpc = resolved.evmRpc || evmRpc || "";
     this.evmChainId = resolved.evmChainId || evmChainId || "";
     this.evmGasLimit = resolved.evmGasLimit || evmGasLimit;
@@ -236,7 +305,11 @@ export class ClairveilBrowserClient {
       chainId: this.chainId,
       accountPrefix: this.accountPrefix,
       shieldedPrefix: this.shieldedPrefix,
-      defaultDenom: this.denom
+      defaultDenom: this.denom,
+      restEndpoints: this.restEndpoints,
+      queryTimeoutMs: this.queryTimeoutMs,
+      queryRetry,
+      nullifierFailover
     });
     this.evm = createClairveilEvmClient({
       contractAddress: resolved.evmPrivacyPrecompileAddress || evmPrivacyPrecompileAddress,
@@ -255,6 +328,10 @@ export class ClairveilBrowserClient {
     return `${this.rpc}${path.startsWith("/") ? path : `/${path}`}`;
   }
 
+  fetchJson(url, options = {}) {
+    return fetchJson(url, { timeoutMs: this.queryTimeoutMs, ...options });
+  }
+
   proverAdapter() {
     if (!this.proverUrl) {
       throw new ClairveilError(
@@ -270,9 +347,9 @@ export class ClairveilBrowserClient {
 
   async health() {
     const [status, tree, audit] = await Promise.allSettled([
-      fetchJson(this.rpcUrl("/status")),
-      fetchJson(this.restUrl("/clairveil/privacy/v1/tree_state")),
-      fetchJson(this.restUrl("/clairveil/privacy/v1/audit_config"))
+      this.fetchJson(this.rpcUrl("/status")),
+      this.cosmos.fetchTreeState(),
+      this.cosmos.fetchAuditConfig()
     ]);
     return {
       status: status.status === "fulfilled" ? status.value.result : null,
@@ -293,7 +370,7 @@ export class ClairveilBrowserClient {
     url.searchParams.set("per_page", String(limit));
     url.searchParams.set("order_by", "\"desc\"");
 
-    const data = await fetchJson(url);
+    const data = await this.fetchJson(url);
     return {
       events: (data.result?.txs || []).map(tx => ({
         type: blockEventType(tx),
@@ -313,6 +390,10 @@ export class ClairveilBrowserClient {
 
   async fetchAuditableTransfers(options = {}) {
     return this.cosmos.fetchAuditableTransfers(options);
+  }
+
+  async fetchReserve(denom) {
+    return this.cosmos.fetchReserve(denom);
   }
 
   buildRootSigningMessage(address, pubKeyHex) {
@@ -336,7 +417,11 @@ export class ClairveilBrowserClient {
     return this.cosmos.derivePrivacyAccount(input);
   }
 
-  privacyMaterial(body, walletType = walletTypeFromBody(body)) {
+  walletTypeFromBody(body = {}) {
+    return walletTypeFromBody(body, this.defaultWalletType);
+  }
+
+  privacyMaterial(body, walletType = this.walletTypeFromBody(body)) {
     const material = derivePrivacyMaterial({
       address: body.address,
       pubKeyHex: body.pubKeyHex ?? body.pub_key_hex,
@@ -350,7 +435,7 @@ export class ClairveilBrowserClient {
   }
 
   async getBalances(address) {
-    return fetchJson(this.restUrl(`/cosmos/bank/v1beta1/balances/${address}`));
+    return this.cosmos.fetchJson(`/cosmos/bank/v1beta1/balances/${address}`, { failover: true });
   }
 
   async waitForTx(txHash, options) {
@@ -368,16 +453,29 @@ export class ClairveilBrowserClient {
   }
 
   async evmJsonRpc(method, params = []) {
-    const response = await fetch(this.evmRpc, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: Date.now(),
-        method,
-        params
-      })
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.queryTimeoutMs);
+    let response;
+    try {
+      response = await fetch(this.evmRpc, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: Date.now(),
+          method,
+          params
+        })
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw new Error(`EVM RPC ${method} timed out after ${this.queryTimeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
     const data = await response.json();
     if (data.error) {
       throw new Error(data.error.message || `EVM RPC ${method} failed`);
@@ -399,15 +497,17 @@ export class ClairveilBrowserClient {
   }
 
   evmNativeSendTransaction({ to, amount }) {
+    const coin = positiveCoinForDenom(amount, this.denom, "send");
     return {
       to: normalizeEvmAddress(to, "send recipient"),
       chainId: this.evmChainId,
-      value: `0x${BigInt(String(amount).replace(this.denom, "")).toString(16)}`,
+      value: `0x${BigInt(coin.amount).toString(16)}`,
       gas: this.evmSendGasLimit
     };
   }
 
   async buildBankSendSignDoc({ from, pubKeyHex, to, amount }) {
+    const coin = positiveCoinForDenom(amount, this.denom, "send");
     return this.cosmos.buildDirectSignDoc({
       signer: from,
       pubKeyHex,
@@ -418,8 +518,8 @@ export class ClairveilBrowserClient {
             fromAddress: from,
             toAddress: to,
             amount: [{
-              denom: this.denom,
-              amount: String(amount).replace(this.denom, "")
+              denom: coin.denom,
+              amount: coin.amount
             }]
           }
         }
@@ -433,11 +533,13 @@ export class ClairveilBrowserClient {
   }
 
   async prepareDeposit(body) {
-    const walletType = walletTypeFromBody(body);
+    const walletType = this.walletTypeFromBody(body);
     const material = this.privacyMaterial(body, walletType);
     const amount = body.amount;
+    let depositMaterial = body.depositMaterial ?? body.deposit_material ?? null;
     if (walletType === "evm") {
       const built = this.evm.buildDepositTransaction({
+        material: depositMaterial,
         creator: material.address,
         rootSeed: material.rootSeed,
         amount,
@@ -456,10 +558,37 @@ export class ClairveilBrowserClient {
         }
       };
     }
+    let depositProof = body.proof ?? null;
+    let depositProofHex = body.proofHex ?? body.proof_hex ?? "";
+    if (!depositProof && !depositProofHex && typeof body.depositProofProvider === "function") {
+      depositMaterial = depositMaterial ?? this.cosmos.buildDepositMaterial({
+        creator: material.address,
+        rootSeed: material.rootSeed,
+        amount,
+        assetDenom: this.denom
+      });
+      const proof = await body.depositProofProvider({
+        material: depositMaterial,
+        amount: depositMaterial.amount,
+        note: depositMaterial.note,
+        noteJson: depositMaterial.note_json,
+        note_json: depositMaterial.note_json,
+        noteCommitmentHex: depositMaterial.note_commitment_hex,
+        note_commitment_hex: depositMaterial.note_commitment_hex
+      });
+      depositProof = proof?.proof ?? proof?.depositProof ?? proof?.deposit_proof ?? null;
+      depositProofHex = proof?.proofHex ?? proof?.proof_hex ?? proof?.depositProofHex ?? proof?.deposit_proof_hex ?? "";
+    }
+    if (!depositProof && !depositProofHex) {
+      throw new Error("deposit proof is required; provide proof/proofHex or depositProofProvider");
+    }
     const prepared = await this.cosmos.prepareDeposit({
       material,
+      depositMaterial,
       amount,
-      gasLimit: 2500000
+      gasLimit: 2500000,
+      proof: depositProof,
+      proofHex: depositProofHex
     });
     return {
       signDoc: prepared.signDoc,
@@ -472,7 +601,7 @@ export class ClairveilBrowserClient {
   }
 
   async prepareTransfer(body) {
-    const walletType = walletTypeFromBody(body);
+    const walletType = this.walletTypeFromBody(body);
     const material = this.privacyMaterial(body, walletType);
     const amount = body.amount;
     const recipient = body.recipient;
@@ -541,7 +670,8 @@ export class ClairveilBrowserClient {
       userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
       userDisclosureMode: isFinal ? userDisclosureMode : "none",
       userDisclosureTargetPubKeyHex: isFinal ? userDisclosureTargetPubKeyHex : "",
-      auditDisclosureTargetPubKeyHex: auditPubKeyHex
+      auditDisclosureTargetPubKeyHex: auditPubKeyHex,
+      disableSelfViewDisclosure: true
     });
     const transaction = this.evm.contract.buildTransferTransaction(built.message);
     return {
@@ -565,7 +695,7 @@ export class ClairveilBrowserClient {
   }
 
   async prepareWithdraw(body) {
-    const walletType = walletTypeFromBody(body);
+    const walletType = this.walletTypeFromBody(body);
     const material = this.privacyMaterial(body, walletType);
     const amount = body.amount;
     const rawRecipient = body.recipient;
@@ -579,6 +709,7 @@ export class ClairveilBrowserClient {
         amount,
         recipient,
         scan: scanOptionsFromBody(body),
+        expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
         gasLimit: 5000000
       });
       if (prepared.status !== "ready") throw plannerError(prepared);
@@ -614,7 +745,8 @@ export class ClairveilBrowserClient {
       assetDenom: this.denom,
       recipient,
       rootSeed: material.rootSeed,
-      chainId: this.chainId
+      chainId: this.chainId,
+      expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix
     });
     const message = evmRecipient ? { ...built.message, evmRecipient } : built.message;
     const transaction = this.evm.contract.buildWithdrawTransaction(message);
@@ -633,7 +765,7 @@ export class ClairveilBrowserClient {
   }
 
   async prepareRelayWithdraw(body) {
-    const walletType = walletTypeFromBody(body);
+    const walletType = this.walletTypeFromBody(body);
     const material = this.privacyMaterial(body, walletType);
     const amount = body.amount;
     const rawRecipient = body.recipient;
@@ -735,12 +867,30 @@ export class ClairveilBrowserClient {
     addIfPresent(request, "maxPages", body.maxPages ?? body.max_pages);
     addIfPresent(request, "eventTypes", body.eventTypes ?? body.event_types);
     if (body.address && (body.pubKeyHex || body.pub_key_hex) && (body.signatureBase64 || body.signature_base64)) {
-      const walletType = walletTypeFromBody(body);
+      const walletType = this.walletTypeFromBody(body);
       Object.assign(request, walletType === "evm"
         ? { ...body, skipSignerPubKeyCheck: true }
         : body);
     }
     return this.cosmos.decodeUserDisclosure(request);
+  }
+
+  async decodeSelfViewDisclosure(body) {
+    const request = { txHash: body.txHash ?? body.tx_hash };
+    addIfPresent(request, "afterHeight", body.afterHeight ?? body.after_height);
+    addIfPresent(request, "page", body.page);
+    addIfPresent(request, "limit", body.limit);
+    addIfPresent(request, "maxPages", body.maxPages ?? body.max_pages);
+    addIfPresent(request, "eventTypes", body.eventTypes ?? body.event_types);
+    addIfPresent(request, "disclosureScalar", body.disclosureScalar ?? body.disclosure_scalar);
+    addIfPresent(request, "disclosureScalarHex", body.disclosureScalarHex ?? body.disclosure_scalar_hex);
+    if (body.address && (body.pubKeyHex || body.pub_key_hex) && (body.signatureBase64 || body.signature_base64)) {
+      const walletType = this.walletTypeFromBody(body);
+      Object.assign(request, walletType === "evm"
+        ? { ...body, skipSignerPubKeyCheck: true }
+        : body);
+    }
+    return this.cosmos.decodeSelfViewDisclosure(request);
   }
 
   async decodeAuditDisclosure(body = {}) {

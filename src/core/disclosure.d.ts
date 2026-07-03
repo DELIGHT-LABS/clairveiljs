@@ -7,6 +7,7 @@ export interface DisclosureDecodeOptions {
 export const payloadVersion: "v4";
 export const planeUser: "user";
 export const planeAudit: "audit";
+export const planeSelfView: "self-view";
 export const userDisclosureModeNone: "USER_DISCLOSURE_MODE_NONE";
 export const userDisclosureModePublic: "USER_DISCLOSURE_MODE_PUBLIC";
 export const userDisclosureModeRecipientEncrypted: "USER_DISCLOSURE_MODE_RECIPIENT_ENCRYPTED";
@@ -15,6 +16,7 @@ export const transferPrivacyPolicyDiscloseAmount: 1;
 export const transferPrivacyPolicyDiscloseTo: 2;
 export const transferPrivacyPolicyDiscloseFrom: 4;
 export const transferAuditDisclosureDomain: 255;
+export const transferSelfViewDisclosureDomain: 254;
 export const transferDisclosureRecipientOutputIndex: 0;
 
 export interface DisclosurePayload {
@@ -80,12 +82,14 @@ export function disclosureAmountAndAsset(payload: DisclosurePayload): {
 };
 export function computeTransferDisclosureDigestHex(input: object): Hex;
 export function computeAuditTransferDisclosureDigestHex(input: object): Hex;
+export function computeSelfViewTransferDisclosureDigestHex(input: object): Hex;
 export function computeExpectedDisclosureDigestHex(payload: DisclosurePayload, options?: DisclosureDecodeOptions): Hex;
 export function verifyPayload(payload: DisclosurePayload, onChainDigestHex?: Hex, options?: DisclosureDecodeOptions): DisclosureVerification;
 export function buildDisclosureReport(input: object): DisclosureReport;
 export function eventAttribute(event: object, key: string): string;
 export function disclosureTargetPubKeyFromEvent(event: object, plane?: string): Hex;
 export function decodeUserDisclosureFromEvent(event: object, disclosureScalar: bigint | string | number, disclosurePubKeyHex: Hex, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
+export function decodeSelfViewDisclosureFromEvent(event: object, disclosureScalar: bigint | string | number, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
 export function decodeAuditDisclosureFromEvent(event: object, disclosureScalar: bigint | string | number, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
 export function disclosureScalarFromHex(value: Hex): bigint;
 export function publicPayloadReport(payloadHex: Hex, onChainDigestHex?: Hex, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;

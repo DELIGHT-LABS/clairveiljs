@@ -421,7 +421,7 @@ export function encodeReferenceEvmWithdraw(message, options = {}) {
       bytes32Word(message.root, "withdraw root"),
       bytes32Word(message.nullifier, "withdraw nullifier"),
       coin.amount,
-      normalizeEvmAddress(message.recipient, "withdraw recipient"),
+      withdrawRecipientToEvmAddress(message, options),
       coin.denom,
       message.expiresAtUnix ?? 0
     ]
@@ -442,6 +442,17 @@ export function encodeEvmPrivacyDeposit(message, options = {}) {
 }
 
 export function encodeEvmPrivacyTransfer(message, options = {}) {
+  const hasSelfViewDisclosure = (value) => {
+    if (value == null) return false;
+    if (typeof value === "string") return strip0x(value).length > 0;
+    return value.length > 0;
+  };
+  if (
+    hasSelfViewDisclosure(message.selfViewDisclosureDigest ?? message.self_view_disclosure_digest)
+    || hasSelfViewDisclosure(message.selfViewDisclosurePayload ?? message.self_view_disclosure_payload)
+  ) {
+    throw new Error("EVM privacy transfer ABI does not support self-view disclosure fields");
+  }
   const request = {
     proof: requiredBytes(message.proof, "transfer proof"),
     root: requiredBytes(message.root, "transfer root", 32),
@@ -516,10 +527,14 @@ export function createEip1193WalletAdapter({ provider, account } = {}) {
     async signPrivacyRoot(messageBytes) {
       const address = await this.getAddress();
       const messageHex = with0x(hexFromBytes(messageBytes));
-      return provider.request({
+      const signature = await provider.request({
         method: "personal_sign",
         params: [messageHex, address]
       });
+      if (typeof signature !== "string" || !/^0x[0-9a-fA-F]+$/.test(signature)) {
+        throw new Error("EVM wallet personal_sign must return a 0x-prefixed hex signature");
+      }
+      return signature;
     },
     async sendTransaction(transaction) {
       const from = transaction.from ? normalizeEvmAddress(transaction.from, "transaction from") : await this.getAddress();
@@ -639,7 +654,24 @@ export class ClairveilEvmClient {
   }
 
   buildDepositTransaction(input = {}) {
-    const material = input.material || this.buildDepositMaterial(input);
+    if (input.message) {
+      return {
+        status: "ready",
+        message: input.message,
+        transaction: this.contract.buildDepositTransaction(input.message, input.transactionOptions)
+      };
+    }
+    const material = input.material || input.depositMaterial || input.deposit_material || this.buildDepositMaterial(input);
+    const expectedCreator = String(input.creator || "").trim();
+    if (expectedCreator && String(material.creator || "").trim() !== expectedCreator) {
+      throw new Error(`deposit material creator mismatch: expected ${expectedCreator}, got ${material.creator || ""}`);
+    }
+    const expectedAmount = input.amount == null
+      ? ""
+      : parseCoin(input.amount, input.assetDenom ?? input.denom ?? this.defaultDenom).raw;
+    if (expectedAmount && String(material.amount || "").trim() !== expectedAmount) {
+      throw new Error(`deposit material amount mismatch: expected ${expectedAmount}, got ${material.amount || ""}`);
+    }
     const message = input.message || {
       amount: material.amount,
       noteCommitment: material.note_commitment,
@@ -659,7 +691,8 @@ export class ClairveilEvmClient {
       : await buildTransferMessage({
         shieldedPrefix: this.shieldedPrefix,
         transferDenom: input.transferDenom ?? input.denom ?? this.defaultDenom,
-        ...input
+        ...input,
+        disableSelfViewDisclosure: input.disableSelfViewDisclosure ?? true
       });
     return {
       status: "ready",
@@ -672,7 +705,8 @@ export class ClairveilEvmClient {
     return buildPreparedTransferPayload({
       shieldedPrefix: this.shieldedPrefix,
       transferDenom: input.transferDenom ?? input.denom ?? this.defaultDenom,
-      ...input
+      ...input,
+      disableSelfViewDisclosure: input.disableSelfViewDisclosure ?? true
     });
   }
 

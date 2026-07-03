@@ -211,6 +211,27 @@ export interface QueryCircuitConfigResponse {
   generatedAt: string;
   artifacts: QueryCircuitArtifact[];
 }
+/**
+ * @name QueryReserveRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryReserveRequest
+ */
+export interface QueryReserveRequest {
+  denom: string;
+}
+/**
+ * @name QueryReserveResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryReserveResponse
+ */
+export interface QueryReserveResponse {
+  denom: string;
+  moduleBalance: string;
+  totalDeposited: string;
+  totalWithdrawn: string;
+  expectedModuleBalance: string;
+  invariantHolds: boolean;
+}
 function createBaseQueryCheckNullifierRequest(): QueryCheckNullifierRequest {
   return {
     nullifier: ""
@@ -1228,6 +1249,128 @@ export const QueryCircuitConfigResponse = {
     message.checksumSource = object.checksumSource ?? "";
     message.generatedAt = object.generatedAt ?? "";
     message.artifacts = object.artifacts?.map(e => QueryCircuitArtifact.fromPartial(e)) || [];
+    return message;
+  }
+};
+function createBaseQueryReserveRequest(): QueryReserveRequest {
+  return {
+    denom: ""
+  };
+}
+/**
+ * @name QueryReserveRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryReserveRequest
+ */
+export const QueryReserveRequest = {
+  typeUrl: "/clairveil.privacy.v1.QueryReserveRequest",
+  encode(message: QueryReserveRequest, writer: BinaryWriter = BinaryWriter.create()): BinaryWriter {
+    if (message.denom !== "") {
+      writer.uint32(10).string(message.denom);
+    }
+    return writer;
+  },
+  decode(input: BinaryReader | Uint8Array, length?: number): QueryReserveRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQueryReserveRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          message.denom = reader.string();
+          break;
+        default:
+          reader.skipType(tag & 7);
+          break;
+      }
+    }
+    return message;
+  },
+  fromPartial(object: DeepPartial<QueryReserveRequest>): QueryReserveRequest {
+    const message = createBaseQueryReserveRequest();
+    message.denom = object.denom ?? "";
+    return message;
+  }
+};
+function createBaseQueryReserveResponse(): QueryReserveResponse {
+  return {
+    denom: "",
+    moduleBalance: "",
+    totalDeposited: "",
+    totalWithdrawn: "",
+    expectedModuleBalance: "",
+    invariantHolds: false
+  };
+}
+/**
+ * @name QueryReserveResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryReserveResponse
+ */
+export const QueryReserveResponse = {
+  typeUrl: "/clairveil.privacy.v1.QueryReserveResponse",
+  encode(message: QueryReserveResponse, writer: BinaryWriter = BinaryWriter.create()): BinaryWriter {
+    if (message.denom !== "") {
+      writer.uint32(10).string(message.denom);
+    }
+    if (message.moduleBalance !== "") {
+      writer.uint32(18).string(message.moduleBalance);
+    }
+    if (message.totalDeposited !== "") {
+      writer.uint32(26).string(message.totalDeposited);
+    }
+    if (message.totalWithdrawn !== "") {
+      writer.uint32(34).string(message.totalWithdrawn);
+    }
+    if (message.expectedModuleBalance !== "") {
+      writer.uint32(42).string(message.expectedModuleBalance);
+    }
+    if (message.invariantHolds === true) {
+      writer.uint32(48).bool(message.invariantHolds);
+    }
+    return writer;
+  },
+  decode(input: BinaryReader | Uint8Array, length?: number): QueryReserveResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQueryReserveResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          message.denom = reader.string();
+          break;
+        case 2:
+          message.moduleBalance = reader.string();
+          break;
+        case 3:
+          message.totalDeposited = reader.string();
+          break;
+        case 4:
+          message.totalWithdrawn = reader.string();
+          break;
+        case 5:
+          message.expectedModuleBalance = reader.string();
+          break;
+        case 6:
+          message.invariantHolds = reader.bool();
+          break;
+        default:
+          reader.skipType(tag & 7);
+          break;
+      }
+    }
+    return message;
+  },
+  fromPartial(object: DeepPartial<QueryReserveResponse>): QueryReserveResponse {
+    const message = createBaseQueryReserveResponse();
+    message.denom = object.denom ?? "";
+    message.moduleBalance = object.moduleBalance ?? "";
+    message.totalDeposited = object.totalDeposited ?? "";
+    message.totalWithdrawn = object.totalWithdrawn ?? "";
+    message.expectedModuleBalance = object.expectedModuleBalance ?? "";
+    message.invariantHolds = object.invariantHolds ?? false;
     return message;
   }
 };

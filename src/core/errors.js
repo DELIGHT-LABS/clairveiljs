@@ -1,5 +1,6 @@
 export const ClairveilErrorCode = Object.freeze({
   INVALID_ARGUMENT: "INVALID_ARGUMENT",
+  INVALID_AMOUNT: "INVALID_AMOUNT",
   WALLET_UNAVAILABLE: "WALLET_UNAVAILABLE",
   ROOT_SIGNATURE_REQUIRED: "ROOT_SIGNATURE_REQUIRED",
   SIGNER_MISMATCH: "SIGNER_MISMATCH",
@@ -34,6 +35,8 @@ export function isClairveilError(error, code) {
 
 export function plannerStatusToErrorCode(status) {
   switch (status) {
+    case "invalid_amount":
+      return ClairveilErrorCode.INVALID_AMOUNT;
     case "insufficient_balance":
       return ClairveilErrorCode.INSUFFICIENT_BALANCE;
     case "self_merge_required":

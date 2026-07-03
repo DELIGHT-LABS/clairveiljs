@@ -22,7 +22,7 @@ export interface TransferSelection {
 }
 
 export interface TransferPlan {
-  status: "final_transfer_ready" | "self_merge_required" | "zero_dummy_required" | "insufficient_balance";
+  status: "final_transfer_ready" | "self_merge_required" | "zero_dummy_required" | "insufficient_balance" | "invalid_amount";
   canBuildTx: boolean;
   action: string;
   message: string;
@@ -32,7 +32,7 @@ export interface TransferPlan {
 }
 
 export interface WithdrawPlan {
-  status: "withdraw_ready" | "exact_note_required" | "insufficient_balance";
+  status: "withdraw_ready" | "exact_note_required" | "insufficient_balance" | "invalid_amount";
   canBuildTx: boolean;
   action: string;
   message: string;

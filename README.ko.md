@@ -14,7 +14,7 @@ English documentation: [README.md](./README.md)
 - shielded address encode/decode
 - note 생성, commitment/nullifier 계산, note encryption
 - transfer disclosure MiMC digest 검증
-- privacy event, auditable transfer, balance query
+- privacy event, auditable transfer, reserve accounting, balance query
 - Keplr/custom signer용 wallet adapter
 - memory/localStorage 기반 note store
 - transfer/withdraw planner와 안정적인 `ClairveilError` 코드
@@ -62,7 +62,7 @@ Public consumer는 내부 파일 경로를 직접 import하지 말고 package ex
 - Keplr/Cosmos: [`examples/minimal-keplr-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-keplr-flow.js)
 - MetaMask/EVM: [`examples/minimal-metamask-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-metamask-flow.js)
 
-두 예제는 wallet privacy material derivation, deposit 준비, note scan, transfer 준비, broadcast 흐름을 SDK surface로 수행합니다.
+두 예제는 wallet privacy material derivation, deposit 준비, note scan, transfer 준비, broadcast 흐름을 SDK surface로 수행합니다. Keplr/Cosmos 예제는 Cosmos `MsgDeposit`에 `DepositCircuit` proof가 포함되기 때문에 `depositProofProvider`가 필요합니다.
 
 ## 주소와 Prefix
 
@@ -121,11 +121,16 @@ const deposit = await clairveil.prepareDeposit({
   address,
   pubKeyHex,
   signatureBase64: privacyRootSignatureBase64,
-  amount: "1000000uclair"
+  amount: "1000000uclair",
+  async depositProofProvider({ material }) {
+    // local/WASM/trusted deposit prover에서 DepositCircuit proof를 생성합니다.
+    return createDepositProof({ material });
+  }
 });
 
-// Cosmos wallet이면 deposit.signDoc을 wallet signDirect flow로 제출합니다.
-// EVM wallet이면 walletType: "evm"을 사용하고 deposit.transaction을 EIP-1193 wallet로 제출합니다.
+// 이 Cosmos-style client는 wallet signDirect용 deposit.signDoc을 반환합니다.
+// EVM은 profile: { transport: "evm", ... }로 client를 만들면
+// prepareDeposit이 EIP-1193 제출용 deposit.transaction을 반환합니다.
 ```
 
 로컬 single-node 데모에서는 faucet, local signer, auditor admin, CORS/proxy convenience를 위해 helper server를 둘 수 있습니다. 그래도 DApp의 핵심 privacy logic은 `clairveiljs/browser-dapp` API를 호출하는 형태를 유지하는 것이 좋습니다.
@@ -142,7 +147,13 @@ ClairveilJS는 브라우저에서 privacy payload를 준비한 뒤, prepared mes
 - precompile address는 chain config에서 제공하거나 SDK 기본값 `0x100000000000000000000000000000000000000b`를 사용할 수 있습니다.
 - ABI shape가 다른 EVM chain은 현재 SDK의 stable support 범위 밖입니다.
 
+지원되는 EVM ABI에서 `IPrivacy.deposit`은 `{ amount, noteCommitment, encryptedNote }`만 받습니다. Cosmos `MsgDeposit` 경로는 `DepositCircuit` proof가 필요하지만, 현재 EVM precompile deposit calldata에는 proof field가 없습니다.
+
+지원되는 EVM `IPrivacy.transfer` ABI에는 user/audit disclosure field는 있지만 Cosmos `selfViewDisclosure*` field는 없습니다. 그래서 ClairveilJS는 EVM transport에서 self-view disclosure를 기본으로 끄고, self-view disclosure bytes가 들어간 EVM transfer message는 조용히 버리지 않고 에러로 막습니다.
+
 EVM transfer/withdraw도 note scan, planner, disclosure, prover adapter 흐름은 Cosmos와 같습니다. 마지막 submit 단계만 Cosmos sign doc이 아니라 EVM calldata 전송으로 달라집니다.
+
+일부 EVM `IPrivacy.withdraw` 배포는 legacy `newNoteCommitment`, `encryptedNote` ABI field를 아직 포함할 수 있습니다. ClairveilJS는 호환을 위해 기본값으로 이 ABI-only field에 32-byte zero placeholder를 넣습니다. `withdrawOutputMode: "none"`은 이 legacy-compatible ABI에 들어가는 placeholder 값만 비웁니다. downstream precompile이 해당 ABI field 자체를 제거했다면 새 function shape에 맞는 custom contract adapter/encoder를 제공해야 합니다.
 
 ## Prover
 
@@ -152,7 +163,7 @@ JS SDK는 ZK proof generation 자체를 내장하지 않습니다. Browser, loca
 import { createHttpProverAdapter } from "clairveiljs";
 
 const proverAdapter = createHttpProverAdapter({
-  baseUrl: "https://prover.example",
+  baseURL: "https://prover.example",
   bearerToken: process.env.CLAIRVEIL_PROVER_TOKEN
 });
 ```
@@ -257,7 +268,7 @@ npm run test:conformance:required
 - prepared transfer/withdraw payload hash
 - prover HTTP contract behavior
 - disclosure decode
-- withdraw/relay payload validation helper
+- relay withdraw message handoff behavior
 
 ## Optional Local Node E2E
 
@@ -271,10 +282,20 @@ Local node e2e는 `prepublishOnly`의 필수 gate가 아닙니다. Clairveil nod
 - disclosure decode
 - direct withdraw
 
-Relay withdraw payload/signDoc 생성은 SDK surface/type test로 확인합니다. 실제 relayer service e2e는 product-defined relayer transport와 배포 환경에 맞춰 별도로 구성하세요.
+Relay withdraw payload/signDoc 생성은 SDK test와 Go conformance fixture로 검증합니다. 실제 relayer service e2e는 product-defined relayer transport와 배포 환경에 맞춰 별도로 구성하세요.
 
 ```bash
 CLAIRVEIL_E2E_LOCAL=1 npm run test:e2e:local
+```
+
+Full flow까지 실행하려면 wallet module과 deposit proof module을 함께 넘기세요. Deposit proof module은 `default`, `createDepositProof`, 또는 `depositProofProvider`를 export하고 `{ proof }`, `{ depositProof }`, `{ proofHex }`, `{ proof_hex }` 같은 proof bytes 또는 proof hex를 반환해야 합니다.
+
+```bash
+CLAIRVEIL_E2E_LOCAL=1 \
+CLAIRVEIL_E2E_FULL_FLOW=1 \
+CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
+CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
+npm run test:e2e:local
 ```
 
 ## 테스트

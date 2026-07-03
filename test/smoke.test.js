@@ -2,15 +2,26 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  derivePrivacyMaterial,
-  decodeShieldedAddress,
+  assertPreparedTransferPayloadShape,
+  buildPreparedTransferPayload,
+  buildPreparedWithdrawProverPayload,
+  buildRelayWithdrawMsgFromPayload,
   buildWithdrawMsgFromPayload,
   computePreparedWithdrawPayloadHash,
-  hashStringToField
+  createNote,
+  createSpendNoteHashSigner,
+  decodeShieldedAddress,
+  derivePrivacyMaterial,
+  deriveSpendKeys,
+  deriveViewKeys,
+  hashStringToField,
+  ClairveilErrorCode,
+  plannerStatusToErrorCode
 } from "clairveiljs/core";
 import {
   createClairveilClient,
   MemoryNoteStore,
+  MsgDeposit,
   MsgWithdraw,
   nextPrivacyScanOptions,
   userDisclosureModeRecipientEncrypted
@@ -20,15 +31,23 @@ import {
   bech32AddressToEvm,
   createClairveilEvmClient,
   createEip1193WalletAdapter,
+  encodeEvmPrivacyDeposit,
   encodeFunctionData,
+  encodeReferenceEvmDeposit,
+  encodeReferenceEvmWithdraw,
   evmAddressToBech32,
   functionSelector,
   encodeEvmPrivacyTransfer,
   encodeEvmPrivacyWithdraw,
   evmPrivacyPrecompileAddress
 } from "clairveiljs/evm";
+import { createWalletAdapter } from "clairveiljs/wallet-adapter";
 import { createClairveilPublicClient } from "clairveiljs/browser-public";
 import { createClairveilBrowserDappClient } from "clairveiljs/browser-dapp";
+import {
+  planTransferNotes,
+  planWithdrawNotes
+} from "clairveiljs/planner";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -60,11 +79,328 @@ test("browser-dapp entrypoint instantiates a DApp client", async () => {
   assert.equal(typeof client.prepareRelayWithdraw, "function");
   assert.equal(typeof client.createRelayWithdrawSignDoc, "function");
   assert.equal(typeof client.scanWalletNotes, "function");
+  assert.equal(typeof client.fetchReserve, "function");
   assert.equal(typeof client.checkNullifier, "function");
   assert.equal(typeof browserDapp.ClairveilBrowserDappClient, "function");
 });
 
-test("browser-dapp EVM native send requires a 0x recipient", () => {
+test("browser-dapp client uses restEndpoints when rest is omitted", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  globalThis.fetch = async url => {
+    requestedUrls.push(String(url));
+    return new Response(JSON.stringify({ balances: [], pagination: null }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    const client = createClairveilBrowserDappClient({
+      rpc: "http://127.0.0.1:26657",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      chainId: "clairveil-local-3",
+      accountPrefix: "clair",
+      shieldedPrefix: "clairs",
+      denom: "uclair"
+    });
+
+    await client.getBalances("clair1abc");
+    assert.deepEqual(requestedUrls, [
+      "http://rest-a.local/cosmos/bank/v1beta1/balances/clair1abc"
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("browser-dapp profile transport is the default wallet type", async () => {
+  const client = createClairveilBrowserDappClient({
+    profile: {
+      transport: "evm",
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://127.0.0.1:1317",
+      chainId: "evm-local-1",
+      accountPrefix: "demo",
+      shieldedPrefix: "demos",
+      denom: "udemo",
+      evmChainId: "0x32f",
+      evmPrivacyPrecompileAddress: evmPrivacyPrecompileAddress
+    }
+  });
+
+  const prepared = await client.prepareDeposit({
+    address: "0x1111111111111111111111111111111111111111",
+    pubKeyHex: "02".padEnd(66, "0"),
+    signatureBase64: Buffer.from("profile-transport-evm").toString("base64"),
+    amount: "3udemo"
+  });
+
+  assert.equal(prepared.signDoc, undefined);
+  assert.equal(prepared.transaction.chainId, "0x32f");
+  assert.equal(prepared.transaction.to, evmPrivacyPrecompileAddress);
+  assert.equal(prepared.prepared.amount, "3udemo");
+});
+
+test("MsgDeposit includes the required deposit proof field", () => {
+  const message = {
+    creator: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
+    amount: "1uclair",
+    noteCommitment: new Uint8Array(32).fill(1),
+    encryptedNote: new Uint8Array([2, 3]),
+    proof: new Uint8Array([4, 5, 6])
+  };
+  const encoded = MsgDeposit.encode(message).finish();
+  const decoded = MsgDeposit.decode(encoded);
+  assert.deepEqual([...decoded.proof], [4, 5, 6]);
+});
+
+test("browser-dapp deposit proof provider reuses the proven deposit material", async () => {
+  const client = createClairveilBrowserDappClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    denom: "uclair"
+  });
+  let providerCommitmentHex = "";
+  let capturedMessage = null;
+  client.cosmos.buildDirectSignDoc = async ({ messages }) => {
+    capturedMessage = messages[0].value;
+    return { chainId: "clairveil-local-3", bodyBytes: "", authInfoBytes: "", accountNumber: "0" };
+  };
+
+  const prepared = await client.prepareDeposit({
+    address: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    pubKeyHex: "02".padEnd(66, "0"),
+    signatureBase64: Buffer.from("deposit-proof-provider").toString("base64"),
+    amount: "7uclair",
+    depositProofProvider({ material }) {
+      providerCommitmentHex = material.note_commitment_hex;
+      return { proof_hex: "ab" };
+    }
+  });
+
+  assert.equal(prepared.prepared.noteCommitmentHex, providerCommitmentHex);
+  assert.equal(Buffer.from(capturedMessage.noteCommitment).toString("hex"), providerCommitmentHex);
+  assert.deepEqual([...capturedMessage.proof], [0xab]);
+});
+
+test("wallet adapter accepts hex privacy root signatures", async () => {
+  const signatureHex = "ab".repeat(64);
+  const adapter = createWalletAdapter({
+    address: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    pubKeyHex: "02".padEnd(66, "0"),
+    async signPrivacyRoot() {
+      return `0x${signatureHex}`;
+    }
+  });
+
+  const signature = await adapter.signPrivacyRoot(new Uint8Array([1, 2, 3]));
+  const signatureBase64 = await adapter.signPrivacyRootBase64(new Uint8Array([1, 2, 3]));
+
+  assert.equal(Buffer.from(signature).toString("hex"), signatureHex);
+  assert.equal(Buffer.from(signatureBase64, "base64").toString("hex"), signatureHex);
+});
+
+test("wallet adapter rejects ambiguous unprefixed hex privacy root signatures", async () => {
+  const signatureHex = "ab".repeat(64);
+  const adapter = createWalletAdapter({
+    address: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    pubKeyHex: "02".padEnd(66, "0"),
+    async signPrivacyRoot() {
+      return signatureHex;
+    }
+  });
+
+  await assert.rejects(
+    () => adapter.signPrivacyRootBase64(new Uint8Array([1, 2, 3])),
+    /hex strings must be prefixed with 0x/
+  );
+});
+
+test("EIP-1193 wallet adapter returns only 0x-prefixed privacy root signatures", async () => {
+  const calls = [];
+  const provider = {
+    async request(input) {
+      calls.push(input);
+      if (input.method === "eth_requestAccounts") {
+        return ["0x1111111111111111111111111111111111111111"];
+      }
+      if (input.method === "personal_sign") {
+        return "0x" + "ab".repeat(65);
+      }
+      throw new Error(`unexpected method ${input.method}`);
+    }
+  };
+  const adapter = createEip1193WalletAdapter({ provider });
+
+  const signature = await adapter.signPrivacyRoot(new Uint8Array([1, 2, 3]));
+
+  assert.equal(signature, "0x" + "ab".repeat(65));
+  assert.deepEqual(calls[1], {
+    method: "personal_sign",
+    params: ["0x010203", "0x1111111111111111111111111111111111111111"]
+  });
+});
+
+test("EIP-1193 wallet adapter rejects non-hex privacy root signatures", async () => {
+  const provider = {
+    async request(input) {
+      if (input.method === "eth_requestAccounts") {
+        return ["0x1111111111111111111111111111111111111111"];
+      }
+      if (input.method === "personal_sign") {
+        return "not-a-hex-signature";
+      }
+      throw new Error(`unexpected method ${input.method}`);
+    }
+  };
+  const adapter = createEip1193WalletAdapter({ provider });
+
+  await assert.rejects(
+    () => adapter.signPrivacyRoot(new Uint8Array([1, 2, 3])),
+    /0x-prefixed hex signature/
+  );
+});
+
+test("deposit preparation requires a deposit proof", async () => {
+  const browserClient = createClairveilBrowserDappClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    denom: "uclair"
+  });
+
+  await assert.rejects(
+    () => browserClient.prepareDeposit({
+      address: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      pubKeyHex: "02".padEnd(66, "0"),
+      signatureBase64: Buffer.from("missing-deposit-proof").toString("base64"),
+      amount: "7uclair"
+    }),
+    /deposit proof is required/
+  );
+
+  const cosmosClient = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    defaultDenom: "uclair"
+  });
+
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: new Uint8Array(32),
+      amount: "7uclair"
+    }),
+    /deposit proof is required/
+  );
+
+  const hexProofDeposit = cosmosClient.buildDepositMessage({
+    creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    rootSeed: new Uint8Array(32),
+    amount: "7uclair",
+    proof: "0xab"
+  });
+  assert.deepEqual([...hexProofDeposit.message.proof], [0xab]);
+
+  const staleCreatorMaterial = cosmosClient.buildDepositMaterial({
+    creator: "clair1other",
+    rootSeed: new Uint8Array(32).fill(1),
+    amount: "7uclair"
+  });
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      depositMaterial: staleCreatorMaterial,
+      amount: "7uclair",
+      proof: "0xab"
+    }),
+    /deposit material creator mismatch/
+  );
+
+  const staleAmountMaterial = cosmosClient.buildDepositMaterial({
+    creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    rootSeed: new Uint8Array(32).fill(2),
+    amount: "8uclair"
+  });
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      depositMaterial: staleAmountMaterial,
+      amount: "7uclair",
+      proof: "0xab"
+    }),
+    /deposit material amount mismatch/
+  );
+});
+
+test("cosmos deposit preparation forwards custom memo", async () => {
+  const cosmosClient = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    defaultDenom: "uclair"
+  });
+  let capturedMemo = "";
+  cosmosClient.buildDirectSignDoc = async ({ memo }) => {
+    capturedMemo = memo;
+    return { chainId: "clairveil-local-3", bodyBytes: "", authInfoBytes: "", accountNumber: "0" };
+  };
+
+  await cosmosClient.prepareDeposit({
+    material: {
+      address: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      pubKeyHex: "02".padEnd(66, "0"),
+      rootSeed: new Uint8Array(32),
+      signingMessage: "",
+      shieldedAddress: "clairs1demo",
+      disclosurePubKeyHex: "",
+      rootSignatureHash: ""
+    },
+    amount: "7uclair",
+    proofHex: "ab",
+    memo: "custom deposit memo"
+  });
+
+  assert.equal(capturedMemo, "custom deposit memo");
+});
+
+test("prepared transfer payload shape accepts v2 self-view fields", () => {
+  const payload = {
+    version: "v2",
+    creator: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
+    root_hex: "00".repeat(32),
+    asset_id_hex: "01".repeat(32),
+    inputs: [{}, {}],
+    outputs: [{}, {}],
+    cipher_text_hexes: ["aa", "bb"],
+    audit_disclosure_digest_hex: "02".repeat(32),
+    audit_disclosure_target_pubkey_hex: "03".repeat(32),
+    self_view_disclosure_digest_hex: "04".repeat(32),
+    self_view_disclosure_payload_hex: "abcd",
+    payload_hash: "05".repeat(32)
+  };
+
+  assert.equal(assertPreparedTransferPayloadShape(payload), payload);
+  assert.throws(
+    () => assertPreparedTransferPayloadShape({
+      ...payload,
+      version: "v1"
+    }),
+    /self_view_disclosure_\* fields require version v2/
+  );
+});
+
+test("browser-dapp public send helpers validate recipients and coin amounts", async () => {
   const client = createClairveilBrowserDappClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
@@ -88,6 +424,41 @@ test("browser-dapp EVM native send requires a 0x recipient", () => {
       amount: "1aokrw"
     }),
     /send recipient must be 20-byte hex/
+  );
+  assert.throws(
+    () => client.evmNativeSendTransaction({
+      to: "0x1111111111111111111111111111111111111111",
+      amount: "0aokrw"
+    }),
+    /send amount must be greater than 0/
+  );
+  assert.throws(
+    () => client.evmNativeSendTransaction({
+      to: "0x1111111111111111111111111111111111111111",
+      amount: "1uclair"
+    }),
+    /send denom must be aokrw, got uclair/
+  );
+
+  client.cosmos.buildDirectSignDoc = async input => input;
+  const signDoc = await client.buildBankSendSignDoc({
+    from: "maroo1sender",
+    pubKeyHex: "02".padEnd(66, "0"),
+    to: "maroo1recipient",
+    amount: "9aokrw"
+  });
+  assert.deepEqual(signDoc.messages[0].value.amount, [{
+    denom: "aokrw",
+    amount: "9"
+  }]);
+  await assert.rejects(
+    () => client.buildBankSendSignDoc({
+      from: "maroo1sender",
+      pubKeyHex: "02".padEnd(66, "0"),
+      to: "maroo1recipient",
+      amount: "0aokrw"
+    }),
+    /send amount must be greater than 0/
   );
 });
 
@@ -334,6 +705,30 @@ test("browser-dapp prepare forwards scan options into EVM note scans", async () 
   assert.equal(withdrawScan.maxPages, 8);
 });
 
+test("planner rejects zero transfer and withdraw amounts before note planning", () => {
+  const transfer = planTransferNotes({
+    notes: [],
+    amount: "0uclair",
+    denom: "uclair"
+  });
+  const withdraw = planWithdrawNotes({
+    notes: [],
+    amount: "0uclair",
+    denom: "uclair"
+  });
+
+  assert.equal(transfer.status, "invalid_amount");
+  assert.equal(transfer.canBuildTx, false);
+  assert.equal(transfer.action, "enter_positive_amount");
+  assert.match(transfer.message, /greater than 0/);
+  assert.equal(plannerStatusToErrorCode(transfer.status), ClairveilErrorCode.INVALID_AMOUNT);
+  assert.equal(withdraw.status, "invalid_amount");
+  assert.equal(withdraw.canBuildTx, false);
+  assert.equal(withdraw.action, "enter_positive_amount");
+  assert.match(withdraw.message, /greater than 0/);
+  assert.equal(plannerStatusToErrorCode(withdraw.status), ClairveilErrorCode.INVALID_AMOUNT);
+});
+
 test("browser-dapp rejects unknown wallet types", async () => {
   const client = createClairveilBrowserDappClient({
     rpc: "http://127.0.0.1:26657",
@@ -430,6 +825,441 @@ test("browser public client reads events directly and filters auditable transfer
   }
 });
 
+test("Reserve query is exposed across public, browser-dapp, and cosmos clients", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  globalThis.fetch = async url => {
+    requestedUrls.push(String(url));
+    return new Response(JSON.stringify({
+      denom: "factory/demo/uclair",
+      module_balance: "7",
+      total_deposited: "10",
+      total_withdrawn: "3",
+      expected_module_balance: "7",
+      invariant_holds: true
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    const publicClient = createClairveilPublicClient({ rest: "http://chain.local:1317/" });
+    const cosmosClient = createClairveilClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://chain.local:1317/",
+      chainId: "clairveil-local-3"
+    });
+    const browserClient = createClairveilBrowserDappClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://chain.local:1317/",
+      chainId: "clairveil-local-3"
+    });
+
+    const [publicReserve, cosmosReserve, browserReserve] = await Promise.all([
+      publicClient.fetchReserve("factory/demo/uclair"),
+      cosmosClient.fetchReserve("factory/demo/uclair"),
+      browserClient.fetchReserve("factory/demo/uclair")
+    ]);
+
+    assert.equal(publicReserve.invariant_holds, true);
+    assert.equal(cosmosReserve.expected_module_balance, "7");
+    assert.equal(browserReserve.denom, "factory/demo/uclair");
+    assert.deepEqual(requestedUrls, [
+      "http://chain.local:1317/clairveil/privacy/v1/reserve/factory%2Fdemo%2Fuclair",
+      "http://chain.local:1317/clairveil/privacy/v1/reserve/factory%2Fdemo%2Fuclair",
+      "http://chain.local:1317/clairveil/privacy/v1/reserve/factory%2Fdemo%2Fuclair"
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chain REST queries abort after the configured timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  let aborts = 0;
+  globalThis.fetch = async (_url, options = {}) => new Promise((_resolve, reject) => {
+    options.signal?.addEventListener("abort", () => {
+      aborts += 1;
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    });
+  });
+  try {
+    const publicClient = createClairveilPublicClient({
+      rest: "http://chain.local:1317/",
+      queryTimeoutMs: 5,
+      queryRetry: false
+    });
+    await assert.rejects(
+      () => publicClient.fetchReserve("uclair"),
+      /fetch request timed out after 5ms/
+    );
+
+    const cosmosClient = createClairveilClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://chain.local:1317/",
+      chainId: "clairveil-local-3",
+      queryTimeoutMs: 5,
+      queryRetry: false
+    });
+    await assert.rejects(
+      () => cosmosClient.fetchReserve("uclair"),
+      /fetch request timed out after 5ms/
+    );
+
+    const browserClient = createClairveilBrowserDappClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://chain.local:1317/",
+      chainId: "clairveil-local-3",
+      queryTimeoutMs: 5,
+      queryRetry: false
+    });
+    await assert.rejects(
+      () => browserClient.getBalances("clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48"),
+      /fetch request timed out after 5ms/
+    );
+
+    assert.equal(aborts, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("public chain read queries retry and fail over across REST endpoints", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  globalThis.fetch = async url => {
+    const text = String(url);
+    requestedUrls.push(text);
+    if (text.startsWith("http://rest-a.local")) {
+      return new Response("busy", { status: 503 });
+    }
+    return new Response(JSON.stringify({
+      denom: "uclair",
+      module_balance: "1",
+      total_deposited: "1",
+      total_withdrawn: "0",
+      expected_module_balance: "1",
+      invariant_holds: true
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    const client = createClairveilClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      chainId: "clairveil-local-3",
+      queryRetry: {
+        retries: 1,
+        baseDelayMs: 1,
+        maxDelayMs: 1,
+        jitter: false
+      }
+    });
+
+    const reserve = await client.fetchReserve("uclair");
+    assert.equal(reserve.invariant_holds, true);
+    assert.deepEqual(requestedUrls, [
+      "http://rest-a.local/clairveil/privacy/v1/reserve/uclair",
+      "http://rest-a.local/clairveil/privacy/v1/reserve/uclair",
+      "http://rest-b.local/clairveil/privacy/v1/reserve/uclair"
+    ]);
+
+    requestedUrls.length = 0;
+    await client.fetchReserve("uclair");
+    assert.equal(requestedUrls[0], "http://rest-b.local/clairveil/privacy/v1/reserve/uclair");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("browser-dapp balance and health REST queries fail over across endpoints", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  globalThis.fetch = async url => {
+    const text = String(url);
+    requestedUrls.push(text);
+    if (text.startsWith("http://rest-a.local")) {
+      return new Response("busy", { status: 503 });
+    }
+    if (text.endsWith("/cosmos/bank/v1beta1/balances/clair1abc")) {
+      return new Response(JSON.stringify({ balances: [{ denom: "uclair", amount: "7" }], pagination: null }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    if (text.endsWith("/clairveil/privacy/v1/tree_state")) {
+      return new Response(JSON.stringify({ tree_size: "1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    if (text.endsWith("/clairveil/privacy/v1/audit_config")) {
+      return new Response(JSON.stringify({ audit_master_pubkey_hex: "" }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    if (text.endsWith("/status")) {
+      return new Response(JSON.stringify({ result: { node_info: { network: "local" } } }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    throw new Error(`unexpected URL ${text}`);
+  };
+  try {
+    const client = createClairveilBrowserDappClient({
+      rpc: "http://rpc.local",
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      chainId: "clairveil-local-3",
+      queryRetry: {
+        retries: 1,
+        baseDelayMs: 1,
+        maxDelayMs: 1,
+        jitter: false
+      }
+    });
+
+    const balances = await client.getBalances("clair1abc");
+    const health = await client.health();
+
+    assert.equal(balances.balances[0].amount, "7");
+    assert.equal(health.tree.tree_size, "1");
+    assert.equal(health.audit.audit_master_pubkey_hex, "");
+    assert.deepEqual(requestedUrls, [
+      "http://rest-a.local/cosmos/bank/v1beta1/balances/clair1abc",
+      "http://rest-a.local/cosmos/bank/v1beta1/balances/clair1abc",
+      "http://rest-b.local/cosmos/bank/v1beta1/balances/clair1abc",
+      "http://rpc.local/status",
+      "http://rest-b.local/clairveil/privacy/v1/tree_state",
+      "http://rest-b.local/clairveil/privacy/v1/audit_config"
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chain read query failover does not mask non-retryable errors", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  globalThis.fetch = async url => {
+    const text = String(url);
+    requestedUrls.push(text);
+    if (text.startsWith("http://rest-a.local")) {
+      return new Response("bad request", { status: 400 });
+    }
+    return new Response(JSON.stringify({ invariant_holds: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    const cosmosClient = createClairveilClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      chainId: "clairveil-local-3",
+      queryRetry: {
+        retries: 1,
+        baseDelayMs: 1,
+        maxDelayMs: 1,
+        jitter: false
+      }
+    });
+    await assert.rejects(
+      () => cosmosClient.fetchReserve("uclair"),
+      /400/
+    );
+
+    const publicClient = createClairveilPublicClient({
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      queryRetry: {
+        retries: 1,
+        baseDelayMs: 1,
+        maxDelayMs: 1,
+        jitter: false
+      }
+    });
+    await assert.rejects(
+      () => publicClient.fetchReserve("uclair"),
+      /400/
+    );
+
+    assert.deepEqual(requestedUrls, [
+      "http://rest-a.local/clairveil/privacy/v1/reserve/uclair",
+      "http://rest-a.local/clairveil/privacy/v1/reserve/uclair"
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("public and cosmos fetchJson honor absolute URLs", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  globalThis.fetch = async url => {
+    const text = String(url);
+    requestedUrls.push(text);
+    return new Response(JSON.stringify({ url: text }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    const cosmosClient = createClairveilClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      chainId: "clairveil-local-3",
+      queryRetry: false
+    });
+    const publicClient = createClairveilPublicClient({
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      queryRetry: false
+    });
+
+    const cosmosResult = await cosmosClient.fetchJson("http://external.local/custom?x=1");
+    const publicResult = await publicClient.fetchJson("http://external.local/other?y=2");
+
+    assert.equal(cosmosResult.url, "http://external.local/custom?x=1");
+    assert.equal(publicResult.url, "http://external.local/other?y=2");
+    assert.equal(cosmosClient.activeRestEndpoint, "http://rest-a.local");
+    assert.equal(publicClient.activeRestEndpoint, "http://rest-a.local");
+    assert.deepEqual(requestedUrls, [
+      "http://external.local/custom?x=1",
+      "http://external.local/other?y=2"
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("cosmos broadcastSignedTx rejects failed indexed transactions", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  client.connect = async () => ({
+    broadcastTxSync: async () => "ABC123"
+  });
+  client.buildTxRawBytes = () => new Uint8Array([1, 2, 3]);
+  client.waitForTx = async () => ({
+    height: "9",
+    txhash: "ABC123",
+    code: 18,
+    raw_log: "invalid request",
+    events: []
+  });
+
+  await assert.rejects(
+    () => client.broadcastSignedTx({
+      bodyBytes: "",
+      authInfoBytes: "",
+      signature: ""
+    }),
+    error => {
+      assert.equal(error.broadcast.code, 18);
+      assert.equal(error.tx.code, 18);
+      return /failed with code 18/.test(error.message);
+    }
+  );
+});
+
+test("cosmos broadcastSignedTx does not mark unindexed transactions as ok", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  client.connect = async () => ({
+    broadcastTxSync: async () => "ABC123"
+  });
+  client.buildTxRawBytes = () => new Uint8Array([1, 2, 3]);
+  client.waitForTx = async () => null;
+
+  const result = await client.broadcastSignedTx({
+    bodyBytes: "",
+    authInfoBytes: "",
+    signature: ""
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.tx, null);
+  assert.equal(result.broadcast.code, 0);
+  assert.match(result.error, /broadcast but not found yet/);
+});
+
+test("nullifier queries retry on the same endpoint unless failover is explicit", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  globalThis.fetch = async url => {
+    const text = String(url);
+    requestedUrls.push(text);
+    if (text.startsWith("http://rest-a.local")) {
+      return new Response("busy", { status: 503 });
+    }
+    return new Response(JSON.stringify({ used: false }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    const defaultClient = createClairveilClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      chainId: "clairveil-local-3",
+      queryRetry: {
+        retries: 1,
+        baseDelayMs: 1,
+        maxDelayMs: 1,
+        jitter: false
+      }
+    });
+    await assert.rejects(
+      () => defaultClient.checkNullifier("aa".repeat(32)),
+      /503/
+    );
+    assert.deepEqual(requestedUrls, [
+      `http://rest-a.local/clairveil/privacy/v1/nullifier/${"aa".repeat(32)}`,
+      `http://rest-a.local/clairveil/privacy/v1/nullifier/${"aa".repeat(32)}`
+    ]);
+
+    requestedUrls.length = 0;
+    const optInClient = createClairveilClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      chainId: "clairveil-local-3",
+      nullifierFailover: true,
+      queryRetry: {
+        retries: 1,
+        baseDelayMs: 1,
+        maxDelayMs: 1,
+        jitter: false
+      }
+    });
+    const result = await optInClient.checkNullifier("bb".repeat(32));
+    assert.equal(result.used, false);
+    assert.deepEqual(requestedUrls, [
+      `http://rest-a.local/clairveil/privacy/v1/nullifier/${"bb".repeat(32)}`,
+      `http://rest-a.local/clairveil/privacy/v1/nullifier/${"bb".repeat(32)}`,
+      `http://rest-b.local/clairveil/privacy/v1/nullifier/${"bb".repeat(32)}`
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("cosmos disclosure lookup paginates privacy events by tx hash", async () => {
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
@@ -484,12 +1314,14 @@ test("root and cosmos-client entrypoints expose the Cosmos client surface", asyn
 test("generated Clairveil protobuf bindings are exposed", async () => {
   const tx = await import("clairveiljs/generated/clairveil/privacy/v1/tx");
   const txWithExtension = await import("clairveiljs/generated/clairveil/privacy/v1/tx.js");
+  const query = await import("clairveiljs/generated/clairveil/privacy/v1/query");
 
   assert.equal(typeof tx.MsgDeposit.encode, "function");
   assert.equal(typeof tx.MsgTransfer.decode, "function");
   assert.equal(tx.MsgWithdraw.typeUrl, "/clairveil.privacy.v1.MsgWithdraw");
   assert.equal(typeof txWithExtension.MsgDeposit.encode, "function");
   assert.equal(txWithExtension.MsgWithdraw.typeUrl, "/clairveil.privacy.v1.MsgWithdraw");
+  assert.equal(query.QueryReserveResponse.typeUrl, "/clairveil.privacy.v1.QueryReserveResponse");
 });
 
 test("package metadata is ready for public npm publishing", () => {
@@ -558,6 +1390,162 @@ test("withdraw message omits legacy output-note fields", () => {
   assert.equal(encoded.includes(50), false);
 });
 
+test("relay withdraw message uses relayer as creator and payload recipient as recipient", () => {
+  const payload = {
+    version: "v1",
+    proof_hex: "40".repeat(96),
+    root_hex: "00".repeat(31) + "01",
+    nullifier_hex: "02".repeat(32),
+    amount: "1uclair",
+    recipient: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
+    chain_id: "clairveil-local-1",
+    expires_at_unix: 4102448400
+  };
+  payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
+
+  const message = buildRelayWithdrawMsgFromPayload(
+    payload,
+    "clair1pyysjzgfpyysjzgfpyysjzgfpyysjzgf0j5ga5",
+    {
+      nowUnix: 4102444800,
+      expectedChainId: "clairveil-local-1",
+      expectedRecipient: payload.recipient,
+      accountPrefix: "clair"
+    }
+  );
+
+  assert.equal(message.creator, "clair1pyysjzgfpyysjzgfpyysjzgfpyysjzgf0j5ga5");
+  assert.equal(message.recipient, payload.recipient);
+  assert.equal(message.chainId, "clairveil-local-1");
+
+  const badExpiry = { ...payload, expires_at_unix: "not-a-number" };
+  badExpiry.payload_hash = computePreparedWithdrawPayloadHash(badExpiry);
+  assert.throws(
+    () => buildRelayWithdrawMsgFromPayload(
+      badExpiry,
+      "clair1pyysjzgfpyysjzgfpyysjzgfpyysjzgf0j5ga5",
+      {
+        nowUnix: 4102444800,
+        expectedChainId: "clairveil-local-1",
+        expectedRecipient: badExpiry.recipient,
+        accountPrefix: "clair"
+      }
+    ),
+    /withdraw payload expires_at_unix must be a safe integer unix timestamp/
+  );
+
+  const missingExpiry = { ...payload };
+  delete missingExpiry.expires_at_unix;
+  missingExpiry.payload_hash = computePreparedWithdrawPayloadHash(missingExpiry);
+  assert.throws(
+    () => buildRelayWithdrawMsgFromPayload(
+      missingExpiry,
+      "clair1pyysjzgfpyysjzgfpyysjzgfpyysjzgf0j5ga5",
+      {
+        nowUnix: 4102444800,
+        expectedChainId: "clairveil-local-1",
+        expectedRecipient: missingExpiry.recipient,
+        accountPrefix: "clair"
+      }
+    ),
+    /withdraw payload expires_at_unix must be a safe integer unix timestamp/
+  );
+});
+
+test("withdraw prover payload rejects invalid expiry before proof handoff", async () => {
+  const note = {
+    receiverSpendPubKeyX: 1n,
+    receiverSpendPubKeyY: 2n,
+    receiverViewPubKeyX: 3n,
+    receiverViewPubKeyY: 4n,
+    amount: 1n,
+    assetID: hashStringToField("uclair"),
+    randomness: 5n,
+    memo: "expiry"
+  };
+  const baseInput = {
+    notes: [{ note, isSpent: false }],
+    amount: "1uclair",
+    recipient: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
+    chainId: "clairveil-local-1",
+    rootSeed: new Uint8Array(32).fill(1),
+    merklePathProvider: {
+      async lookupMerklePath() {
+        return { root: "01".padStart(64, "0"), path: [], path_helper: [] };
+      }
+    }
+  };
+
+  await assert.rejects(
+    () => buildPreparedWithdrawProverPayload({
+      ...baseInput,
+      expiresAtUnix: "not-a-number"
+    }),
+    /withdraw prover payload expires_at_unix must be a safe integer unix timestamp/
+  );
+  await assert.rejects(
+    () => buildPreparedWithdrawProverPayload({
+      ...baseInput,
+      expiresAtUnix: 1
+    }),
+    /withdraw prover payload expired/
+  );
+});
+
+test("prepared transfer payload skips self-view disclosure when signer material is external", async () => {
+  const senderRootSeed = new Uint8Array(32).fill(9);
+  const senderSpend = deriveSpendKeys(senderRootSeed).pubKey;
+  const senderView = deriveViewKeys(senderRootSeed).pubKey;
+  const recipientMaterial = derivePrivacyMaterial({
+    address: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    pubKeyHex: "03".padEnd(66, "0"),
+    signatureBase64: Buffer.from("recipient-root-signature").toString("base64"),
+    shieldedPrefix: "clairs"
+  });
+  const inputs = [
+    {
+      note: createNote({
+        spendPubKey: senderSpend,
+        viewPubKey: senderView,
+        amount: 1n,
+        assetDenom: "uclair",
+        randomness: 101n
+      }),
+      isSpent: false
+    },
+    {
+      note: createNote({
+        spendPubKey: senderSpend,
+        viewPubKey: senderView,
+        amount: 1n,
+        assetDenom: "uclair",
+        randomness: 102n
+      }),
+      isSpent: false
+    }
+  ];
+  const payload = await buildPreparedTransferPayload({
+    creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    inputs,
+    recipient: recipientMaterial.shieldedAddress,
+    amount: "1uclair",
+    senderSpendPubKey: senderSpend,
+    senderViewPubKey: senderView,
+    noteHashSigner: createSpendNoteHashSigner(senderRootSeed),
+    auditDisclosureTargetPubKeyHex: recipientMaterial.disclosurePubKeyHex,
+    merklePathProvider: {
+      async lookupMerklePath() {
+        return { root: "01".padStart(64, "0"), path: [], path_helper: [] };
+      }
+    },
+    shieldedPrefix: "clairs"
+  });
+
+  assertPreparedTransferPayloadShape(payload);
+  assert.equal(payload.self_view_disclosure_digest_hex, "");
+  assert.equal(payload.self_view_disclosure_payload_hex, "");
+});
+
 test("EVM client builds and sends deposit transaction with mock provider", async () => {
   const sent = [];
   const provider = {
@@ -589,14 +1577,73 @@ test("EVM client builds and sends deposit transaction with mock provider", async
     rootSeed: material.rootSeed,
     amount: "3"
   });
+  const sameMaterial = client.buildDepositTransaction({
+    material: prepared.material
+  });
+  const sameMessage = client.buildDepositTransaction({
+    message: prepared.message
+  });
+  assert.throws(
+    () => client.buildDepositTransaction({
+      material: prepared.material,
+      creator: "0x2222222222222222222222222222222222222222"
+    }),
+    /deposit material creator mismatch/
+  );
   const wallet = createEip1193WalletAdapter({ provider });
   const txHash = await client.sendTransaction(wallet, prepared.transaction);
 
   assert.equal(prepared.material.amount, "3udemo");
   assert.equal(prepared.transaction.to, evmPrivacyPrecompileAddress);
   assert.equal(prepared.transaction.data.slice(2, 10), functionSelector("deposit((string,bytes,bytes))"));
+  assert.equal(prepared.transaction.data, sameMaterial.transaction.data);
+  assert.equal(prepared.transaction.data, sameMessage.transaction.data);
+  assert.equal(sameMessage.material, undefined);
   assert.equal(txHash, "0x" + "cd".repeat(32));
   assert.equal(sent[0].from, "0x1111111111111111111111111111111111111111");
+});
+
+test("EVM client wraps existing transfer and withdraw messages without prepared material", async () => {
+  const client = createClairveilEvmClient({
+    shieldedPrefix: "demos",
+    accountPrefix: "demo",
+    defaultDenom: "udemo"
+  });
+  const transferMessage = {
+    proof: new Uint8Array([1, 2, 3]),
+    root: new Uint8Array(32).fill(1),
+    nullifiers: [new Uint8Array(32).fill(2), new Uint8Array(32).fill(3)],
+    newCommitments: [new Uint8Array(32).fill(4), new Uint8Array(32).fill(5)],
+    cipherTexts: [new Uint8Array([6]), new Uint8Array([7])],
+    auditDisclosureDigest: new Uint8Array(),
+    auditDisclosureTargetPubkey: new Uint8Array(),
+    auditDisclosurePayload: new Uint8Array()
+  };
+  const withdrawMessage = {
+    proof: new Uint8Array([1, 2, 3]),
+    root: new Uint8Array(32).fill(8),
+    nullifier: new Uint8Array(32).fill(9),
+    amount: "1udemo",
+    recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
+    chainId: "demo-1",
+    expiresAtUnix: 4102448400n
+  };
+
+  const transfer = await client.buildTransferTransaction({ message: transferMessage });
+  const withdraw = await client.buildWithdrawTransaction({ message: withdrawMessage });
+
+  assert.equal(transfer.message, transferMessage);
+  assert.equal(transfer.payload, undefined);
+  assert.equal(transfer.proof, undefined);
+  assert.equal(transfer.transaction.to, evmPrivacyPrecompileAddress);
+  assert.equal(transfer.transaction.data.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))"));
+  assert.equal(withdraw.message, withdrawMessage);
+  assert.equal(withdraw.payload, undefined);
+  assert.equal(withdraw.proof, undefined);
+  assert.equal(withdraw.proverPayload, undefined);
+  assert.equal(withdraw.selectedNote, undefined);
+  assert.equal(withdraw.transaction.to, evmPrivacyPrecompileAddress);
+  assert.equal(withdraw.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))"));
 });
 
 test("EVM address helpers round-trip through custom bech32 accounts", () => {
@@ -608,7 +1655,12 @@ test("EVM address helpers round-trip through custom bech32 accounts", () => {
 });
 
 test("EVM privacy precompile encoders use tuple selectors", () => {
-  const transfer = encodeEvmPrivacyTransfer({
+  const deposit = encodeEvmPrivacyDeposit({
+    amount: "1aokrw",
+    noteCommitment: new Uint8Array(32).fill(1),
+    encryptedNote: new Uint8Array([2, 3])
+  });
+  const transferMessage = {
     proof: new Uint8Array([1, 2, 3]),
     root: new Uint8Array(32).fill(1),
     nullifiers: [new Uint8Array(32).fill(2), new Uint8Array(32).fill(3)],
@@ -619,7 +1671,15 @@ test("EVM privacy precompile encoders use tuple selectors", () => {
     auditDisclosureDigest: new Uint8Array(32).fill(8),
     auditDisclosureTargetPubkey: new Uint8Array(32).fill(9),
     auditDisclosurePayload: new Uint8Array([10])
-  });
+  };
+  const transfer = encodeEvmPrivacyTransfer(transferMessage);
+  assert.throws(
+    () => encodeEvmPrivacyTransfer({
+      ...transferMessage,
+      selfViewDisclosureDigest: new Uint8Array(32).fill(11)
+    }),
+    /does not support self-view disclosure/
+  );
   const withdraw = encodeEvmPrivacyWithdraw({
     proof: new Uint8Array([1, 2, 3]),
     root: new Uint8Array(32).fill(1),
@@ -630,8 +1690,32 @@ test("EVM privacy precompile encoders use tuple selectors", () => {
     expiresAtUnix: 1234
   }, { accountPrefix: "demo" });
 
+  assert.equal(deposit.slice(2, 10), functionSelector("deposit((string,bytes,bytes))"));
   assert.equal(transfer.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))"));
   assert.equal(withdraw.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))"));
+});
+
+test("EVM reference deposit encoder matches the proofless precompile signature", () => {
+  const encoded = encodeReferenceEvmDeposit({
+    amount: "1aokrw",
+    noteCommitment: new Uint8Array(32).fill(1),
+    encryptedNote: new Uint8Array([2, 3])
+  });
+  assert.equal(encoded.slice(2, 10), functionSelector("deposit(uint256,bytes32,bytes)"));
+});
+
+test("EVM reference withdraw encoder accepts evmRecipient with bech32 payload recipient", () => {
+  const encoded = encodeReferenceEvmWithdraw({
+    proof: new Uint8Array([1, 2, 3]),
+    root: new Uint8Array(32).fill(1),
+    nullifier: new Uint8Array(32).fill(2),
+    amount: "1aokrw",
+    recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
+    evmRecipient: "0x2222222222222222222222222222222222222222",
+    expiresAtUnix: 1234
+  }, { accountPrefix: "demo" });
+
+  assert.equal(encoded.slice(2, 10), functionSelector("withdraw(bytes,bytes32,bytes32,uint256,address,string,uint64)"));
 });
 
 test("ABI encoder uses Solidity offsets for bytes arrays inside tuples", () => {

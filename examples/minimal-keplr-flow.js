@@ -14,6 +14,9 @@ export async function runMinimalClairveilFlow({
   accountPrefix = "clair",
   shieldedPrefix = "clairs",
   defaultDenom = "uclair",
+  depositAmount = `10${defaultDenom}`,
+  transferAmount = `1${defaultDenom}`,
+  depositProofProvider,
   recipientShieldedAddress
 }) {
   const clairveil = createClairveilClient({
@@ -34,13 +37,38 @@ export async function runMinimalClairveilFlow({
   await keplr.enable(chainId);
 
   const material = await clairveil.deriveWalletPrivacyMaterial(wallet);
+  if (typeof depositProofProvider !== "function") {
+    throw new Error("depositProofProvider is required for Cosmos deposits");
+  }
+  const depositMaterial = clairveil.buildDepositMaterial({
+    creator: material.address,
+    rootSeed: material.rootSeed,
+    amount: depositAmount
+  });
+  const proof = await depositProofProvider({
+    material: depositMaterial,
+    amount: depositMaterial.amount,
+    note: depositMaterial.note,
+    noteJson: depositMaterial.note_json,
+    note_json: depositMaterial.note_json,
+    noteCommitmentHex: depositMaterial.note_commitment_hex,
+    note_commitment_hex: depositMaterial.note_commitment_hex
+  });
+  const proofBytes = proof?.proof ?? proof?.depositProof ?? proof?.deposit_proof ?? null;
+  const proofHex = proof?.proofHex ?? proof?.proof_hex ?? proof?.depositProofHex ?? proof?.deposit_proof_hex;
 
   const deposit = await clairveil.prepareDeposit({
     wallet,
     material,
-    amount: "10uclair"
+    depositMaterial,
+    amount: depositAmount,
+    proof: proofBytes,
+    proofHex
   });
-  await clairveil.signDirectAndBroadcast({ wallet, signDoc: deposit.signDoc });
+  const depositBroadcast = await clairveil.signDirectAndBroadcast({ wallet, signDoc: deposit.signDoc });
+  if (!depositBroadcast.ok) {
+    throw new Error(depositBroadcast.error || "Clairveil deposit was broadcast but not confirmed");
+  }
 
   const scan = await clairveil.scanWalletNotes({
     wallet,
@@ -52,7 +80,7 @@ export async function runMinimalClairveilFlow({
   const transfer = await clairveil.prepareTransfer({
     wallet,
     material,
-    amount: "1uclair",
+    amount: transferAmount,
     recipient: recipientShieldedAddress,
     proverAdapter,
     allowPlanStep: false
@@ -66,6 +94,9 @@ export async function runMinimalClairveilFlow({
     wallet,
     signDoc: transfer.signDoc
   });
+  if (!broadcast.ok) {
+    throw new Error(broadcast.error || "Clairveil transfer was broadcast but not confirmed");
+  }
 
-  return { material, scan, transfer, broadcast };
+  return { material, scan, depositBroadcast, transfer, broadcast };
 }

@@ -87,7 +87,9 @@ export function assertFoundNoteShape(value, label = "found note") {
 
 export function assertPreparedTransferPayloadShape(value, label = "prepared transfer payload", options = {}) {
   const payload = assertObject(value, label);
-  if (payload.version !== "v1") throw new Error(`${label}.version must be v1`);
+  if (payload.version !== "v1" && payload.version !== "v2") {
+    throw new Error(`${label}.version must be v1 or v2`);
+  }
   assertClairAddress(payload.creator, `${label}.creator`, options);
   assertHex(payload.root_hex, 32, `${label}.root_hex`);
   assertHex(payload.asset_id_hex, 32, `${label}.asset_id_hex`);
@@ -102,6 +104,16 @@ export function assertPreparedTransferPayloadShape(value, label = "prepared tran
   }
   assertHex(payload.audit_disclosure_digest_hex, 32, `${label}.audit_disclosure_digest_hex`);
   assertDisclosurePubKeyHex(payload.audit_disclosure_target_pubkey_hex, `${label}.audit_disclosure_target_pubkey_hex`);
+  if (payload.version === "v2") {
+    const selfViewDigest = String(payload.self_view_disclosure_digest_hex || "").trim();
+    const selfViewPayload = String(payload.self_view_disclosure_payload_hex || "").trim();
+    if (selfViewDigest || selfViewPayload) {
+      assertHex(selfViewDigest, 32, `${label}.self_view_disclosure_digest_hex`);
+      assertHex(selfViewPayload, undefined, `${label}.self_view_disclosure_payload_hex`);
+    }
+  } else if (payload.self_view_disclosure_digest_hex || payload.self_view_disclosure_payload_hex) {
+    throw new Error(`${label}.self_view_disclosure_* fields require version v2`);
+  }
   assertHex(payload.payload_hash, 32, `${label}.payload_hash`);
   return payload;
 }

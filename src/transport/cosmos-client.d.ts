@@ -32,6 +32,7 @@ export type {
   QueryPrivacyEvent,
   QueryPrivacyEventAttribute,
   QueryPrivacyEventsResponse,
+  QueryReserveResponse,
   QueryTreeStateResponse
 } from "../generated/clairveil/privacy/v1/query.js";
 
@@ -114,6 +115,26 @@ export interface TxSearchResult {
   tx?: object;
 }
 
+export interface BroadcastSignedTxResult {
+  ok: boolean;
+  broadcast: {
+    txhash: Hex | string;
+    code: number;
+    raw_log: string;
+  };
+  tx: TxSearchResult | null;
+  error?: string;
+}
+
+export interface ReserveResponse {
+  denom: string;
+  module_balance: string;
+  total_deposited: string;
+  total_withdrawn: string;
+  expected_module_balance: string;
+  invariant_holds: boolean;
+}
+
 export interface PrivacyEventsQuery {
   afterHeight?: number;
   after_height?: number;
@@ -159,7 +180,8 @@ export interface WalletScanInput extends PrivacyScanOptions {
 
 export interface ClairveilClientOptions {
   rpc: string;
-  rest: string;
+  rest?: string;
+  restEndpoints?: string[];
   chainId: string;
   accountPrefix?: string;
   bech32Prefix?: string;
@@ -167,6 +189,18 @@ export interface ClairveilClientOptions {
   defaultDenom?: string;
   assetDenom?: string;
   registry?: object;
+  queryTimeoutMs?: number;
+  fetchTimeoutMs?: number;
+  queryRetry?: QueryRetryOptions | false;
+  nullifierFailover?: boolean;
+}
+
+export interface QueryRetryOptions {
+  retries?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  jitter?: boolean;
+  retryStatuses?: number[];
 }
 
 export interface PreparedDeposit {
@@ -177,6 +211,16 @@ export interface PreparedDeposit {
   privacyAccount: PrivacyAccountSummary;
 }
 
+export interface PreparedTransferSummary {
+  planAction: "final_transfer" | "self_merge" | string;
+  isFinal: boolean;
+  amount: CoinString;
+  recipient: ShieldedAddress;
+  finalAmount: CoinString;
+  finalRecipient: ShieldedAddress;
+  selectedInputTotal: string;
+}
+
 export interface PreparedTransfer {
   status: string;
   plan: TransferPlan;
@@ -185,7 +229,7 @@ export interface PreparedTransfer {
   payload?: PreparedTransferPayload;
   proof?: PreparedTransferProof;
   message?: TransferMessage;
-  prepared?: TransferMessageBuildResult;
+  prepared?: PreparedTransferSummary;
   privacyAccount: PrivacyAccountSummary;
 }
 
@@ -221,6 +265,32 @@ export interface PreparedRelayWithdrawSignDoc {
   signDoc: SignDocBase64;
 }
 
+export type DepositProofInput =
+  | { proof: Uint8Array | Hex; proofHex?: Hex; proof_hex?: Hex }
+  | { proof?: Uint8Array | Hex; proofHex: Hex; proof_hex?: Hex }
+  | { proof?: Uint8Array | Hex; proofHex?: Hex; proof_hex: Hex };
+
+export type BuildDepositMessageInput = {
+  creator: ClairAddress;
+  rootSeed: Uint8Array;
+  amount: CoinString;
+  memo?: string;
+  depositMaterial?: object;
+  deposit_material?: object;
+} & DepositProofInput;
+
+export type PrepareDepositInput = {
+  wallet?: WalletAdapterLike;
+  material?: PrivacyMaterial;
+  depositMaterial?: object;
+  deposit_material?: object;
+  amount: CoinString;
+  memo?: string;
+  gasLimit?: number;
+  denom?: string;
+  assetDenom?: string;
+} & DepositProofInput;
+
 export function createClairveilRegistry(extraTypes?: Array<[string, object]>): object;
 export function normalizeRpcEndpoint(rpc: string): string;
 export function normalizeRestEndpoint(rest: string): string;
@@ -243,7 +313,13 @@ export class ClairveilJS {
   constructor(options: ClairveilClientOptions);
   connect(): Promise<object>;
   disconnect(): Promise<void>;
-  restUrl(path: string): string;
+  restEndpoints: string[];
+  activeRestEndpoint: string;
+  restUrl(path: string, endpoint?: string): string;
+  fetchJson<T = object>(pathOrUrl: string, options?: {
+    failover?: boolean;
+    retry?: QueryRetryOptions | false;
+  }): Promise<T>;
   getAccountInfo(address: ClairAddress): Promise<{ accountNumber: bigint; sequence: bigint }>;
   getBalances(address: ClairAddress): Promise<object>;
   getTx(txHash: Hex): Promise<TxSearchResult | null>;
@@ -254,6 +330,7 @@ export class ClairveilJS {
   fetchAuditConfig(): Promise<object>;
   fetchDisclosureConfig(): Promise<object>;
   fetchCircuitConfig(): Promise<object>;
+  fetchReserve(denom: string): Promise<ReserveResponse>;
   lookupMerklePath(commitmentHex: Hex): Promise<object>;
   checkNullifier(nullifierHex: Hex): Promise<object>;
   deriveWalletPrivacyMaterial(wallet: WalletAdapterLike): Promise<PrivacyMaterial>;
@@ -313,16 +390,8 @@ export class ClairveilJS {
     maxPages?: number;
     scan?: PrivacyScanOptions;
   }): Promise<{ plan: WithdrawPlan; scan: ScanResult }>;
-  buildDepositMessage(input: { creator: ClairAddress; rootSeed: Uint8Array; amount: CoinString; memo?: string }): object;
-  prepareDeposit(input: {
-    wallet?: WalletAdapterLike;
-    material?: PrivacyMaterial;
-    amount: CoinString;
-    memo?: string;
-    gasLimit?: number;
-    denom?: string;
-    assetDenom?: string;
-  }): Promise<PreparedDeposit>;
+  buildDepositMessage(input: BuildDepositMessageInput): object;
+  prepareDeposit(input: PrepareDepositInput): Promise<PreparedDeposit>;
   prepareTransfer(input: {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
@@ -352,6 +421,7 @@ export class ClairveilJS {
     limit?: number;
     maxPages?: number;
     scan?: PrivacyScanOptions;
+    expiresAtUnix?: number;
   }): Promise<PreparedWithdraw>;
   prepareRelayWithdraw(input: {
     wallet?: WalletAdapterLike;
@@ -416,6 +486,29 @@ export class ClairveilJS {
     eventTypes?: string[];
     event_types?: string[];
   }): Promise<import("../core/disclosure.js").DisclosureReport>;
+  decodeSelfViewDisclosure(input: {
+    txHash?: Hex;
+    tx_hash?: Hex;
+    address?: ClairAddress;
+    pubKeyHex?: Hex;
+    pub_key_hex?: Hex;
+    signatureBase64?: Base64;
+    signature_base64?: Base64;
+    skipSignerPubKeyCheck?: boolean;
+    skip_signer_pubkey_check?: boolean;
+    disclosureScalar?: bigint | string | number;
+    disclosure_scalar?: bigint | string | number;
+    disclosureScalarHex?: Hex;
+    disclosure_scalar_hex?: Hex;
+    afterHeight?: number;
+    after_height?: number;
+    page?: number;
+    limit?: number;
+    maxPages?: number;
+    max_pages?: number;
+    eventTypes?: string[];
+    event_types?: string[];
+  }): Promise<import("../core/disclosure.js").DisclosureReport>;
   decodeAuditDisclosure(input: {
     txHash?: Hex;
     tx_hash?: Hex;
@@ -439,13 +532,14 @@ export class ClairveilJS {
     feeAmount?: Array<object>;
   }): Promise<SignDocBase64>;
   buildTxRawBytes(signedTx: SignedTxBase64): Uint8Array;
-  broadcastSignedTx(signedTx: SignedTxBase64, waitOptions?: object): Promise<object>;
-  signDirectAndBroadcast(input: { wallet: WalletAdapterLike; signDoc: SignDocBase64; waitOptions?: object }): Promise<object>;
+  broadcastSignedTx(signedTx: SignedTxBase64, waitOptions?: object): Promise<BroadcastSignedTxResult>;
+  signDirectAndBroadcast(input: { wallet: WalletAdapterLike; signDoc: SignDocBase64; waitOptions?: object }): Promise<BroadcastSignedTxResult>;
 }
 
 export function createClairveilClient(options: {
   rpc: string;
-  rest: string;
+  rest?: string;
+  restEndpoints?: string[];
   chainId: string;
   accountPrefix?: string;
   bech32Prefix?: string;
@@ -453,6 +547,10 @@ export function createClairveilClient(options: {
   defaultDenom?: string;
   assetDenom?: string;
   registry?: object;
+  queryTimeoutMs?: number;
+  fetchTimeoutMs?: number;
+  queryRetry?: QueryRetryOptions | false;
+  nullifierFailover?: boolean;
 }): ClairveilJS;
 
 export function nextPrivacyScanOptions(scanOrCursor?: object, defaults?: PrivacyScanOptions & {

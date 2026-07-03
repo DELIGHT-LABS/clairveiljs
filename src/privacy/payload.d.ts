@@ -7,7 +7,7 @@ import type {
   UserDisclosureMode
 } from "../generated/clairveil/privacy/v1/tx.js";
 
-export const preparedTransferPayloadVersion: "v1";
+export const preparedTransferPayloadVersion: "v2";
 export const preparedTransferProofVersion: "v1";
 export const preparedWithdrawProverPayloadVersion: "v1";
 export const preparedWithdrawProofVersion: "v1";
@@ -42,12 +42,12 @@ export type MerklePathProviderLike =
   | MerklePathProvider
   | ((commitmentHex: Hex) => Promise<MerklePathResult> | MerklePathResult);
 
-export type TransferPrivacyPolicy = "all-private" | "amount" | "recipient" | "sender" | "amount+recipient" | "amount+sender" | "recipient+sender" | "all" | number;
+export type TransferPrivacyPolicy = "all-private" | "amount" | "to" | "amount-to" | "from" | "amount-from" | "from-to" | "to-from" | "amount-from-to" | "amount-to-from" | number;
 export type TransferUserDisclosureMode = "none" | "public" | "recipient-encrypted" | UserDisclosureMode | number;
 
 export interface TransferDisclosurePayload {
-  version: "v1";
-  plane: "user" | "audit" | string;
+  version: "v4";
+  plane: "user" | "audit" | "self-view" | string;
   policy: number;
   output_index: number;
   commitment_hex: Hex;
@@ -84,6 +84,8 @@ export interface PreparedTransferPayloadInput {
   userDisclosureMode?: TransferUserDisclosureMode;
   userDisclosureTargetPubKeyHex?: Hex;
   auditDisclosureTargetPubKeyHex?: Hex;
+  disableSelfViewDisclosure?: boolean;
+  selfViewDisclosureTargetPubKeyHex?: Hex;
   shieldedPrefix?: string;
 }
 
@@ -122,6 +124,8 @@ export interface PreparedTransferPayload {
   audit_disclosure_digest_hex: Hex;
   audit_disclosure_target_pubkey_hex: Hex;
   audit_disclosure_payload_hex: Hex;
+  self_view_disclosure_digest_hex?: Hex;
+  self_view_disclosure_payload_hex?: Hex;
   payload_hash: Hex;
 }
 
@@ -157,6 +161,14 @@ export function buildAuditDisclosureData(input: {
   auditPubKeyHex?: Hex;
   shieldedPrefix?: string;
 }): TransferDisclosureData;
+export function buildSelfViewDisclosureData(input: {
+  outputCommitmentHex: Hex;
+  transferDenom?: string;
+  fromNote: Note;
+  recipientNote: Note;
+  targetPubKeyHex?: Hex;
+  shieldedPrefix?: string;
+}): Omit<TransferDisclosureData, "target_pubkey_hex">;
 export function computePreparedTransferPayloadHash(payload: PreparedTransferPayload): Hex;
 export function buildPreparedTransferPayload(input: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;
 export function validatePreparedTransferProof(payload: PreparedTransferPayload, proof: PreparedTransferProof): true;
@@ -257,6 +269,6 @@ export function buildWithdrawMessage(input?: PreparedWithdrawProverPayloadInput 
   proverAdapter?: ProverAdapter;
   creator?: ClairAddress | string;
 }): Promise<WithdrawMessageBuildResult>;
-export function createRestMerklePathProvider(input?: { rest: string; fetchImpl?: typeof fetch }): { lookupMerklePath(commitmentHex: Hex): Promise<MerklePathResult> };
+export function createRestMerklePathProvider(input?: { rest: string; fetchImpl?: typeof fetch; timeoutMs?: number }): { lookupMerklePath(commitmentHex: Hex): Promise<MerklePathResult> };
 
 export type { TransferMessage, WithdrawMessage };

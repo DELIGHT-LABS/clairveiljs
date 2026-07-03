@@ -27,12 +27,14 @@ import {
 } from "clairveiljs/planner";
 import {
   buildPreparedWithdrawPayloadFromProof,
+  buildRelayWithdrawMsgFromPayload,
   buildTransferMsgFromPayloadAndProof,
   buildWithdrawMsgFromPayload,
   computePreparedTransferPayloadHash,
   computePreparedWithdrawPayloadHash,
   computePreparedWithdrawProverPayloadHash,
   validatePreparedTransferProof,
+  validateRelayWithdrawPayload,
   validatePreparedWithdrawPayload,
   validatePreparedWithdrawProof
 } from "clairveiljs/payload";
@@ -288,6 +290,62 @@ test("withdraw planner and relay payload validation reject unsafe variants", fix
       prover.withdraw.validation_now_unix
     ),
     /withdraw proof payload hash mismatch/
+  );
+});
+
+test("relay withdraw handoff builds the Go-compatible relay message", fixtureTestOptions, () => {
+  const relay = readFixture("privacy_relay_withdraw_contract.json");
+  const payload = relay.request.payload;
+  const expected = relay.expected_msg;
+
+  assert.equal(
+    validateRelayWithdrawPayload(payload, {
+      nowUnix: 4102444800,
+      expectedChainId: expected.chain_id,
+      expectedRecipient: expected.recipient,
+      accountPrefix: "clair"
+    }),
+    true
+  );
+
+  const message = buildRelayWithdrawMsgFromPayload(payload, relay.relayer.address, {
+    nowUnix: 4102444800,
+    expectedChainId: expected.chain_id,
+    expectedRecipient: expected.recipient,
+    accountPrefix: "clair"
+  });
+
+  assert.equal(message.creator, expected.creator);
+  assert.equal(hexFromBytes(message.proof), expected.proof_hex);
+  assert.equal(hexFromBytes(message.root), expected.root_hex);
+  assert.equal(hexFromBytes(message.nullifier), expected.nullifier_hex);
+  assert.equal(message.amount, expected.amount);
+  assert.equal(message.recipient, expected.recipient);
+  assert.equal(message.chainId, expected.chain_id);
+  assert.equal(message.expiresAtUnix.toString(), String(expected.expires_at_unix));
+
+  assert.throws(
+    () => buildRelayWithdrawMsgFromPayload(payload, relay.relayer.address, {
+      nowUnix: 4102444800,
+      expectedChainId: "wrong-chain",
+      accountPrefix: "clair"
+    }),
+    /withdraw payload chain_id mismatch/
+  );
+  assert.throws(
+    () => buildRelayWithdrawMsgFromPayload(payload, relay.relayer.address, {
+      nowUnix: 4102444800,
+      expectedRecipient: "clair1pyysjzgfpyysjzgfpyysjzgfpyysjzgf0j5ga5",
+      accountPrefix: "clair"
+    }),
+    /withdraw payload recipient mismatch/
+  );
+  assert.throws(
+    () => buildRelayWithdrawMsgFromPayload(payload, relay.relayer.address, {
+      nowUnix: expected.expires_at_unix,
+      accountPrefix: "clair"
+    }),
+    /withdraw payload expired/
   );
 });
 

@@ -31,6 +31,10 @@ export interface MsgDeposit {
      * 복구용 암호화 데이터
      */
     encryptedNote: Uint8Array;
+    /**
+     * commitment가 amount/asset에 묶였다는 ZK proof
+     */
+    proof: Uint8Array;
 }
 /**
  * MsgWithdraw: 익명 자산 -> 투명 자산 변환
@@ -110,6 +114,13 @@ export interface MsgTransfer {
     auditDisclosureDigest: Uint8Array;
     auditDisclosureTargetPubkey: Uint8Array;
     auditDisclosurePayload: Uint8Array;
+    /**
+     * Optional sender self-view disclosure.
+     * The payload is encrypted to the sender's own disclosure key. The target
+     * public key is intentionally omitted to avoid sender clustering.
+     */
+    selfViewDisclosureDigest: Uint8Array;
+    selfViewDisclosurePayload: Uint8Array;
 }
 /**
  * MsgDepositResponse

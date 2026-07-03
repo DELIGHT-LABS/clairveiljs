@@ -58,6 +58,11 @@ function configFromEnv() {
     scanMaxPages: positiveIntegerEnv("CLAIRVEIL_E2E_SCAN_MAX_PAGES", 1000),
     maxPlannerSteps: positiveIntegerEnv("CLAIRVEIL_E2E_MAX_PLANNER_STEPS", 8),
     proverTimeoutMs: positiveIntegerEnv("CLAIRVEIL_E2E_PROVER_TIMEOUT_MS", 120000),
+    auditDisclosurePrivKeyHex: String(
+      env.CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX ||
+      env.CLAIRVEIL_E2E_AUDIT_DISCLOSURE_SCALAR_HEX ||
+      ""
+    ).trim(),
     waitOptions: {
       attempts: positiveIntegerEnv("CLAIRVEIL_E2E_TX_ATTEMPTS", 30),
       intervalMs: positiveIntegerEnv("CLAIRVEIL_E2E_TX_INTERVAL_MS", 1500)
@@ -109,6 +114,20 @@ async function loadWalletFromModule(config) {
   return createWalletAdapter(wallet);
 }
 
+async function loadDepositProofProvider(config) {
+  const modulePath = String(env.CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE || "").trim();
+  if (!modulePath) return null;
+  const specifier = modulePath.startsWith("file:")
+    ? modulePath
+    : pathToFileURL(resolve(modulePath)).href;
+  const mod = await import(specifier);
+  const provider = mod.default ?? mod.createDepositProof ?? mod.depositProofProvider;
+  if (typeof provider !== "function") {
+    throw new Error("CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE must export default, createDepositProof, or depositProofProvider");
+  }
+  return input => provider(input, config);
+}
+
 async function loadWalletFromMnemonic(config) {
   const mnemonic = String(env.CLAIRVEIL_E2E_MNEMONIC || "").trim();
   const signatureBase64 = rootSignatureBase64FromEnv();
@@ -132,10 +151,20 @@ function assertBroadcastOk(result, label) {
   const txhash = result?.broadcast?.txhash || result?.tx?.txhash || result?.txhash;
   assert.match(String(txhash || ""), /^[0-9A-F]{64}$/i, `${label} should return a tx hash`);
   assert.equal(result?.broadcast?.code, 0, `${label} broadcast failed`);
+  assert.equal(result?.ok, true, `${label} was broadcast but not confirmed: ${result?.error || ""}`);
   if (result?.tx?.code != null) {
     assert.equal(result.tx.code, 0, `${label} tx failed: ${result.tx.raw_log || ""}`);
   }
   return txhash.toUpperCase();
+}
+
+function assertDisclosureReport(report, label, config, amount) {
+  const verified = report?.verified ?? report?.verification?.verified;
+  assert.equal(verified, true, `${label} disclosure should verify`);
+  if (amount) {
+    assert.equal(report.amount ?? report.summary?.amount, amount.replace(config.denom, ""));
+  }
+  assert.equal(report.asset_denom ?? report.summary?.asset_denom, config.denom);
 }
 
 async function broadcastPrepared(client, wallet, prepared, label, config) {
@@ -159,17 +188,35 @@ async function scanWallet(client, wallet, material, config) {
   });
 }
 
-async function prepareDepositAndBroadcast(client, wallet, material, amount, config) {
+async function prepareDepositAndBroadcast(client, wallet, material, amount, config, depositProofProvider) {
+  const depositMaterial = client.buildDepositMaterial({
+    creator: material.address,
+    rootSeed: material.rootSeed,
+    amount,
+    assetDenom: config.denom
+  });
+  const proof = await depositProofProvider({
+    material: depositMaterial,
+    amount: depositMaterial.amount,
+    note: depositMaterial.note,
+    noteJson: depositMaterial.note_json,
+    note_json: depositMaterial.note_json,
+    noteCommitmentHex: depositMaterial.note_commitment_hex,
+    note_commitment_hex: depositMaterial.note_commitment_hex
+  });
   const prepared = await client.prepareDeposit({
     wallet,
     material,
+    depositMaterial,
     amount,
-    denom: config.denom
+    denom: config.denom,
+    proof: proof?.proof,
+    proofHex: proof?.proofHex ?? proof?.proof_hex ?? proof?.depositProofHex ?? proof?.deposit_proof_hex
   });
   return broadcastPrepared(client, wallet, prepared, `deposit ${amount}`, config);
 }
 
-async function prepareFinalTransfer(client, wallet, material, proverAdapter, recipient, amount, config) {
+async function prepareFinalTransfer(client, wallet, material, proverAdapter, recipient, amount, config, depositProofProvider) {
   let createdZeroHelper = false;
   for (let step = 1; step <= config.maxPlannerSteps; step += 1) {
     const prepared = await client.prepareTransfer({
@@ -188,7 +235,7 @@ async function prepareFinalTransfer(client, wallet, material, proverAdapter, rec
 
     if (prepared.status !== "ready") {
       if (prepared.status === "zero_dummy_required" && !createdZeroHelper) {
-        await prepareDepositAndBroadcast(client, wallet, material, `0${config.denom}`, config);
+        await prepareDepositAndBroadcast(client, wallet, material, `0${config.denom}`, config, depositProofProvider);
         createdZeroHelper = true;
         continue;
       }
@@ -212,15 +259,17 @@ test("local Clairveil node endpoints respond", {
   const client = createClient(config);
 
   try {
-    const [events, treeState, auditConfig] = await Promise.all([
+    const [events, treeState, auditConfig, reserve] = await Promise.all([
       client.fetchPrivacyEvents({ limit: 1 }),
       client.fetchTreeState(),
-      client.fetchAuditConfig()
+      client.fetchAuditConfig(),
+      client.fetchReserve(config.denom)
     ]);
 
     assert.ok(Array.isArray(events.events), "privacy events response should include events");
     assert.equal(typeof treeState, "object", "tree state should be an object");
     assert.equal(typeof auditConfig, "object", "audit config should be an object");
+    assert.equal(reserve.denom, config.denom, "reserve response should echo denom");
   } finally {
     await client.disconnect();
   }
@@ -238,6 +287,11 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
     t.skip("set CLAIRVEIL_E2E_WALLET_MODULE or CLAIRVEIL_E2E_MNEMONIC plus CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64");
     return;
   }
+  const depositProofProvider = await loadDepositProofProvider(config);
+  if (!depositProofProvider) {
+    t.skip("set CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE to run the full deposit flow");
+    return;
+  }
 
   const client = createClient(config);
   const proverAdapter = createHttpProverAdapter({
@@ -250,7 +304,7 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
     assert.match(material.address, new RegExp(`^${config.accountPrefix}1`));
     assert.match(material.shieldedAddress, new RegExp(`^${config.shieldedPrefix}1`));
 
-    await prepareDepositAndBroadcast(client, wallet, material, config.depositAmount, config);
+    await prepareDepositAndBroadcast(client, wallet, material, config.depositAmount, config, depositProofProvider);
 
     const depositScan = await scanWallet(client, wallet, material, config);
     assert.ok(
@@ -267,14 +321,27 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
       proverAdapter,
       transferRecipient,
       config.transferAmount,
-      config
+      config,
+      depositProofProvider
     );
     const transferTxHash = await broadcastPrepared(client, wallet, transfer, "final transfer", config);
 
     const disclosure = await client.decodeUserDisclosure({ txHash: transferTxHash });
-    assert.equal(disclosure.verified, true, "public transfer disclosure should verify");
-    assert.equal(disclosure.amount, config.transferAmount.replace(config.denom, ""));
-    assert.equal(disclosure.asset_denom, config.denom);
+    assertDisclosureReport(disclosure, "public transfer", config, config.transferAmount);
+
+    const selfViewDisclosure = await client.decodeSelfViewDisclosure({
+      txHash: transferTxHash,
+      disclosureScalar: material.disclosureScalar
+    });
+    assertDisclosureReport(selfViewDisclosure, "sender self-view", config, config.transferAmount);
+
+    if (config.auditDisclosurePrivKeyHex) {
+      const auditDisclosure = await client.decodeAuditDisclosure({
+        txHash: transferTxHash,
+        disclosurePrivKeyHex: config.auditDisclosurePrivKeyHex
+      });
+      assertDisclosureReport(auditDisclosure, "audit", config, config.transferAmount);
+    }
 
     const withdrawRecipient = String(env.CLAIRVEIL_E2E_WITHDRAW_RECIPIENT || "").trim()
       || material.address;

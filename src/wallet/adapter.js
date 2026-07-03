@@ -37,12 +37,25 @@ function normalizeSignatureBytes(signature, label = "privacy root signature") {
     return Uint8Array.from(signature);
   }
   if (typeof signature === "string") {
-    return base64ToBytes(signature, label);
+    const text = signature.trim();
+    if (/^0x[0-9a-fA-F]+$/.test(text)) {
+      return bytesFromHex(text.replace(/^0x/i, ""), label);
+    }
+    if (text.length >= 64 && text.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(text)) {
+      throw new Error(`${label} hex strings must be prefixed with 0x`);
+    }
+    return base64ToBytes(text, label);
+  }
+  if (signature?.signatureHex || signature?.signature_hex) {
+    return bytesFromHex(signature.signatureHex ?? signature.signature_hex, label);
+  }
+  if (signature?.signatureBase64 || signature?.signature_base64) {
+    return base64ToBytes(signature.signatureBase64 ?? signature.signature_base64, label);
   }
   if (signature?.signature) {
     return normalizeSignatureBytes(signature.signature, label);
   }
-  throw new Error(`${label} must be bytes or base64`);
+  throw new Error(`${label} must be bytes, hex, or base64`);
 }
 
 export function buildPrivacyRootSigningMessage({ address, transparentPubKeyHex, pubKeyHex }) {

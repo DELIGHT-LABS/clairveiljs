@@ -6,6 +6,9 @@ import type {
   PrivacyEventsCursor,
   PrivacyScanOptions,
   PrivacyScanResumeOptions,
+  QueryRetryOptions,
+  ReserveResponse,
+  BroadcastSignedTxResult,
   SignedTxBase64,
   SignDocBase64,
   TxSearchResult
@@ -28,9 +31,11 @@ import type { ScanResult } from "../privacy/scan.js";
 
 export interface BrowserWalletProfile {
   id?: string;
-  transport?: "cosmos" | "evm" | string;
+  transport?: BrowserWalletType;
+  wallet?: string;
   rpc?: string;
   rest?: string;
+  restEndpoints?: string[];
   chainId?: string;
   accountPrefix?: string;
   shieldedPrefix?: string;
@@ -49,12 +54,17 @@ export interface ClairveilBrowserClientOptions {
   profile?: BrowserWalletProfile;
   rpc?: string;
   rest?: string;
+  restEndpoints?: string[];
   chainId?: string;
   accountPrefix?: string;
   shieldedPrefix?: string;
   denom?: string;
   proverUrl?: string;
   proverTimeoutMs?: number;
+  queryTimeoutMs?: number;
+  fetchTimeoutMs?: number;
+  queryRetry?: QueryRetryOptions | false;
+  nullifierFailover?: boolean;
   evmRpc?: string;
   evmChainId?: string;
   evmPrivacyPrecompileAddress?: string;
@@ -121,9 +131,48 @@ export interface BrowserWalletIdentityInput {
   wallet_type?: BrowserWalletType;
 }
 
-export interface PrepareDepositInput extends BrowserWalletIdentityInput {
+export type DepositProofProvider = (input: object) => Promise<object> | object;
+
+export type PrepareDepositProofInput =
+  | { proof: Uint8Array | Hex; proofHex?: Hex; proof_hex?: Hex; depositProofProvider?: DepositProofProvider }
+  | { proof?: Uint8Array | Hex; proofHex: Hex; proof_hex?: Hex; depositProofProvider?: DepositProofProvider }
+  | { proof?: Uint8Array | Hex; proofHex?: Hex; proof_hex: Hex; depositProofProvider?: DepositProofProvider }
+  | { proof?: Uint8Array | Hex; proofHex?: Hex; proof_hex?: Hex; depositProofProvider: DepositProofProvider };
+
+export type PrepareDepositBaseInput = Omit<BrowserWalletIdentityInput, "walletType" | "wallet_type"> & {
   amount: CoinString;
-}
+  depositMaterial?: object;
+  deposit_material?: object;
+};
+
+export type PrepareCosmosDepositInput = PrepareDepositBaseInput & PrepareDepositProofInput & {
+  walletType?: "cosmos";
+  wallet_type?: "cosmos";
+};
+
+export type PrepareEvmDepositInput = PrepareDepositBaseInput & (
+  | { walletType: "evm"; wallet_type?: "evm" }
+  | { walletType?: "evm"; wallet_type: "evm" }
+) & {
+  proof?: Uint8Array | Hex;
+  proofHex?: Hex;
+  proof_hex?: Hex;
+  depositProofProvider?: DepositProofProvider;
+};
+
+export type PrepareDefaultEvmProfileDepositInput = PrepareDepositBaseInput & {
+  walletType?: undefined;
+  wallet_type?: undefined;
+  proof?: Uint8Array | Hex;
+  proofHex?: Hex;
+  proof_hex?: Hex;
+  depositProofProvider?: DepositProofProvider;
+};
+
+export type PrepareDepositInput<TDefaultWalletType extends BrowserWalletType = "cosmos"> =
+  | PrepareCosmosDepositInput
+  | PrepareEvmDepositInput
+  | (TDefaultWalletType extends "evm" ? PrepareDefaultEvmProfileDepositInput : never);
 
 export interface PreparedDepositSummary {
   shieldedAddress: ShieldedAddress;
@@ -144,6 +193,8 @@ export interface PreparedEvmDeposit {
 }
 
 export type PreparedDeposit = PreparedCosmosDeposit | PreparedEvmDeposit;
+export type PreparedDepositForDefault<TDefaultWalletType extends BrowserWalletType> =
+  TDefaultWalletType extends "evm" ? PreparedEvmDeposit : PreparedCosmosDeposit;
 
 export interface PrepareTransferInput extends BrowserWalletIdentityInput {
   amount: CoinString;
@@ -161,6 +212,23 @@ export interface PrepareTransferInput extends BrowserWalletIdentityInput {
   disclosurePubKeyHex?: Hex;
   disclosure_pubkey_hex?: Hex;
 }
+
+export type PrepareTransferBaseInput = Omit<PrepareTransferInput, "walletType" | "wallet_type">;
+
+export type PrepareCosmosTransferInput = PrepareTransferBaseInput & {
+  walletType?: "cosmos";
+  wallet_type?: "cosmos";
+};
+
+export type PrepareEvmTransferInput = PrepareTransferBaseInput & (
+  | { walletType: "evm"; wallet_type?: "evm" }
+  | { walletType?: "evm"; wallet_type: "evm" }
+);
+
+export type PrepareDefaultEvmProfileTransferInput = PrepareTransferBaseInput & {
+  walletType?: undefined;
+  wallet_type?: undefined;
+};
 
 export interface PreparedTransferSummary {
   shieldedAddress: ShieldedAddress;
@@ -205,6 +273,23 @@ export interface PrepareWithdrawInput extends BrowserWalletIdentityInput {
   expiresAtUnix?: number;
   expires_at_unix?: number;
 }
+
+export type PrepareWithdrawBaseInput = Omit<PrepareWithdrawInput, "walletType" | "wallet_type">;
+
+export type PrepareCosmosWithdrawInput = PrepareWithdrawBaseInput & {
+  walletType?: "cosmos";
+  wallet_type?: "cosmos";
+};
+
+export type PrepareEvmWithdrawInput = PrepareWithdrawBaseInput & (
+  | { walletType: "evm"; wallet_type?: "evm" }
+  | { walletType?: "evm"; wallet_type: "evm" }
+);
+
+export type PrepareDefaultEvmProfileWithdrawInput = PrepareWithdrawBaseInput & {
+  walletType?: undefined;
+  wallet_type?: undefined;
+};
 
 export interface PreparedWithdrawSummary {
   shieldedAddress: ShieldedAddress;
@@ -293,6 +378,13 @@ export interface DecodeUserDisclosureInput extends Partial<BrowserWalletIdentity
   skip_signer_pubkey_check?: boolean;
 }
 
+export interface DecodeSelfViewDisclosureInput extends DecodeUserDisclosureInput {
+  disclosureScalar?: bigint | string | number;
+  disclosure_scalar?: bigint | string | number;
+  disclosureScalarHex?: Hex;
+  disclosure_scalar_hex?: Hex;
+}
+
 export interface DecodeAuditDisclosureInput extends PrivacyScanOptions {
   txHash?: Hex;
   tx_hash?: Hex;
@@ -300,12 +392,14 @@ export interface DecodeAuditDisclosureInput extends PrivacyScanOptions {
   disclosure_privkey_hex?: Hex;
 }
 
-export class ClairveilBrowserClient {
+export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType = "cosmos"> {
+  constructor(options: ClairveilBrowserClientOptions & { profile: BrowserWalletProfile & { transport: TDefaultWalletType } });
   constructor(options?: ClairveilBrowserClientOptions);
   health(): Promise<BrowserHealthResult>;
   fetchBlockEvents(limit?: number): Promise<{ events: BrowserBlockEvent[] }>;
   fetchPrivacyEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
+  fetchReserve(denom: string): Promise<ReserveResponse>;
   buildRootSigningMessage(address: ClairAddress, pubKeyHex: Hex): string;
   verifySignerPubKey(address: ClairAddress, pubKeyHex: Hex): object;
   evmAccountIdentity(address: string): { evmAddress: string; address: ClairAddress; pubKeyHex: Hex };
@@ -315,9 +409,18 @@ export class ClairveilBrowserClient {
   waitForEvmTransaction(txHash: Hex): Promise<BrowserEvmTransactionWaitResult>;
   evmNativeSendTransaction(input: { to: string; amount: CoinString }): BrowserEvmNativeSendTransaction;
   buildBankSendSignDoc(input: { from: ClairAddress; pubKeyHex: Hex; to: ClairAddress; amount: CoinString }): Promise<SignDocBase64>;
-  broadcastSignedTx(input: SignedTxBase64, waitOptions?: { attempts?: number; intervalMs?: number }): Promise<object>;
-  prepareDeposit(input: PrepareDepositInput): Promise<PreparedDeposit>;
+  broadcastSignedTx(input: SignedTxBase64, waitOptions?: { attempts?: number; intervalMs?: number }): Promise<BroadcastSignedTxResult>;
+  prepareDeposit(input: TDefaultWalletType extends "evm" ? PrepareDefaultEvmProfileDepositInput : never): Promise<PreparedEvmDeposit>;
+  prepareDeposit(input: PrepareEvmDepositInput): Promise<PreparedEvmDeposit>;
+  prepareDeposit(input: PrepareCosmosDepositInput): Promise<PreparedCosmosDeposit>;
+  prepareDeposit(input: PrepareDepositInput<TDefaultWalletType>): Promise<PreparedDeposit>;
+  prepareTransfer(input: TDefaultWalletType extends "evm" ? PrepareDefaultEvmProfileTransferInput : never): Promise<PreparedEvmTransfer>;
+  prepareTransfer(input: PrepareEvmTransferInput): Promise<PreparedEvmTransfer>;
+  prepareTransfer(input: PrepareCosmosTransferInput): Promise<PreparedCosmosTransfer>;
   prepareTransfer(input: PrepareTransferInput): Promise<PreparedTransfer>;
+  prepareWithdraw(input: TDefaultWalletType extends "evm" ? PrepareDefaultEvmProfileWithdrawInput : never): Promise<PreparedEvmWithdraw>;
+  prepareWithdraw(input: PrepareEvmWithdrawInput): Promise<PreparedEvmWithdraw>;
+  prepareWithdraw(input: PrepareCosmosWithdrawInput): Promise<PreparedCosmosWithdraw>;
   prepareWithdraw(input: PrepareWithdrawInput): Promise<PreparedWithdraw>;
   prepareRelayWithdraw(input: PrepareRelayWithdrawInput): Promise<PreparedRelayWithdraw>;
   buildRelayWithdrawMessageFromPayload(input: CreateRelayWithdrawSignDocInput): WithdrawMessage;
@@ -325,10 +428,14 @@ export class ClairveilBrowserClient {
   scanWalletNotes(input: ScanWalletNotesInput): Promise<ScanWalletNotesResult>;
   checkNullifier(nullifierHex: Hex): Promise<object & { used?: boolean; Used?: boolean }>;
   decodeUserDisclosure(input: DecodeUserDisclosureInput): Promise<DisclosureReport>;
+  decodeSelfViewDisclosure(input: DecodeSelfViewDisclosureInput): Promise<DisclosureReport>;
   decodeAuditDisclosure(input: DecodeAuditDisclosureInput): Promise<DisclosureReport>;
   txRawBytesBase64(input: SignedTxBase64): Base64;
 }
 
+export function createClairveilBrowserClient<TWalletType extends BrowserWalletType>(
+  options: ClairveilBrowserClientOptions & { profile: BrowserWalletProfile & { transport: TWalletType } }
+): ClairveilBrowserClient<TWalletType>;
 export function createClairveilBrowserClient(options?: ClairveilBrowserClientOptions): ClairveilBrowserClient;
 export function buildRootSigningMessage(address: ClairAddress, pubKeyHex: Hex): string;
 export function evmAddressToBech32(address: string, prefix: string): string;
@@ -337,4 +444,7 @@ export function verifySignerPubKey(address: ClairAddress, pubKeyHex: Hex): objec
 export type BrowserDappProfile = BrowserWalletProfile;
 export type ClairveilBrowserDappClientOptions = ClairveilBrowserClientOptions;
 export { ClairveilBrowserClient as ClairveilBrowserDappClient };
+export function createClairveilBrowserDappClient<TWalletType extends BrowserWalletType>(
+  options: ClairveilBrowserClientOptions & { profile: BrowserWalletProfile & { transport: TWalletType } }
+): ClairveilBrowserClient<TWalletType>;
 export function createClairveilBrowserDappClient(options?: ClairveilBrowserClientOptions): ClairveilBrowserClient;

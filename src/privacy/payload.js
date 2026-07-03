@@ -5,6 +5,7 @@ import {
   defaultAccountPrefix,
   decodeCanonicalFieldHex,
   decodeShieldedAddress,
+  deriveDisclosureKeys,
   deriveSpendKeys,
   deriveViewKeys,
   encodeShieldedAddress,
@@ -16,9 +17,11 @@ import {
 } from "../core/crypto.js";
 import {
   computeAuditTransferDisclosureDigestHex,
+  computeSelfViewTransferDisclosureDigestHex,
   computeTransferDisclosureDigestHex,
   payloadVersion,
   planeAudit,
+  planeSelfView,
   planeUser,
   transferDisclosureRecipientOutputIndex,
   transferPrivacyPolicyAllPrivate,
@@ -52,7 +55,7 @@ import {
   utf8Bytes
 } from "../core/browser-crypto.js";
 
-export const preparedTransferPayloadVersion = "v1";
+export const preparedTransferPayloadVersion = "v2";
 export const preparedTransferProofVersion = "v1";
 export const preparedWithdrawProverPayloadVersion = "v1";
 export const preparedWithdrawProofVersion = "v1";
@@ -448,6 +451,40 @@ export function buildAuditDisclosureData({
   };
 }
 
+export function buildSelfViewDisclosureData({
+  outputCommitmentHex,
+  transferDenom = defaultAssetDenom,
+  fromNote,
+  recipientNote,
+  targetPubKeyHex,
+  shieldedPrefix
+}) {
+  const target = normalizeDisclosurePubKey(targetPubKeyHex, "self-view disclosure target pubkey");
+  if (!target.point) {
+    throw new Error("self-view disclosure target pubkey is required");
+  }
+  const digestHex = computeSelfViewTransferDisclosureDigestHex(
+    disclosureCommon({ outputCommitmentHex, fromNote, recipientNote })
+  );
+  const payload = buildDisclosurePayload({
+    plane: planeSelfView,
+    policy: 7,
+    outputCommitmentHex,
+    digestHex,
+    transferDenom,
+    fromNote,
+    recipientNote,
+    shieldedPrefix
+  });
+  const cipherText = asymEncrypt(utf8Bytes(JSON.stringify(payload)), target.point);
+  return {
+    payload,
+    digest_hex: digestHex,
+    payload_hex: hexFromBytes(cipherText),
+    mode: userDisclosureModeValue["recipient-encrypted"]
+  };
+}
+
 async function lookupMerklePath(provider, commitmentHex) {
   if (!provider) {
     throw new Error("a merkle path provider is required");
@@ -476,6 +513,10 @@ function normalizeMerklePathResult(result, label) {
   };
 }
 
+function transferPayloadHashIncludesSelfView(version) {
+  return String(version || "") !== "v1";
+}
+
 export function computePreparedTransferPayloadHash(payload) {
   const lines = [
     payload.version,
@@ -489,9 +530,15 @@ export function computePreparedTransferPayloadHash(payload) {
     payload.user_disclosure_payload_hex || "",
     payload.audit_disclosure_digest_hex,
     payload.audit_disclosure_target_pubkey_hex,
-    payload.audit_disclosure_payload_hex,
-    String(payload.inputs.length)
+    payload.audit_disclosure_payload_hex
   ];
+  if (transferPayloadHashIncludesSelfView(payload.version)) {
+    lines.push(
+      payload.self_view_disclosure_digest_hex || "",
+      payload.self_view_disclosure_payload_hex || ""
+    );
+  }
+  lines.push(String(payload.inputs.length));
   for (const input of payload.inputs) {
     lines.push(
       input.amount,
@@ -536,6 +583,8 @@ export async function buildPreparedTransferPayload({
   userDisclosureMode,
   userDisclosureTargetPubKeyHex = "",
   auditDisclosureTargetPubKeyHex,
+  disableSelfViewDisclosure = false,
+  selfViewDisclosureTargetPubKeyHex,
   shieldedPrefix
 } = {}) {
   const coin = parseCoin(amount ?? transferAmount, transferDenom || defaultAssetDenom);
@@ -605,6 +654,19 @@ export async function buildPreparedTransferPayload({
     auditPubKeyHex: auditDisclosureTargetPubKeyHex,
     shieldedPrefix
   });
+  const explicitSelfViewTargetPubKeyHex = String(selfViewDisclosureTargetPubKeyHex || "").trim();
+  const selfViewTargetPubKeyHex = explicitSelfViewTargetPubKeyHex
+    || (rootSeed ? deriveDisclosureKeys(rootSeed).pubKeyHex : "");
+  const selfViewDisclosure = !disableSelfViewDisclosure && selfViewTargetPubKeyHex
+    ? buildSelfViewDisclosureData({
+      outputCommitmentHex: recipientCommitmentHex,
+      transferDenom: coin.denom,
+      fromNote: foundInputs[0].note,
+      recipientNote,
+      targetPubKeyHex: selfViewTargetPubKeyHex,
+      shieldedPrefix
+    })
+    : null;
 
   const preparedInputs = [];
   let commonRootHex = "";
@@ -651,7 +713,9 @@ export async function buildPreparedTransferPayload({
     user_disclosure_payload_hex: userDisclosure?.payload_hex || "",
     audit_disclosure_digest_hex: auditDisclosure.digest_hex,
     audit_disclosure_target_pubkey_hex: auditDisclosure.target_pubkey_hex,
-    audit_disclosure_payload_hex: auditDisclosure.payload_hex
+    audit_disclosure_payload_hex: auditDisclosure.payload_hex,
+    self_view_disclosure_digest_hex: selfViewDisclosure?.digest_hex || "",
+    self_view_disclosure_payload_hex: selfViewDisclosure?.payload_hex || ""
   };
   payload.payload_hash = computePreparedTransferPayloadHash(payload);
   return payload;
@@ -684,7 +748,9 @@ export function buildTransferMsgFromPayloadAndProof(payload, proof) {
     userDisclosurePayload: optionalHexToBytes(payload.user_disclosure_payload_hex, "user disclosure payload"),
     auditDisclosureDigest: hexToBytes(payload.audit_disclosure_digest_hex, "audit disclosure digest"),
     auditDisclosureTargetPubkey: hexToBytes(payload.audit_disclosure_target_pubkey_hex, "audit disclosure target pubkey"),
-    auditDisclosurePayload: hexToBytes(payload.audit_disclosure_payload_hex, "audit disclosure payload")
+    auditDisclosurePayload: hexToBytes(payload.audit_disclosure_payload_hex, "audit disclosure payload"),
+    selfViewDisclosureDigest: optionalHexToBytes(payload.self_view_disclosure_digest_hex, "self-view disclosure digest"),
+    selfViewDisclosurePayload: optionalHexToBytes(payload.self_view_disclosure_payload_hex, "self-view disclosure payload")
   };
 }
 
@@ -987,20 +1053,37 @@ export async function buildWithdrawMessage({ proverAdapter, creator, ...input } 
   };
 }
 
-export function createRestMerklePathProvider({ rest, fetchImpl = fetch } = {}) {
+export function createRestMerklePathProvider({ rest, fetchImpl = fetch, timeoutMs = 30000 } = {}) {
   const base = String(rest || "").replace(/\/$/, "");
   if (!base) {
     throw new Error("rest endpoint is required");
   }
   return {
     async lookupMerklePath(commitmentHex) {
-      const response = await fetchImpl(`${base}/clairveil/privacy/v1/merkle_path/${commitmentHex}`, {
-        headers: { accept: "application/json" }
-      });
-      if (!response.ok) {
-        throw new Error(`merkle path query failed with status ${response.status}: ${await response.text()}`);
+      const resolvedTimeoutMs = Number(timeoutMs);
+      if (!Number.isFinite(resolvedTimeoutMs) || resolvedTimeoutMs <= 0) {
+        throw new Error("merkle path timeoutMs must be positive");
       }
-      return response.json();
+      const url = `${base}/clairveil/privacy/v1/merkle_path/${commitmentHex}`;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), resolvedTimeoutMs);
+      try {
+        const response = await fetchImpl(url, {
+          headers: { accept: "application/json" },
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          throw new Error(`merkle path query failed with status ${response.status}: ${await response.text()}`);
+        }
+        return response.json();
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          throw new Error(`merkle path query timed out after ${resolvedTimeoutMs}ms: ${url}`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+      }
     }
   };
 }

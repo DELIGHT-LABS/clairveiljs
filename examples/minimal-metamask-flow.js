@@ -20,6 +20,14 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
+function bytesToHex(bytes) {
+  return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function utf8ToHex(value) {
+  return bytesToHex(new TextEncoder().encode(String(value)));
+}
+
 async function ensureMetaMaskChain(provider, {
   evmChainId,
   evmRpc,
@@ -60,12 +68,12 @@ export async function runMinimalMetaMaskFlow({
   accountPrefix = "clair",
   shieldedPrefix = "clairs",
   denom = "uclair",
-  depositAmount = "10uclair",
-  transferAmount = "1uclair",
+  depositAmount = `10${denom}`,
+  transferAmount = `1${denom}`,
   recipientShieldedAddress,
   chainName,
   nativeCurrency,
-  waitForDeposit = false,
+  waitForDeposit = true,
   waitForTransfer = false
 }) {
   if (!provider) {
@@ -101,12 +109,11 @@ export async function runMinimalMetaMaskFlow({
   const rootMessage = clairveil.buildRootSigningMessage(identity.address, identity.pubKeyHex);
   const signatureHex = await provider.request({
     method: "personal_sign",
-    params: [rootMessage, evmAccount]
+    params: [`0x${utf8ToHex(rootMessage)}`, evmAccount]
   });
   const signatureBase64 = bytesToBase64(hexToBytes(signatureHex));
 
   const privacyRequest = {
-    walletType: "evm",
     address: identity.address,
     pubKeyHex: identity.pubKeyHex,
     signatureBase64
@@ -123,6 +130,9 @@ export async function runMinimalMetaMaskFlow({
   const depositReceipt = waitForDeposit
     ? await clairveil.waitForEvmTransaction(depositTxHash)
     : null;
+  if (waitForDeposit && !depositReceipt?.ok) {
+    throw new Error(depositReceipt?.error || depositReceipt?.errors?.[0] || "EVM deposit was not confirmed");
+  }
 
   const scan = await clairveil.scanWalletNotes({
     ...privacyRequest,
@@ -146,6 +156,9 @@ export async function runMinimalMetaMaskFlow({
     transferReceipt = waitForTransfer
       ? await clairveil.waitForEvmTransaction(transferTxHash)
       : null;
+    if (waitForTransfer && !transferReceipt?.ok) {
+      throw new Error(transferReceipt?.error || transferReceipt?.errors?.[0] || "EVM transfer was not confirmed");
+    }
   }
 
   return {

@@ -1,5 +1,6 @@
-import type { Base64, BytesLike, ClairAddress, Hex, PrivacyMaterial, ShieldedAddress } from "../core/crypto.js";
-import type { CoinString, DepositMaterial } from "../core/note.js";
+import type { BytesLike, ClairAddress, Hex, PrivacyMaterial, ShieldedAddress } from "../core/crypto.js";
+import type { CoinString, DepositMaterial, FoundNote } from "../core/note.js";
+import type { PrefixedHex } from "../wallet/adapter.js";
 import type {
   PreparedTransferPayload,
   PreparedTransferPayloadInput,
@@ -10,9 +11,7 @@ import type {
   PreparedWithdrawProverPayloadInput,
   PreparedWithdrawProverPayloadResult,
   TransferMessage,
-  TransferMessageBuildResult,
-  WithdrawMessage,
-  WithdrawMessageBuildResult
+  WithdrawMessage
 } from "../privacy/payload.js";
 import type { ProverAdapter } from "../privacy/prover.js";
 
@@ -26,7 +25,7 @@ export type EvmBlockTag = "earliest" | "latest" | "pending" | "safe" | "finalize
 export interface EvmTransactionRequest {
   from?: string;
   to: string;
-  data: string;
+  data?: string;
   value?: EvmQuantity;
   gas?: EvmQuantity;
   gasPrice?: EvmQuantity;
@@ -105,7 +104,7 @@ export type EvmWithdrawEncoder = (message: EvmWithdrawMessage, options?: EvmPriv
 
 export interface Eip1193WalletAdapter {
   getAddress(): Promise<string>;
-  signPrivacyRoot(messageBytes: Uint8Array): Promise<Base64 | Hex | string>;
+  signPrivacyRoot(messageBytes: Uint8Array): Promise<PrefixedHex>;
   sendTransaction(transaction: EvmTransactionRequest): Promise<Hex | string>;
   call(transaction: EvmCallRequest, blockTag?: EvmBlockTag): Promise<Hex | string>;
   getLogs(filter: EvmLogFilter): Promise<EvmLog[]>;
@@ -128,9 +127,10 @@ export interface EvmPublicPrivacyAccount {
   root_signature_hash?: Hex;
 }
 
-export interface EvmDepositTransactionInput {
+export type EvmDepositTransactionInput = {
   material?: DepositMaterial;
-  message?: EvmDepositMessage;
+  depositMaterial?: DepositMaterial;
+  deposit_material?: DepositMaterial;
   creator?: string;
   rootSeed?: BytesLike;
   shieldedAddress?: ShieldedAddress;
@@ -139,11 +139,12 @@ export interface EvmDepositTransactionInput {
   denom?: string;
   assetDenom?: string;
   transactionOptions?: EvmPrivacyTransactionOptions;
-}
+  message?: EvmDepositMessage;
+};
 
 export interface EvmDepositTransactionResult {
   status: "ready";
-  material: DepositMaterial;
+  material?: DepositMaterial;
   message: EvmDepositMessage;
   transaction: EvmTransactionRequest;
 }
@@ -156,8 +157,11 @@ export interface EvmTransferTransactionInput extends PreparedTransferPayloadInpu
   transactionOptions?: EvmPrivacyTransactionOptions;
 }
 
-export interface EvmTransferTransactionResult extends TransferMessageBuildResult {
+export interface EvmTransferTransactionResult {
   status: "ready";
+  message: TransferMessage;
+  payload?: PreparedTransferPayload;
+  proof?: PreparedTransferProof;
   transaction: EvmTransactionRequest;
 }
 
@@ -172,8 +176,12 @@ export interface EvmWithdrawTransactionInput extends PreparedWithdrawProverPaylo
   evm_recipient?: string;
 }
 
-export interface EvmWithdrawTransactionResult extends Omit<WithdrawMessageBuildResult, "message"> {
+export interface EvmWithdrawTransactionResult {
   status: "ready";
+  selectedNote?: FoundNote;
+  proverPayload?: PreparedWithdrawProverPayload;
+  proof?: PreparedWithdrawProof;
+  payload?: PreparedWithdrawPayload;
   message: EvmWithdrawMessage;
   transaction: EvmTransactionRequest;
 }

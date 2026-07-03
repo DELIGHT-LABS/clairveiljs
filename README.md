@@ -18,7 +18,7 @@ It uses CosmJS as the transport/signing foundation and provides Clairveil-specif
 - Clairveil note creation, commitment/nullifier calculation, and note encryption
 - Clairveil transfer disclosure MiMC digest verification
 - signer address/pubkey checks
-- privacy events and auditable transfer queries
+- privacy events, auditable transfer, and reserve accounting queries
 - balance queries
 - wallet adapters for Keplr or custom signers
 - CosmJS OfflineSigner adapter when a separate privacy-root signer is supplied
@@ -72,7 +72,7 @@ src/
 
 Public consumers should import through the package export map (`clairveiljs`, `clairveiljs/core`, `clairveiljs/cosmos`, `clairveiljs/cosmos-client`, `clairveiljs/evm`, `clairveiljs/browser-dapp`, `clairveiljs/generated/...`) instead of reaching into files directly. The export map preserves semantic entrypoints even when an entrypoint shares an internal implementation; for example, `clairveiljs/browser-dapp` points at the browser wallet client surface.
 
-Minimal SDK usage examples live in [`examples/`](https://github.com/DELIGHT-LABS/clairveiljs/tree/main/examples). Start with [`examples/minimal-keplr-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-keplr-flow.js) for Keplr/Cosmos and [`examples/minimal-metamask-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-metamask-flow.js) for MetaMask/EVM. Both examples derive wallet privacy material, prepare a deposit, scan notes, prepare a transfer, and broadcast through the SDK surface.
+Minimal SDK usage examples live in [`examples/`](https://github.com/DELIGHT-LABS/clairveiljs/tree/main/examples). Start with [`examples/minimal-keplr-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-keplr-flow.js) for Keplr/Cosmos and [`examples/minimal-metamask-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-metamask-flow.js) for MetaMask/EVM. Both examples derive wallet privacy material, prepare a deposit, scan notes, prepare a transfer, and broadcast through the SDK surface. The Keplr/Cosmos example requires a `depositProofProvider` because Cosmos `MsgDeposit` includes a `DepositCircuit` proof.
 
 Current boundary:
 
@@ -118,7 +118,7 @@ npm run test:conformance:required
 
 `prepublishOnly` runs the strict conformance command.
 
-These tests verify root seed/key/address derivation, browser signer adapter behavior, note scan results, prepared transfer and withdraw payload hashes, prover HTTP contract behavior, disclosure decoding, and withdraw/relay payload validation helpers.
+These tests verify root seed/key/address derivation, browser signer adapter behavior, note scan results, prepared transfer and withdraw payload hashes, prover HTTP contract behavior, disclosure decoding, and relay withdraw message handoff behavior against the Go-generated fixtures.
 
 Downstream packages can reuse the same fixture loading policy:
 
@@ -139,7 +139,7 @@ if (!result.skipped) {
 
 The handoff e2e item is intentionally not part of `prepublishOnly`. Running a Clairveil node and prover is the chain repository's responsibility; this package only proves that the published SDK surface can attach to those services and execute the full wallet flow.
 
-Current local e2e scope is deposit, wallet note scan, shielded transfer, disclosure decode, and direct withdraw. Relay withdraw payload/signDoc construction is covered by SDK surface/type tests; full relayer service e2e depends on the product's relayer transport and deployment.
+Current local e2e scope is deposit, wallet note scan, shielded transfer, disclosure decode, and direct withdraw. Relay withdraw payload/signDoc construction is covered by SDK tests and Go conformance fixtures; full relayer service e2e depends on the product's relayer transport and deployment.
 
 Run the optional smoke/e2e command with a local Clairveil node:
 
@@ -155,6 +155,7 @@ To run the tx flow, explicitly opt in:
 CLAIRVEIL_E2E_LOCAL=1 \
 CLAIRVEIL_E2E_FULL_FLOW=1 \
 CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
+CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 npm run test:e2e:local
 ```
 
@@ -203,6 +204,15 @@ export default async function createWallet(config) {
 }
 ```
 
+The deposit proof module must export `default`, `createDepositProof`, or `depositProofProvider`. It receives the browser/SDK-built deposit material and returns proof bytes or proof hex, such as `{ proof }`, `{ depositProof }`, `{ proofHex }`, or `{ proof_hex }`.
+
+```js
+// /absolute/path/to/deposit-proof-provider.mjs
+export async function createDepositProof({ material }) {
+  return { proofHex: await proveDepositCircuit(material) };
+}
+```
+
 For a simple local signer, the e2e test also accepts `CLAIRVEIL_E2E_MNEMONIC` plus either `CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64` or `CLAIRVEIL_E2E_ROOT_SIGNATURE_HEX`. The root signature must match the transparent account and pubkey; CosmJS offline signers do not sign Clairveil's privacy-root message by themselves.
 
 ## Production Privacy Boundary
@@ -244,11 +254,16 @@ const deposit = await clairveil.prepareDeposit({
   address: walletAddress,
   pubKeyHex: walletPubKeyHex,
   signatureBase64: privacyRootSignatureBase64,
-  amount: "1000000uexample"
+  amount: "1000000uexample",
+  async depositProofProvider({ material }) {
+    // Generate a DepositCircuit proof with your local/WASM/trusted deposit prover.
+    return createDepositProof({ material });
+  }
 });
 
-// For Cosmos wallets, submit deposit.signDoc with the wallet's signDirect flow.
-// For EVM wallets, pass walletType: "evm" and submit deposit.transaction via EIP-1193.
+// This Cosmos-style client returns deposit.signDoc for the wallet signDirect flow.
+// For EVM, create the client with profile: { transport: "evm", ... };
+// then prepareDeposit returns deposit.transaction for EIP-1193 submission.
 ```
 
 For a local single-node demo, it is fine to run a helper server for faucet funding, local signer setup, auditor admin tools, or CORS/proxy convenience. Keep that helper out of the production privacy boundary: the DApp should still call ClairveilJS for root material derivation, note scanning, deposit preparation, transfer preparation, withdraw preparation, and user disclosure decoding.
@@ -296,6 +311,10 @@ EVM Clairveil chains submit state-changing privacy actions through the EVM priva
 
 Supported EVM scope: an EVM Clairveil chain is expected to use the Clairveil `IPrivacy` precompile ABI and payload semantics. Adding another EVM chain should only require chain/profile configuration changes when that chain keeps the same ABI contract. Different precompile function shapes are outside the current supported SDK scope.
 
+In the supported EVM ABI, `IPrivacy.deposit` receives `{ amount, noteCommitment, encryptedNote }`. The Cosmos `MsgDeposit` path requires a `DepositCircuit` proof, but the current EVM precompile deposit calldata does not include a proof field.
+
+The supported EVM `IPrivacy.transfer` ABI carries user and audit disclosure fields, but not the Cosmos `selfViewDisclosure*` fields. ClairveilJS disables self-view disclosure by default on the EVM transport and rejects EVM transfer messages that still contain self-view disclosure bytes instead of silently dropping them.
+
 ```js
 import {
   createClairveilEvmClient,
@@ -327,7 +346,7 @@ console.log(defaultEvmPrivacyPrecompileAddress);
 
 For EVM transfer/withdraw, use the same ClairveilJS note scan, planner, disclosure, and prover adapter flow as the Cosmos client. The final submit step is different: Cosmos sends a `Msg*` sign doc, while EVM sends calldata to the privacy precompile.
 
-Some EVM `IPrivacy.withdraw` deployments may still include legacy `newNoteCommitment` and `encryptedNote` ABI fields. ClairveilJS fills those ABI-only fields with 32 zero bytes by default for compatibility. Once the downstream precompile is updated to the latest Clairveil withdraw shape, pass `withdrawOutputMode: "none"` or provide a custom contract adapter.
+Some EVM `IPrivacy.withdraw` deployments may still include legacy `newNoteCommitment` and `encryptedNote` ABI fields. ClairveilJS fills those ABI-only fields with 32 zero bytes by default for compatibility. `withdrawOutputMode: "none"` only changes the placeholder values sent to that legacy-compatible ABI. If a downstream precompile removes those ABI fields entirely, provide a custom contract adapter/encoder that matches the new function shape.
 
 For a CosmJS `OfflineSigner`, supply a separate root-signing function because standard OfflineSigners do not define Clairveil's arbitrary root message signature by themselves:
 
@@ -361,18 +380,31 @@ The derived `rootSeed` stays client-side and is used to scan notes, create new n
 
 ## Deposit
 
-`prepareDeposit` builds a Telescope-generated `MsgDeposit` and returns a Keplr-compatible sign doc.
+`prepareDeposit` builds a Telescope-generated `MsgDeposit` and returns a Keplr-compatible sign doc. Deposit requires a `DepositCircuit` proof; generate it with a local/WASM/trusted deposit prover and pass the proof with the same deposit material.
 
 ```js
-const deposit = await clairveil.prepareDeposit({
-  wallet,
+const material = await clairveil.deriveWalletPrivacyMaterial(wallet);
+const depositMaterial = clairveil.buildDepositMaterial({
+  creator: material.address,
+  rootSeed: material.rootSeed,
   amount: "10uclair"
+});
+const { proofHex } = await depositProofProvider({
+  material: depositMaterial
+});
+
+const deposit = await clairveil.prepareDeposit({
+  material,
+  depositMaterial,
+  amount: "10uclair",
+  proofHex
 });
 
 const broadcast = await clairveil.signDirectAndBroadcast({
   wallet,
   signDoc: deposit.signDoc
 });
+if (!broadcast.ok) throw new Error(broadcast.error || "deposit was not confirmed");
 ```
 
 ## Scan And Store Notes
@@ -416,10 +448,11 @@ if (transfer.status === "self_merge_required") {
   // Ask the user to confirm the self transaction, then retry with allowPlanStep: true.
   console.log(transfer.plan.message);
 } else if (transfer.status === "ready") {
-  await clairveil.signDirectAndBroadcast({
+  const broadcast = await clairveil.signDirectAndBroadcast({
     wallet,
     signDoc: transfer.signDoc
   });
+  if (!broadcast.ok) throw new Error(broadcast.error || "transfer was not confirmed");
 }
 ```
 
@@ -484,10 +517,11 @@ const withdraw = await clairveil.prepareWithdraw({
 });
 
 if (withdraw.status === "ready") {
-  await clairveil.signDirectAndBroadcast({
+  const broadcast = await clairveil.signDirectAndBroadcast({
     wallet,
     signDoc: withdraw.signDoc
   });
+  if (!broadcast.ok) throw new Error(broadcast.error || "withdraw was not confirmed");
 }
 ```
 

@@ -9,18 +9,21 @@ import {
   UserDisclosureMode
 } from "../generated/clairveil/privacy/v1/tx.js";
 import {
+  bytesFromHex,
   defaultAccountPrefix,
   derivePrivacyMaterial,
   normalizeBech32Prefix
 } from "../core/crypto.js";
 import {
   decodeAuditDisclosureFromEvent,
+  decodeSelfViewDisclosureFromEvent,
   decodeUserDisclosureFromEvent,
   disclosureScalarFromHex
 } from "../core/disclosure.js";
 import {
   buildDepositMaterial as buildDepositMaterialCore,
-  defaultAssetDenom
+  defaultAssetDenom,
+  parseCoin
 } from "../core/note.js";
 import {
   buildPreparedTransferPayload as buildPreparedTransferPayloadCore,
@@ -28,8 +31,7 @@ import {
   buildPreparedWithdrawProverPayload as buildPreparedWithdrawProverPayloadCore,
   buildRelayWithdrawMsgFromPayload as buildRelayWithdrawMsgFromPayloadCore,
   buildRelayWithdrawPayload as buildRelayWithdrawPayloadCore,
-  buildWithdrawMessage as buildWithdrawMessageCore,
-  createRestMerklePathProvider
+  buildWithdrawMessage as buildWithdrawMessageCore
 } from "../privacy/payload.js";
 import {
   assertPlanCanBuildTx,
@@ -68,6 +70,105 @@ export const msgDepositTypeUrl = GeneratedMsgDeposit.typeUrl;
 export const msgTransferTypeUrl = GeneratedMsgTransfer.typeUrl;
 export const msgWithdrawTypeUrl = GeneratedMsgWithdraw.typeUrl;
 const defaultPrepareScanMaxPages = 1000;
+const defaultFetchTimeoutMs = 30000;
+const defaultRetryStatuses = Object.freeze([408, 429, 502, 503, 504]);
+const defaultQueryRetry = Object.freeze({
+  retries: 2,
+  baseDelayMs: 250,
+  maxDelayMs: 1500,
+  jitter: true,
+  retryStatuses: defaultRetryStatuses
+});
+
+function normalizeTimeoutMs(value, label = "timeoutMs") {
+  const timeoutMs = Number(value);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`${label} must be positive`);
+  }
+  return timeoutMs;
+}
+
+function normalizeNonNegativeInteger(value, label) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+  return number;
+}
+
+function normalizeDelayMs(value, label) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) {
+    throw new Error(`${label} must be non-negative`);
+  }
+  return number;
+}
+
+function normalizeQueryRetry(value = {}) {
+  if (value === false) {
+    return {
+      retries: 0,
+      baseDelayMs: defaultQueryRetry.baseDelayMs,
+      maxDelayMs: defaultQueryRetry.maxDelayMs,
+      jitter: false,
+      retryStatuses: new Set(defaultRetryStatuses)
+    };
+  }
+  const retry = value || {};
+  return {
+    retries: normalizeNonNegativeInteger(retry.retries ?? defaultQueryRetry.retries, "queryRetry.retries"),
+    baseDelayMs: normalizeDelayMs(retry.baseDelayMs ?? defaultQueryRetry.baseDelayMs, "queryRetry.baseDelayMs"),
+    maxDelayMs: normalizeDelayMs(retry.maxDelayMs ?? defaultQueryRetry.maxDelayMs, "queryRetry.maxDelayMs"),
+    jitter: retry.jitter ?? defaultQueryRetry.jitter,
+    retryStatuses: new Set(retry.retryStatuses ?? defaultRetryStatuses)
+  };
+}
+
+function retryDelayMs(attemptNumber, retry) {
+  const base = retry.baseDelayMs * (attemptNumber <= 1 ? 1 : 3 ** (attemptNumber - 1));
+  const capped = Math.min(retry.maxDelayMs, base);
+  if (!retry.jitter || capped <= 0) return capped;
+  return Math.round(capped + (Math.random() * capped * 0.2));
+}
+
+function sleep(ms) {
+  return ms > 0 ? new Promise(resolve => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+function isRetryableFetchError(error, retry) {
+  if (error?.name === "AbortError" || error?.code === "FETCH_TIMEOUT") return true;
+  if (error?.status != null) return retry.retryStatuses.has(Number(error.status));
+  return true;
+}
+
+function normalizeRestEndpoints(primary, restEndpoints = []) {
+  const endpoints = [];
+  for (const endpoint of [primary, ...(Array.isArray(restEndpoints) ? restEndpoints : [])]) {
+    const normalized = normalizeRestEndpoint(String(endpoint || ""));
+    if (normalized && !endpoints.includes(normalized)) {
+      endpoints.push(normalized);
+    }
+  }
+  if (!endpoints.length) {
+    throw new Error("rest endpoint is required");
+  }
+  return endpoints;
+}
+
+function requiredDepositProof(input = {}) {
+  if (input?.proof != null) {
+    const proof = typeof input.proof === "string"
+      ? bytesFromHex(input.proof, "deposit proof")
+      : Uint8Array.from(input.proof);
+    if (proof.length) return proof;
+  }
+  const proofHex = input?.proofHex ?? input?.proof_hex;
+  if (proofHex != null && String(proofHex).trim()) {
+    const proof = bytesFromHex(proofHex, "deposit proof");
+    if (proof.length) return proof;
+  }
+  throw new Error("deposit proof is required; provide proof or proofHex");
+}
 
 export const MsgDeposit = GeneratedMsgDeposit;
 export const MsgTransfer = GeneratedMsgTransfer;
@@ -150,12 +251,57 @@ function fromHex(value, label = "hex") {
   return rawBytesFromHex(value, label);
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url, { headers: { accept: "application/json" } });
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+async function fetchJson(url, { timeoutMs = defaultFetchTimeoutMs, fetchImpl = globalThis.fetch } = {}) {
+  const resolvedTimeoutMs = normalizeTimeoutMs(timeoutMs, "fetch timeoutMs");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), resolvedTimeoutMs);
+  try {
+    const response = await fetchImpl(url, {
+      headers: { accept: "application/json" },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const error = new Error(`${response.status} ${response.statusText}`);
+      error.status = response.status;
+      error.statusText = response.statusText;
+      throw error;
+    }
+    return response.json();
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const timeoutError = new Error(`fetch request timed out after ${resolvedTimeoutMs}ms: ${url}`);
+      timeoutError.code = "FETCH_TIMEOUT";
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return response.json();
+}
+
+async function fetchJsonWithRetry(urlForEndpoint, endpoints, { timeoutMs, retry, fetchImpl } = {}) {
+  const normalizedRetry = normalizeQueryRetry(retry);
+  let lastError = null;
+  for (const endpoint of endpoints) {
+    for (let attempt = 0; attempt <= normalizedRetry.retries; attempt += 1) {
+      try {
+        return {
+          data: await fetchJson(urlForEndpoint(endpoint), { timeoutMs, fetchImpl }),
+          endpoint
+        };
+      } catch (error) {
+        lastError = error;
+        const retryable = isRetryableFetchError(error, normalizedRetry);
+        if (!retryable) {
+          throw error;
+        }
+        const canRetry = attempt < normalizedRetry.retries && retryable;
+        if (!canRetry) break;
+        await sleep(retryDelayMs(attempt + 1, normalizedRetry));
+      }
+    }
+  }
+  throw lastError;
 }
 
 function privacyEventsQuery({
@@ -281,15 +427,35 @@ function publicPrivacyAccount(material) {
 }
 
 export class ClairveilJS {
-  constructor({ rpc, rest, chainId, accountPrefix, bech32Prefix, shieldedPrefix, defaultDenom = defaultAssetDenom, assetDenom, registry = createClairveilRegistry() }) {
+  constructor({
+    rpc,
+    rest,
+    restEndpoints,
+    chainId,
+    accountPrefix,
+    bech32Prefix,
+    shieldedPrefix,
+    defaultDenom = defaultAssetDenom,
+    assetDenom,
+    registry = createClairveilRegistry(),
+    queryTimeoutMs = defaultFetchTimeoutMs,
+    fetchTimeoutMs,
+    queryRetry,
+    nullifierFailover = false
+  } = {}) {
     this.rpc = normalizeRpcEndpoint(rpc);
-    this.rest = normalizeRestEndpoint(rest);
+    this.restEndpoints = normalizeRestEndpoints(rest, restEndpoints);
+    this.rest = this.restEndpoints[0];
+    this.activeRestEndpoint = this.rest;
     this.chainId = chainId;
     this.accountPrefix = normalizeBech32Prefix(accountPrefix ?? bech32Prefix ?? defaultAccountPrefix, "accountPrefix");
     this.bech32Prefix = this.accountPrefix;
     this.shieldedPrefix = normalizeBech32Prefix(shieldedPrefix ?? `${this.accountPrefix}s`, "shieldedPrefix");
     this.defaultDenom = String(assetDenom ?? defaultDenom ?? defaultAssetDenom);
     this.registry = registry;
+    this.queryTimeoutMs = normalizeTimeoutMs(fetchTimeoutMs ?? queryTimeoutMs, "queryTimeoutMs");
+    this.queryRetry = normalizeQueryRetry(queryRetry);
+    this.nullifierFailover = Boolean(nullifierFailover);
     this.clientPromise = null;
   }
 
@@ -307,12 +473,42 @@ export class ClairveilJS {
     this.clientPromise = null;
   }
 
-  restUrl(path) {
-    return `${this.rest}${path}`;
+  restUrl(path, endpoint = this.activeRestEndpoint) {
+    return `${endpoint}${path}`;
+  }
+
+  async fetchJson(pathOrUrl, { failover = false, retry = this.queryRetry } = {}) {
+    const text = String(pathOrUrl || "");
+    const isAbsolute = /^https?:\/\//i.test(text);
+    if (isAbsolute) {
+      const result = await fetchJsonWithRetry(
+        url => url,
+        [text],
+        {
+          timeoutMs: this.queryTimeoutMs,
+          retry
+        }
+      );
+      return result.data;
+    }
+    const path = text;
+    const endpoints = failover
+      ? [this.activeRestEndpoint, ...this.restEndpoints.filter(endpoint => endpoint !== this.activeRestEndpoint)]
+      : [this.activeRestEndpoint];
+    const result = await fetchJsonWithRetry(
+      endpoint => this.restUrl(path, endpoint),
+      endpoints,
+      {
+        timeoutMs: this.queryTimeoutMs,
+        retry
+      }
+    );
+    this.activeRestEndpoint = result.endpoint;
+    return result.data;
   }
 
   async getAccountInfo(address) {
-    const data = await fetchJson(this.restUrl(`/cosmos/auth/v1beta1/account_info/${address}`));
+    const data = await this.fetchJson(`/cosmos/auth/v1beta1/account_info/${address}`, { failover: true });
     const info = data.info;
     if (!info?.account_number || info.sequence == null) {
       throw new Error("account not found on-chain; fund it first");
@@ -347,35 +543,43 @@ export class ClairveilJS {
   }
 
   async fetchPrivacyEvents(options = {}) {
-    return fetchJson(this.restUrl(`/clairveil/privacy/v1/events${privacyEventsQuery(options)}`));
+    return this.fetchJson(`/clairveil/privacy/v1/events${privacyEventsQuery(options)}`, { failover: true });
   }
 
   async fetchTreeState() {
-    return fetchJson(this.restUrl("/clairveil/privacy/v1/tree_state"));
+    return this.fetchJson("/clairveil/privacy/v1/tree_state", { failover: true });
   }
 
   async fetchCommitmentInfo(commitmentHex) {
-    return fetchJson(this.restUrl(`/clairveil/privacy/v1/commitment/${commitmentHex}`));
+    return this.fetchJson(`/clairveil/privacy/v1/commitment/${commitmentHex}`, { failover: true });
   }
 
   async lookupMerklePath(commitmentHex) {
-    return createRestMerklePathProvider({ rest: this.rest }).lookupMerklePath(commitmentHex);
+    return this.fetchJson(`/clairveil/privacy/v1/merkle_path/${commitmentHex}`, { failover: true });
   }
 
   async fetchAuditConfig() {
-    return fetchJson(this.restUrl("/clairveil/privacy/v1/audit_config"));
+    return this.fetchJson("/clairveil/privacy/v1/audit_config", { failover: true });
   }
 
   async fetchDisclosureConfig() {
-    return fetchJson(this.restUrl("/clairveil/privacy/v1/disclosure_config"));
+    return this.fetchJson("/clairveil/privacy/v1/disclosure_config", { failover: true });
   }
 
   async fetchCircuitConfig() {
-    return fetchJson(this.restUrl("/clairveil/privacy/v1/circuit_config"));
+    return this.fetchJson("/clairveil/privacy/v1/circuit_config", { failover: true });
+  }
+
+  async fetchReserve(denom) {
+    const normalizedDenom = String(denom || "").trim();
+    if (!normalizedDenom) {
+      throw new Error("reserve denom is required");
+    }
+    return this.fetchJson(`/clairveil/privacy/v1/reserve/${encodeURIComponent(normalizedDenom)}`, { failover: true });
   }
 
   async checkNullifier(nullifierHex) {
-    return fetchJson(this.restUrl(`/clairveil/privacy/v1/nullifier/${nullifierHex}`));
+    return this.fetchJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`, { failover: this.nullifierFailover });
   }
 
   async deriveWalletPrivacyMaterial(wallet) {
@@ -528,18 +732,34 @@ export class ClairveilJS {
   }
 
   buildDepositMessage(input) {
-    const material = buildDepositMaterialCore({
-      shieldedPrefix: this.shieldedPrefix,
-      assetDenom: input?.assetDenom ?? input?.denom ?? this.defaultDenom,
-      ...input
-    });
+    const material = input?.depositMaterial ?? input?.deposit_material ?? (
+      input?.material?.note_commitment && input?.material?.encrypted_note
+        ? input.material
+        : buildDepositMaterialCore({
+          shieldedPrefix: this.shieldedPrefix,
+          assetDenom: input?.assetDenom ?? input?.denom ?? this.defaultDenom,
+          ...input
+        })
+    );
+    const expectedCreator = String(input?.creator || "").trim();
+    if (expectedCreator && String(material.creator || "").trim() !== expectedCreator) {
+      throw new Error(`deposit material creator mismatch: expected ${expectedCreator}, got ${material.creator || ""}`);
+    }
+    const expectedAmount = input?.amount == null
+      ? ""
+      : parseCoin(input.amount, input?.assetDenom ?? input?.denom ?? this.defaultDenom).raw;
+    if (expectedAmount && String(material.amount || "").trim() !== expectedAmount) {
+      throw new Error(`deposit material amount mismatch: expected ${expectedAmount}, got ${material.amount || ""}`);
+    }
+    const proof = requiredDepositProof(input);
     return {
       material,
       message: {
         creator: material.creator,
         amount: material.amount,
         noteCommitment: material.note_commitment,
-        encryptedNote: material.encrypted_note
+        encryptedNote: material.encrypted_note,
+        proof
       }
     };
   }
@@ -656,14 +876,17 @@ export class ClairveilJS {
     };
   }
 
-  async prepareDeposit({ wallet, material, amount, memo = "Clairveil deposit", gasLimit = 2500000, denom, assetDenom } = {}) {
+  async prepareDeposit({ wallet, material, depositMaterial, deposit_material, amount, memo = "Clairveil deposit", gasLimit = 2500000, denom, assetDenom, proof, proofHex, proof_hex } = {}) {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const prepared = this.buildDepositMessage({
+      depositMaterial: depositMaterial ?? deposit_material,
       creator: privacy.address,
       rootSeed: privacy.rootSeed,
       amount,
       assetDenom: assetDenom ?? denom ?? this.defaultDenom,
-      memo
+      memo,
+      proof,
+      proofHex: proofHex ?? proof_hex
     });
     const signDoc = await this.buildDirectSignDoc({
       signer: privacy.address,
@@ -675,7 +898,7 @@ export class ClairveilJS {
           value: prepared.message
         }
       ],
-      memo: "Clairveil privacy deposit"
+      memo
     });
 
     return {
@@ -822,6 +1045,7 @@ export class ClairveilJS {
     max_pages,
     eventTypes,
     event_types,
+    expiresAtUnix,
     gasLimit = 5000000
   } = {}) {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
@@ -866,7 +1090,8 @@ export class ClairveilJS {
       assetDenom: assetDenom ?? denom ?? this.defaultDenom,
       recipient,
       rootSeed: privacy.rootSeed,
-      chainId: this.chainId
+      chainId: this.chainId,
+      expiresAtUnix
     });
     const signDoc = await this.buildDirectSignDoc({
       signer: privacy.address,
@@ -1155,6 +1380,53 @@ export class ClairveilJS {
     );
   }
 
+  async decodeSelfViewDisclosure({
+    txHash,
+    tx_hash,
+    address,
+    pubKeyHex,
+    pub_key_hex,
+    signatureBase64,
+    signature_base64,
+    skipSignerPubKeyCheck,
+    skip_signer_pubkey_check,
+    disclosureScalar,
+    disclosure_scalar,
+    disclosureScalarHex,
+    disclosure_scalar_hex,
+    ...eventQuery
+  }) {
+    const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
+    const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+    const directScalar = disclosureScalar ?? disclosure_scalar;
+    const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
+    if (directScalar != null || directScalarHex != null) {
+      return decodeSelfViewDisclosureFromEvent(
+        event,
+        directScalar != null ? directScalar : disclosureScalarFromHex(directScalarHex),
+        normalizedTxHash,
+        { shieldedPrefix: this.shieldedPrefix }
+      );
+    }
+    const signerPubKeyHex = pubKeyHex ?? pub_key_hex;
+    const skipSignerCheck = Boolean(skipSignerPubKeyCheck ?? skip_signer_pubkey_check);
+    if (!skipSignerCheck) {
+      assertSignerPubKey(address, signerPubKeyHex, this.bech32Prefix);
+    }
+    const material = derivePrivacyMaterial({
+      address,
+      pubKeyHex: signerPubKeyHex,
+      signatureBase64: signatureBase64 ?? signature_base64,
+      shieldedPrefix: this.shieldedPrefix
+    });
+    return decodeSelfViewDisclosureFromEvent(
+      event,
+      material.disclosureScalar,
+      normalizedTxHash,
+      { shieldedPrefix: this.shieldedPrefix }
+    );
+  }
+
   async decodeAuditDisclosure({ txHash, tx_hash, disclosurePrivKeyHex, disclosure_privkey_hex, ...eventQuery }) {
     const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
     const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
@@ -1207,13 +1479,25 @@ export class ClairveilJS {
     const txBytes = this.buildTxRawBytes(signedTx);
     const txhash = await client.broadcastTxSync(txBytes);
     const tx = await this.waitForTx(txhash, waitOptions);
+    const txCode = Number(tx?.code ?? 0);
+    const rawLog = String(tx?.raw_log || "");
+    const broadcast = {
+      txhash,
+      code: txCode,
+      raw_log: tx ? rawLog : `transaction was broadcast but not found yet: ${txhash}`
+    };
+    if (tx && txCode !== 0) {
+      const error = new Error(`broadcasted transaction failed with code ${txCode}: ${rawLog || "no raw log"}`);
+      error.txhash = txhash;
+      error.broadcast = broadcast;
+      error.tx = tx;
+      throw error;
+    }
     return {
-      broadcast: {
-        txhash,
-        code: 0,
-        raw_log: ""
-      },
-      tx
+      ok: Boolean(tx && txCode === 0),
+      broadcast,
+      tx,
+      error: tx ? "" : broadcast.raw_log
     };
   }
 
