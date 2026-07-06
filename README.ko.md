@@ -209,10 +209,10 @@ const withdraw = await clairveil.prepareWithdraw({
 });
 ```
 
-Relay withdraw는 two-party handoff로 지원합니다. wallet/DApp은 final withdraw payload를 만들고, product-defined relayer endpoint로 전달합니다. relayer는 payload hash, chain ID, recipient, expiry, address prefix를 검증한 뒤 자기 주소를 `MsgWithdraw.creator`로 넣어 sign doc을 만듭니다. payload의 `recipient`는 그대로 transparent withdraw target입니다.
+Relay withdraw는 two-party handoff로 지원합니다. wallet/DApp은 Cosmos와 EVM profile 모두에서 같은 `prepareRelayWithdraw(...)` API로 final withdraw payload를 만들고, product-defined relayer endpoint로 전달합니다. Cosmos profile은 relayer-side `MsgWithdraw` signing에 사용할 payload를 반환합니다. EVM profile은 같은 payload와 `IPrivacy.withdraw` transaction request를 함께 반환합니다. 단, relayer는 client가 보낸 `transaction`을 그대로 신뢰하지 말고 payload에서 transaction을 다시 만들거나 byte-for-byte로 검증해야 합니다. 검증 대상은 `to`, `data`, `chainId`, recipient, expiry, payload hash입니다.
 
 ```js
-const prepared = await clairveil.createRelayWithdrawPayload({
+const prepared = await clairveil.prepareRelayWithdraw({
   wallet,
   amount: "5uclair",
   recipient: "clair1...",
@@ -223,6 +223,28 @@ await fetch("/relayer/withdraw", {
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify({ payload: prepared.payload })
+});
+```
+
+EVM profile에서는 `prepared.transaction`을 user wallet에서 바로 보내지 말고 relayer에 candidate transaction으로 전달하세요. relayer는 payload에서 다시 만든 transaction과 일치할 때만 자기 EVM account로 broadcast해야 합니다.
+
+```js
+const prepared = await clairveil.prepareRelayWithdraw({
+  walletType: "evm",
+  address,
+  pubKeyHex,
+  signatureBase64,
+  amount: "5aokrw",
+  recipient: "0x..."
+});
+
+await fetch("/relayer/evm-withdraw", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    payload: prepared.payload,
+    transaction: prepared.transaction
+  })
 });
 ```
 

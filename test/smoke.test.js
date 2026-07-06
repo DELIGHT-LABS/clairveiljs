@@ -1646,6 +1646,197 @@ test("EVM client wraps existing transfer and withdraw messages without prepared 
   assert.equal(withdraw.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))"));
 });
 
+test("EVM client wraps prepared relay withdraw payloads into withdraw transactions", async () => {
+  const client = createClairveilEvmClient({
+    shieldedPrefix: "demos",
+    accountPrefix: "demo",
+    chainId: "demo-1",
+    defaultDenom: "udemo"
+  });
+  const payload = {
+    proof_hex: "01",
+    root_hex: "08".repeat(32),
+    nullifier_hex: "09".repeat(32),
+    amount: "1udemo",
+    recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
+    chain_id: "demo-1",
+    version: "v1",
+    expires_at_unix: 4102448400
+  };
+  payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
+
+  const withdraw = await client.buildWithdrawTransaction({ payload });
+
+  assert.equal(withdraw.payload, payload);
+  assert.equal(withdraw.message.recipient, payload.recipient);
+  assert.equal(withdraw.transaction.to, evmPrivacyPrecompileAddress);
+  assert.equal(withdraw.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))"));
+});
+
+test("EVM client requires an expected chain id for relay withdraw payload transactions", async () => {
+  const client = createClairveilEvmClient({
+    shieldedPrefix: "demos",
+    accountPrefix: "demo",
+    defaultDenom: "udemo"
+  });
+  const payload = {
+    proof_hex: "01",
+    root_hex: "08".repeat(32),
+    nullifier_hex: "09".repeat(32),
+    amount: "1udemo",
+    recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
+    chain_id: "demo-1",
+    version: "v1",
+    expires_at_unix: 4102448400
+  };
+  payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
+
+  await assert.rejects(
+    () => client.buildWithdrawTransaction({ payload }),
+    /expectedChainId is required for relay withdraw payload validation/
+  );
+
+  const withdraw = await client.buildWithdrawTransaction({
+    payload,
+    expectedChainId: "demo-1"
+  });
+  assert.equal(withdraw.message.chainId, "demo-1");
+});
+
+test("EVM withdraw transaction rejects payload and evmRecipient mismatches", async () => {
+  const client = createClairveilEvmClient({
+    shieldedPrefix: "demos",
+    accountPrefix: "demo",
+    chainId: "demo-1",
+    defaultDenom: "udemo"
+  });
+  const payload = {
+    proof_hex: "01",
+    root_hex: "08".repeat(32),
+    nullifier_hex: "09".repeat(32),
+    amount: "1udemo",
+    recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
+    chain_id: "demo-1",
+    version: "v1",
+    expires_at_unix: 4102448400
+  };
+  payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
+
+  await assert.rejects(
+    () => client.buildWithdrawTransaction({
+      payload,
+      evmRecipient: "0x2222222222222222222222222222222222222222"
+    }),
+    /evmRecipient does not match message recipient/
+  );
+});
+
+test("EVM withdraw transaction validates relay payload chain id and message recipient aliases", async () => {
+  const client = createClairveilEvmClient({
+    shieldedPrefix: "demos",
+    accountPrefix: "demo",
+    chainId: "demo-1",
+    defaultDenom: "udemo"
+  });
+  const payload = {
+    proof_hex: "01",
+    root_hex: "08".repeat(32),
+    nullifier_hex: "09".repeat(32),
+    amount: "1udemo",
+    recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
+    chain_id: "other-chain",
+    version: "v1",
+    expires_at_unix: 4102448400
+  };
+  payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
+
+  await assert.rejects(
+    () => client.buildWithdrawTransaction({ payload }),
+    /withdraw payload chain_id mismatch/
+  );
+
+  await assert.rejects(
+    () => client.buildWithdrawTransaction({
+      message: {
+        creator: "demo1example",
+        proof: new Uint8Array([1]),
+        root: new Uint8Array(32),
+        nullifier: new Uint8Array(32),
+        amount: "1udemo",
+        recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
+        recipientAddress: "0x2222222222222222222222222222222222222222",
+        chainId: "demo-1",
+        expiresAtUnix: 4102448400n
+      }
+    }),
+    /evmRecipient does not match message recipient/
+  );
+});
+
+test("browser-dapp prepareRelayWithdraw returns an EVM transaction for EVM profiles", async () => {
+  const client = createClairveilBrowserDappClient({
+    profile: {
+      transport: "evm",
+      chainId: "demo-1",
+      accountPrefix: "demo",
+      shieldedPrefix: "demos",
+      denom: "udemo",
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://127.0.0.1:1317",
+      evmRpc: "http://127.0.0.1:8545",
+      evmChainId: "0x539",
+      evmPrivacyPrecompileAddress: evmPrivacyPrecompileAddress
+    },
+    proverUrl: "http://127.0.0.1:8080"
+  });
+  client.privacyMaterial = () => ({
+    rootSeed: new Uint8Array(32),
+    address: "demo1example",
+    pubKeyHex: "02".padEnd(66, "0"),
+    shieldedAddress: "demos1example"
+  });
+  let captured = null;
+  client.cosmos.prepareRelayWithdraw = async input => {
+    captured = input;
+    const payload = {
+      proof_hex: "01",
+      root_hex: "08".repeat(32),
+      nullifier_hex: "09".repeat(32),
+      amount: input.amount,
+      recipient: input.recipient,
+      chain_id: "demo-1",
+      version: "v1",
+      expires_at_unix: 4102448400
+    };
+    payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
+    return {
+      status: "ready",
+      plan: { status: "final_withdraw_ready", canBuildTx: true },
+      payload,
+      proof: { version: "v1", payload_hash: payload.payload_hash, proof_hex: "01" },
+      proverPayload: { payload_hash: payload.payload_hash },
+      selectedNote: { nullifier: "09".repeat(32) },
+      privacyAccount: { shielded_address: "demos1example" }
+    };
+  };
+
+  const prepared = await client.prepareRelayWithdraw({
+    walletType: "evm",
+    address: "demo1example",
+    pubKeyHex: "02".padEnd(66, "0"),
+    signatureBase64: "AQID",
+    amount: "1udemo",
+    recipient: "0x1111111111111111111111111111111111111111"
+  });
+
+  assert.equal(captured.recipient, evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"));
+  assert.equal(prepared.payload, prepared.prepared.payload);
+  assert.equal(prepared.prepared.evmRecipient, "0x1111111111111111111111111111111111111111");
+  assert.equal(prepared.transaction.chainId, "0x539");
+  assert.equal(prepared.transaction.to, evmPrivacyPrecompileAddress);
+  assert.equal(prepared.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))"));
+});
+
 test("EVM address helpers round-trip through custom bech32 accounts", () => {
   const address = "0x1111111111111111111111111111111111111111";
   const bech32 = evmAddressToBech32(address, "demo");
@@ -1704,18 +1895,30 @@ test("EVM reference deposit encoder matches the proofless precompile signature",
   assert.equal(encoded.slice(2, 10), functionSelector("deposit(uint256,bytes32,bytes)"));
 });
 
-test("EVM reference withdraw encoder accepts evmRecipient with bech32 payload recipient", () => {
+test("EVM reference withdraw encoder compares evmRecipient with bech32 recipient", () => {
   const encoded = encodeReferenceEvmWithdraw({
     proof: new Uint8Array([1, 2, 3]),
     root: new Uint8Array(32).fill(1),
     nullifier: new Uint8Array(32).fill(2),
     amount: "1aokrw",
     recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
-    evmRecipient: "0x2222222222222222222222222222222222222222",
+    evmRecipient: "0x1111111111111111111111111111111111111111",
     expiresAtUnix: 1234
-  }, { accountPrefix: "demo" });
-
+  });
   assert.equal(encoded.slice(2, 10), functionSelector("withdraw(bytes,bytes32,bytes32,uint256,address,string,uint64)"));
+
+  assert.throws(
+    () => encodeReferenceEvmWithdraw({
+      proof: new Uint8Array([1, 2, 3]),
+      root: new Uint8Array(32).fill(1),
+      nullifier: new Uint8Array(32).fill(2),
+      amount: "1aokrw",
+      recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
+      evmRecipient: "0x2222222222222222222222222222222222222222",
+      expiresAtUnix: 1234
+    }),
+    /evmRecipient does not match message recipient/
+  );
 });
 
 test("ABI encoder uses Solidity offsets for bytes arrays inside tuples", () => {

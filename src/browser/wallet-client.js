@@ -780,6 +780,32 @@ export class ClairveilBrowserClient {
       expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix
     });
     if (prepared.status !== "ready") throw plannerError(prepared);
+    if (walletType === "evm") {
+      const built = await this.evm.buildWithdrawTransaction({
+        payload: prepared.payload,
+        proof: prepared.proof,
+        proverPayload: prepared.proverPayload,
+        selectedNote: prepared.selectedNote,
+        evmRecipient: evmRecipient || undefined,
+        transactionOptions: body.transactionOptions ?? body.transaction_options
+      });
+      return {
+        payload: prepared.payload,
+        transaction: { chainId: this.evmChainId, gas: this.evmGasLimit, ...built.transaction },
+        prepared: {
+          shieldedAddress: prepared.privacyAccount.shielded_address,
+          amount: prepared.payload.amount,
+          recipient: prepared.payload.recipient,
+          evmRecipient,
+          selectedNoteNullifier: prepared.selectedNote?.nullifier || prepared.payload.nullifier_hex,
+          expiresAtUnix: prepared.payload.expires_at_unix,
+          payload: prepared.payload,
+          proof: prepared.proof,
+          message: built.message
+        },
+        plan: prepared.plan
+      };
+    }
     return {
       payload: prepared.payload,
       prepared: {

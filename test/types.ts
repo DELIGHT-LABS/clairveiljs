@@ -10,6 +10,10 @@ import {
   type PreparedDeposit,
   type PreparedEvmDeposit,
   type PrepareRelayWithdrawInput,
+  type PrepareCosmosRelayWithdrawInput,
+  type PrepareEvmRelayWithdrawInput,
+  type PreparedCosmosRelayWithdraw,
+  type PreparedEvmRelayWithdraw,
   type PreparedRelayWithdraw,
   type PreparedRelayWithdrawSignDoc,
   type PrepareTransferInput,
@@ -201,6 +205,10 @@ const relayWithdrawInput: PrepareRelayWithdrawInput = {
   ...withdrawInput,
   expiresAtUnix: 4102448400
 };
+const cosmosRelayWithdrawInput: PrepareCosmosRelayWithdrawInput = {
+  ...withdrawInput,
+  expiresAtUnix: 4102448400
+};
 const scanInput: ScanWalletNotesInput = {
   ...walletIdentity,
   limit: 50,
@@ -266,6 +274,21 @@ const evmDirectWithdrawResult: Promise<PreparedEvmWithdraw> = evmDirectDappClien
   recipient: "demo1recipient"
 });
 const withdrawResult: Promise<PreparedWithdraw> = dappClient.prepareWithdraw(withdrawInput);
+const cosmosRelayWithdrawResult: Promise<PreparedCosmosRelayWithdraw> = dappClient.prepareRelayWithdraw(cosmosRelayWithdrawInput);
+const evmProfileRelayWithdrawResult: Promise<PreparedEvmRelayWithdraw> = evmProfileDappClient.prepareRelayWithdraw({
+  ...walletIdentity,
+  amount: "1udemo",
+  recipient: "demo1recipient",
+  transactionOptions: { value: "0x0" }
+});
+const evmDirectRelayWithdrawInput: PrepareEvmRelayWithdrawInput = {
+  ...walletIdentity,
+  walletType: "evm",
+  amount: "1udemo",
+  recipient: "demo1recipient",
+  transaction_options: { value: "0x0" }
+};
+const evmDirectRelayWithdrawResult: Promise<PreparedEvmRelayWithdraw> = evmDirectDappClient.prepareRelayWithdraw(evmDirectRelayWithdrawInput);
 const relayWithdrawResult: Promise<PreparedRelayWithdraw> = dappClient.prepareRelayWithdraw(relayWithdrawInput);
 const scanResult: Promise<ScanWalletNotesResult> = dappClient.scanWalletNotes(scanInput);
 const nullifierResult: Promise<object & { used?: boolean }> = dappClient.checkNullifier("00".repeat(32));
@@ -354,6 +377,9 @@ async function browserDappTypeSmoke() {
 
   const relayWithdraw = await relayWithdrawResult;
   const relayWithdrawPayloadHash: string = relayWithdraw.payload.payload_hash;
+  const evmRelayWithdraw = await evmProfileRelayWithdrawResult;
+  const evmRelayWithdrawTo: string = evmRelayWithdraw.transaction.to;
+  const evmRelayWithdrawRecipient: string | undefined = evmRelayWithdraw.prepared.message?.evmRecipient;
   const relaySignDocResult: Promise<PreparedRelayWithdrawSignDoc> = dappClient.createRelayWithdrawSignDoc({
     payload: relayWithdraw.payload,
     address: "demo1relayer",
@@ -393,6 +419,8 @@ async function browserDappTypeSmoke() {
     evmProfileWithdrawTo,
     evmDirectWithdrawTo,
     relayWithdrawPayloadHash,
+    evmRelayWithdrawTo,
+    evmRelayWithdrawRecipient,
     relaySigner,
     spendableTotal,
     nextScanAfterHeight,

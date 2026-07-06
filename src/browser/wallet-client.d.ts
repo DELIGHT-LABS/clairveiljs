@@ -13,7 +13,7 @@ import type {
   SignDocBase64,
   TxSearchResult
 } from "../transport/cosmos-client.js";
-import type { EvmTransactionRequest } from "../transport/evm.js";
+import type { EvmPrivacyTransactionOptions, EvmTransactionRequest, EvmWithdrawMessage } from "../transport/evm.js";
 import type { CoinString } from "../core/note.js";
 import type { DisclosureReport } from "../core/disclosure.js";
 import type {
@@ -319,18 +319,59 @@ export interface PreparedEvmWithdraw {
 
 export type PreparedWithdraw = PreparedCosmosWithdraw | PreparedEvmWithdraw;
 
-export interface PrepareRelayWithdrawInput extends PrepareWithdrawInput {}
+export interface PrepareEvmRelayWithdrawTransactionOptionsInput {
+  transactionOptions?: EvmPrivacyTransactionOptions;
+  transaction_options?: EvmPrivacyTransactionOptions;
+}
+
+export type PrepareRelayWithdrawBaseInput = PrepareWithdrawBaseInput;
+
+export type PrepareCosmosRelayWithdrawInput = PrepareRelayWithdrawBaseInput & {
+  walletType?: "cosmos";
+  wallet_type?: "cosmos";
+};
+
+export type PrepareEvmRelayWithdrawInput = PrepareRelayWithdrawBaseInput & PrepareEvmRelayWithdrawTransactionOptionsInput & (
+  | { walletType: "evm"; wallet_type?: "evm" }
+  | { walletType?: "evm"; wallet_type: "evm" }
+);
+
+export type PrepareDefaultEvmProfileRelayWithdrawInput = PrepareRelayWithdrawBaseInput & PrepareEvmRelayWithdrawTransactionOptionsInput & {
+  walletType?: undefined;
+  wallet_type?: undefined;
+};
+
+export type PrepareRelayWithdrawInput<TDefaultWalletType extends BrowserWalletType = "cosmos"> =
+  | PrepareCosmosRelayWithdrawInput
+  | PrepareEvmRelayWithdrawInput
+  | (TDefaultWalletType extends "evm" ? PrepareDefaultEvmProfileRelayWithdrawInput : never);
 
 export interface PreparedRelayWithdrawSummary extends PreparedWithdrawSummary {
   payload: PreparedWithdrawPayload;
   proof?: PreparedWithdrawProof;
 }
 
-export interface PreparedRelayWithdraw {
+export interface PreparedEvmRelayWithdrawSummary extends Omit<PreparedRelayWithdrawSummary, "message"> {
+  message?: EvmWithdrawMessage;
+}
+
+export interface PreparedCosmosRelayWithdraw {
   payload: PreparedWithdrawPayload;
+  signDoc?: never;
+  transaction?: never;
   prepared: PreparedRelayWithdrawSummary;
   plan: WithdrawPlan;
 }
+
+export interface PreparedEvmRelayWithdraw {
+  payload: PreparedWithdrawPayload;
+  signDoc?: never;
+  transaction: EvmTransactionRequest;
+  prepared: PreparedEvmRelayWithdrawSummary;
+  plan: WithdrawPlan;
+}
+
+export type PreparedRelayWithdraw = PreparedCosmosRelayWithdraw | PreparedEvmRelayWithdraw;
 
 export interface CreateRelayWithdrawSignDocInput {
   payload: PreparedWithdrawPayload;
@@ -422,7 +463,10 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   prepareWithdraw(input: PrepareEvmWithdrawInput): Promise<PreparedEvmWithdraw>;
   prepareWithdraw(input: PrepareCosmosWithdrawInput): Promise<PreparedCosmosWithdraw>;
   prepareWithdraw(input: PrepareWithdrawInput): Promise<PreparedWithdraw>;
-  prepareRelayWithdraw(input: PrepareRelayWithdrawInput): Promise<PreparedRelayWithdraw>;
+  prepareRelayWithdraw(input: TDefaultWalletType extends "evm" ? PrepareDefaultEvmProfileRelayWithdrawInput : never): Promise<PreparedEvmRelayWithdraw>;
+  prepareRelayWithdraw(input: PrepareEvmRelayWithdrawInput): Promise<PreparedEvmRelayWithdraw>;
+  prepareRelayWithdraw(input: PrepareCosmosRelayWithdrawInput): Promise<PreparedCosmosRelayWithdraw>;
+  prepareRelayWithdraw(input: PrepareRelayWithdrawInput<TDefaultWalletType>): Promise<PreparedRelayWithdraw>;
   buildRelayWithdrawMessageFromPayload(input: CreateRelayWithdrawSignDocInput): WithdrawMessage;
   createRelayWithdrawSignDoc(input: CreateRelayWithdrawSignDocInput): Promise<PreparedRelayWithdrawSignDoc>;
   scanWalletNotes(input: ScanWalletNotesInput): Promise<ScanWalletNotesResult>;

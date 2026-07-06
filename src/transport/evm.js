@@ -8,7 +8,9 @@ import {
   buildPreparedTransferPayload,
   buildTransferMessage,
   buildPreparedWithdrawProverPayload,
-  buildWithdrawMessage
+  buildWithdrawMsgFromPayload,
+  buildWithdrawMessage,
+  validateRelayWithdrawPayload
 } from "../privacy/payload.js";
 import {
   defaultShieldedPrefix,
@@ -356,9 +358,34 @@ function bytesArray(value, label, byteLength) {
   return value.map((item, index) => requiredBytes(item, `${label}[${index}]`, byteLength));
 }
 
-function withdrawRecipientToEvmAddress(message, options = {}) {
+function explicitWithdrawEvmRecipient(message) {
   const recipient = valueFrom(message, ["evmRecipient", "evm_recipient", "recipientAddress", "recipient_address"], null);
-  if (recipient) return normalizeEvmAddress(recipient, "withdraw recipient");
+  return recipient ? normalizeEvmAddress(recipient, "withdraw recipient") : "";
+}
+
+function assertWithdrawEvmRecipientMatchesMessage(evmRecipient, messageRecipient, accountPrefix) {
+  if (!evmRecipient || messageRecipient == null) return;
+  const recipient = String(messageRecipient).trim();
+  if (!recipient) return;
+  if (isEvmAddress(recipient)) {
+    const normalizedRecipient = normalizeEvmAddress(recipient, "withdraw recipient");
+    if (normalizedRecipient.toLowerCase() !== evmRecipient.toLowerCase()) {
+      throw new Error(`withdraw evmRecipient does not match message recipient: ${evmRecipient} does not match ${normalizedRecipient}`);
+    }
+    return;
+  }
+  const decodedRecipient = bech32AddressToEvm(recipient, accountPrefix);
+  if (decodedRecipient.toLowerCase() !== evmRecipient.toLowerCase()) {
+    throw new Error(`withdraw evmRecipient does not match message recipient: ${evmRecipient} does not match ${decodedRecipient}`);
+  }
+}
+
+function withdrawRecipientToEvmAddress(message, options = {}) {
+  const recipient = explicitWithdrawEvmRecipient(message);
+  if (recipient) {
+    assertWithdrawEvmRecipientMatchesMessage(recipient, valueFrom(message, ["recipient"], null), options.accountPrefix);
+    return recipient;
+  }
   const fallback = valueFrom(message, ["recipient"], null);
   if (isEvmAddress(fallback)) return normalizeEvmAddress(fallback, "withdraw recipient");
   return bech32AddressToEvm(fallback, options.accountPrefix);
@@ -724,24 +751,71 @@ export class ClairveilEvmClient {
   }
 
   async buildWithdrawTransaction(input = {}) {
+    const accountPrefix = input.accountPrefix ?? this.accountPrefix;
     const evmRecipient = input.evmRecipient
       ?? input.evm_recipient
       ?? (isEvmAddress(input.recipient) ? normalizeEvmAddress(input.recipient, "withdraw recipient") : undefined);
     const recipient = evmRecipient
-      ? evmAddressToBech32(evmRecipient, input.accountPrefix ?? this.accountPrefix)
+      ? evmAddressToBech32(evmRecipient, accountPrefix)
       : input.recipient;
-    const built = input.message
-      ? { message: input.message, payload: input.payload, proof: input.proof, proverPayload: input.proverPayload }
-      : await buildWithdrawMessage({
+    let built;
+    if (input.message) {
+      built = {
+        message: input.message,
+        payload: input.payload,
+        proof: input.proof,
+        proverPayload: input.proverPayload,
+        selectedNote: input.selectedNote
+      };
+    } else if (input.payload) {
+      const expectedRecipientInput = input.expectedRecipient
+        ?? input.expected_recipient
+        ?? (input.recipient == null ? undefined : recipient);
+      const expectedRecipient = isEvmAddress(expectedRecipientInput)
+        ? evmAddressToBech32(expectedRecipientInput, accountPrefix)
+        : expectedRecipientInput;
+      const expectedChainId = input.expectedChainId
+        ?? input.expected_chain_id
+        ?? input.chainId
+        ?? input.chain_id
+        ?? this.chainId;
+      if (!String(expectedChainId ?? "").trim()) {
+        throw new Error("expectedChainId is required for relay withdraw payload validation");
+      }
+      validateRelayWithdrawPayload(input.payload, {
+        nowUnix: input.nowUnix ?? input.now_unix,
+        expectedChainId,
+        expectedRecipient,
+        accountPrefix
+      });
+      built = {
+        message: buildWithdrawMsgFromPayload(
+          input.payload,
+          input.relayer ?? input.creator ?? input.address ?? "",
+          input.nowUnix ?? input.now_unix
+        ),
+        payload: input.payload,
+        proof: input.proof,
+        proverPayload: input.proverPayload,
+        selectedNote: input.selectedNote
+      };
+    } else {
+      built = await buildWithdrawMessage({
         assetDenom: input.assetDenom ?? input.denom ?? this.defaultDenom,
         ...input,
         recipient,
-        accountPrefix: input.accountPrefix ?? this.accountPrefix,
+        accountPrefix,
         chainId: input.chainId ?? this.chainId
       });
-    const message = evmRecipient
+    }
+    const candidateMessage = evmRecipient
       ? { ...built.message, evmRecipient }
       : built.message;
+    const messageEvmRecipient = explicitWithdrawEvmRecipient(candidateMessage);
+    assertWithdrawEvmRecipientMatchesMessage(messageEvmRecipient, candidateMessage?.recipient, accountPrefix);
+    const message = messageEvmRecipient
+      ? { ...candidateMessage, evmRecipient: messageEvmRecipient }
+      : candidateMessage;
     return {
       status: "ready",
       ...built,

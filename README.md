@@ -82,7 +82,7 @@ Current boundary:
 - User disclosure decoding is handled in JS.
 - Auditor disclosure decoding is handled in JS with a request-level disclosure private scalar supplied by a trusted admin/backend/local auditor runtime.
 - Cosmos transport uses CosmJS/Keplr-style signing. EVM transport uses the Clairveil-compatible `IPrivacy` precompile calldata contract.
-- Relay withdraw is supported as a two-party handoff: the wallet/DApp prepares the final withdraw payload, and a relayer validates that payload before signing `MsgWithdraw` as the relayer creator. The transport between wallet and relayer is product-defined.
+- Relay withdraw is supported as a two-party handoff. The wallet/DApp prepares the final withdraw payload with one API. Cosmos relayers validate that payload before signing `MsgWithdraw` as the relayer creator; EVM relayers rebuild or byte-for-byte validate the returned `IPrivacy.withdraw` transaction before submitting it from their own EVM account.
 - The SDK files are ESM and avoid direct `node:crypto` imports. Browser bundlers still need to provide normal web APIs such as `fetch`, `TextEncoder`, `TextDecoder`, and `crypto.getRandomValues`.
 - The default prefixes are the Clairveil reference prefixes (`clair` accounts and `clairs` shielded addresses), but account and shielded prefixes are runtime configuration. Use `accountPrefix`/`shieldedPrefix` when targeting a downstream Cosmos chain that embeds the Clairveil privacy module.
 
@@ -525,10 +525,10 @@ if (withdraw.status === "ready") {
 }
 ```
 
-For relay withdraw, the wallet/DApp prepares a final payload and sends it to a product-defined relayer endpoint. The relayer must validate the payload hash, chain ID, recipient, expiry, and address prefix before signing. The relayer address becomes `MsgWithdraw.creator`; the payload recipient remains the transparent withdraw target.
+For relay withdraw, the wallet/DApp prepares a final payload and sends it to a product-defined relayer endpoint. Use the same `prepareRelayWithdraw(...)` call for Cosmos and EVM profiles. Cosmos returns a payload for relayer-side `MsgWithdraw` signing. EVM returns the same payload plus an `IPrivacy.withdraw` transaction request, but the relayer must still rebuild or byte-for-byte validate that transaction from the payload before broadcasting it from its own EVM account. Do not trust a client-supplied `transaction` without checking its `to`, `data`, `chainId`, recipient, expiry, and payload hash.
 
 ```js
-const prepared = await clairveil.createRelayWithdrawPayload({
+const prepared = await clairveil.prepareRelayWithdraw({
   wallet,
   amount: "5uclair",
   recipient: "clair1...",
@@ -539,6 +539,28 @@ await fetch("/relayer/withdraw", {
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify({ payload: prepared.payload })
+});
+```
+
+For an EVM profile, forward `prepared.transaction` to the relayer as a candidate transaction instead of asking the user wallet to send it. The relayer should reject it unless it matches the transaction it rebuilds from `prepared.payload`:
+
+```js
+const prepared = await clairveil.prepareRelayWithdraw({
+  walletType: "evm",
+  address,
+  pubKeyHex,
+  signatureBase64,
+  amount: "5aokrw",
+  recipient: "0x..."
+});
+
+await fetch("/relayer/evm-withdraw", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    payload: prepared.payload,
+    transaction: prepared.transaction
+  })
 });
 ```
 

@@ -170,10 +170,21 @@ export interface EvmWithdrawTransactionInput extends PreparedWithdrawProverPaylo
   payload?: PreparedWithdrawPayload;
   proof?: PreparedWithdrawProof;
   proverPayload?: PreparedWithdrawProverPayload;
+  selectedNote?: FoundNote;
   proverAdapter?: ProverAdapter;
   transactionOptions?: EvmPrivacyTransactionOptions;
   evmRecipient?: string;
   evm_recipient?: string;
+  relayer?: string;
+  creator?: string;
+  address?: string;
+  nowUnix?: number;
+  now_unix?: number;
+  expectedChainId?: string;
+  expected_chain_id?: string;
+  expectedRecipient?: ClairAddress | string;
+  expected_recipient?: ClairAddress | string;
+  chain_id?: string;
 }
 
 export interface EvmWithdrawTransactionResult {
