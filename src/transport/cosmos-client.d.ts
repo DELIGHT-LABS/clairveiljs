@@ -55,7 +55,7 @@ import type {
   WithdrawMessage,
   WithdrawMessageBuildResult
 } from "../privacy/payload.js";
-import type { TransferPlan, WithdrawPlan } from "../privacy/planner.js";
+import type { TransferBatchPlan, TransferPlan, WithdrawPlan } from "../privacy/planner.js";
 import type { ProverAdapter } from "../privacy/prover.js";
 import type { ScanResult } from "../privacy/scan.js";
 import type { MemoryNoteStore } from "../privacy/note-store.js";
@@ -138,6 +138,8 @@ export interface ReserveResponse {
 export interface PrivacyEventsQuery {
   afterHeight?: number;
   after_height?: number;
+  afterSequence?: number;
+  after_sequence?: number;
   page?: number;
   limit?: number;
   eventTypes?: string[];
@@ -150,21 +152,29 @@ export interface PrivacyScanOptions extends PrivacyEventsQuery {
 }
 
 export interface PrivacyEventsCursor {
+  source?: "scan_events" | string;
   after_height: number;
-  page: number;
+  after_sequence?: number;
+  page?: number;
   limit: number;
   event_types: string[];
   has_more: boolean;
   latest_height: number;
+  latest_sequence?: number;
   latest_tx_hash: Hex | "";
+  next_height?: number;
+  next_sequence?: number;
   next_page?: number;
   pages_scanned?: number;
   completed?: boolean;
+  scan_format_version?: number;
+  view_tag_version?: number;
 }
 
 export interface PrivacyScanResumeOptions {
   afterHeight: number;
-  page: number;
+  afterSequence?: number;
+  page?: number;
   limit: number;
   eventTypes: string[];
   maxPages?: number;
@@ -230,6 +240,25 @@ export interface PreparedTransfer {
   proof?: PreparedTransferProof;
   message?: TransferMessage;
   prepared?: PreparedTransferSummary;
+  privacyAccount: PrivacyAccountSummary;
+}
+
+export interface PreparedTransferBatchSummary {
+  planAction: "batch_transfer";
+  amounts: CoinString[];
+  recipient: ShieldedAddress;
+  selectedInputTotals: string[];
+}
+
+export interface PreparedTransferBatch {
+  status: string;
+  plan: TransferBatchPlan;
+  scan: ScanResult;
+  signDoc?: SignDocBase64;
+  payloads?: PreparedTransferPayload[];
+  proofs?: PreparedTransferProof[];
+  messages?: TransferMessage[];
+  prepared?: PreparedTransferBatchSummary;
   privacyAccount: PrivacyAccountSummary;
 }
 
@@ -319,6 +348,9 @@ export class ClairveilJS {
   fetchJson<T = object>(pathOrUrl: string, options?: {
     failover?: boolean;
     retry?: QueryRetryOptions | false;
+    method?: string;
+    body?: BodyInit | null;
+    headers?: Record<string, string>;
   }): Promise<T>;
   getAccountInfo(address: ClairAddress): Promise<{ accountNumber: bigint; sequence: bigint }>;
   getBalances(address: ClairAddress): Promise<object>;
@@ -333,10 +365,19 @@ export class ClairveilJS {
   fetchReserve(denom: string): Promise<ReserveResponse>;
   lookupMerklePath(commitmentHex: Hex): Promise<object>;
   checkNullifier(nullifierHex: Hex): Promise<object>;
+  checkNullifiers(nullifierHexes: Hex[]): Promise<Map<Hex, boolean>>;
   deriveWalletPrivacyMaterial(wallet: WalletAdapterLike): Promise<PrivacyMaterial>;
   scanNotes(input: WalletScanInput): Promise<ScanResult & {
     scanCursor: PrivacyEventsCursor;
     nextScanOptions: PrivacyScanResumeOptions;
+  }>;
+  fetchScanEvents(options?: PrivacyEventsQuery): Promise<object & {
+    events?: object[];
+    next_height?: number;
+    next_sequence?: number;
+    has_more?: boolean;
+    scan_format_version?: number;
+    view_tag_version?: number;
   }>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
   findPrivacyEventByTxHash(txHash: Hex, options?: PrivacyEventsQuery & {
@@ -409,6 +450,22 @@ export class ClairveilJS {
     maxPages?: number;
     scan?: PrivacyScanOptions;
   }): Promise<PreparedTransfer>;
+  prepareTransferBatch(input: {
+    wallet?: WalletAdapterLike;
+    material?: PrivacyMaterial;
+    amounts: CoinString[];
+    recipient: ShieldedAddress;
+    proverAdapter: ProverAdapter;
+    gasLimit?: number;
+    userPrivacyPolicy?: string | number;
+    userDisclosureMode?: string | number;
+    userDisclosureTargetPubKeyHex?: Hex;
+    auditDisclosureTargetPubKeyHex?: Hex;
+    denom?: string;
+    limit?: number;
+    maxPages?: number;
+    scan?: PrivacyScanOptions;
+  }): Promise<PreparedTransferBatch>;
   prepareWithdraw(input: {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
@@ -438,6 +495,7 @@ export class ClairveilJS {
   }): Promise<PreparedRelayWithdraw>;
   createDepositSignDoc(input: Parameters<ClairveilJS["prepareDeposit"]>[0]): Promise<PreparedDeposit>;
   createTransferSignDoc(input: Parameters<ClairveilJS["prepareTransfer"]>[0]): Promise<PreparedTransfer & { status: "ready"; signDoc: SignDocBase64 }>;
+  createTransferBatchSignDoc(input: Parameters<ClairveilJS["prepareTransferBatch"]>[0]): Promise<PreparedTransferBatch & { status: "ready"; signDoc: SignDocBase64 }>;
   createWithdrawSignDoc(input: Parameters<ClairveilJS["prepareWithdraw"]>[0]): Promise<PreparedWithdraw & { status: "ready"; signDoc: SignDocBase64 }>;
   createRelayWithdrawPayload(input: Parameters<ClairveilJS["prepareRelayWithdraw"]>[0]): Promise<PreparedRelayWithdraw & { status: "ready"; payload: PreparedWithdrawPayload }>;
   buildPreparedTransferPayload(input: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;

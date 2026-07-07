@@ -25,10 +25,10 @@ const zeroWord = "0".repeat(64);
 const emptyBytes = new Uint8Array();
 const zeroBytes32 = new Uint8Array(32);
 const referenceDepositSignature = "deposit(uint256,bytes32,bytes)";
-const referenceTransferSignature = "shieldedTransfer(bytes,bytes32,bytes32[],bytes32[],bytes[],uint8,uint8,bytes32,bytes32,bytes,bytes32,bytes32,bytes)";
+const referenceTransferSignature = "shieldedTransfer(bytes,bytes32,bytes32[],bytes32[],bytes[],bytes[],uint8,uint8,bytes32,bytes32,bytes,bytes32,bytes32,bytes)";
 const referenceWithdrawSignature = "withdraw(bytes,bytes32,bytes32,uint256,address,string,uint64)";
 const evmPrivacyDepositSignature = "deposit((string,bytes,bytes))";
-const evmPrivacyTransferSignature = "transfer((bytes,bytes,bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))";
+const evmPrivacyTransferSignature = "transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))";
 const evmPrivacyWithdrawSignature = "withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))";
 
 export const evmPrivacyPrecompileAddress = "0x100000000000000000000000000000000000000b";
@@ -65,6 +65,7 @@ export const evmPrivacyPrecompileAbi = Object.freeze([
           { name: "nullifiers", type: "bytes[]" },
           { name: "newCommitments", type: "bytes[]" },
           { name: "cipherTexts", type: "bytes[]" },
+          { name: "viewTags", type: "bytes[]" },
           { name: "userPrivacyPolicy", type: "uint32" },
           { name: "userDisclosureDigest", type: "bytes" },
           { name: "userDisclosureMode", type: "uint8" },
@@ -419,13 +420,14 @@ export function encodeReferenceEvmDeposit(message, options = {}) {
 export function encodeReferenceEvmTransfer(message, options = {}) {
   return encodeFunctionData(
     options.signature || referenceTransferSignature,
-    ["bytes", "bytes32", "bytes32[]", "bytes32[]", "bytes[]", "uint8", "uint8", "bytes32", "bytes32", "bytes", "bytes32", "bytes32", "bytes"],
+    ["bytes", "bytes32", "bytes32[]", "bytes32[]", "bytes[]", "bytes[]", "uint8", "uint8", "bytes32", "bytes32", "bytes", "bytes32", "bytes32", "bytes"],
     [
       message.proof,
       bytes32Word(message.root, "transfer root"),
       message.nullifiers,
       message.newCommitments,
       message.cipherTexts,
+      bytesArray(message.viewTags, "transfer view tags", 2),
       message.userPrivacyPolicy ?? 0,
       message.userDisclosureMode ?? 0,
       optionalBytes32(message.userDisclosureDigest),
@@ -486,6 +488,7 @@ export function encodeEvmPrivacyTransfer(message, options = {}) {
     nullifiers: bytesArray(message.nullifiers, "transfer nullifiers", 32),
     newCommitments: bytesArray(message.newCommitments, "transfer new commitments", 32),
     cipherTexts: bytesArray(message.cipherTexts, "transfer cipher texts"),
+    viewTags: bytesArray(message.viewTags, "transfer view tags", 2),
     userPrivacyPolicy: message.userPrivacyPolicy ?? 0,
     userDisclosureDigest: optionalBytes(message.userDisclosureDigest),
     userDisclosureMode: message.userDisclosureMode ?? 0,

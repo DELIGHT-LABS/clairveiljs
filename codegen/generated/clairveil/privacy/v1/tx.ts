@@ -149,6 +149,13 @@ export interface MsgTransfer {
    */
   selfViewDisclosureDigest: Uint8Array;
   selfViewDisclosurePayload: Uint8Array;
+  /**
+   * Per-output scan performance tags. Tags are not circuit-bound in this
+   * format version; wallets must treat them as untrusted hints. Safe default
+   * scans must full-decrypt on tag mismatch; explicit fast modes may skip
+   * well-formed mismatches only when recovery/rescan policy is in place.
+   */
+  viewTags: Uint8Array[];
 }
 /**
  * MsgDepositResponse
@@ -360,7 +367,8 @@ function createBaseMsgTransfer(): MsgTransfer {
     auditDisclosureTargetPubkey: new Uint8Array(),
     auditDisclosurePayload: new Uint8Array(),
     selfViewDisclosureDigest: new Uint8Array(),
-    selfViewDisclosurePayload: new Uint8Array()
+    selfViewDisclosurePayload: new Uint8Array(),
+    viewTags: []
   };
 }
 /**
@@ -420,6 +428,9 @@ export const MsgTransfer = {
     if (message.selfViewDisclosurePayload.length !== 0) {
       writer.uint32(130).bytes(message.selfViewDisclosurePayload);
     }
+    for (const v of message.viewTags) {
+      writer.uint32(138).bytes(v!);
+    }
     return writer;
   },
   decode(input: BinaryReader | Uint8Array, length?: number): MsgTransfer {
@@ -477,6 +488,9 @@ export const MsgTransfer = {
         case 16:
           message.selfViewDisclosurePayload = reader.bytes();
           break;
+        case 17:
+          message.viewTags.push(reader.bytes());
+          break;
         default:
           reader.skipType(tag & 7);
           break;
@@ -502,6 +516,7 @@ export const MsgTransfer = {
     message.auditDisclosurePayload = object.auditDisclosurePayload ?? new Uint8Array();
     message.selfViewDisclosureDigest = object.selfViewDisclosureDigest ?? new Uint8Array();
     message.selfViewDisclosurePayload = object.selfViewDisclosurePayload ?? new Uint8Array();
+    message.viewTags = object.viewTags?.map(e => e) || [];
     return message;
   }
 };

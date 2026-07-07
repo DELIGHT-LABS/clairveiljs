@@ -7,7 +7,7 @@ import type {
   UserDisclosureMode
 } from "../generated/clairveil/privacy/v1/tx.js";
 
-export const preparedTransferPayloadVersion: "v2";
+export const preparedTransferPayloadVersion: "v3";
 export const preparedTransferProofVersion: "v1";
 export const preparedWithdrawProverPayloadVersion: "v1";
 export const preparedWithdrawProofVersion: "v1";
@@ -116,6 +116,7 @@ export interface PreparedTransferPayload {
   inputs: [PreparedTransferPayloadInputNote, PreparedTransferPayloadInputNote];
   outputs: [PreparedTransferPayloadOutputNote, PreparedTransferPayloadOutputNote];
   cipher_text_hexes: [Hex, Hex];
+  view_tag_hexes: [Hex, Hex];
   user_privacy_policy: number;
   user_disclosure_mode: number;
   user_disclosure_digest_hex: Hex | "";
@@ -143,6 +144,8 @@ export interface TransferMessageBuildResult {
 
 export function summarizeSpendableNotesByDenom(notes: FoundNote[], denom?: string): { notes: FoundNote[]; total: bigint };
 export function selectTransferInputs(notes: FoundNote[], denom: string, targetAmount: string | number | bigint): TransferInputSelection;
+export function selectTransferInputBatch(notes: FoundNote[], denom: string, targetAmounts: Array<string | number | bigint>): TransferInputSelection[];
+export function validatePreparedTransferPayloadMetadata(payload: PreparedTransferPayload): true;
 export function buildUserDisclosureData(input: {
   policy?: TransferPrivacyPolicy;
   mode?: TransferUserDisclosureMode;

@@ -31,6 +31,15 @@ export interface TransferPlan {
   selection: TransferSelection;
 }
 
+export interface TransferBatchPlan {
+  status: "batch_transfer_ready" | "batch_note_preparation_required" | "mixed_denom_unsupported" | "insufficient_balance" | "invalid_amount" | "invalid_batch";
+  canBuildTx: boolean;
+  action: string;
+  message: string;
+  facts: PlannerFacts;
+  selections: TransferSelection[];
+}
+
 export interface WithdrawPlan {
   status: "withdraw_ready" | "exact_note_required" | "insufficient_balance" | "invalid_amount";
   canBuildTx: boolean;
@@ -41,11 +50,12 @@ export interface WithdrawPlan {
 }
 
 export function planTransferNotes(input?: { notes?: FoundNote[]; amount?: CoinString; denom?: string }): TransferPlan;
+export function planTransferBatchNotes(input?: { notes?: FoundNote[]; amounts?: CoinString[]; denom?: string }): TransferBatchPlan;
 export function planWithdrawNotes(input?: { notes?: FoundNote[]; amount?: CoinString; denom?: string }): WithdrawPlan;
 
 export class ClairveilPlannerError extends ClairveilError {
-  plan: TransferPlan | WithdrawPlan;
-  constructor(plan: TransferPlan | WithdrawPlan);
+  plan: TransferPlan | TransferBatchPlan | WithdrawPlan;
+  constructor(plan: TransferPlan | TransferBatchPlan | WithdrawPlan);
 }
 
-export function assertPlanCanBuildTx<T extends TransferPlan | WithdrawPlan>(plan: T): T;
+export function assertPlanCanBuildTx<T extends TransferPlan | TransferBatchPlan | WithdrawPlan>(plan: T): T;

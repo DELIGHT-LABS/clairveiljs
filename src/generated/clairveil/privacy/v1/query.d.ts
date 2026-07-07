@@ -22,6 +22,31 @@ export interface QueryCheckNullifierResponse {
     used: boolean;
 }
 /**
+ * @name QueryCheckNullifiersRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCheckNullifiersRequest
+ */
+export interface QueryCheckNullifiersRequest {
+    nullifiers: string[];
+}
+/**
+ * @name QueryNullifierStatus
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryNullifierStatus
+ */
+export interface QueryNullifierStatus {
+    nullifier: string;
+    used: boolean;
+}
+/**
+ * @name QueryCheckNullifiersResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCheckNullifiersResponse
+ */
+export interface QueryCheckNullifiersResponse {
+    statuses: QueryNullifierStatus[];
+}
+/**
  * @name QueryTreeStateRequest
  * @package clairveil.privacy.v1
  * @see proto type: clairveil.privacy.v1.QueryTreeStateRequest
@@ -118,6 +143,58 @@ export interface QueryPrivacyEventsResponse {
     page: bigint;
     limit: bigint;
     hasMore: boolean;
+}
+/**
+ * @name QueryScanEventsRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEventsRequest
+ */
+export interface QueryScanEventsRequest {
+    afterHeight: bigint;
+    afterSequence: bigint;
+    limit: bigint;
+    eventTypes: string[];
+}
+/**
+ * @name QueryScanOutput
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanOutput
+ */
+export interface QueryScanOutput {
+    outputIndex: number;
+    commitmentHex: string;
+    encryptedNoteHex: string;
+    cipherTextHex: string;
+    viewTagHex: string;
+    leafIndexFound: boolean;
+    leafIndex: bigint;
+}
+/**
+ * @name QueryScanEvent
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEvent
+ */
+export interface QueryScanEvent {
+    sequence: bigint;
+    height: bigint;
+    txHashHex: string;
+    eventType: string;
+    outputs: QueryScanOutput[];
+    nullifierHexes: string[];
+}
+/**
+ * @name QueryScanEventsResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEventsResponse
+ */
+export interface QueryScanEventsResponse {
+    events: QueryScanEvent[];
+    nextHeight: bigint;
+    nextSequence: bigint;
+    limit: bigint;
+    hasMore: boolean;
+    scanFormatVersion: number;
+    viewTagVersion: number;
 }
 /**
  * QueryMerklePathRequest
@@ -261,6 +338,39 @@ export declare const QueryCheckNullifierResponse: {
     fromPartial(object: DeepPartial<QueryCheckNullifierResponse>): QueryCheckNullifierResponse;
 };
 /**
+ * @name QueryCheckNullifiersRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCheckNullifiersRequest
+ */
+export declare const QueryCheckNullifiersRequest: {
+    typeUrl: string;
+    encode(message: QueryCheckNullifiersRequest, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryCheckNullifiersRequest;
+    fromPartial(object: DeepPartial<QueryCheckNullifiersRequest>): QueryCheckNullifiersRequest;
+};
+/**
+ * @name QueryNullifierStatus
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryNullifierStatus
+ */
+export declare const QueryNullifierStatus: {
+    typeUrl: string;
+    encode(message: QueryNullifierStatus, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryNullifierStatus;
+    fromPartial(object: DeepPartial<QueryNullifierStatus>): QueryNullifierStatus;
+};
+/**
+ * @name QueryCheckNullifiersResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCheckNullifiersResponse
+ */
+export declare const QueryCheckNullifiersResponse: {
+    typeUrl: string;
+    encode(message: QueryCheckNullifiersResponse, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryCheckNullifiersResponse;
+    fromPartial(object: DeepPartial<QueryCheckNullifiersResponse>): QueryCheckNullifiersResponse;
+};
+/**
  * @name QueryTreeStateRequest
  * @package clairveil.privacy.v1
  * @see proto type: clairveil.privacy.v1.QueryTreeStateRequest
@@ -347,6 +457,50 @@ export declare const QueryPrivacyEventsResponse: {
     encode(message: QueryPrivacyEventsResponse, writer?: BinaryWriter): BinaryWriter;
     decode(input: BinaryReader | Uint8Array, length?: number): QueryPrivacyEventsResponse;
     fromPartial(object: DeepPartial<QueryPrivacyEventsResponse>): QueryPrivacyEventsResponse;
+};
+/**
+ * @name QueryScanEventsRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEventsRequest
+ */
+export declare const QueryScanEventsRequest: {
+    typeUrl: string;
+    encode(message: QueryScanEventsRequest, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryScanEventsRequest;
+    fromPartial(object: DeepPartial<QueryScanEventsRequest>): QueryScanEventsRequest;
+};
+/**
+ * @name QueryScanOutput
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanOutput
+ */
+export declare const QueryScanOutput: {
+    typeUrl: string;
+    encode(message: QueryScanOutput, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryScanOutput;
+    fromPartial(object: DeepPartial<QueryScanOutput>): QueryScanOutput;
+};
+/**
+ * @name QueryScanEvent
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEvent
+ */
+export declare const QueryScanEvent: {
+    typeUrl: string;
+    encode(message: QueryScanEvent, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryScanEvent;
+    fromPartial(object: DeepPartial<QueryScanEvent>): QueryScanEvent;
+};
+/**
+ * @name QueryScanEventsResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEventsResponse
+ */
+export declare const QueryScanEventsResponse: {
+    typeUrl: string;
+    encode(message: QueryScanEventsResponse, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryScanEventsResponse;
+    fromPartial(object: DeepPartial<QueryScanEventsResponse>): QueryScanEventsResponse;
 };
 /**
  * QueryMerklePathRequest

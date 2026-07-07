@@ -121,6 +121,13 @@ export interface MsgTransfer {
      */
     selfViewDisclosureDigest: Uint8Array;
     selfViewDisclosurePayload: Uint8Array;
+    /**
+     * Per-output scan performance tags. Tags are not circuit-bound in this
+     * format version; wallets must treat them as untrusted hints. Safe default
+     * scans must full-decrypt on tag mismatch; explicit fast modes may skip
+     * well-formed mismatches only when recovery/rescan policy is in place.
+     */
+    viewTags: Uint8Array[];
 }
 /**
  * MsgDepositResponse

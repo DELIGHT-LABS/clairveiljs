@@ -35,6 +35,7 @@ import {
 } from "../privacy/payload.js";
 import {
   assertPlanCanBuildTx,
+  planTransferBatchNotes,
   planTransferNotes,
   planWithdrawNotes
 } from "../privacy/planner.js";
@@ -251,13 +252,26 @@ function fromHex(value, label = "hex") {
   return rawBytesFromHex(value, label);
 }
 
-async function fetchJson(url, { timeoutMs = defaultFetchTimeoutMs, fetchImpl = globalThis.fetch } = {}) {
+async function fetchJson(url, {
+  timeoutMs = defaultFetchTimeoutMs,
+  fetchImpl = globalThis.fetch,
+  method = "GET",
+  body,
+  headers
+} = {}) {
   const resolvedTimeoutMs = normalizeTimeoutMs(timeoutMs, "fetch timeoutMs");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), resolvedTimeoutMs);
+  const requestHeaders = {
+    accept: "application/json",
+    ...(body != null ? { "content-type": "application/json" } : {}),
+    ...(headers || {})
+  };
   try {
     const response = await fetchImpl(url, {
-      headers: { accept: "application/json" },
+      method,
+      headers: requestHeaders,
+      body,
       signal: controller.signal
     });
     if (!response.ok) {
@@ -279,14 +293,14 @@ async function fetchJson(url, { timeoutMs = defaultFetchTimeoutMs, fetchImpl = g
   }
 }
 
-async function fetchJsonWithRetry(urlForEndpoint, endpoints, { timeoutMs, retry, fetchImpl } = {}) {
+async function fetchJsonWithRetry(urlForEndpoint, endpoints, { timeoutMs, retry, fetchImpl, method, body, headers } = {}) {
   const normalizedRetry = normalizeQueryRetry(retry);
   let lastError = null;
   for (const endpoint of endpoints) {
     for (let attempt = 0; attempt <= normalizedRetry.retries; attempt += 1) {
       try {
         return {
-          data: await fetchJson(urlForEndpoint(endpoint), { timeoutMs, fetchImpl }),
+          data: await fetchJson(urlForEndpoint(endpoint), { timeoutMs, fetchImpl, method, body, headers }),
           endpoint
         };
       } catch (error) {
@@ -337,6 +351,41 @@ function privacyEventsQuery({
   return query ? `?${query}` : "";
 }
 
+function scanEventsQuery({
+  afterHeight,
+  after_height,
+  afterSequence,
+  after_sequence,
+  limit,
+  eventTypes,
+  event_types
+} = {}) {
+  const params = new URLSearchParams();
+  const resolvedAfterHeight = afterHeight ?? after_height;
+  if (resolvedAfterHeight != null) {
+    params.set("after_height", String(resolvedAfterHeight));
+  }
+  const resolvedAfterSequence = afterSequence ?? after_sequence;
+  if (resolvedAfterSequence != null) {
+    params.set("after_sequence", String(resolvedAfterSequence));
+  }
+  if (limit != null) {
+    params.set("limit", String(limit));
+  }
+  const resolvedEventTypes = eventTypes ?? event_types;
+  if (Array.isArray(resolvedEventTypes)) {
+    for (const eventType of resolvedEventTypes) {
+      if (String(eventType || "").trim()) {
+        params.append("event_types", String(eventType).trim());
+      }
+    }
+  } else if (resolvedEventTypes != null && String(resolvedEventTypes).trim()) {
+    params.set("event_types", String(resolvedEventTypes).trim());
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
 function privacyEventsCursor(data, request = {}) {
   const events = data?.events || [];
   let latestHeight = 0;
@@ -359,8 +408,78 @@ function privacyEventsCursor(data, request = {}) {
   };
 }
 
+function scanEventsCursor(data, request = {}) {
+  const events = data?.events || [];
+  let latestHeight = 0;
+  let latestSequence = 0;
+  let latestTxHash = "";
+  for (const event of events) {
+    const height = Number(event?.height || 0);
+    const sequence = Number(event?.sequence || 0);
+    if (height > latestHeight || (height === latestHeight && sequence >= latestSequence)) {
+      latestHeight = height;
+      latestSequence = sequence;
+      latestTxHash = String(event?.tx_hash_hex ?? event?.txHashHex ?? "").toUpperCase();
+    }
+  }
+  return {
+    source: "scan_events",
+    after_height: Number(request.afterHeight ?? request.after_height ?? 0),
+    after_sequence: Number(request.afterSequence ?? request.after_sequence ?? 0),
+    limit: Number(data?.limit ?? request.limit ?? events.length),
+    event_types: request.eventTypes ?? request.event_types ?? [],
+    has_more: Boolean(data?.has_more),
+    next_height: Number(data?.next_height ?? data?.nextHeight ?? request.afterHeight ?? request.after_height ?? 0),
+    next_sequence: Number(data?.next_sequence ?? data?.nextSequence ?? request.afterSequence ?? request.after_sequence ?? 0),
+    latest_height: latestHeight,
+    latest_sequence: latestSequence,
+    latest_tx_hash: latestTxHash,
+    scan_format_version: Number(data?.scan_format_version ?? data?.scanFormatVersion ?? 0),
+    view_tag_version: Number(data?.view_tag_version ?? data?.viewTagVersion ?? 0)
+  };
+}
+
+function assertScanEventsVersions(data) {
+  const scanFormatVersion = Number(data?.scan_format_version ?? data?.scanFormatVersion ?? 0);
+  const viewTagVersion = Number(data?.view_tag_version ?? data?.viewTagVersion ?? 0);
+  if (scanFormatVersion !== 1) {
+    const error = new Error(`unsupported scan_format_version ${scanFormatVersion}; expected 1`);
+    error.code = "UNSUPPORTED_SCAN_EVENTS_VERSION";
+    throw error;
+  }
+  if (viewTagVersion !== 1) {
+    const error = new Error(`unsupported view_tag_version ${viewTagVersion}; expected 1`);
+    error.code = "UNSUPPORTED_SCAN_EVENTS_VERSION";
+    throw error;
+  }
+}
+
 export function nextPrivacyScanOptions(scanOrCursor = {}, defaults = {}) {
   const cursor = scanOrCursor?.scanCursor || scanOrCursor || {};
+  if (cursor.source === "scan_events" || cursor.next_sequence != null || cursor.nextSequence != null) {
+    const hasMore = Boolean(cursor.has_more ?? cursor.hasMore);
+    const next = {
+      afterHeight: Number(
+        hasMore
+          ? cursor.next_height ?? cursor.nextHeight ?? cursor.after_height ?? cursor.afterHeight ?? 0
+          : cursor.next_height ?? cursor.nextHeight ?? cursor.latest_height ?? cursor.latestHeight ?? cursor.after_height ?? cursor.afterHeight ?? 0
+      ),
+      afterSequence: Number(
+        hasMore
+          ? cursor.next_sequence ?? cursor.nextSequence ?? cursor.after_sequence ?? cursor.afterSequence ?? 0
+          : cursor.next_sequence ?? cursor.nextSequence ?? cursor.latest_sequence ?? cursor.latestSequence ?? cursor.after_sequence ?? cursor.afterSequence ?? 0
+      ),
+      limit: Number(cursor.limit ?? defaults.limit ?? 200),
+      eventTypes: cursor.event_types ?? cursor.eventTypes ?? defaults.eventTypes ?? defaults.event_types ?? [],
+      hasMore,
+      completed: !hasMore
+    };
+    const maxPages = defaults.maxPages ?? defaults.max_pages;
+    if (maxPages != null) next.maxPages = maxPages;
+    const includeFoundNotes = defaults.includeFoundNotes ?? defaults.include_found_notes;
+    if (includeFoundNotes != null) next.includeFoundNotes = Boolean(includeFoundNotes);
+    return next;
+  }
   const afterHeight = Number(cursor.after_height ?? cursor.afterHeight ?? defaults.afterHeight ?? defaults.after_height ?? 0);
   const latestHeight = Number(cursor.latest_height ?? cursor.latestHeight ?? 0);
   const hasMore = Boolean(cursor.has_more ?? cursor.hasMore);
@@ -387,6 +506,8 @@ function resolveScanOptions({
   scan,
   afterHeight,
   after_height,
+  afterSequence,
+  after_sequence,
   page,
   limit,
   maxPages,
@@ -396,6 +517,7 @@ function resolveScanOptions({
 } = {}) {
   return {
     afterHeight: scan?.afterHeight ?? scan?.after_height ?? afterHeight ?? after_height,
+    afterSequence: scan?.afterSequence ?? scan?.after_sequence ?? afterSequence ?? after_sequence,
     page: scan?.page ?? page,
     limit: scan?.limit ?? limit,
     maxPages: scan?.maxPages ?? scan?.max_pages ?? maxPages ?? max_pages,
@@ -477,7 +599,7 @@ export class ClairveilJS {
     return `${endpoint}${path}`;
   }
 
-  async fetchJson(pathOrUrl, { failover = false, retry = this.queryRetry } = {}) {
+  async fetchJson(pathOrUrl, { failover = false, retry = this.queryRetry, method, body, headers } = {}) {
     const text = String(pathOrUrl || "");
     const isAbsolute = /^https?:\/\//i.test(text);
     if (isAbsolute) {
@@ -486,7 +608,10 @@ export class ClairveilJS {
         [text],
         {
           timeoutMs: this.queryTimeoutMs,
-          retry
+          retry,
+          method,
+          body,
+          headers
         }
       );
       return result.data;
@@ -500,7 +625,10 @@ export class ClairveilJS {
       endpoints,
       {
         timeoutMs: this.queryTimeoutMs,
-        retry
+        retry,
+        method,
+        body,
+        headers
       }
     );
     this.activeRestEndpoint = result.endpoint;
@@ -546,6 +674,12 @@ export class ClairveilJS {
     return this.fetchJson(`/clairveil/privacy/v1/events${privacyEventsQuery(options)}`, { failover: true });
   }
 
+  async fetchScanEvents(options = {}) {
+    const data = await this.fetchJson(`/clairveil/privacy/v1/scan_events${scanEventsQuery(options)}`, { failover: true });
+    assertScanEventsVersions(data);
+    return data;
+  }
+
   async fetchTreeState() {
     return this.fetchJson("/clairveil/privacy/v1/tree_state", { failover: true });
   }
@@ -582,6 +716,24 @@ export class ClairveilJS {
     return this.fetchJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`, { failover: this.nullifierFailover });
   }
 
+  async checkNullifiers(nullifierHexes = []) {
+    const normalized = [...new Set((nullifierHexes || []).map(value => String(value || "").trim().toLowerCase()).filter(Boolean))];
+    const usedByNullifier = new Map();
+    const chunkSize = 1000;
+    for (let start = 0; start < normalized.length; start += chunkSize) {
+      const chunk = normalized.slice(start, start + chunkSize);
+      const response = await this.fetchJson("/clairveil/privacy/v1/nullifiers", {
+        method: "POST",
+        body: JSON.stringify({ nullifiers: chunk }),
+        failover: this.nullifierFailover
+      });
+      for (const status of response?.statuses || response?.Statuses || []) {
+        usedByNullifier.set(String(status?.nullifier || status?.Nullifier || "").toLowerCase(), Boolean(status?.used ?? status?.Used));
+      }
+    }
+    return usedByNullifier;
+  }
+
   async deriveWalletPrivacyMaterial(wallet) {
     return derivePrivacyMaterialFromWallet(wallet, {
       shieldedPrefix: this.shieldedPrefix
@@ -592,17 +744,104 @@ export class ClairveilJS {
     rootSeed,
     afterHeight,
     after_height,
+    afterSequence,
+    after_sequence,
     page = 1,
     limit = 200,
     maxPages = 1,
     eventTypes = ["deposit", "shielded_transfer"],
     event_types,
-    includeFoundNotes = false
+    includeFoundNotes = false,
+    scanSource = "scan_events",
+    scan_source
   } = {}) {
     const resolvedEventTypes = event_types ?? eventTypes;
-    const startPage = Math.max(1, Number(page || 1));
     const pageLimit = Math.max(1, Number(limit || 200));
     const pageBudget = Math.max(1, Number(maxPages || 1));
+    const source = scan_source ?? scanSource;
+
+    if (source !== "privacy_events") {
+      const startAfterHeight = Number(afterHeight ?? after_height ?? 0);
+      const startAfterSequence = Number(afterSequence ?? after_sequence ?? 0);
+      const events = [];
+      let currentAfterHeight = startAfterHeight;
+      let currentAfterSequence = startAfterSequence;
+      let pagesScanned = 0;
+      let hasMore = false;
+      let lastData = null;
+      try {
+        for (; pagesScanned < pageBudget;) {
+          const request = {
+            afterHeight: currentAfterHeight,
+            afterSequence: currentAfterSequence,
+            limit: pageLimit,
+            eventTypes: resolvedEventTypes
+          };
+          const data = await this.fetchScanEvents(request);
+          lastData = data;
+          events.push(...(data.events || []));
+          pagesScanned += 1;
+          hasMore = Boolean(data.has_more ?? data.hasMore);
+          const nextHeight = Number(data.next_height ?? data.nextHeight ?? currentAfterHeight);
+          const nextSequence = Number(data.next_sequence ?? data.nextSequence ?? currentAfterSequence);
+          if (hasMore && nextHeight === currentAfterHeight && nextSequence === currentAfterSequence) {
+            throw new Error("scan events cursor did not advance");
+          }
+          currentAfterHeight = nextHeight;
+          currentAfterSequence = nextSequence;
+          if (!hasMore) break;
+        }
+
+        const result = await scanNotesCore({
+          rootSeed,
+          events,
+          checkNullifiers: nullifiers => this.checkNullifiers(nullifiers),
+          checkNullifier: nullifierHex => this.checkNullifier(nullifierHex),
+          includeFoundNotes
+        });
+        const cursor = scanEventsCursor(lastData || {
+          events,
+          limit: pageLimit,
+          has_more: hasMore,
+          next_height: currentAfterHeight,
+          next_sequence: currentAfterSequence,
+          scan_format_version: 1,
+          view_tag_version: 1
+        }, {
+          afterHeight: startAfterHeight,
+          afterSequence: startAfterSequence,
+          limit: pageLimit,
+          eventTypes: resolvedEventTypes
+        });
+        return {
+          ...result,
+          diagnostics: {
+            ...result.diagnostics,
+            pages_scanned: pagesScanned,
+            max_pages: pageBudget
+          },
+          scanCursor: {
+            ...cursor,
+            pages_scanned: pagesScanned,
+            completed: !hasMore
+          },
+          nextScanOptions: nextPrivacyScanOptions({
+            ...cursor,
+            pages_scanned: pagesScanned,
+            completed: !hasMore
+          }, {
+            maxPages: pageBudget,
+            includeFoundNotes,
+            eventTypes: resolvedEventTypes
+          })
+        };
+      } catch (error) {
+        const canFallback = error?.status === 404 || error?.status === 501 || error?.status === 503 || error?.code === "UNSUPPORTED_SCAN_EVENTS_VERSION";
+        if (!canFallback) throw error;
+      }
+    }
+
+    const startPage = Math.max(1, Number(page || 1));
     const baseRequest = {
       afterHeight,
       after_height,
@@ -629,6 +868,7 @@ export class ClairveilJS {
     const result = await scanNotesCore({
       rootSeed,
       events,
+      checkNullifiers: nullifiers => this.checkNullifiers(nullifiers),
       checkNullifier: nullifierHex => this.checkNullifier(nullifierHex),
       includeFoundNotes
     });
@@ -774,21 +1014,29 @@ export class ClairveilJS {
     includeFoundNotes = false,
     afterHeight,
     after_height,
+    afterSequence,
+    after_sequence,
     page,
     eventTypes,
     event_types
   } = {}) {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     let resolvedAfterHeight = afterHeight ?? after_height;
+    let resolvedAfterSequence = afterSequence ?? after_sequence;
     let resolvedPage = page;
     if (resolvedAfterHeight == null && noteStore) {
       const cached = await noteStore.load();
       const cachedCursor = cached.scanCursor || {};
-      if (cachedCursor.has_more && (cachedCursor.next_page || cachedCursor.nextPage)) {
+      if (cachedCursor.has_more && (cachedCursor.next_sequence != null || cachedCursor.nextSequence != null)) {
+        resolvedAfterHeight = cachedCursor.next_height ?? cachedCursor.nextHeight ?? cached.lastScannedHeight ?? 0;
+        resolvedAfterSequence = cachedCursor.next_sequence ?? cachedCursor.nextSequence ?? cached.lastScannedSequence ?? 0;
+      } else if (cachedCursor.has_more && (cachedCursor.next_page || cachedCursor.nextPage)) {
         resolvedAfterHeight = cachedCursor.after_height ?? cachedCursor.afterHeight ?? cached.lastScannedHeight ?? 0;
+        resolvedAfterSequence = cachedCursor.after_sequence ?? cachedCursor.afterSequence ?? cached.lastScannedSequence ?? 0;
         resolvedPage = resolvedPage ?? cachedCursor.next_page ?? cachedCursor.nextPage;
       } else {
         resolvedAfterHeight = cached.lastScannedHeight || 0;
+        resolvedAfterSequence = cached.lastScannedSequence || 0;
       }
     }
     const scan = await this.scanNotes({
@@ -796,6 +1044,7 @@ export class ClairveilJS {
       limit,
       maxPages: max_pages ?? maxPages,
       afterHeight: resolvedAfterHeight,
+      afterSequence: resolvedAfterSequence,
       page: resolvedPage,
       eventTypes: event_types ?? eventTypes,
       includeFoundNotes: true
@@ -819,21 +1068,37 @@ export class ClairveilJS {
 
   async refreshNoteStoreSpentStatuses(noteStore) {
     if (!noteStore) return null;
-    const current = await noteStore.load();
+    let current = await noteStore.load();
     const nullifiers = [];
     for (const note of current.notes || []) {
       const nullifier = String(note?.nullifier || "").trim().toLowerCase();
       if (!nullifier || note.isSpent || note.spent) continue;
+      nullifiers.push(nullifier);
+    }
+    if (!nullifiers.length) return current;
+    try {
+      const statuses = await this.checkNullifiers(nullifiers);
+      const spent = nullifiers.filter(nullifier => Boolean(statuses.get(nullifier)));
+      if (spent.length) {
+        current = await noteStore.markSpent(spent);
+      }
+      const missing = nullifiers.filter(nullifier => !statuses.has(nullifier));
+      if (!missing.length) return current;
+      nullifiers.length = 0;
+      nullifiers.push(...missing);
+    } catch {
+      // Fall back to individual checks below when the batch path is temporarily unavailable.
+    }
+    const spent = [];
+    for (const nullifier of nullifiers) {
       try {
         const result = await this.checkNullifier(nullifier);
-        if (Boolean(result?.used ?? result?.Used ?? result)) {
-          nullifiers.push(nullifier);
-        }
+        if (Boolean(result?.used ?? result?.Used ?? result)) spent.push(nullifier);
       } catch {
         // Leave cached notes unchanged when the nullifier query is temporarily unavailable.
       }
     }
-    return nullifiers.length ? noteStore.markSpent(nullifiers) : current;
+    return spent.length ? noteStore.markSpent(spent) : current;
   }
 
   async planWalletTransfer({ wallet, material, amount, denom, limit = 200, maxPages = defaultPrepareScanMaxPages, scan: scanOptions } = {}) {
@@ -1028,6 +1293,112 @@ export class ClairveilJS {
     };
   }
 
+  async prepareTransferBatch({
+    wallet,
+    material,
+    amounts,
+    recipient,
+    proverAdapter,
+    userPrivacyPolicy = "all-private",
+    userDisclosureMode = "none",
+    userDisclosureTargetPubKeyHex = "",
+    auditDisclosureTargetPubKeyHex,
+    denom,
+    scan,
+    afterHeight,
+    after_height,
+    page,
+    limit = 200,
+    maxPages = defaultPrepareScanMaxPages,
+    max_pages,
+    eventTypes,
+    event_types,
+    gasLimit = 25000000
+  } = {}) {
+    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
+    const scanOptions = resolveScanOptions({
+      scan,
+      afterHeight,
+      after_height,
+      page,
+      limit,
+      maxPages,
+      max_pages,
+      eventTypes,
+      event_types
+    });
+    const scanResult = await this.scanNotes({
+      rootSeed: privacy.rootSeed,
+      ...scanOptions,
+      limit: scanOptions.limit ?? 200,
+      maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
+      includeFoundNotes: true
+    });
+    const plan = planTransferBatchNotes({
+      notes: scanResult.foundNotes,
+      amounts,
+      denom: denom ?? this.defaultDenom
+    });
+    if (!plan.canBuildTx) {
+      return {
+        status: plan.status,
+        plan,
+        scan: scanResult,
+        privacyAccount: publicPrivacyAccount(privacy)
+      };
+    }
+    assertPlanCanBuildTx(plan);
+
+    const auditPubKeyHex = auditDisclosureTargetPubKeyHex
+      || (await this.fetchAuditConfig()).audit_master_pubkey_hex;
+    const builtItems = [];
+    for (let i = 0; i < amounts.length; i += 1) {
+      const built = await this.buildTransferMessage({
+        proverAdapter,
+        creator: privacy.address,
+        inputs: plan.selections[i].inputs,
+        recipient,
+        amount: amounts[i],
+        transferDenom: denom ?? this.defaultDenom,
+        rootSeed: privacy.rootSeed,
+        shieldedPrefix: this.shieldedPrefix,
+        userPrivacyPolicy,
+        userDisclosureMode,
+        userDisclosureTargetPubKeyHex,
+        auditDisclosureTargetPubKeyHex: auditPubKeyHex
+      });
+      builtItems.push(built);
+    }
+
+    const signDoc = await this.buildDirectSignDoc({
+      signer: privacy.address,
+      pubKeyHex: privacy.pubKeyHex,
+      gasLimit,
+      messages: builtItems.map(built => ({
+        typeUrl: msgTransferTypeUrl,
+        value: built.message
+      })),
+      memo: "Clairveil batch veiled transfer"
+    });
+
+    return {
+      status: "ready",
+      plan,
+      scan: scanResult,
+      signDoc,
+      payloads: builtItems.map(built => built.payload),
+      proofs: builtItems.map(built => built.proof),
+      messages: builtItems.map(built => built.message),
+      prepared: {
+        planAction: "batch_transfer",
+        amounts: [...amounts],
+        recipient,
+        selectedInputTotals: plan.selections.map(selection => selection.total.toString())
+      },
+      privacyAccount: publicPrivacyAccount(privacy)
+    };
+  }
+
   async prepareWithdraw({
     wallet,
     material,
@@ -1204,6 +1575,14 @@ export class ClairveilJS {
     const result = await this.prepareTransfer(input);
     if (result.status !== "ready") {
       throw new Error(result.plan?.message || `transfer is not ready: ${result.status}`);
+    }
+    return result;
+  }
+
+  async createTransferBatchSignDoc(input) {
+    const result = await this.prepareTransferBatch(input);
+    if (result.status !== "ready") {
+      throw new Error(result.plan?.message || `transfer batch is not ready: ${result.status}`);
     }
     return result;
   }

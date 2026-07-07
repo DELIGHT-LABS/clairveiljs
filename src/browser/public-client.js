@@ -77,13 +77,19 @@ function isRetryableFetchError(error, retry) {
   return true;
 }
 
-async function fetchJson(url, { timeoutMs = defaultFetchTimeoutMs } = {}) {
+async function fetchJson(url, { timeoutMs = defaultFetchTimeoutMs, method = "GET", body, headers } = {}) {
   const resolvedTimeoutMs = normalizeTimeoutMs(timeoutMs, "fetch timeoutMs");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), resolvedTimeoutMs);
   try {
     const response = await fetch(url, {
-      headers: { accept: "application/json" },
+      method,
+      headers: {
+        accept: "application/json",
+        ...(body != null ? { "content-type": "application/json" } : {}),
+        ...(headers || {})
+      },
+      body,
       signal: controller.signal
     });
     if (!response.ok) {
@@ -105,14 +111,14 @@ async function fetchJson(url, { timeoutMs = defaultFetchTimeoutMs } = {}) {
   }
 }
 
-async function fetchJsonWithRetry(urlForEndpoint, endpoints, { timeoutMs, retry } = {}) {
+async function fetchJsonWithRetry(urlForEndpoint, endpoints, { timeoutMs, retry, method, body, headers } = {}) {
   const normalizedRetry = normalizeQueryRetry(retry);
   let lastError = null;
   for (const endpoint of endpoints) {
     for (let attempt = 0; attempt <= normalizedRetry.retries; attempt += 1) {
       try {
         return {
-          data: await fetchJson(urlForEndpoint(endpoint), { timeoutMs }),
+          data: await fetchJson(urlForEndpoint(endpoint), { timeoutMs, method, body, headers }),
           endpoint
         };
       } catch (error) {
@@ -163,6 +169,41 @@ function privacyEventsQuery({
   return query ? `?${query}` : "";
 }
 
+function scanEventsQuery({
+  afterHeight,
+  after_height,
+  afterSequence,
+  after_sequence,
+  limit,
+  eventTypes,
+  event_types
+} = {}) {
+  const params = new URLSearchParams();
+  const resolvedAfterHeight = afterHeight ?? after_height;
+  if (resolvedAfterHeight != null) {
+    params.set("after_height", String(resolvedAfterHeight));
+  }
+  const resolvedAfterSequence = afterSequence ?? after_sequence;
+  if (resolvedAfterSequence != null) {
+    params.set("after_sequence", String(resolvedAfterSequence));
+  }
+  if (limit != null) {
+    params.set("limit", String(limit));
+  }
+  const resolvedEventTypes = eventTypes ?? event_types;
+  if (Array.isArray(resolvedEventTypes)) {
+    for (const eventType of resolvedEventTypes) {
+      if (String(eventType || "").trim()) {
+        params.append("event_types", String(eventType).trim());
+      }
+    }
+  } else if (resolvedEventTypes != null && String(resolvedEventTypes).trim()) {
+    params.set("event_types", String(resolvedEventTypes).trim());
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
 export function eventAttribute(event, key) {
   return (event?.attributes || []).find(attribute => attribute.key === key)?.value || "";
 }
@@ -172,19 +213,20 @@ export function isAuditableTransfer(event) {
 }
 
 export class ClairveilPublicClient {
-  constructor({ rest, restEndpoints, queryTimeoutMs = defaultFetchTimeoutMs, fetchTimeoutMs, queryRetry } = {}) {
+  constructor({ rest, restEndpoints, queryTimeoutMs = defaultFetchTimeoutMs, fetchTimeoutMs, queryRetry, nullifierFailover = false } = {}) {
     this.restEndpoints = normalizeRestEndpoints(rest, restEndpoints);
     this.rest = this.restEndpoints[0];
     this.activeRestEndpoint = this.rest;
     this.queryTimeoutMs = normalizeTimeoutMs(fetchTimeoutMs ?? queryTimeoutMs, "queryTimeoutMs");
     this.queryRetry = normalizeQueryRetry(queryRetry);
+    this.nullifierFailover = Boolean(nullifierFailover);
   }
 
   restUrl(path, endpoint = this.activeRestEndpoint) {
     return `${endpoint}${path.startsWith("/") ? path : `/${path}`}`;
   }
 
-  async fetchJson(pathOrUrl) {
+  async fetchJson(pathOrUrl, { method, body, headers, failover = true } = {}) {
     const text = String(pathOrUrl || "");
     const isAbsolute = /^https?:\/\//i.test(text);
     if (isAbsolute) {
@@ -193,19 +235,27 @@ export class ClairveilPublicClient {
         [text],
         {
           timeoutMs: this.queryTimeoutMs,
-          retry: this.queryRetry
+          retry: this.queryRetry,
+          method,
+          body,
+          headers
         }
       );
       return result.data;
     }
     const path = text;
-    const endpoints = [this.activeRestEndpoint, ...this.restEndpoints.filter(endpoint => endpoint !== this.activeRestEndpoint)];
+    const endpoints = failover
+      ? [this.activeRestEndpoint, ...this.restEndpoints.filter(endpoint => endpoint !== this.activeRestEndpoint)]
+      : [this.activeRestEndpoint];
     const result = await fetchJsonWithRetry(
       endpoint => this.restUrl(path, endpoint),
       endpoints,
       {
         timeoutMs: this.queryTimeoutMs,
-        retry: this.queryRetry
+        retry: this.queryRetry,
+        method,
+        body,
+        headers
       }
     );
     this.activeRestEndpoint = result.endpoint;
@@ -214,6 +264,30 @@ export class ClairveilPublicClient {
 
   async fetchPrivacyEvents(options = {}) {
     return this.fetchJson(`/clairveil/privacy/v1/events${privacyEventsQuery(options)}`);
+  }
+
+  async fetchScanEvents(options = {}) {
+    return this.fetchJson(`/clairveil/privacy/v1/scan_events${scanEventsQuery(options)}`);
+  }
+
+  async checkNullifier(nullifierHex) {
+    return this.fetchJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`, { failover: this.nullifierFailover });
+  }
+
+  async checkNullifiers(nullifierHexes = []) {
+    const normalized = [...new Set((nullifierHexes || []).map(value => String(value || "").trim().toLowerCase()).filter(Boolean))];
+    const usedByNullifier = new Map();
+    for (let start = 0; start < normalized.length; start += 1000) {
+      const response = await this.fetchJson("/clairveil/privacy/v1/nullifiers", {
+        method: "POST",
+        body: JSON.stringify({ nullifiers: normalized.slice(start, start + 1000) }),
+        failover: this.nullifierFailover
+      });
+      for (const status of response?.statuses || response?.Statuses || []) {
+        usedByNullifier.set(String(status?.nullifier || status?.Nullifier || "").toLowerCase(), Boolean(status?.used ?? status?.Used));
+      }
+    }
+    return usedByNullifier;
   }
 
   async fetchAuditableTransfers(options = {}) {

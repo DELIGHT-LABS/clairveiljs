@@ -8,6 +8,7 @@ import {
   parseCoin
 } from "../core/note.js";
 import {
+  selectTransferInputBatch,
   selectTransferInputs,
   summarizeSpendableNotesByDenom
 } from "./payload.js";
@@ -127,6 +128,93 @@ export function planTransferNotes({ notes, amount, denom = defaultAssetDenom } =
     facts,
     selection
   };
+}
+
+export function planTransferBatchNotes({ notes, amounts = [], denom = defaultAssetDenom } = {}) {
+  const coins = [...(amounts || [])].map(amount => parseCoin(amount, denom));
+  const batchDenom = coins[0]?.denom ?? denom;
+  const spendable = spendableNotes(notes, batchDenom);
+  const spendableTotal = spendable.reduce((sum, found) => sum + found.note.amount, 0n);
+  const requestedTotal = coins.reduce((sum, coin) => sum + BigInt(coin.amount), 0n);
+  const facts = {
+    requestedAmount: coinString(requestedTotal, batchDenom),
+    requestedAmountValue: requestedTotal.toString(),
+    denom: batchDenom,
+    spendableTotal: coinString(spendableTotal, batchDenom),
+    spendableTotalValue: spendableTotal.toString(),
+    spendableCount: spendable.length,
+    currentMaxNote: coinString(maxBigInt(spendable.map(noteAmount)), batchDenom),
+    currentMaxNoteValue: maxBigInt(spendable.map(noteAmount)).toString(),
+    selectedInputTotal: "0" + batchDenom,
+    selectedInputTotalValue: "0"
+  };
+
+  if (!coins.length) {
+    return {
+      status: "invalid_batch",
+      canBuildTx: false,
+      action: "enter_batch_amounts",
+      message: "Batch transfer requires at least one amount.",
+      facts,
+      selections: []
+    };
+  }
+  if (coins.some(coin => coin.denom !== batchDenom)) {
+    return {
+      status: "mixed_denom_unsupported",
+      canBuildTx: false,
+      action: "split_batch_by_denom",
+      message: "Batch transfer amounts must use the same denom.",
+      facts,
+      selections: []
+    };
+  }
+  if (coins.some(coin => BigInt(coin.amount) <= 0n)) {
+    return {
+      status: "invalid_amount",
+      canBuildTx: false,
+      action: "enter_positive_amounts",
+      message: "Every batch transfer amount must be greater than 0.",
+      facts,
+      selections: []
+    };
+  }
+  if (spendableTotal < requestedTotal) {
+    return {
+      status: "insufficient_balance",
+      canBuildTx: false,
+      action: "deposit_or_receive_notes",
+      message: `Need ${requestedTotal}${batchDenom}, but spendable total is ${spendableTotal}${batchDenom}.`,
+      facts,
+      selections: []
+    };
+  }
+
+  try {
+    const selections = selectTransferInputBatch(notes, batchDenom, coins.map(coin => coin.amount));
+    const selectedTotal = selections.reduce((sum, selection) => sum + selection.total, 0n);
+    return {
+      status: "batch_transfer_ready",
+      canBuildTx: true,
+      action: "build_multi_message_transfer",
+      message: "The selected notes can satisfy the batch without reusing inputs.",
+      facts: {
+        ...facts,
+        selectedInputTotal: coinString(selectedTotal, batchDenom),
+        selectedInputTotalValue: selectedTotal.toString()
+      },
+      selections
+    };
+  } catch (error) {
+    return {
+      status: "batch_note_preparation_required",
+      canBuildTx: false,
+      action: "prepare_notes_before_batching",
+      message: error?.message || "Batch transfer needs note preparation before it can be built.",
+      facts,
+      selections: []
+    };
+  }
 }
 
 export function planWithdrawNotes({ notes, amount, denom = defaultAssetDenom } = {}) {

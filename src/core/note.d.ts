@@ -25,6 +25,7 @@ export interface FoundNote {
   isSpent: boolean;
   txHash: Hex;
   height: number;
+  sequence: number;
 }
 
 export interface NoteHashSigner {
@@ -68,9 +69,13 @@ export function noteViewPubKeyHex(noteLike: object): Hex;
 export function encryptWithRootSeed(plaintext: BytesLike, rootSeed: BytesLike): Uint8Array;
 export function decryptWithRootSeed(ciphertextBytes: BytesLike, rootSeed: BytesLike): Uint8Array;
 export function encryptNoteWithRootSeed(noteLike: object, rootSeed: BytesLike): Uint8Array;
+export const viewTagLength: 2;
+export function deriveViewTag(sharedPoint: Point, outputCommitment: BytesLike, outputIndex: number | bigint): Uint8Array;
 export function asymEncrypt(plaintext: BytesLike, receiverPubKey: Point): Uint8Array;
+export function asymEncryptWithViewTag(plaintext: BytesLike, receiverPubKey: Point, outputCommitment: BytesLike, outputIndex: number | bigint): { cipherText: Uint8Array; viewTag: Uint8Array };
 export function asymEncryptHex(plaintext: BytesLike, receiverPubKeyHex: Hex): Hex;
 export function encryptNoteForReceiver(noteLike: object): Uint8Array;
+export function encryptNoteForReceiverWithViewTag(noteLike: object, outputCommitment: BytesLike, outputIndex: number | bigint): { cipherText: Uint8Array; viewTag: Uint8Array };
 export function computeTransferNoteHash(noteLike: object): bigint;
 export function computeWithdrawNoteHash(noteLike: object, recipientBytes: BytesLike): bigint;
 export function signNoteHash(messageHash: bigint, input: { spendScalar: bigint; spendPubKey?: Point }): Uint8Array;

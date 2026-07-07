@@ -313,7 +313,7 @@ Supported EVM scope: an EVM Clairveil chain is expected to use the Clairveil `IP
 
 In the supported EVM ABI, `IPrivacy.deposit` receives `{ amount, noteCommitment, encryptedNote }`. The Cosmos `MsgDeposit` path requires a `DepositCircuit` proof, but the current EVM precompile deposit calldata does not include a proof field.
 
-The supported EVM `IPrivacy.transfer` ABI carries user and audit disclosure fields, but not the Cosmos `selfViewDisclosure*` fields. ClairveilJS disables self-view disclosure by default on the EVM transport and rejects EVM transfer messages that still contain self-view disclosure bytes instead of silently dropping them.
+The supported EVM `IPrivacy.transfer` ABI carries encrypted output notes and the two 2-byte `viewTags` aligned with `newCommitments` and `cipherTexts`, plus user and audit disclosure fields. It does not carry the Cosmos `selfViewDisclosure*` fields. ClairveilJS disables self-view disclosure by default on the EVM transport and rejects EVM transfer messages that still contain self-view disclosure bytes instead of silently dropping them.
 
 ```js
 import {

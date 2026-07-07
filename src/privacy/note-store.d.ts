@@ -12,16 +12,21 @@ export interface StoredFoundNote extends FoundNote {
   spend_pubkey_hex: Hex;
   view_pubkey_hex: Hex;
   tx_hash: Hex;
+  sequence: number;
   spent: boolean;
 }
 
 export interface NoteStoreScanCursor {
   after_height?: number;
+  after_sequence?: number;
   page?: number;
   limit?: number;
   event_types?: string[];
   has_more?: boolean;
   latest_height?: number;
+  latest_sequence?: number;
+  next_height?: number;
+  next_sequence?: number;
   latest_tx_hash?: Hex;
   [key: string]: unknown;
 }
@@ -30,6 +35,7 @@ export interface NoteStoreState {
   owner?: string;
   notes: StoredFoundNote[];
   lastScannedHeight?: number;
+  lastScannedSequence?: number;
   lastScannedTxHash?: Hex | "";
   rollbackHeight?: number;
   scanCursor?: NoteStoreScanCursor | null;

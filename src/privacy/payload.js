@@ -40,7 +40,7 @@ import {
   createNote,
   createSpendNoteHashSigner,
   defaultAssetDenom,
-  encryptNoteForReceiver,
+  encryptNoteForReceiverWithViewTag,
   normalizeFoundNote,
   normalizeNote,
   noteSpendPubKeyHex,
@@ -55,7 +55,7 @@ import {
   utf8Bytes
 } from "../core/browser-crypto.js";
 
-export const preparedTransferPayloadVersion = "v2";
+export const preparedTransferPayloadVersion = "v3";
 export const preparedTransferProofVersion = "v1";
 export const preparedWithdrawProverPayloadVersion = "v1";
 export const preparedWithdrawProofVersion = "v1";
@@ -187,6 +187,12 @@ function foundNoteIdentityKey(found) {
   return `fallback:${found.height}:${String(found.txHash || "").toLowerCase()}:${found.note.amount}`;
 }
 
+const maxShieldedAmount = (1n << 64n) - 1n;
+const exactInputBatchFullNoteLimit = 32;
+const exactInputBatchCandidateNoteLimit = 48;
+const exactInputBatchCandidatePairLimit = 16;
+const exactInputBatchSearchStepLimit = 250000;
+
 function foundNotePlannerLess(left, right) {
   if (left.note.amount !== right.note.amount) return left.note.amount < right.note.amount;
   if (left.height !== right.height) return left.height < right.height;
@@ -195,6 +201,23 @@ function foundNotePlannerLess(left, right) {
   const nullifierCompare = String(left.nullifier || "").toLowerCase().localeCompare(String(right.nullifier || "").toLowerCase());
   if (nullifierCompare !== 0) return nullifierCompare < 0;
   return foundNoteIdentityKey(left) < foundNoteIdentityKey(right);
+}
+
+function foundNotePlannerCompare(left, right) {
+  if (foundNotePlannerLess(left, right)) return -1;
+  if (foundNotePlannerLess(right, left)) return 1;
+  return 0;
+}
+
+function finalTransferOutputsWithinBound(total, target) {
+  if (target < 0n || target > maxShieldedAmount) return false;
+  if (total < target) return false;
+  return total - target <= maxShieldedAmount;
+}
+
+function orderedInputPair(left, right) {
+  if (left.note.amount === 0n && right.note.amount > 0n) return [right, left];
+  return [left, right];
 }
 
 function betterSufficientPairCandidate(left, right, total, bestLeft, bestRight, bestTotal) {
@@ -220,7 +243,7 @@ export function summarizeSpendableNotesByDenom(notes, denom = defaultAssetDenom)
   const spendable = [...(notes || [])]
     .map(normalizeFoundNote)
     .filter(found => !found.isSpent && canonicalFieldHex(found.note.assetID) === targetAssetIdHex)
-    .sort(foundNotePlannerLess);
+    .sort(foundNotePlannerCompare);
   const total = spendable.reduce((sum, found) => sum + found.note.amount, 0n);
   return { notes: spendable, total };
 }
@@ -241,7 +264,7 @@ export function selectTransferInputs(notes, denom, targetAmount) {
 
   for (let i = 0; i < sameDenomNotes.length; i += 1) {
     const note = sameDenomNotes[i];
-    if (note.note.amount >= target) {
+    if (finalTransferOutputsWithinBound(note.note.amount, target)) {
       const zeroNoteIndex = findZeroNote(sameDenomNotes, i);
       if (zeroNoteIndex !== -1) {
         return {
@@ -262,7 +285,7 @@ export function selectTransferInputs(notes, denom, targetAmount) {
     for (let j = i + 1; j < sameDenomNotes.length; j += 1) {
       if (sameDenomNotes[j].note.amount === 0n) continue;
       const total = sameDenomNotes[i].note.amount + sameDenomNotes[j].note.amount;
-      if (total >= target && (!bestPair || betterSufficientPairCandidate(
+      if (finalTransferOutputsWithinBound(total, target) && (!bestPair || betterSufficientPairCandidate(
         sameDenomNotes[i],
         sameDenomNotes[j],
         total,
@@ -286,6 +309,7 @@ export function selectTransferInputs(notes, denom, targetAmount) {
     for (let j = i + 1; j < sameDenomNotes.length; j += 1) {
       if (sameDenomNotes[j].note.amount === 0n) continue;
       const total = sameDenomNotes[i].note.amount + sameDenomNotes[j].note.amount;
+      if (total > maxShieldedAmount) continue;
       if (!bestMerge || betterMergePairCandidate(
         sameDenomNotes[i],
         sameDenomNotes[j],
@@ -308,6 +332,225 @@ export function selectTransferInputs(notes, denom, targetAmount) {
   }
 
   return { inputs, total: 0n, isFinal: false, needsZeroDummy: false };
+}
+
+function targetOrderDescending(targets) {
+  return targets.map((_, index) => index).sort((left, right) => {
+    if (targets[left] !== targets[right]) return targets[left] > targets[right] ? -1 : 1;
+    return left - right;
+  });
+}
+
+function noteIndexUsed(usedMask, index) {
+  return (usedMask & (1n << BigInt(index))) !== 0n;
+}
+
+function pairCandidates(notes, usedMask, target) {
+  const candidates = [];
+  for (let i = 0; i < notes.length; i += 1) {
+    if (noteIndexUsed(usedMask, i)) continue;
+    for (let j = i + 1; j < notes.length; j += 1) {
+      if (noteIndexUsed(usedMask, j)) continue;
+      const total = notes[i].note.amount + notes[j].note.amount;
+      if (!finalTransferOutputsWithinBound(total, target)) continue;
+      candidates.push({ left: i, right: j, total });
+    }
+  }
+  candidates.sort((a, b) => {
+    if (a.total !== b.total) return a.total < b.total ? -1 : 1;
+    const leftAmount = notes[a.left].note.amount;
+    const otherLeftAmount = notes[b.left].note.amount;
+    if (leftAmount !== otherLeftAmount) return leftAmount < otherLeftAmount ? -1 : 1;
+    const rightAmount = notes[a.right].note.amount;
+    const otherRightAmount = notes[b.right].note.amount;
+    if (rightAmount !== otherRightAmount) return rightAmount < otherRightAmount ? -1 : 1;
+    if (foundNotePlannerLess(notes[a.left], notes[b.left])) return -1;
+    if (foundNotePlannerLess(notes[b.left], notes[a.left])) return 1;
+    return foundNotePlannerCompare(notes[a.right], notes[b.right]);
+  });
+  return candidates;
+}
+
+function zeroCandidateIndexes(notes, limit) {
+  const indexes = [];
+  for (let i = 0; i < notes.length; i += 1) {
+    if (notes[i].note.amount > 0n) break;
+    indexes.push(i);
+    if (indexes.length >= limit) break;
+  }
+  return indexes;
+}
+
+function lowerBoundNoteAmount(notes, target) {
+  let low = 0;
+  let high = notes.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (notes[mid].note.amount >= target) high = mid;
+    else low = mid + 1;
+  }
+  return low;
+}
+
+function singleCandidateIndexes(notes, target, limit) {
+  const indexes = [];
+  for (let i = lowerBoundNoteAmount(notes, target); i < notes.length; i += 1) {
+    if (finalTransferOutputsWithinBound(notes[i].note.amount, target)) {
+      indexes.push(i);
+    }
+    if (indexes.length >= limit) break;
+  }
+  return indexes;
+}
+
+function boundedPairCandidateIndexes(notes, target, limit) {
+  if (limit <= 0) return [];
+  const leftIndexes = [];
+  for (let i = lowerBoundNoteAmount(notes, 1n); i < notes.length; i += 1) {
+    leftIndexes.push(i);
+    if (leftIndexes.length >= limit * 4) break;
+  }
+
+  const candidates = [];
+  const seen = new Set();
+  for (const left of leftIndexes) {
+    let needed = target - notes[left].note.amount;
+    if (needed <= 0n) needed = 1n;
+    let addedForLeft = 0;
+    for (let right = lowerBoundNoteAmount(notes, needed); right < notes.length && addedForLeft < 4; right += 1) {
+      if (right === left || notes[right].note.amount <= 0n) continue;
+      const i = Math.min(left, right);
+      const j = Math.max(left, right);
+      const key = `${i}:${j}`;
+      if (seen.has(key)) continue;
+      const total = notes[i].note.amount + notes[j].note.amount;
+      if (!finalTransferOutputsWithinBound(total, target)) continue;
+      seen.add(key);
+      candidates.push({ left: i, right: j, total });
+      addedForLeft += 1;
+    }
+  }
+
+  candidates.sort((a, b) => {
+    if (a.total !== b.total) return a.total < b.total ? -1 : 1;
+    const leftAmount = notes[a.left].note.amount;
+    const otherLeftAmount = notes[b.left].note.amount;
+    if (leftAmount !== otherLeftAmount) return leftAmount < otherLeftAmount ? -1 : 1;
+    const rightAmount = notes[a.right].note.amount;
+    const otherRightAmount = notes[b.right].note.amount;
+    if (rightAmount !== otherRightAmount) return rightAmount < otherRightAmount ? -1 : 1;
+    if (foundNotePlannerLess(notes[a.left], notes[b.left])) return -1;
+    if (foundNotePlannerLess(notes[b.left], notes[a.left])) return 1;
+    return foundNotePlannerCompare(notes[a.right], notes[b.right]);
+  });
+  return candidates.slice(0, limit);
+}
+
+function exactInputBatchCandidateNotes(notes, targets, order) {
+  if (notes.length <= exactInputBatchFullNoteLimit) return [...notes];
+
+  const selected = new Set();
+  const candidates = [];
+  const addIndex = index => {
+    if (index < 0 || index >= notes.length) return true;
+    if (selected.has(index)) return true;
+    if (candidates.length >= exactInputBatchCandidateNoteLimit) return false;
+    selected.add(index);
+    candidates.push(notes[index]);
+    return true;
+  };
+
+  for (const targetIndex of order) {
+    const target = targets[targetIndex];
+    for (const index of zeroCandidateIndexes(notes, exactInputBatchCandidatePairLimit)) {
+      if (!addIndex(index)) break;
+    }
+    for (const index of singleCandidateIndexes(notes, target, exactInputBatchCandidatePairLimit)) {
+      if (!addIndex(index)) break;
+    }
+    for (const candidate of boundedPairCandidateIndexes(notes, target, exactInputBatchCandidatePairLimit)) {
+      if (!addIndex(candidate.left) || !addIndex(candidate.right)) break;
+    }
+    if (candidates.length >= exactInputBatchCandidateNoteLimit) break;
+  }
+
+  return [...candidates].sort(foundNotePlannerCompare);
+}
+
+function exactSelectTransferInputBatch(notes, targets, order) {
+  if (notes.length > exactInputBatchCandidateNoteLimit) return null;
+  if (targets.length * 2 > notes.length) return null;
+  const selections = Array.from({ length: targets.length }, () => null);
+  const failed = new Set();
+  let steps = 0;
+
+  function search(position, usedMask) {
+    steps += 1;
+    if (steps > exactInputBatchSearchStepLimit) return false;
+    if (position === order.length) return true;
+    const key = `${position}:${usedMask.toString(16)}`;
+    if (failed.has(key)) return false;
+    const targetIndex = order[position];
+    for (const candidate of pairCandidates(notes, usedMask, targets[targetIndex])) {
+      const nextMask = usedMask | (1n << BigInt(candidate.left)) | (1n << BigInt(candidate.right));
+      selections[targetIndex] = {
+        inputs: orderedInputPair(notes[candidate.left], notes[candidate.right]),
+        total: candidate.total,
+        isFinal: true,
+        needsZeroDummy: false
+      };
+      if (search(position + 1, nextMask)) return true;
+      selections[targetIndex] = null;
+    }
+    failed.add(key);
+    return false;
+  }
+
+  return search(0, 0n) ? selections : null;
+}
+
+function removeSelectedInputNotes(notes, inputs) {
+  const used = new Map();
+  for (const input of inputs || []) {
+    const key = foundNoteIdentityKey(input);
+    used.set(key, (used.get(key) || 0) + 1);
+  }
+  return notes.filter(note => {
+    const key = foundNoteIdentityKey(note);
+    const count = used.get(key) || 0;
+    if (!count) return true;
+    used.set(key, count - 1);
+    return false;
+  });
+}
+
+export function selectTransferInputBatch(notes, denom, targetAmounts = []) {
+  const targets = [...(targetAmounts || [])].map((amount, index) => {
+    const target = BigInt(bigintDecimal(amount, `batch item ${index} transfer amount`));
+    if (target <= 0n) {
+      throw new Error(`batch item ${index} target amount must be positive`);
+    }
+    return target;
+  });
+  if (!targets.length) return [];
+
+  const sameDenomNotes = summarizeSpendableNotesByDenom(notes, denom).notes;
+  const order = targetOrderDescending(targets);
+  const candidates = exactInputBatchCandidateNotes(sameDenomNotes, targets, order);
+  const exact = exactSelectTransferInputBatch(candidates, targets, order);
+  if (exact) return exact;
+
+  let available = [...sameDenomNotes];
+  const selections = Array.from({ length: targets.length }, () => null);
+  for (const targetIndex of order) {
+    const selection = selectTransferInputs(available, denom, targets[targetIndex].toString());
+    if (selection.needsZeroDummy || !selection.isFinal || selection.total === 0n) {
+      throw new Error(`batch item ${targetIndex} needs note preparation before batching`);
+    }
+    selections[targetIndex] = selection;
+    available = removeSelectedInputNotes(available, selection.inputs);
+  }
+  return selections;
 }
 
 function disclosureCommon({ outputCommitmentHex, fromNote, recipientNote }) {
@@ -517,6 +760,44 @@ function transferPayloadHashIncludesSelfView(version) {
   return String(version || "") !== "v1";
 }
 
+function transferPayloadHashIncludesViewTags(version) {
+  return String(version || "") === preparedTransferPayloadVersion;
+}
+
+export function validatePreparedTransferPayloadMetadata(payload) {
+  if (payload?.version === preparedTransferPayloadVersion) {
+    // Continue below.
+  } else if (payload?.version === "v2") {
+    throw new Error(`legacy transfer payload version "v2" does not include required view tags; regenerate it with transfer payload version "${preparedTransferPayloadVersion}"`);
+  } else if (payload?.version === "v1") {
+    throw new Error(`legacy transfer payload version "v1" does not include required self-view disclosure and view tags; regenerate it with transfer payload version "${preparedTransferPayloadVersion}"`);
+  } else {
+    throw new Error(`unsupported transfer payload version ${JSON.stringify(payload?.version)} (expected "${preparedTransferPayloadVersion}")`);
+  }
+  if (!Array.isArray(payload.inputs) || payload.inputs.length !== 2) {
+    throw new Error(`transfer payload requires exactly 2 inputs; got ${payload.inputs?.length ?? 0}`);
+  }
+  if (!Array.isArray(payload.outputs) || payload.outputs.length !== 2) {
+    throw new Error(`transfer payload requires exactly 2 outputs; got ${payload.outputs?.length ?? 0}`);
+  }
+  if (!Array.isArray(payload.cipher_text_hexes) || payload.cipher_text_hexes.length !== 2) {
+    throw new Error(`transfer payload requires exactly 2 ciphertexts; got ${payload.cipher_text_hexes?.length ?? 0}`);
+  }
+  if (!Array.isArray(payload.view_tag_hexes) || payload.view_tag_hexes.length !== 2) {
+    throw new Error(`transfer payload requires exactly 2 view tags; got ${payload.view_tag_hexes?.length ?? 0}`);
+  }
+  payload.view_tag_hexes.forEach((value, index) => {
+    const hex = normalizeHex(value, `transfer view tag ${index}`);
+    if (hex.length !== 4) {
+      throw new Error(`transfer view tag ${index} must be exactly 2 bytes`);
+    }
+  });
+  if (!payload.payload_hash || payload.payload_hash !== computePreparedTransferPayloadHash(payload)) {
+    throw new Error("transfer payload hash mismatch; the file may have been modified after preparation");
+  }
+  return true;
+}
+
 export function computePreparedTransferPayloadHash(payload) {
   const lines = [
     payload.version,
@@ -564,6 +845,10 @@ export function computePreparedTransferPayloadHash(payload) {
     );
   }
   lines.push(String(payload.cipher_text_hexes.length), ...payload.cipher_text_hexes);
+  if (transferPayloadHashIncludesViewTags(payload.version)) {
+    const viewTagHexes = payload.view_tag_hexes || [];
+    lines.push(String(viewTagHexes.length), ...viewTagHexes);
+  }
   return sha256Hex(writeLines(lines));
 }
 
@@ -692,6 +977,13 @@ export async function buildPreparedTransferPayload({
     });
   }
 
+  const encryptedOutputs = outputNotes.map((note, index) => (
+    encryptNoteForReceiverWithViewTag(
+      note,
+      hexToBytes(outputCommitmentHexes[index], `transfer output ${index} commitment`),
+      index
+    )
+  ));
   const payload = {
     version: preparedTransferPayloadVersion,
     creator: String(creator || ""),
@@ -705,7 +997,8 @@ export async function buildPreparedTransferPayload({
       view_pubkey_hex: noteViewPubKeyHex(note),
       commitment_hex: outputCommitmentHexes[i]
     })),
-    cipher_text_hexes: outputNotes.map(note => hexFromBytes(encryptNoteForReceiver(note))),
+    cipher_text_hexes: encryptedOutputs.map(output => hexFromBytes(output.cipherText)),
+    view_tag_hexes: encryptedOutputs.map(output => hexFromBytes(output.viewTag)),
     user_privacy_policy: policy,
     user_disclosure_mode: mode,
     user_disclosure_digest_hex: userDisclosure?.digest_hex || "",
@@ -722,6 +1015,7 @@ export async function buildPreparedTransferPayload({
 }
 
 export function validatePreparedTransferProof(payload, proof) {
+  validatePreparedTransferPayloadMetadata(payload);
   if (!proof || proof.version !== preparedTransferProofVersion) {
     throw new Error(`unsupported transfer proof version ${JSON.stringify(proof?.version)}`);
   }
@@ -741,6 +1035,7 @@ export function buildTransferMsgFromPayloadAndProof(payload, proof) {
     nullifiers: payload.inputs.map(input => hexToBytes(input.nullifier_hex, "transfer nullifier")),
     newCommitments: payload.outputs.map(output => hexToBytes(output.commitment_hex, "transfer commitment")),
     cipherTexts: payload.cipher_text_hexes.map(value => hexToBytes(value, "transfer ciphertext")),
+    viewTags: (payload.view_tag_hexes || []).map(value => hexToBytes(value, "transfer view tag")),
     userPrivacyPolicy: payload.user_privacy_policy,
     userDisclosureDigest: optionalHexToBytes(payload.user_disclosure_digest_hex, "user disclosure digest"),
     userDisclosureMode: payload.user_disclosure_mode,

@@ -5,18 +5,23 @@ import {
   assertPreparedTransferPayloadShape,
   buildPreparedTransferPayload,
   buildPreparedWithdrawProverPayload,
+  buildDepositMaterial,
   buildRelayWithdrawMsgFromPayload,
   buildWithdrawMsgFromPayload,
   computePreparedWithdrawPayloadHash,
   createNote,
   createSpendNoteHashSigner,
+  CURVE_BASE,
   decodeShieldedAddress,
   derivePrivacyMaterial,
   deriveSpendKeys,
+  deriveViewTag,
   deriveViewKeys,
   hashStringToField,
+  hexFromBytes,
   ClairveilErrorCode,
-  plannerStatusToErrorCode
+  plannerStatusToErrorCode,
+  validatePreparedTransferPayloadMetadata
 } from "clairveiljs/core";
 import {
   createClairveilClient,
@@ -24,6 +29,7 @@ import {
   MsgDeposit,
   MsgWithdraw,
   nextPrivacyScanOptions,
+  scanNotes,
   userDisclosureModeRecipientEncrypted
 } from "clairveiljs/cosmos";
 import { conformanceFixtureRelativePath } from "clairveiljs/conformance";
@@ -45,9 +51,11 @@ import { createWalletAdapter } from "clairveiljs/wallet-adapter";
 import { createClairveilPublicClient } from "clairveiljs/browser-public";
 import { createClairveilBrowserDappClient } from "clairveiljs/browser-dapp";
 import {
+  planTransferBatchNotes,
   planTransferNotes,
   planWithdrawNotes
 } from "clairveiljs/planner";
+import { summarizeSpendableNotesByDenom } from "clairveiljs/payload";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -75,6 +83,7 @@ test("browser-dapp entrypoint instantiates a DApp client", async () => {
 
   assert.equal(typeof client.prepareDeposit, "function");
   assert.equal(typeof client.prepareTransfer, "function");
+  assert.equal(typeof client.prepareTransferBatch, "function");
   assert.equal(typeof client.prepareWithdraw, "function");
   assert.equal(typeof client.prepareRelayWithdraw, "function");
   assert.equal(typeof client.createRelayWithdrawSignDoc, "function");
@@ -152,6 +161,100 @@ test("MsgDeposit includes the required deposit proof field", () => {
   const encoded = MsgDeposit.encode(message).finish();
   const decoded = MsgDeposit.decode(encoded);
   assert.deepEqual([...decoded.proof], [4, 5, 6]);
+});
+
+test("view tag derivation matches the Go reference vector", () => {
+  const commitmentHex = "03".repeat(32);
+  const commitmentBytes = Uint8Array.from({ length: 32 }, () => 0x03);
+
+  assert.equal(hexFromBytes(deriveViewTag(CURVE_BASE, commitmentHex, 1)), "0d26");
+  assert.equal(hexFromBytes(deriveViewTag(CURVE_BASE, commitmentBytes, 1)), "0d26");
+});
+
+test("scan projection events decrypt notes and use batch nullifier status", async () => {
+  const rootSeed = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+  const material = buildDepositMaterial({
+    creator: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
+    rootSeed,
+    amount: "5uclair"
+  });
+
+  const result = await scanNotes({
+    rootSeed,
+    events: [{
+      event_type: "deposit",
+      height: 12,
+      sequence: 7,
+      tx_hash_hex: "AABB",
+      outputs: [{
+        output_index: 0,
+        commitment_hex: material.note_commitment_hex,
+        encrypted_note_hex: material.encrypted_note_hex
+      }]
+    }],
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(value => [value, true])),
+    includeFoundNotes: true
+  });
+
+  assert.equal(result.summary.total_count, 1);
+  assert.equal(result.summary.spent_count, 1);
+  assert.equal(result.notes[0].sequence, 7);
+  assert.equal(result.foundNotes[0].height, 12);
+  assert.equal(result.foundNotes[0].sequence, 7);
+});
+
+test("scan falls back to individual nullifier checks when batch statuses are partial", async () => {
+  const rootSeed = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+  const first = buildDepositMaterial({
+    creator: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
+    rootSeed,
+    amount: "5uclair"
+  });
+  const second = buildDepositMaterial({
+    creator: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
+    rootSeed,
+    amount: "6uclair"
+  });
+  const individuallyChecked = [];
+
+  const result = await scanNotes({
+    rootSeed,
+    events: [
+      {
+        event_type: "deposit",
+        height: 12,
+        sequence: 7,
+        tx_hash_hex: "AABB",
+        outputs: [{
+          output_index: 0,
+          commitment_hex: first.note_commitment_hex,
+          encrypted_note_hex: first.encrypted_note_hex
+        }]
+      },
+      {
+        event_type: "deposit",
+        height: 12,
+        sequence: 8,
+        tx_hash_hex: "AABC",
+        outputs: [{
+          output_index: 0,
+          commitment_hex: second.note_commitment_hex,
+          encrypted_note_hex: second.encrypted_note_hex
+        }]
+      }
+    ],
+    checkNullifiers: async nullifiers => new Map([[nullifiers[0], false]]),
+    checkNullifier: async nullifier => {
+      individuallyChecked.push(nullifier);
+      return { used: true };
+    },
+    includeFoundNotes: true
+  });
+
+  assert.equal(result.summary.total_count, 2);
+  assert.equal(result.summary.spendable_count, 1);
+  assert.equal(result.summary.spent_count, 1);
+  assert.deepEqual(individuallyChecked, [result.foundNotes[1].nullifier]);
 });
 
 test("browser-dapp deposit proof provider reuses the proven deposit material", async () => {
@@ -396,7 +499,14 @@ test("prepared transfer payload shape accepts v2 self-view fields", () => {
       ...payload,
       version: "v1"
     }),
-    /self_view_disclosure_\* fields require version v2/
+    /self_view_disclosure_\* fields require version v2 or v3/
+  );
+});
+
+test("prepared transfer metadata rejects legacy payload versions before proving", () => {
+  assert.throws(
+    () => validatePreparedTransferPayloadMetadata({ version: "v2" }),
+    /legacy transfer payload version "v2" does not include required view tags/
   );
 });
 
@@ -523,7 +633,7 @@ test("browser-dapp exposes chain nullifier checks", async () => {
   assert.equal(result.used, true);
 });
 
-test("cosmos note scan paginates within the requested page budget", async () => {
+test("cosmos note scan follows ScanEvents cursor within the requested page budget", async () => {
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
@@ -533,19 +643,24 @@ test("cosmos note scan paginates within the requested page budget", async () => 
     defaultDenom: "uclair"
   });
   const requests = [];
-  client.fetchPrivacyEvents = async request => {
+  client.fetchScanEvents = async request => {
     requests.push(request);
+    const page = Number(request.afterHeight || 0) + 1;
     return {
       events: [
         {
           event_type: "withdraw",
-          height: request.page,
-          tx_hash_hex: `PAGE${request.page}`
+          height: page,
+          sequence: page,
+          tx_hash_hex: `PAGE${page}`
         }
       ],
-      page: request.page,
+      next_height: page,
+      next_sequence: page,
       limit: request.limit,
-      has_more: request.page < 2
+      has_more: page < 2,
+      scan_format_version: 1,
+      view_tag_version: 1
     };
   };
 
@@ -555,14 +670,15 @@ test("cosmos note scan paginates within the requested page budget", async () => 
     maxPages: 2
   });
 
-  assert.deepEqual(requests.map(request => request.page), [1, 2]);
+  assert.deepEqual(requests.map(request => [request.afterHeight, request.afterSequence]), [[0, 0], [1, 1]]);
   assert.equal(result.diagnostics.scanned_events, 2);
   assert.equal(result.diagnostics.pages_scanned, 2);
   assert.equal(result.scanCursor.has_more, false);
   assert.equal(result.scanCursor.completed, true);
-  assert.equal(result.scanCursor.next_page, 1);
+  assert.equal(result.scanCursor.next_height, 2);
+  assert.equal(result.scanCursor.next_sequence, 2);
   assert.equal(result.nextScanOptions.afterHeight, 2);
-  assert.equal(result.nextScanOptions.page, 1);
+  assert.equal(result.nextScanOptions.afterSequence, 2);
   assert.equal(result.nextScanOptions.completed, true);
 
   requests.length = 0;
@@ -572,11 +688,12 @@ test("cosmos note scan paginates within the requested page budget", async () => 
     maxPages: 1
   });
 
-  assert.deepEqual(requests.map(request => request.page), [1]);
+  assert.deepEqual(requests.map(request => [request.afterHeight, request.afterSequence]), [[0, 0]]);
   assert.equal(partial.scanCursor.has_more, true);
-  assert.equal(partial.scanCursor.next_page, 2);
-  assert.equal(partial.nextScanOptions.afterHeight, 0);
-  assert.equal(partial.nextScanOptions.page, 2);
+  assert.equal(partial.scanCursor.next_height, 1);
+  assert.equal(partial.scanCursor.next_sequence, 1);
+  assert.equal(partial.nextScanOptions.afterHeight, 1);
+  assert.equal(partial.nextScanOptions.afterSequence, 1);
   assert.equal(partial.nextScanOptions.hasMore, true);
   assert.deepEqual(
     nextPrivacyScanOptions(partial).eventTypes,
@@ -594,32 +711,59 @@ test("cosmos wallet note store refreshes cached spent statuses", async () => {
     defaultDenom: "uclair"
   });
   const nullifier = "01".padStart(64, "0");
+  const missingBatchNullifier = "02".padStart(64, "0");
   const store = new MemoryNoteStore({ owner: "clair1example" });
   await store.mergeScanResult({
-    foundNotes: [{
-      height: 7,
-      txHash: "AA01",
-      isSpent: false,
-      nullifier,
-      note: {
-        receiverSpendPubKeyX: 1n,
-        receiverSpendPubKeyY: 2n,
-        receiverViewPubKeyX: 3n,
-        receiverViewPubKeyY: 4n,
-        amount: 10n,
-        assetID: hashStringToField("uclair"),
-        randomness: 11n,
-        memo: "cached"
+    foundNotes: [
+      {
+        height: 7,
+        txHash: "AA01",
+        isSpent: false,
+        nullifier,
+        note: {
+          receiverSpendPubKeyX: 1n,
+          receiverSpendPubKeyY: 2n,
+          receiverViewPubKeyX: 3n,
+          receiverViewPubKeyY: 4n,
+          amount: 10n,
+          assetID: hashStringToField("uclair"),
+          randomness: 11n,
+          memo: "cached"
+        }
+      },
+      {
+        height: 8,
+        txHash: "AA02",
+        isSpent: false,
+        nullifier: missingBatchNullifier,
+        note: {
+          receiverSpendPubKeyX: 1n,
+          receiverSpendPubKeyY: 2n,
+          receiverViewPubKeyX: 3n,
+          receiverViewPubKeyY: 4n,
+          amount: 11n,
+          assetID: hashStringToField("uclair"),
+          randomness: 12n,
+          memo: "cached2"
+        }
       }
-    }]
+    ]
   });
-  client.fetchPrivacyEvents = async request => ({
+  client.fetchScanEvents = async request => ({
     events: [],
-    page: request.page,
+    next_height: request.afterHeight ?? 0,
+    next_sequence: request.afterSequence ?? 0,
     limit: request.limit,
-    has_more: false
+    has_more: false,
+    scan_format_version: 1,
+    view_tag_version: 1
   });
-  client.checkNullifier = async value => ({ used: value === nullifier });
+  client.checkNullifiers = async values => new Map([[values[0], values[0] === nullifier]]);
+  const individuallyChecked = [];
+  client.checkNullifier = async value => {
+    individuallyChecked.push(value);
+    return { used: value === missingBatchNullifier };
+  };
 
   await client.scanWalletNotes({
     material: {
@@ -635,8 +779,12 @@ test("cosmos wallet note store refreshes cached spent statuses", async () => {
   });
 
   const loaded = await store.load();
-  assert.equal(loaded.notes[0].isSpent, true);
-  assert.equal(loaded.notes[0].spent, true);
+  const byNullifier = new Map(loaded.notes.map(note => [note.nullifier, note]));
+  assert.equal(byNullifier.get(nullifier).isSpent, true);
+  assert.equal(byNullifier.get(nullifier).spent, true);
+  assert.equal(byNullifier.get(missingBatchNullifier).isSpent, true);
+  assert.equal(byNullifier.get(missingBatchNullifier).spent, true);
+  assert.deepEqual(individuallyChecked, [missingBatchNullifier]);
 });
 
 test("browser-dapp prepare forwards scan options into EVM note scans", async () => {
@@ -703,6 +851,232 @@ test("browser-dapp prepare forwards scan options into EVM note scans", async () 
   assert.equal(withdrawScan.afterHeight, 10);
   assert.equal(withdrawScan.limit, 124);
   assert.equal(withdrawScan.maxPages, 8);
+});
+
+test("planner selects non-overlapping notes for batch transfer", () => {
+  const note = (amount, randomness, height) => ({
+    note: createNote({
+      spendPubKey: CURVE_BASE,
+      viewPubKey: CURVE_BASE,
+      amount,
+      assetDenom: "uclair",
+      randomness
+    }),
+    isSpent: false,
+    txHash: `TX${height}`,
+    height
+  });
+  const plan = planTransferBatchNotes({
+    notes: [
+      note(0, 1, 1),
+      note(0, 2, 2),
+      note(5, 3, 3),
+      note(7, 4, 4)
+    ],
+    amounts: ["5uclair", "7uclair"],
+    denom: "uclair"
+  });
+
+  assert.equal(plan.status, "batch_transfer_ready");
+  assert.equal(plan.canBuildTx, true);
+  assert.equal(plan.selections.length, 2);
+  const inputKeys = plan.selections.flatMap(selection => (
+    selection.inputs.map(input => `${input.height}:${input.note.amount}`)
+  ));
+  assert.equal(new Set(inputKeys).size, 4);
+});
+
+test("planner backtracks batch transfers beyond the small-item exact limit", () => {
+  const note = (amount, randomness, height) => ({
+    note: createNote({
+      spendPubKey: CURVE_BASE,
+      viewPubKey: CURVE_BASE,
+      amount,
+      assetDenom: "uclair",
+      randomness
+    }),
+    isSpent: false,
+    txHash: `TX${height}`,
+    height
+  });
+  const noteAmounts = [4, 8, 4, 4, 9, 20, 13, 6, 10, 2, 17, 4, 8, 10, 4, 20, 19, 2, 2, 3, 2, 11, 12, 7, 11, 1, 1];
+  const targetAmounts = [10, 19, 14, 3, 20, 11, 16, 8, 9, 18, 10, 17, 19];
+
+  const plan = planTransferBatchNotes({
+    notes: noteAmounts.map((amount, index) => note(amount, index + 1, index + 1)),
+    amounts: targetAmounts.map(amount => `${amount}uclair`),
+    denom: "uclair"
+  });
+
+  assert.equal(plan.status, "batch_transfer_ready");
+  assert.equal(plan.selections.length, targetAmounts.length);
+  const inputKeys = plan.selections.flatMap(selection => (
+    selection.inputs.map(input => `${input.height}:${input.note.amount}`)
+  ));
+  assert.equal(new Set(inputKeys).size, inputKeys.length);
+  assert.deepEqual(
+    plan.selections.map((selection, index) => selection.total >= BigInt(targetAmounts[index])),
+    targetAmounts.map(() => true)
+  );
+});
+
+test("planner sorts spendable notes before batch candidate search", () => {
+  const note = (amount, randomness, height) => ({
+    note: createNote({
+      spendPubKey: CURVE_BASE,
+      viewPubKey: CURVE_BASE,
+      amount,
+      assetDenom: "uclair",
+      randomness
+    }),
+    isSpent: false,
+    txHash: `TX${height}`,
+    height
+  });
+  const summary = summarizeSpendableNotesByDenom([
+    note(7, 1, 1),
+    note(0, 2, 2),
+    note(5, 3, 3),
+    note(0, 4, 4),
+    note(1, 5, 5)
+  ], "uclair");
+
+  assert.deepEqual(
+    summary.notes.map(found => found.note.amount.toString()),
+    ["0", "0", "1", "5", "7"]
+  );
+});
+
+test("planner does not propose overflow self-merge notes", () => {
+  const maxShieldedAmount = (1n << 64n) - 1n;
+  const note = (amount, randomness, height) => ({
+    note: createNote({
+      spendPubKey: CURVE_BASE,
+      viewPubKey: CURVE_BASE,
+      amount,
+      assetDenom: "uclair",
+      randomness
+    }),
+    isSpent: false,
+    txHash: `TX${height}`,
+    height
+  });
+  const plan = planTransferNotes({
+    notes: [
+      note(maxShieldedAmount, 1, 1),
+      note(maxShieldedAmount, 2, 2)
+    ],
+    amount: "1uclair",
+    denom: "uclair"
+  });
+
+  assert.equal(plan.status, "zero_dummy_required");
+  assert.equal(plan.selection.total, 0n);
+});
+
+test("planner batch transfer uses bounded exact candidates for large note sets", () => {
+  const note = (amount, randomness, height) => ({
+    note: createNote({
+      spendPubKey: CURVE_BASE,
+      viewPubKey: CURVE_BASE,
+      amount,
+      assetDenom: "uclair",
+      randomness
+    }),
+    isSpent: false,
+    txHash: `TX${height}`,
+    height
+  });
+  const notes = [
+    note(0, 1, 1),
+    ...Array.from({ length: 40 }, (_, index) => note(1n + BigInt(index), index + 2, index + 2)),
+    note(100, 90, 90),
+    note(101, 91, 91),
+    note(102, 92, 92),
+    note(103, 93, 93),
+    note(104, 94, 94),
+    note(105, 95, 95),
+    note(106, 96, 96),
+    note(107, 97, 97)
+  ];
+
+  const plan = planTransferBatchNotes({
+    notes,
+    amounts: ["100uclair", "101uclair", "102uclair", "103uclair"],
+    denom: "uclair"
+  });
+
+  assert.equal(plan.status, "batch_transfer_ready");
+  assert.equal(plan.selections.length, 4);
+  assert.equal(plan.selections.every(selection => selection.isFinal), true);
+  const inputKeys = plan.selections.flatMap(selection => (
+    selection.inputs.map(input => `${input.height}:${input.note.amount}`)
+  ));
+  assert.equal(new Set(inputKeys).size, inputKeys.length);
+});
+
+test("cosmos prepareTransferBatch builds one sign doc with multiple transfer messages", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    defaultDenom: "uclair"
+  });
+  const note = (amount, randomness, height) => ({
+    note: createNote({
+      spendPubKey: CURVE_BASE,
+      viewPubKey: CURVE_BASE,
+      amount,
+      assetDenom: "uclair",
+      randomness
+    }),
+    isSpent: false,
+    txHash: `TX${height}`,
+    height
+  });
+  client.scanNotes = async () => ({
+    notes: [],
+    summary: { total_spendable: "12", spendable_count: 4, spent_count: 0, total_count: 4 },
+    diagnostics: { scanned_events: 0, new_notes_found: 0 },
+    foundNotes: [
+      note(0, 1, 1),
+      note(0, 2, 2),
+      note(5, 3, 3),
+      note(7, 4, 4)
+    ],
+    scanCursor: { has_more: false }
+  });
+  client.fetchAuditConfig = async () => ({ audit_master_pubkey_hex: "aa".repeat(32) });
+  const builtAmounts = [];
+  client.buildTransferMessage = async input => {
+    builtAmounts.push(input.amount);
+    return {
+      payload: { payload_hash: `payload-${builtAmounts.length}` },
+      proof: { payload_hash: `payload-${builtAmounts.length}`, proof_hex: "01" },
+      message: { creator: input.creator, amount: input.amount }
+    };
+  };
+  client.buildDirectSignDoc = async input => input;
+
+  const result = await client.prepareTransferBatch({
+    material: {
+      rootSeed: new Uint8Array(32),
+      address: "clair1sender",
+      pubKeyHex: "02".padEnd(66, "0"),
+      shieldedAddress: "clairs1sender"
+    },
+    amounts: ["5uclair", "7uclair"],
+    recipient: "clairs1recipient",
+    proverAdapter: null
+  });
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.signDoc.messages.length, 2);
+  assert.deepEqual(builtAmounts, ["5uclair", "7uclair"]);
+  assert.equal(result.messages.length, 2);
+  assert.deepEqual(result.prepared.selectedInputTotals, ["5", "7"]);
 });
 
 test("planner rejects zero transfer and withdraw amounts before note planning", () => {
@@ -1260,6 +1634,45 @@ test("nullifier queries retry on the same endpoint unless failover is explicit",
   }
 });
 
+test("batch nullifier query uses POST chunks", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    requests.push({ url: String(url), method: init.method, body });
+    return new Response(JSON.stringify({
+      statuses: body.nullifiers.map(nullifier => ({
+        nullifier,
+        used: nullifier.endsWith("ff")
+      }))
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    const client = createClairveilClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://rest-a.local",
+      chainId: "clairveil-local-3",
+      queryRetry: false
+    });
+    const nullifiers = Array.from({ length: 1001 }, (_, index) => (
+      index === 1000 ? "ff".repeat(32) : index.toString(16).padStart(64, "0")
+    ));
+    const result = await client.checkNullifiers(nullifiers);
+
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].method, "POST");
+    assert.equal(requests[0].url, "http://rest-a.local/clairveil/privacy/v1/nullifiers");
+    assert.equal(requests[0].body.nullifiers.length, 1000);
+    assert.equal(requests[1].body.nullifiers.length, 1);
+    assert.equal(result.get("ff".repeat(32)), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("cosmos disclosure lookup paginates privacy events by tx hash", async () => {
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
@@ -1615,6 +2028,7 @@ test("EVM client wraps existing transfer and withdraw messages without prepared 
     nullifiers: [new Uint8Array(32).fill(2), new Uint8Array(32).fill(3)],
     newCommitments: [new Uint8Array(32).fill(4), new Uint8Array(32).fill(5)],
     cipherTexts: [new Uint8Array([6]), new Uint8Array([7])],
+    viewTags: [new Uint8Array([8, 9]), new Uint8Array([10, 11])],
     auditDisclosureDigest: new Uint8Array(),
     auditDisclosureTargetPubkey: new Uint8Array(),
     auditDisclosurePayload: new Uint8Array()
@@ -1636,7 +2050,7 @@ test("EVM client wraps existing transfer and withdraw messages without prepared 
   assert.equal(transfer.payload, undefined);
   assert.equal(transfer.proof, undefined);
   assert.equal(transfer.transaction.to, evmPrivacyPrecompileAddress);
-  assert.equal(transfer.transaction.data.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))"));
+  assert.equal(transfer.transaction.data.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))"));
   assert.equal(withdraw.message, withdrawMessage);
   assert.equal(withdraw.payload, undefined);
   assert.equal(withdraw.proof, undefined);
@@ -1857,6 +2271,7 @@ test("EVM privacy precompile encoders use tuple selectors", () => {
     nullifiers: [new Uint8Array(32).fill(2), new Uint8Array(32).fill(3)],
     newCommitments: [new Uint8Array(32).fill(4), new Uint8Array(32).fill(5)],
     cipherTexts: [new Uint8Array([6]), new Uint8Array([7])],
+    viewTags: [new Uint8Array([8, 9]), new Uint8Array([10, 11])],
     userPrivacyPolicy: 0,
     userDisclosureMode: 0,
     auditDisclosureDigest: new Uint8Array(32).fill(8),
@@ -1882,7 +2297,7 @@ test("EVM privacy precompile encoders use tuple selectors", () => {
   }, { accountPrefix: "demo" });
 
   assert.equal(deposit.slice(2, 10), functionSelector("deposit((string,bytes,bytes))"));
-  assert.equal(transfer.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))"));
+  assert.equal(transfer.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))"));
   assert.equal(withdraw.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))"));
 });
 

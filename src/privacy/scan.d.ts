@@ -9,6 +9,7 @@ export interface ScanResult {
     nullifier: Hex;
     tx_hash: Hex;
     height: number;
+    sequence: number;
   }>;
   summary: {
     total_spendable: string;
@@ -32,5 +33,6 @@ export function scanNotes(input: {
   rootSeed?: BytesLike;
   events?: object[];
   checkNullifier?: (nullifier: Hex) => Promise<object | boolean> | object | boolean;
+  checkNullifiers?: (nullifiers: Hex[]) => Promise<Map<Hex, boolean> | Record<Hex, boolean> | { statuses?: Array<{ nullifier: Hex; used: boolean }> }>;
   includeFoundNotes?: boolean;
 }): Promise<ScanResult>;

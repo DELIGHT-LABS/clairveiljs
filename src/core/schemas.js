@@ -87,8 +87,8 @@ export function assertFoundNoteShape(value, label = "found note") {
 
 export function assertPreparedTransferPayloadShape(value, label = "prepared transfer payload", options = {}) {
   const payload = assertObject(value, label);
-  if (payload.version !== "v1" && payload.version !== "v2") {
-    throw new Error(`${label}.version must be v1 or v2`);
+  if (payload.version !== "v1" && payload.version !== "v2" && payload.version !== "v3") {
+    throw new Error(`${label}.version must be v1, v2, or v3`);
   }
   assertClairAddress(payload.creator, `${label}.creator`, options);
   assertHex(payload.root_hex, 32, `${label}.root_hex`);
@@ -102,9 +102,19 @@ export function assertPreparedTransferPayloadShape(value, label = "prepared tran
   if (!Array.isArray(payload.cipher_text_hexes) || payload.cipher_text_hexes.length !== 2) {
     throw new Error(`${label}.cipher_text_hexes must contain exactly 2 ciphertexts`);
   }
+  if (payload.version === "v3") {
+    if (!Array.isArray(payload.view_tag_hexes) || payload.view_tag_hexes.length !== 2) {
+      throw new Error(`${label}.view_tag_hexes must contain exactly 2 view tags`);
+    }
+    payload.view_tag_hexes.forEach((value, index) => {
+      assertHex(value, 2, `${label}.view_tag_hexes[${index}]`);
+    });
+  } else if (payload.view_tag_hexes) {
+    throw new Error(`${label}.view_tag_hexes requires version v3`);
+  }
   assertHex(payload.audit_disclosure_digest_hex, 32, `${label}.audit_disclosure_digest_hex`);
   assertDisclosurePubKeyHex(payload.audit_disclosure_target_pubkey_hex, `${label}.audit_disclosure_target_pubkey_hex`);
-  if (payload.version === "v2") {
+  if (payload.version === "v2" || payload.version === "v3") {
     const selfViewDigest = String(payload.self_view_disclosure_digest_hex || "").trim();
     const selfViewPayload = String(payload.self_view_disclosure_payload_hex || "").trim();
     if (selfViewDigest || selfViewPayload) {
@@ -112,7 +122,7 @@ export function assertPreparedTransferPayloadShape(value, label = "prepared tran
       assertHex(selfViewPayload, undefined, `${label}.self_view_disclosure_payload_hex`);
     }
   } else if (payload.self_view_disclosure_digest_hex || payload.self_view_disclosure_payload_hex) {
-    throw new Error(`${label}.self_view_disclosure_* fields require version v2`);
+    throw new Error(`${label}.self_view_disclosure_* fields require version v2 or v3`);
   }
   assertHex(payload.payload_hash, 32, `${label}.payload_hash`);
   return payload;

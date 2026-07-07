@@ -1,6 +1,8 @@
 export interface PrivacyEventsQuery {
   afterHeight?: number;
   after_height?: number;
+  afterSequence?: number;
+  after_sequence?: number;
   page?: number;
   limit?: number;
   eventTypes?: string[];
@@ -13,6 +15,7 @@ export interface ClairveilPublicClientOptions {
   queryTimeoutMs?: number;
   fetchTimeoutMs?: number;
   queryRetry?: QueryRetryOptions | false;
+  nullifierFailover?: boolean;
 }
 
 export interface QueryRetryOptions {
@@ -41,8 +44,11 @@ export class ClairveilPublicClient {
   restEndpoints: string[];
   activeRestEndpoint: string;
   restUrl(path: string, endpoint?: string): string;
-  fetchJson<T = object>(pathOrUrl: string): Promise<T>;
+  fetchJson<T = object>(pathOrUrl: string, options?: { method?: string; body?: BodyInit | null; headers?: Record<string, string>; failover?: boolean }): Promise<T>;
   fetchPrivacyEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
+  fetchScanEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
+  checkNullifier(nullifierHex: string): Promise<object & { used?: boolean; Used?: boolean }>;
+  checkNullifiers(nullifierHexes: string[]): Promise<Map<string, boolean>>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
 }

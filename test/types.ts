@@ -18,7 +18,10 @@ import {
   type PreparedRelayWithdrawSignDoc,
   type PrepareTransferInput,
   type PrepareCosmosTransferInput,
+  type PrepareCosmosTransferBatchInput,
+  type PrepareExplicitCosmosTransferBatchInput,
   type PreparedCosmosTransfer,
+  type PreparedCosmosTransferBatch,
   type PreparedEvmTransfer,
   type PreparedTransfer,
   type PrepareWithdrawInput,
@@ -36,6 +39,7 @@ import {
   type PreparedTransfer as CosmosPreparedTransfer,
   type ReserveResponse
 } from "clairveiljs/cosmos";
+import { planTransferBatchNotes } from "clairveiljs/planner";
 import {
   bech32AddressToEvm,
   createClairveilEvmClient,
@@ -112,7 +116,9 @@ const endpointSetOnlyPublic = createClairveilPublicClient({
   restEndpoints: ["http://127.0.0.1:1317", "http://127.0.0.2:1317"]
 });
 publicClient.fetchPrivacyEvents({ limit: 10 });
+publicClient.fetchScanEvents({ afterHeight: 1, afterSequence: 2, limit: 10 });
 publicClient.fetchAuditableTransfers({ eventTypes: ["shielded_transfer"] });
+const publicNullifierBatch: Promise<Map<string, boolean>> = publicClient.checkNullifiers(["00".repeat(32)]);
 const publicReserveResult: Promise<{ invariant_holds: boolean }> = publicClient.fetchReserve("udemo");
 const publicFetchJsonResult: Promise<{ events?: object[] }> = publicClient.fetchJson<{ events?: object[] }>("/clairveil/privacy/v1/events");
 const cosmosFetchJsonResult: Promise<{ events?: object[] }> = cosmos.fetchJson<{ events?: object[] }>("/clairveil/privacy/v1/events", {
@@ -257,6 +263,25 @@ const evmDirectTransferResult: Promise<PreparedEvmTransfer> = evmDirectDappClien
   recipient: "demos1recipient"
 });
 const transferResult: Promise<PreparedTransfer> = dappClient.prepareTransfer(transferInput);
+const transferBatchInput: PrepareCosmosTransferBatchInput = {
+  ...walletIdentity,
+  amounts: ["1udemo", "2udemo"],
+  recipient: "demos1recipient"
+};
+const cosmosTransferBatchResult: Promise<PreparedCosmosTransferBatch> = dappClient.prepareTransferBatch(transferBatchInput);
+const explicitCosmosTransferBatchInput: PrepareExplicitCosmosTransferBatchInput = {
+  ...walletIdentity,
+  walletType: "cosmos",
+  amounts: ["1udemo"],
+  recipient: "demos1recipient"
+};
+const evmProfileExplicitCosmosBatchResult: Promise<PreparedCosmosTransferBatch> = evmProfileDappClient.prepareTransferBatch(explicitCosmosTransferBatchInput);
+// @ts-expect-error EVM-default browser clients require explicit walletType: "cosmos" for batch transfer.
+evmProfileDappClient.prepareTransferBatch({
+  ...walletIdentity,
+  amounts: ["1udemo"],
+  recipient: "demos1recipient"
+});
 const cosmosWithdrawResult: Promise<PreparedCosmosWithdraw> = dappClient.prepareWithdraw(withdrawInput);
 const cosmosInlineWithdrawResult: Promise<PreparedCosmosWithdraw> = dappClient.prepareWithdraw({
   ...walletIdentity,
@@ -292,6 +317,7 @@ const evmDirectRelayWithdrawResult: Promise<PreparedEvmRelayWithdraw> = evmDirec
 const relayWithdrawResult: Promise<PreparedRelayWithdraw> = dappClient.prepareRelayWithdraw(relayWithdrawInput);
 const scanResult: Promise<ScanWalletNotesResult> = dappClient.scanWalletNotes(scanInput);
 const nullifierResult: Promise<object & { used?: boolean }> = dappClient.checkNullifier("00".repeat(32));
+const nullifierBatchResult: Promise<Map<string, boolean>> = dappClient.checkNullifiers(["00".repeat(32)]);
 const dappReserveResult: Promise<ReserveResponse> = dappClient.fetchReserve("udemo");
 const auditDisclosureInput: DecodeAuditDisclosureInput = {
   txHash: "aa",
@@ -303,6 +329,8 @@ const selfViewDisclosureInput: DecodeSelfViewDisclosureInput = {
   disclosureScalarHex: "01".repeat(32)
 };
 const selfViewDisclosureResult: Promise<DisclosureReport> = dappClient.decodeSelfViewDisclosure(selfViewDisclosureInput);
+const batchPlan = planTransferBatchNotes({ notes: [], amounts: ["1udemo"], denom: "udemo" });
+const batchPlanReady: boolean = batchPlan.canBuildTx;
 const conformanceResult = runClairveilConformanceFixtures({
   fixtureNames: ["privacy_wallet_golden_vectors.json"]
 });
@@ -311,6 +339,13 @@ const cosmosPreparedTransfer = null as unknown as CosmosPreparedTransfer;
 const cosmosPreparedTransferPlanAction: string = cosmosPreparedTransfer.prepared?.planAction ?? "";
 // @ts-expect-error Cosmos prepared transfer summary does not expose built payload artifacts.
 cosmosPreparedTransfer.prepared?.payload;
+const cosmosPreparedTransferBatch = cosmos.prepareTransferBatch({
+  material,
+  amounts: ["1udemo", "2udemo"],
+  recipient: "demos1recipient",
+  proverAdapter: undefined as never
+});
+const cosmosPreparedTransferBatchReady: Promise<string> = cosmosPreparedTransferBatch.then(result => result.status);
 const nativeSendTx = evmProfileDappClient.evmNativeSendTransaction({
   to: "0x1111111111111111111111111111111111111111",
   amount: "1udemo"
@@ -452,6 +487,7 @@ const evmExistingTransferMessage = {
   nullifiers: [new Uint8Array(32), new Uint8Array(32)],
   newCommitments: [new Uint8Array(32), new Uint8Array(32)],
   cipherTexts: [new Uint8Array([1]), new Uint8Array([2])],
+  viewTags: [new Uint8Array([3, 4]), new Uint8Array([5, 6])],
   userPrivacyPolicy: 0,
   userDisclosureDigest: new Uint8Array(),
   userDisclosureMode: 0,

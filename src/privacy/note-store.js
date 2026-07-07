@@ -70,6 +70,7 @@ export function serializeFoundNote(foundLike) {
     isSpent: spent,
     txHash,
     height,
+    sequence: Number(found.sequence || foundLike?.sequence || foundLike?.Sequence || 0),
     tx_hash: txHash,
     spent
   };
@@ -100,6 +101,7 @@ export function deserializeFoundNote(serialized) {
     spend_pubkey_hex: String(serialized.spend_pubkey_hex || noteSpendPubKeyHex(found.note)).toLowerCase(),
     view_pubkey_hex: String(serialized.view_pubkey_hex || noteViewPubKeyHex(found.note)).toLowerCase(),
     tx_hash: String(serialized.tx_hash || found.txHash || "").toUpperCase(),
+    sequence: Number(serialized.sequence || found.sequence || 0),
     spent: Boolean(serialized.spent ?? found.isSpent)
   };
 }
@@ -116,6 +118,7 @@ function emptyState(owner = "") {
     version: "v1",
     owner,
     lastScannedHeight: 0,
+    lastScannedSequence: 0,
     lastScannedTxHash: "",
     rollbackHeight: 0,
     scanCursor: null,
@@ -128,11 +131,14 @@ function latestNoteCursor(notes) {
   const sorted = [...notes].sort((left, right) => {
     const heightCompare = Number(left.height || 0) - Number(right.height || 0);
     if (heightCompare !== 0) return heightCompare;
+    const sequenceCompare = Number(left.sequence || 0) - Number(right.sequence || 0);
+    if (sequenceCompare !== 0) return sequenceCompare;
     return String(left.txHash || left.tx_hash || "").localeCompare(String(right.txHash || right.tx_hash || ""));
   });
   const latest = sorted.at(-1);
   return {
     height: Number(latest?.height || 0),
+    sequence: Number(latest?.sequence || 0),
     txHash: String(latest?.txHash || latest?.tx_hash || "").toUpperCase()
   };
 }
@@ -195,6 +201,7 @@ export class MemoryNoteStore {
     const latest = latestNoteCursor(notes);
     const hasMore = Boolean(scanCursor?.has_more ?? scanCursor?.hasMore);
     const cursorAfterHeight = Number(scanCursor?.after_height ?? scanCursor?.afterHeight ?? 0);
+    const cursorAfterSequence = Number(scanCursor?.after_sequence ?? scanCursor?.afterSequence ?? 0);
     const lastScannedHeight = hasMore
       ? Math.max(
         rollbackHeight || 0,
@@ -207,6 +214,20 @@ export class MemoryNoteStore {
         Number(scanCursor?.latest_height || scanCursor?.latestHeight || 0),
         latest.height
       );
+    const lastScannedSequence = hasMore
+      ? Math.max(
+        rollbackHeight > 0 ? 0 : current.lastScannedSequence || 0,
+        cursorAfterSequence
+      )
+      : Number(
+        scanCursor?.next_sequence ??
+        scanCursor?.nextSequence ??
+        scanCursor?.latest_sequence ??
+        scanCursor?.latestSequence ??
+        latest.sequence ??
+        current.lastScannedSequence ??
+        0
+      );
     const lastScannedTxHash = String(
       scanCursor?.latest_tx_hash ??
       scanCursor?.latestTxHash ??
@@ -217,6 +238,7 @@ export class MemoryNoteStore {
     return this.save({
       owner,
       lastScannedHeight,
+      lastScannedSequence,
       lastScannedTxHash,
       rollbackHeight,
       scanCursor,

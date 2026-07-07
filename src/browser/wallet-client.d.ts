@@ -26,7 +26,7 @@ import type {
   TransferUserDisclosureMode,
   WithdrawMessage,
 } from "../privacy/payload.js";
-import type { TransferPlan, WithdrawPlan } from "../privacy/planner.js";
+import type { TransferBatchPlan, TransferPlan, WithdrawPlan } from "../privacy/planner.js";
 import type { ScanResult } from "../privacy/scan.js";
 
 export interface BrowserWalletProfile {
@@ -263,6 +263,57 @@ export interface PreparedEvmTransfer {
 
 export type PreparedTransfer = PreparedCosmosTransfer | PreparedEvmTransfer;
 
+export interface PrepareTransferBatchInput extends BrowserWalletIdentityInput {
+  amounts: CoinString[];
+  recipient: ShieldedAddress;
+  limit?: number;
+  maxPages?: number;
+  max_pages?: number;
+  scan?: PrivacyScanOptions;
+  gasLimit?: number;
+  gas_limit?: number;
+  privacyPolicy?: TransferPrivacyPolicy;
+  privacy_policy?: TransferPrivacyPolicy;
+  disclosureMode?: TransferUserDisclosureMode;
+  disclosure_mode?: TransferUserDisclosureMode;
+  disclosurePubKeyHex?: Hex;
+  disclosure_pubkey_hex?: Hex;
+}
+
+export type PrepareCosmosTransferBatchInput = Omit<PrepareTransferBatchInput, "walletType" | "wallet_type"> & {
+  walletType?: "cosmos";
+  wallet_type?: "cosmos";
+};
+
+export type PrepareExplicitCosmosTransferBatchInput = Omit<PrepareTransferBatchInput, "walletType" | "wallet_type"> & (
+  | { walletType: "cosmos"; wallet_type?: "cosmos" }
+  | { walletType?: "cosmos"; wallet_type: "cosmos" }
+);
+
+export type PrepareTransferBatchInputForDefault<TDefaultWalletType extends BrowserWalletType = "cosmos"> =
+  TDefaultWalletType extends "evm" ? PrepareExplicitCosmosTransferBatchInput : PrepareCosmosTransferBatchInput;
+
+export interface PreparedTransferBatchSummary {
+  shieldedAddress: ShieldedAddress;
+  amounts: CoinString[];
+  recipient: ShieldedAddress;
+  privacyPolicy: TransferPrivacyPolicy;
+  disclosureMode: TransferUserDisclosureMode;
+  planStatus: string;
+  planAction: string;
+  selectedInputTotals?: string[];
+  payloads?: PreparedTransferPayload[];
+  proofs?: PreparedTransferProof[];
+  messages?: TransferMessage[];
+}
+
+export interface PreparedCosmosTransferBatch {
+  signDoc: SignDocBase64;
+  transaction?: never;
+  prepared: PreparedTransferBatchSummary;
+  plan: TransferBatchPlan;
+}
+
 export interface PrepareWithdrawInput extends BrowserWalletIdentityInput {
   amount: CoinString;
   recipient: ClairAddress | string;
@@ -439,6 +490,7 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   health(): Promise<BrowserHealthResult>;
   fetchBlockEvents(limit?: number): Promise<{ events: BrowserBlockEvent[] }>;
   fetchPrivacyEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
+  fetchScanEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
   buildRootSigningMessage(address: ClairAddress, pubKeyHex: Hex): string;
@@ -459,6 +511,7 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   prepareTransfer(input: PrepareEvmTransferInput): Promise<PreparedEvmTransfer>;
   prepareTransfer(input: PrepareCosmosTransferInput): Promise<PreparedCosmosTransfer>;
   prepareTransfer(input: PrepareTransferInput): Promise<PreparedTransfer>;
+  prepareTransferBatch(input: PrepareTransferBatchInputForDefault<TDefaultWalletType>): Promise<PreparedCosmosTransferBatch>;
   prepareWithdraw(input: TDefaultWalletType extends "evm" ? PrepareDefaultEvmProfileWithdrawInput : never): Promise<PreparedEvmWithdraw>;
   prepareWithdraw(input: PrepareEvmWithdrawInput): Promise<PreparedEvmWithdraw>;
   prepareWithdraw(input: PrepareCosmosWithdrawInput): Promise<PreparedCosmosWithdraw>;
@@ -471,6 +524,7 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   createRelayWithdrawSignDoc(input: CreateRelayWithdrawSignDocInput): Promise<PreparedRelayWithdrawSignDoc>;
   scanWalletNotes(input: ScanWalletNotesInput): Promise<ScanWalletNotesResult>;
   checkNullifier(nullifierHex: Hex): Promise<object & { used?: boolean; Used?: boolean }>;
+  checkNullifiers(nullifierHexes: Hex[]): Promise<Map<Hex, boolean>>;
   decodeUserDisclosure(input: DecodeUserDisclosureInput): Promise<DisclosureReport>;
   decodeSelfViewDisclosure(input: DecodeSelfViewDisclosureInput): Promise<DisclosureReport>;
   decodeAuditDisclosure(input: DecodeAuditDisclosureInput): Promise<DisclosureReport>;

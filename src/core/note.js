@@ -38,6 +38,19 @@ function cloneBytes(bytes) {
   return Uint8Array.from(bytes);
 }
 
+function bytesFromBytesLike(value, label = "bytes") {
+  if (value == null) return new Uint8Array();
+  if (typeof value === "string") return bytesFromHex(value, label);
+  if (value instanceof Uint8Array) return Uint8Array.from(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value).slice();
+  }
+  return Uint8Array.from(value);
+}
+
 function randomScalar({ allowZero = false } = {}) {
   while (true) {
     const candidate = BigInt(`0x${hexFromBytes(randomBytes(32))}`);
@@ -260,7 +273,7 @@ export function encryptNoteWithRootSeed(noteLike, rootSeed) {
   return encryptWithRootSeed(noteToGoJSONBytes(noteLike), rootSeed);
 }
 
-export function asymEncrypt(plaintext, receiverPubKey) {
+function asymEncryptWithSharedPoint(plaintext, receiverPubKey) {
   const ephemeralScalar = randomScalar();
   const ephemeralPubKey = scalarMultiply(CURVE_BASE, ephemeralScalar);
   const sharedPoint = scalarMultiply(receiverPubKey, ephemeralScalar);
@@ -271,7 +284,39 @@ export function asymEncrypt(plaintext, receiverPubKey) {
     nonce,
     plaintext
   });
-  return concatBytes(packPoint(ephemeralPubKey), nonce, ciphertextAndTag);
+  return {
+    cipherText: concatBytes(packPoint(ephemeralPubKey), nonce, ciphertextAndTag),
+    sharedPoint
+  };
+}
+
+export const viewTagLength = 2;
+
+export function deriveViewTag(sharedPoint, outputCommitment, outputIndex) {
+  const commitmentBytes = bytesFromBytesLike(outputCommitment, "output commitment");
+  if (commitmentBytes.length !== 32) {
+    throw new Error("output commitment must be exactly 32 bytes");
+  }
+  const tagFull = mimcHash(
+    hashStringToField("clairveil.view_tag.v1"),
+    pointCoordinate(sharedPoint, "x"),
+    pointCoordinate(sharedPoint, "y"),
+    bytesToBigIntBE(commitmentBytes),
+    BigInt(outputIndex)
+  );
+  return canonicalFieldBytes(tagFull).slice(0, viewTagLength);
+}
+
+export function asymEncrypt(plaintext, receiverPubKey) {
+  return asymEncryptWithSharedPoint(plaintext, receiverPubKey).cipherText;
+}
+
+export function asymEncryptWithViewTag(plaintext, receiverPubKey, outputCommitment, outputIndex) {
+  const encrypted = asymEncryptWithSharedPoint(plaintext, receiverPubKey);
+  return {
+    cipherText: encrypted.cipherText,
+    viewTag: deriveViewTag(encrypted.sharedPoint, outputCommitment, outputIndex)
+  };
 }
 
 export function asymEncryptHex(plaintext, receiverPubKeyHex) {
@@ -280,6 +325,15 @@ export function asymEncryptHex(plaintext, receiverPubKeyHex) {
 
 export function encryptNoteForReceiver(noteLike) {
   return asymEncrypt(noteToGoJSONBytes(noteLike), noteViewPubKey(noteLike));
+}
+
+export function encryptNoteForReceiverWithViewTag(noteLike, outputCommitment, outputIndex) {
+  return asymEncryptWithViewTag(
+    noteToGoJSONBytes(noteLike),
+    noteViewPubKey(noteLike),
+    outputCommitment,
+    outputIndex
+  );
 }
 
 export function computeTransferNoteHash(noteLike) {
@@ -416,7 +470,8 @@ export function normalizeFoundNote(foundNote) {
     nullifier: String(foundNote.nullifier ?? foundNote.Nullifier ?? computeNoteNullifierHex(note)).toLowerCase(),
     isSpent: Boolean(foundNote.isSpent ?? foundNote.IsSpent ?? false),
     txHash: String(foundNote.txHash ?? foundNote.tx_hash ?? foundNote.TxHash ?? ""),
-    height: Number(foundNote.height ?? foundNote.Height ?? 0)
+    height: Number(foundNote.height ?? foundNote.Height ?? 0),
+    sequence: Number(foundNote.sequence ?? foundNote.Sequence ?? 0)
   };
 }
 

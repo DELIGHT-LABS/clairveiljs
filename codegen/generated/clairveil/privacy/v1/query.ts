@@ -22,6 +22,31 @@ export interface QueryCheckNullifierResponse {
   used: boolean;
 }
 /**
+ * @name QueryCheckNullifiersRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCheckNullifiersRequest
+ */
+export interface QueryCheckNullifiersRequest {
+  nullifiers: string[];
+}
+/**
+ * @name QueryNullifierStatus
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryNullifierStatus
+ */
+export interface QueryNullifierStatus {
+  nullifier: string;
+  used: boolean;
+}
+/**
+ * @name QueryCheckNullifiersResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCheckNullifiersResponse
+ */
+export interface QueryCheckNullifiersResponse {
+  statuses: QueryNullifierStatus[];
+}
+/**
  * @name QueryTreeStateRequest
  * @package clairveil.privacy.v1
  * @see proto type: clairveil.privacy.v1.QueryTreeStateRequest
@@ -117,6 +142,58 @@ export interface QueryPrivacyEventsResponse {
   page: bigint;
   limit: bigint;
   hasMore: boolean;
+}
+/**
+ * @name QueryScanEventsRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEventsRequest
+ */
+export interface QueryScanEventsRequest {
+  afterHeight: bigint;
+  afterSequence: bigint;
+  limit: bigint;
+  eventTypes: string[];
+}
+/**
+ * @name QueryScanOutput
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanOutput
+ */
+export interface QueryScanOutput {
+  outputIndex: number;
+  commitmentHex: string;
+  encryptedNoteHex: string;
+  cipherTextHex: string;
+  viewTagHex: string;
+  leafIndexFound: boolean;
+  leafIndex: bigint;
+}
+/**
+ * @name QueryScanEvent
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEvent
+ */
+export interface QueryScanEvent {
+  sequence: bigint;
+  height: bigint;
+  txHashHex: string;
+  eventType: string;
+  outputs: QueryScanOutput[];
+  nullifierHexes: string[];
+}
+/**
+ * @name QueryScanEventsResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEventsResponse
+ */
+export interface QueryScanEventsResponse {
+  events: QueryScanEvent[];
+  nextHeight: bigint;
+  nextSequence: bigint;
+  limit: bigint;
+  hasMore: boolean;
+  scanFormatVersion: number;
+  viewTagVersion: number;
 }
 /**
  * QueryMerklePathRequest
@@ -313,6 +390,137 @@ export const QueryCheckNullifierResponse = {
   fromPartial(object: DeepPartial<QueryCheckNullifierResponse>): QueryCheckNullifierResponse {
     const message = createBaseQueryCheckNullifierResponse();
     message.used = object.used ?? false;
+    return message;
+  }
+};
+function createBaseQueryCheckNullifiersRequest(): QueryCheckNullifiersRequest {
+  return {
+    nullifiers: []
+  };
+}
+/**
+ * @name QueryCheckNullifiersRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCheckNullifiersRequest
+ */
+export const QueryCheckNullifiersRequest = {
+  typeUrl: "/clairveil.privacy.v1.QueryCheckNullifiersRequest",
+  encode(message: QueryCheckNullifiersRequest, writer: BinaryWriter = BinaryWriter.create()): BinaryWriter {
+    for (const v of message.nullifiers) {
+      writer.uint32(10).string(v!);
+    }
+    return writer;
+  },
+  decode(input: BinaryReader | Uint8Array, length?: number): QueryCheckNullifiersRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQueryCheckNullifiersRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          message.nullifiers.push(reader.string());
+          break;
+        default:
+          reader.skipType(tag & 7);
+          break;
+      }
+    }
+    return message;
+  },
+  fromPartial(object: DeepPartial<QueryCheckNullifiersRequest>): QueryCheckNullifiersRequest {
+    const message = createBaseQueryCheckNullifiersRequest();
+    message.nullifiers = object.nullifiers?.map(e => e) || [];
+    return message;
+  }
+};
+function createBaseQueryNullifierStatus(): QueryNullifierStatus {
+  return {
+    nullifier: "",
+    used: false
+  };
+}
+/**
+ * @name QueryNullifierStatus
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryNullifierStatus
+ */
+export const QueryNullifierStatus = {
+  typeUrl: "/clairveil.privacy.v1.QueryNullifierStatus",
+  encode(message: QueryNullifierStatus, writer: BinaryWriter = BinaryWriter.create()): BinaryWriter {
+    if (message.nullifier !== "") {
+      writer.uint32(10).string(message.nullifier);
+    }
+    if (message.used === true) {
+      writer.uint32(16).bool(message.used);
+    }
+    return writer;
+  },
+  decode(input: BinaryReader | Uint8Array, length?: number): QueryNullifierStatus {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQueryNullifierStatus();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          message.nullifier = reader.string();
+          break;
+        case 2:
+          message.used = reader.bool();
+          break;
+        default:
+          reader.skipType(tag & 7);
+          break;
+      }
+    }
+    return message;
+  },
+  fromPartial(object: DeepPartial<QueryNullifierStatus>): QueryNullifierStatus {
+    const message = createBaseQueryNullifierStatus();
+    message.nullifier = object.nullifier ?? "";
+    message.used = object.used ?? false;
+    return message;
+  }
+};
+function createBaseQueryCheckNullifiersResponse(): QueryCheckNullifiersResponse {
+  return {
+    statuses: []
+  };
+}
+/**
+ * @name QueryCheckNullifiersResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCheckNullifiersResponse
+ */
+export const QueryCheckNullifiersResponse = {
+  typeUrl: "/clairveil.privacy.v1.QueryCheckNullifiersResponse",
+  encode(message: QueryCheckNullifiersResponse, writer: BinaryWriter = BinaryWriter.create()): BinaryWriter {
+    for (const v of message.statuses) {
+      QueryNullifierStatus.encode(v!, writer.uint32(10).fork()).ldelim();
+    }
+    return writer;
+  },
+  decode(input: BinaryReader | Uint8Array, length?: number): QueryCheckNullifiersResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQueryCheckNullifiersResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          message.statuses.push(QueryNullifierStatus.decode(reader, reader.uint32()));
+          break;
+        default:
+          reader.skipType(tag & 7);
+          break;
+      }
+    }
+    return message;
+  },
+  fromPartial(object: DeepPartial<QueryCheckNullifiersResponse>): QueryCheckNullifiersResponse {
+    const message = createBaseQueryCheckNullifiersResponse();
+    message.statuses = object.statuses?.map(e => QueryNullifierStatus.fromPartial(e)) || [];
     return message;
   }
 };
@@ -768,6 +976,330 @@ export const QueryPrivacyEventsResponse = {
     message.page = object.page !== undefined && object.page !== null ? BigInt(object.page.toString()) : BigInt(0);
     message.limit = object.limit !== undefined && object.limit !== null ? BigInt(object.limit.toString()) : BigInt(0);
     message.hasMore = object.hasMore ?? false;
+    return message;
+  }
+};
+function createBaseQueryScanEventsRequest(): QueryScanEventsRequest {
+  return {
+    afterHeight: BigInt(0),
+    afterSequence: BigInt(0),
+    limit: BigInt(0),
+    eventTypes: []
+  };
+}
+/**
+ * @name QueryScanEventsRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEventsRequest
+ */
+export const QueryScanEventsRequest = {
+  typeUrl: "/clairveil.privacy.v1.QueryScanEventsRequest",
+  encode(message: QueryScanEventsRequest, writer: BinaryWriter = BinaryWriter.create()): BinaryWriter {
+    if (message.afterHeight !== BigInt(0)) {
+      writer.uint32(8).int64(message.afterHeight);
+    }
+    if (message.afterSequence !== BigInt(0)) {
+      writer.uint32(16).uint64(message.afterSequence);
+    }
+    if (message.limit !== BigInt(0)) {
+      writer.uint32(24).uint64(message.limit);
+    }
+    for (const v of message.eventTypes) {
+      writer.uint32(34).string(v!);
+    }
+    return writer;
+  },
+  decode(input: BinaryReader | Uint8Array, length?: number): QueryScanEventsRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQueryScanEventsRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          message.afterHeight = reader.int64();
+          break;
+        case 2:
+          message.afterSequence = reader.uint64();
+          break;
+        case 3:
+          message.limit = reader.uint64();
+          break;
+        case 4:
+          message.eventTypes.push(reader.string());
+          break;
+        default:
+          reader.skipType(tag & 7);
+          break;
+      }
+    }
+    return message;
+  },
+  fromPartial(object: DeepPartial<QueryScanEventsRequest>): QueryScanEventsRequest {
+    const message = createBaseQueryScanEventsRequest();
+    message.afterHeight = object.afterHeight !== undefined && object.afterHeight !== null ? BigInt(object.afterHeight.toString()) : BigInt(0);
+    message.afterSequence = object.afterSequence !== undefined && object.afterSequence !== null ? BigInt(object.afterSequence.toString()) : BigInt(0);
+    message.limit = object.limit !== undefined && object.limit !== null ? BigInt(object.limit.toString()) : BigInt(0);
+    message.eventTypes = object.eventTypes?.map(e => e) || [];
+    return message;
+  }
+};
+function createBaseQueryScanOutput(): QueryScanOutput {
+  return {
+    outputIndex: 0,
+    commitmentHex: "",
+    encryptedNoteHex: "",
+    cipherTextHex: "",
+    viewTagHex: "",
+    leafIndexFound: false,
+    leafIndex: BigInt(0)
+  };
+}
+/**
+ * @name QueryScanOutput
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanOutput
+ */
+export const QueryScanOutput = {
+  typeUrl: "/clairveil.privacy.v1.QueryScanOutput",
+  encode(message: QueryScanOutput, writer: BinaryWriter = BinaryWriter.create()): BinaryWriter {
+    if (message.outputIndex !== 0) {
+      writer.uint32(8).uint32(message.outputIndex);
+    }
+    if (message.commitmentHex !== "") {
+      writer.uint32(18).string(message.commitmentHex);
+    }
+    if (message.encryptedNoteHex !== "") {
+      writer.uint32(26).string(message.encryptedNoteHex);
+    }
+    if (message.cipherTextHex !== "") {
+      writer.uint32(34).string(message.cipherTextHex);
+    }
+    if (message.viewTagHex !== "") {
+      writer.uint32(42).string(message.viewTagHex);
+    }
+    if (message.leafIndexFound === true) {
+      writer.uint32(48).bool(message.leafIndexFound);
+    }
+    if (message.leafIndex !== BigInt(0)) {
+      writer.uint32(56).uint64(message.leafIndex);
+    }
+    return writer;
+  },
+  decode(input: BinaryReader | Uint8Array, length?: number): QueryScanOutput {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQueryScanOutput();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          message.outputIndex = reader.uint32();
+          break;
+        case 2:
+          message.commitmentHex = reader.string();
+          break;
+        case 3:
+          message.encryptedNoteHex = reader.string();
+          break;
+        case 4:
+          message.cipherTextHex = reader.string();
+          break;
+        case 5:
+          message.viewTagHex = reader.string();
+          break;
+        case 6:
+          message.leafIndexFound = reader.bool();
+          break;
+        case 7:
+          message.leafIndex = reader.uint64();
+          break;
+        default:
+          reader.skipType(tag & 7);
+          break;
+      }
+    }
+    return message;
+  },
+  fromPartial(object: DeepPartial<QueryScanOutput>): QueryScanOutput {
+    const message = createBaseQueryScanOutput();
+    message.outputIndex = object.outputIndex ?? 0;
+    message.commitmentHex = object.commitmentHex ?? "";
+    message.encryptedNoteHex = object.encryptedNoteHex ?? "";
+    message.cipherTextHex = object.cipherTextHex ?? "";
+    message.viewTagHex = object.viewTagHex ?? "";
+    message.leafIndexFound = object.leafIndexFound ?? false;
+    message.leafIndex = object.leafIndex !== undefined && object.leafIndex !== null ? BigInt(object.leafIndex.toString()) : BigInt(0);
+    return message;
+  }
+};
+function createBaseQueryScanEvent(): QueryScanEvent {
+  return {
+    sequence: BigInt(0),
+    height: BigInt(0),
+    txHashHex: "",
+    eventType: "",
+    outputs: [],
+    nullifierHexes: []
+  };
+}
+/**
+ * @name QueryScanEvent
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEvent
+ */
+export const QueryScanEvent = {
+  typeUrl: "/clairveil.privacy.v1.QueryScanEvent",
+  encode(message: QueryScanEvent, writer: BinaryWriter = BinaryWriter.create()): BinaryWriter {
+    if (message.sequence !== BigInt(0)) {
+      writer.uint32(8).uint64(message.sequence);
+    }
+    if (message.height !== BigInt(0)) {
+      writer.uint32(16).int64(message.height);
+    }
+    if (message.txHashHex !== "") {
+      writer.uint32(26).string(message.txHashHex);
+    }
+    if (message.eventType !== "") {
+      writer.uint32(34).string(message.eventType);
+    }
+    for (const v of message.outputs) {
+      QueryScanOutput.encode(v!, writer.uint32(42).fork()).ldelim();
+    }
+    for (const v of message.nullifierHexes) {
+      writer.uint32(50).string(v!);
+    }
+    return writer;
+  },
+  decode(input: BinaryReader | Uint8Array, length?: number): QueryScanEvent {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQueryScanEvent();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          message.sequence = reader.uint64();
+          break;
+        case 2:
+          message.height = reader.int64();
+          break;
+        case 3:
+          message.txHashHex = reader.string();
+          break;
+        case 4:
+          message.eventType = reader.string();
+          break;
+        case 5:
+          message.outputs.push(QueryScanOutput.decode(reader, reader.uint32()));
+          break;
+        case 6:
+          message.nullifierHexes.push(reader.string());
+          break;
+        default:
+          reader.skipType(tag & 7);
+          break;
+      }
+    }
+    return message;
+  },
+  fromPartial(object: DeepPartial<QueryScanEvent>): QueryScanEvent {
+    const message = createBaseQueryScanEvent();
+    message.sequence = object.sequence !== undefined && object.sequence !== null ? BigInt(object.sequence.toString()) : BigInt(0);
+    message.height = object.height !== undefined && object.height !== null ? BigInt(object.height.toString()) : BigInt(0);
+    message.txHashHex = object.txHashHex ?? "";
+    message.eventType = object.eventType ?? "";
+    message.outputs = object.outputs?.map(e => QueryScanOutput.fromPartial(e)) || [];
+    message.nullifierHexes = object.nullifierHexes?.map(e => e) || [];
+    return message;
+  }
+};
+function createBaseQueryScanEventsResponse(): QueryScanEventsResponse {
+  return {
+    events: [],
+    nextHeight: BigInt(0),
+    nextSequence: BigInt(0),
+    limit: BigInt(0),
+    hasMore: false,
+    scanFormatVersion: 0,
+    viewTagVersion: 0
+  };
+}
+/**
+ * @name QueryScanEventsResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryScanEventsResponse
+ */
+export const QueryScanEventsResponse = {
+  typeUrl: "/clairveil.privacy.v1.QueryScanEventsResponse",
+  encode(message: QueryScanEventsResponse, writer: BinaryWriter = BinaryWriter.create()): BinaryWriter {
+    for (const v of message.events) {
+      QueryScanEvent.encode(v!, writer.uint32(10).fork()).ldelim();
+    }
+    if (message.nextHeight !== BigInt(0)) {
+      writer.uint32(16).int64(message.nextHeight);
+    }
+    if (message.nextSequence !== BigInt(0)) {
+      writer.uint32(24).uint64(message.nextSequence);
+    }
+    if (message.limit !== BigInt(0)) {
+      writer.uint32(32).uint64(message.limit);
+    }
+    if (message.hasMore === true) {
+      writer.uint32(40).bool(message.hasMore);
+    }
+    if (message.scanFormatVersion !== 0) {
+      writer.uint32(48).uint32(message.scanFormatVersion);
+    }
+    if (message.viewTagVersion !== 0) {
+      writer.uint32(56).uint32(message.viewTagVersion);
+    }
+    return writer;
+  },
+  decode(input: BinaryReader | Uint8Array, length?: number): QueryScanEventsResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseQueryScanEventsResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          message.events.push(QueryScanEvent.decode(reader, reader.uint32()));
+          break;
+        case 2:
+          message.nextHeight = reader.int64();
+          break;
+        case 3:
+          message.nextSequence = reader.uint64();
+          break;
+        case 4:
+          message.limit = reader.uint64();
+          break;
+        case 5:
+          message.hasMore = reader.bool();
+          break;
+        case 6:
+          message.scanFormatVersion = reader.uint32();
+          break;
+        case 7:
+          message.viewTagVersion = reader.uint32();
+          break;
+        default:
+          reader.skipType(tag & 7);
+          break;
+      }
+    }
+    return message;
+  },
+  fromPartial(object: DeepPartial<QueryScanEventsResponse>): QueryScanEventsResponse {
+    const message = createBaseQueryScanEventsResponse();
+    message.events = object.events?.map(e => QueryScanEvent.fromPartial(e)) || [];
+    message.nextHeight = object.nextHeight !== undefined && object.nextHeight !== null ? BigInt(object.nextHeight.toString()) : BigInt(0);
+    message.nextSequence = object.nextSequence !== undefined && object.nextSequence !== null ? BigInt(object.nextSequence.toString()) : BigInt(0);
+    message.limit = object.limit !== undefined && object.limit !== null ? BigInt(object.limit.toString()) : BigInt(0);
+    message.hasMore = object.hasMore ?? false;
+    message.scanFormatVersion = object.scanFormatVersion ?? 0;
+    message.viewTagVersion = object.viewTagVersion ?? 0;
     return message;
   }
 };

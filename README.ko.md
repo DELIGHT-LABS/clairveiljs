@@ -149,7 +149,7 @@ ClairveilJS는 브라우저에서 privacy payload를 준비한 뒤, prepared mes
 
 지원되는 EVM ABI에서 `IPrivacy.deposit`은 `{ amount, noteCommitment, encryptedNote }`만 받습니다. Cosmos `MsgDeposit` 경로는 `DepositCircuit` proof가 필요하지만, 현재 EVM precompile deposit calldata에는 proof field가 없습니다.
 
-지원되는 EVM `IPrivacy.transfer` ABI에는 user/audit disclosure field는 있지만 Cosmos `selfViewDisclosure*` field는 없습니다. 그래서 ClairveilJS는 EVM transport에서 self-view disclosure를 기본으로 끄고, self-view disclosure bytes가 들어간 EVM transfer message는 조용히 버리지 않고 에러로 막습니다.
+지원되는 EVM `IPrivacy.transfer` ABI에는 encrypted output note와 `newCommitments`, `cipherTexts` 순서에 맞춘 2개의 2-byte `viewTags`, 그리고 user/audit disclosure field가 들어갑니다. Cosmos `selfViewDisclosure*` field는 없습니다. 그래서 ClairveilJS는 EVM transport에서 self-view disclosure를 기본으로 끄고, self-view disclosure bytes가 들어간 EVM transfer message는 조용히 버리지 않고 에러로 막습니다.
 
 EVM transfer/withdraw도 note scan, planner, disclosure, prover adapter 흐름은 Cosmos와 같습니다. 마지막 submit 단계만 Cosmos sign doc이 아니라 EVM calldata 전송으로 달라집니다.
 

@@ -388,6 +388,10 @@ export class ClairveilBrowserClient {
     return this.cosmos.fetchPrivacyEvents(options);
   }
 
+  async fetchScanEvents(options = {}) {
+    return this.cosmos.fetchScanEvents(options);
+  }
+
   async fetchAuditableTransfers(options = {}) {
     return this.cosmos.fetchAuditableTransfers(options);
   }
@@ -694,6 +698,48 @@ export class ClairveilBrowserClient {
     };
   }
 
+  async prepareTransferBatch(body) {
+    const walletType = this.walletTypeFromBody(body);
+    if (walletType === "evm") {
+      throw new Error("batch transfer is currently supported for Cosmos wallet profiles only");
+    }
+    const material = this.privacyMaterial(body, walletType);
+    const amounts = body.amounts || [];
+    const recipient = body.recipient;
+    const userPrivacyPolicy = body.privacyPolicy ?? body.privacy_policy ?? "all-private";
+    const userDisclosureMode = body.disclosureMode ?? body.disclosure_mode ?? "none";
+    const userDisclosureTargetPubKeyHex = body.disclosurePubKeyHex ?? body.disclosure_pubkey_hex ?? "";
+    const scanOptions = scanOptionsFromBody(body);
+
+    const prepared = await this.cosmos.prepareTransferBatch({
+      proverAdapter: this.proverAdapter(),
+      material,
+      recipient,
+      amounts,
+      userPrivacyPolicy,
+      userDisclosureMode,
+      userDisclosureTargetPubKeyHex,
+      scan: scanOptions,
+      gasLimit: body.gasLimit ?? body.gas_limit ?? 25000000
+    });
+    if (prepared.status !== "ready") throw plannerError(prepared);
+    return {
+      signDoc: prepared.signDoc,
+      prepared: {
+        ...prepared.prepared,
+        shieldedAddress: prepared.privacyAccount.shielded_address,
+        privacyPolicy: userPrivacyPolicy,
+        disclosureMode: userDisclosureMode,
+        planStatus: prepared.plan?.status || "",
+        planAction: prepared.prepared?.planAction || prepared.plan?.action || "",
+        payloads: prepared.payloads,
+        proofs: prepared.proofs,
+        messages: prepared.messages
+      },
+      plan: prepared.plan
+    };
+  }
+
   async prepareWithdraw(body) {
     const walletType = this.walletTypeFromBody(body);
     const material = this.privacyMaterial(body, walletType);
@@ -883,6 +929,10 @@ export class ClairveilBrowserClient {
 
   async checkNullifier(nullifierHex) {
     return this.cosmos.checkNullifier(nullifierHex);
+  }
+
+  async checkNullifiers(nullifierHexes) {
+    return this.cosmos.checkNullifiers(nullifierHexes);
   }
 
   async decodeUserDisclosure(body) {

@@ -4,6 +4,7 @@ import {
   deriveViewKeys
 } from "../core/crypto.js";
 import {
+  computeNoteCommitmentHex,
   computeNoteNullifierHex,
   decryptWithRootSeed,
   normalizeNote
@@ -58,9 +59,24 @@ function foundNoteFromEvent(note, event) {
     note,
     nullifier: computeNoteNullifierHex(note).toLowerCase(),
     isSpent: false,
-    txHash: String(event?.tx_hash_hex || "").toUpperCase(),
-    height: Number(event?.height || 0)
+    txHash: String(event?.tx_hash_hex ?? event?.txHashHex ?? "").toUpperCase(),
+    height: Number(event?.height || 0),
+    sequence: Number(event?.sequence || 0)
   };
+}
+
+function outputField(output, snake, camel) {
+  return output?.[snake] ?? output?.[camel] ?? "";
+}
+
+function noteCommitmentMatches(note, commitmentHex) {
+  const text = String(commitmentHex || "").trim().toLowerCase();
+  if (!text) return true;
+  try {
+    return computeNoteCommitmentHex(note).toLowerCase() === text;
+  } catch {
+    return false;
+  }
 }
 
 function processDepositEvent(event, rootSeed) {
@@ -101,11 +117,61 @@ function processTransferEvent(event, spendScalar, viewScalar) {
   return found;
 }
 
+function processScanProjectionEvent(event, rootSeed, spendScalar, viewScalar) {
+  const found = [];
+  for (const output of event?.outputs || event?.Outputs || []) {
+    if (event?.event_type === "deposit" || event?.eventType === "deposit") {
+      const encryptedNoteHex = outputField(output, "encrypted_note_hex", "encryptedNoteHex");
+      if (!encryptedNoteHex) continue;
+      try {
+        const noteBytes = decryptWithRootSeed(bytesFromHex(encryptedNoteHex, "encrypted note"), rootSeed);
+        const note = parseNoteBytes(noteBytes);
+        if (!noteCommitmentMatches(note, outputField(output, "commitment_hex", "commitmentHex"))) continue;
+        found.push(foundNoteFromEvent(note, event));
+      } catch {
+        // Ignore projection outputs that do not belong to this wallet.
+      }
+      continue;
+    }
+
+    if (event?.event_type === "shielded_transfer" || event?.eventType === "shielded_transfer") {
+      const cipherTextHex = outputField(output, "cipher_text_hex", "cipherTextHex");
+      if (!cipherTextHex) continue;
+
+      let noteBytes;
+      try {
+        // View tags are untrusted scan hints. Safe default is full trial decrypt.
+        noteBytes = asymDecryptHex(cipherTextHex, viewScalar);
+      } catch {
+        if (spendScalar == null || spendScalar === viewScalar) continue;
+        try {
+          noteBytes = asymDecryptHex(cipherTextHex, spendScalar);
+        } catch {
+          continue;
+        }
+      }
+
+      try {
+        const note = parseNoteBytes(noteBytes);
+        if (!noteCommitmentMatches(note, outputField(output, "commitment_hex", "commitmentHex"))) continue;
+        found.push(foundNoteFromEvent(note, event));
+      } catch {
+        // Ignore ciphertexts that decrypt but do not contain a note payload.
+      }
+    }
+  }
+  return found;
+}
+
 export function processPrivacyEvent(event, { rootSeed, spendScalar, viewScalar } = {}) {
-  if (event?.event_type === "deposit") {
+  if (Array.isArray(event?.outputs) || Array.isArray(event?.Outputs)) {
+    return processScanProjectionEvent(event, rootSeed, spendScalar, viewScalar);
+  }
+  const eventType = event?.event_type ?? event?.eventType;
+  if (eventType === "deposit") {
     return processDepositEvent(event, rootSeed);
   }
-  if (event?.event_type === "shielded_transfer") {
+  if (eventType === "shielded_transfer") {
     return processTransferEvent(event, spendScalar, viewScalar);
   }
   return [];
@@ -140,7 +206,8 @@ function noteResponse(found, index) {
     amount: found.note.amount.toString(),
     nullifier: found.nullifier,
     tx_hash: found.txHash,
-    height: found.height
+    height: found.height,
+    sequence: found.sequence
   };
 }
 
@@ -148,6 +215,7 @@ export async function scanNotes({
   rootSeed,
   events,
   checkNullifier,
+  checkNullifiers,
   includeFoundNotes = false
 } = {}) {
   if (!rootSeed) {
@@ -163,8 +231,48 @@ export async function scanNotes({
 
   found = normalizeFoundNotes(found);
 
-  if (checkNullifier) {
+  let batchSpentRefreshSucceeded = false;
+  let missingBatchNullifiers = null;
+  if (checkNullifiers && found.length) {
+    try {
+      const nullifiers = [...new Set(found.map(note => String(note.nullifier || "").toLowerCase()).filter(Boolean))];
+      const result = await checkNullifiers(nullifiers);
+      const statuses = result instanceof Map ? result : new Map();
+      if (!(result instanceof Map)) {
+        if (Array.isArray(result?.statuses)) {
+          for (const status of result.statuses) {
+            statuses.set(String(status?.nullifier || "").toLowerCase(), Boolean(status?.used ?? status?.Used));
+          }
+        } else if (result && typeof result === "object") {
+          for (const [key, value] of Object.entries(result)) {
+            statuses.set(String(key).toLowerCase(), Boolean(value?.used ?? value?.Used ?? value));
+          }
+        }
+      }
+      const missing = nullifiers.filter(nullifier => !statuses.has(nullifier));
+      for (const note of found) {
+        if (statuses.has(note.nullifier)) {
+          note.isSpent = Boolean(statuses.get(note.nullifier));
+        }
+      }
+      batchSpentRefreshSucceeded = missing.length === 0;
+      if (!batchSpentRefreshSucceeded) {
+        missingBatchNullifiers = new Set(missing);
+      }
+    } catch {
+      // Fall back to individual checks below when the batch path is unavailable.
+    }
+  }
+
+  if (!batchSpentRefreshSucceeded && checkNullifier && (
+    missingBatchNullifiers?.size || found.some(note => !note.isSpent)
+  )) {
     for (const note of found) {
+      if (missingBatchNullifiers) {
+        if (!missingBatchNullifiers.has(note.nullifier)) continue;
+      } else if (note.isSpent) {
+        continue;
+      }
       try {
         const result = await checkNullifier(note.nullifier);
         note.isSpent = Boolean(result?.used ?? result?.Used ?? result);
