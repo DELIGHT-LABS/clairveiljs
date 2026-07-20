@@ -10,10 +10,14 @@ import {
   computeBatchTransferPayloadDigestV1,
   computeNoteCommitmentV1,
   computeNoteNullifierV1,
+  computeTransferFullDisclosureDigestV2,
+  computeTransferUserDisclosureDigestV2,
   decryptTransferNoteV1,
   emptyNoteTreeRootsV1,
   encryptNoteForTransferV1,
   encryptedEnvelopeKindV1,
+  marshalDisclosurePlaintextV1,
+  unmarshalDisclosurePlaintextV1,
   wrapEncryptedEnvelopeV1
 } from "clairveiljs/protocol-v1";
 
@@ -110,4 +114,52 @@ test("batch canonical payload excludes creator and proof while binding every eff
   assert.deepEqual(computeBatchTransferPayloadDigestV1(mutated).bytes, digest.bytes);
   assert.equal(digest.bytes.length, 32);
   assert.ok(canonical.length > 0);
+});
+
+test("privacy-fixed-v1 disclosure plaintext and transfer blinded digests are canonical", () => {
+  const senderSpend = derivePubKeyFromScalar(17n);
+  const senderView = derivePubKeyFromScalar(19n);
+  const recipientSpend = derivePubKeyFromScalar(23n);
+  const recipientView = derivePubKeyFromScalar(29n);
+  const disclosure = {
+    plane: 1,
+    outputIndex: 0,
+    policy: 7,
+    disclosedFieldBitmap: 7,
+    commitment: 101n,
+    amount: 7n,
+    assetID: computeAssetIdV1("uclair"),
+    senderSpendKeyX: senderSpend.x,
+    senderSpendKeyY: senderSpend.y,
+    senderViewKeyX: senderView.x,
+    senderViewKeyY: senderView.y,
+    recipientSpendKeyX: recipientSpend.x,
+    recipientSpendKeyY: recipientSpend.y,
+    recipientViewKeyX: recipientView.x,
+    recipientViewKeyY: recipientView.y,
+    disclosureBlinding: 13n
+  };
+  const encoded = marshalDisclosurePlaintextV1(disclosure);
+  assert.equal(encoded.length, 392);
+  assert.deepEqual(unmarshalDisclosurePlaintextV1(encoded), disclosure);
+
+  const digestInput = {
+    commitment: disclosure.commitment,
+    amount: disclosure.amount,
+    assetID: disclosure.assetID,
+    fromSpendPubKeyX: senderSpend.x,
+    fromSpendPubKeyY: senderSpend.y,
+    fromViewPubKeyX: senderView.x,
+    fromViewPubKeyY: senderView.y,
+    toSpendPubKeyX: recipientSpend.x,
+    toSpendPubKeyY: recipientSpend.y,
+    toViewPubKeyX: recipientView.x,
+    toViewPubKeyY: recipientView.y,
+    outputIndex: 0,
+    disclosureBlinding: 13n
+  };
+  assert.equal(computeTransferUserDisclosureDigestV2({ ...digestInput, policy: 7 }).toString(16).padStart(64, "0"), "27c6806d9b24568889da32707c7a61515f1e83e00f9239aae42ee8840462288c");
+  assert.equal(computeTransferFullDisclosureDigestV2(digestInput).toString(16).padStart(64, "0"), "18328bc0503673a4318c5431c24185ffa65b4903be7a252c27b7e51f9575a251");
+  assert.equal(computeTransferUserDisclosureDigestV2({ policy: 0, commitment: disclosure.commitment }), 0n);
+  assert.throws(() => marshalDisclosurePlaintextV1({ ...disclosure, policy: 1, disclosedFieldBitmap: 1, senderSpendKeyX: 1n }));
 });

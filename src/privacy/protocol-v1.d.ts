@@ -23,6 +23,25 @@ export interface NoteV1 {
 
 export interface DigestLimbsV1 { bytes: Uint8Array; hex: Hex; hi: bigint; lo: bigint; }
 
+export interface DisclosurePlaintextV1 {
+  plane: 1 | 2;
+  outputIndex: number;
+  policy: number;
+  disclosedFieldBitmap: number;
+  commitment: bigint;
+  amount: bigint;
+  assetID: bigint;
+  senderSpendKeyX: bigint;
+  senderSpendKeyY: bigint;
+  senderViewKeyX: bigint;
+  senderViewKeyY: bigint;
+  recipientSpendKeyX: bigint;
+  recipientSpendKeyY: bigint;
+  recipientViewKeyX: bigint;
+  recipientViewKeyY: bigint;
+  disclosureBlinding: bigint;
+}
+
 export function domainFieldV1(label: string): bigint;
 export function computeAssetIdV1(denom: string): bigint;
 export function computeNoteCommitmentV1(note: NoteV1): bigint;
@@ -32,6 +51,10 @@ export function emptyNoteTreeRootsV1(depth: number | bigint): bigint[];
 export function validateNoteV1(note: object): NoteV1;
 export function marshalNotePlaintextV1(note: NoteV1): Uint8Array;
 export function unmarshalNotePlaintextV1(value: Uint8Array | Hex): NoteV1;
+export function marshalDisclosurePlaintextV1(payload: DisclosurePlaintextV1): Uint8Array;
+export function unmarshalDisclosurePlaintextV1(value: Uint8Array | Hex): DisclosurePlaintextV1;
+export function computeTransferUserDisclosureDigestV2(input: object): bigint;
+export function computeTransferFullDisclosureDigestV2(input: object): bigint;
 export function wrapEncryptedEnvelopeV1(kind: number, ciphertext: Uint8Array | Hex): Uint8Array;
 export function unwrapEncryptedEnvelopeV1(value: Uint8Array | Hex, expectedKind?: number): Uint8Array;
 export function encryptNoteForTransferV1(note: NoteV1, outputCommitment: Uint8Array | Hex, outputIndex: number): { ciphertext: Uint8Array; viewTag: Uint8Array };

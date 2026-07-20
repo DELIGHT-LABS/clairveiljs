@@ -316,6 +316,176 @@ export function unmarshalNotePlaintextV1(value) {
   });
 }
 
+function disclosureField(payload, names, label, options) {
+  for (const name of names) {
+    if (payload?.[name] != null) return field(payload[name], label, options);
+  }
+  return field(0n, label, options);
+}
+
+function normalizeDisclosurePlaintextV1(payload) {
+  if (!payload || typeof payload !== "object") throw new Error("DisclosurePlaintextV1 is required");
+  const plane = Number(payload.plane ?? 0);
+  const outputIndex = Number(uint(payload.outputIndex ?? payload.output_index ?? 0, 32, "disclosure output index"));
+  const policy = Number(uint(payload.policy ?? 0, 32, "disclosure policy"));
+  const disclosedFieldBitmap = Number(uint(payload.disclosedFieldBitmap ?? payload.disclosed_field_bitmap ?? 0, 32, "disclosure bitmap"));
+  const value = {
+    plane,
+    outputIndex,
+    policy,
+    disclosedFieldBitmap,
+    commitment: disclosureField(payload, ["commitment"], "disclosure commitment", { nonZero: true }),
+    amount: uint(payload.amount ?? 0, 64, "disclosure amount"),
+    assetID: disclosureField(payload, ["assetID", "assetId", "asset_id"], "disclosure asset ID", { nonZero: true }),
+    senderSpendKeyX: disclosureField(payload, ["senderSpendKeyX", "sender_spend_key_x"], "disclosure sender spend x"),
+    senderSpendKeyY: disclosureField(payload, ["senderSpendKeyY", "sender_spend_key_y"], "disclosure sender spend y"),
+    senderViewKeyX: disclosureField(payload, ["senderViewKeyX", "sender_view_key_x"], "disclosure sender view x"),
+    senderViewKeyY: disclosureField(payload, ["senderViewKeyY", "sender_view_key_y"], "disclosure sender view y"),
+    recipientSpendKeyX: disclosureField(payload, ["recipientSpendKeyX", "recipient_spend_key_x"], "disclosure recipient spend x"),
+    recipientSpendKeyY: disclosureField(payload, ["recipientSpendKeyY", "recipient_spend_key_y"], "disclosure recipient spend y"),
+    recipientViewKeyX: disclosureField(payload, ["recipientViewKeyX", "recipient_view_key_x"], "disclosure recipient view x"),
+    recipientViewKeyY: disclosureField(payload, ["recipientViewKeyY", "recipient_view_key_y"], "disclosure recipient view y"),
+    disclosureBlinding: disclosureField(payload, ["disclosureBlinding", "disclosure_blinding", "fullDisclosureBlinding"], "disclosure blinding", { nonZero: true })
+  };
+  const sender = [value.senderSpendKeyX, value.senderSpendKeyY, value.senderViewKeyX, value.senderViewKeyY];
+  const recipient = [value.recipientSpendKeyX, value.recipientSpendKeyY, value.recipientViewKeyX, value.recipientViewKeyY];
+  const allZero = values => values.every(entry => entry === 0n);
+  const validateSender = () => {
+    pointFromCoordinates(value.senderSpendKeyX, value.senderSpendKeyY, "disclosure sender spend public key");
+    pointFromCoordinates(value.senderViewKeyX, value.senderViewKeyY, "disclosure sender view public key");
+  };
+  const validateRecipient = () => {
+    pointFromCoordinates(value.recipientSpendKeyX, value.recipientSpendKeyY, "disclosure recipient spend public key");
+    pointFromCoordinates(value.recipientViewKeyX, value.recipientViewKeyY, "disclosure recipient view public key");
+  };
+  if (plane === 1) {
+    if (policy < 1 || policy > 7 || disclosedFieldBitmap !== policy) throw new Error("user disclosure requires a matching policy bitmap in 1..7");
+    if ((policy & 1) === 0 && value.amount !== 0n) throw new Error("undisclosed amount must be zero");
+    if ((policy & 4) === 0) {
+      if (!allZero(sender)) throw new Error("undisclosed sender fields must be zero");
+    } else {
+      validateSender();
+    }
+    if ((policy & 2) === 0) {
+      if (!allZero(recipient)) throw new Error("undisclosed recipient fields must be zero");
+    } else {
+      validateRecipient();
+    }
+  } else if (plane === 2) {
+    if (policy !== 0xffffffff || disclosedFieldBitmap !== 7) throw new Error("full disclosure must use the full marker and bitmap");
+    validateSender();
+    validateRecipient();
+  } else {
+    throw new Error("unsupported disclosure plane");
+  }
+  return value;
+}
+
+export function marshalDisclosurePlaintextV1(payload) {
+  const value = normalizeDisclosurePlaintextV1(payload);
+  const output = new Uint8Array(disclosurePlaintextV1Size);
+  let offset = 0;
+  output.set(fixedDomainTag("clairveil.disclosure-plaintext.v1"), offset); offset += 16;
+  output.set(u16be(fixedBinaryVersion), offset); offset += 2;
+  output[offset] = value.plane; offset += 1;
+  offset += 1;
+  output.set(u32be(value.outputIndex), offset); offset += 4;
+  output.set(u32be(value.policy), offset); offset += 4;
+  output.set(u32be(value.disclosedFieldBitmap), offset); offset += 4;
+  output.set(canonicalFieldBytes(value.commitment), offset); offset += 32;
+  output.set(u64be(value.amount, "disclosure amount"), offset); offset += 8;
+  for (const entry of [
+    value.assetID,
+    value.senderSpendKeyX, value.senderSpendKeyY, value.senderViewKeyX, value.senderViewKeyY,
+    value.recipientSpendKeyX, value.recipientSpendKeyY, value.recipientViewKeyX, value.recipientViewKeyY,
+    value.disclosureBlinding
+  ]) {
+    output.set(canonicalFieldBytes(entry), offset); offset += 32;
+  }
+  return output;
+}
+
+export function unmarshalDisclosurePlaintextV1(value) {
+  const encoded = bytes(value, "DisclosurePlaintextV1");
+  if (encoded.length !== disclosurePlaintextV1Size) throw new Error(`DisclosurePlaintextV1 must be exactly ${disclosurePlaintextV1Size} bytes`);
+  let offset = 0;
+  if (!equalBytes(encoded.slice(0, 16), fixedDomainTag("clairveil.disclosure-plaintext.v1"))) throw new Error("invalid DisclosurePlaintextV1 domain tag");
+  offset += 16;
+  if (readU16(encoded, offset) !== fixedBinaryVersion) throw new Error("unsupported DisclosurePlaintextV1 version");
+  offset += 2;
+  const plane = encoded[offset]; offset += 1;
+  if (encoded[offset] !== 0) throw new Error("DisclosurePlaintextV1 reserved byte must be zero");
+  offset += 1;
+  const outputIndex = readU32(encoded, offset); offset += 4;
+  const policy = readU32(encoded, offset); offset += 4;
+  const disclosedFieldBitmap = readU32(encoded, offset); offset += 4;
+  const commitment = bytesToBigIntBE(fieldFromBytes(encoded.slice(offset, offset + 32), "disclosure commitment", { nonZero: true })); offset += 32;
+  const amount = readU64(encoded, offset); offset += 8;
+  const fields = [];
+  for (let index = 0; index < 10; index += 1) {
+    fields.push(bytesToBigIntBE(fieldFromBytes(encoded.slice(offset, offset + 32), `disclosure field ${index}`)));
+    offset += 32;
+  }
+  return normalizeDisclosurePlaintextV1({
+    plane, outputIndex, policy, disclosedFieldBitmap, commitment, amount,
+    assetID: fields[0],
+    senderSpendKeyX: fields[1], senderSpendKeyY: fields[2], senderViewKeyX: fields[3], senderViewKeyY: fields[4],
+    recipientSpendKeyX: fields[5], recipientSpendKeyY: fields[6], recipientViewKeyX: fields[7], recipientViewKeyY: fields[8],
+    disclosureBlinding: fields[9]
+  });
+}
+
+export function computeTransferUserDisclosureDigestV2(input) {
+  const policy = Number(input?.policy ?? 0);
+  if (!Number.isInteger(policy) || policy < 0 || policy > 7) throw new Error("transfer user disclosure policy must be in 0..7");
+  const commitment = field(input?.commitment, "transfer user disclosure commitment", { nonZero: true });
+  if (policy === 0) return 0n;
+  const required = (value, label) => {
+    if (value == null) throw new Error(`${label} is required`);
+    return field(value, label);
+  };
+  const selected = (value, enabled, label) => enabled ? required(value, label) : 0n;
+  const assetID = required(input?.assetID ?? input?.assetId, "transfer user disclosure asset ID");
+  if (assetID === 0n) throw new Error("transfer user disclosure asset ID must be non-zero");
+  return mimcHash(
+    hashStringToField("CLAIRVEIL_USER_DISCLOSURE_V2"),
+    BigInt(policy),
+    uint(input?.outputIndex ?? 0, 32, "transfer user disclosure output index"),
+    commitment,
+    selected(input?.amount, (policy & 1) !== 0, "transfer user disclosure amount"),
+    assetID,
+    selected(input?.fromSpendPubKeyX, (policy & 4) !== 0, "transfer user disclosure sender spend x"),
+    selected(input?.fromSpendPubKeyY, (policy & 4) !== 0, "transfer user disclosure sender spend y"),
+    selected(input?.fromViewPubKeyX, (policy & 4) !== 0, "transfer user disclosure sender view x"),
+    selected(input?.fromViewPubKeyY, (policy & 4) !== 0, "transfer user disclosure sender view y"),
+    selected(input?.toSpendPubKeyX, (policy & 2) !== 0, "transfer user disclosure recipient spend x"),
+    selected(input?.toSpendPubKeyY, (policy & 2) !== 0, "transfer user disclosure recipient spend y"),
+    selected(input?.toViewPubKeyX, (policy & 2) !== 0, "transfer user disclosure recipient view x"),
+    selected(input?.toViewPubKeyY, (policy & 2) !== 0, "transfer user disclosure recipient view y"),
+    field(input?.disclosureBlinding, "transfer user disclosure blinding", { nonZero: true })
+  );
+}
+
+export function computeTransferFullDisclosureDigestV2(input) {
+  const required = (names, label, options) => {
+    for (const name of names) if (input?.[name] != null) return field(input[name], label, options);
+    throw new Error(`${label} is required`);
+  };
+  return mimcHash(
+    hashStringToField("CLAIRVEIL_FULL_DISCLOSURE_V2"),
+    255n,
+    uint(input?.outputIndex ?? 0, 32, "transfer full disclosure output index"),
+    required(["commitment"], "transfer full disclosure commitment", { nonZero: true }),
+    required(["amount"], "transfer full disclosure amount"),
+    required(["assetID", "assetId"], "transfer full disclosure asset ID", { nonZero: true }),
+    required(["fromSpendPubKeyX"], "transfer full disclosure sender spend x"), required(["fromSpendPubKeyY"], "transfer full disclosure sender spend y"),
+    required(["fromViewPubKeyX"], "transfer full disclosure sender view x"), required(["fromViewPubKeyY"], "transfer full disclosure sender view y"),
+    required(["toSpendPubKeyX"], "transfer full disclosure recipient spend x"), required(["toSpendPubKeyY"], "transfer full disclosure recipient spend y"),
+    required(["toViewPubKeyX"], "transfer full disclosure recipient view x"), required(["toViewPubKeyY"], "transfer full disclosure recipient view y"),
+    required(["disclosureBlinding", "fullDisclosureBlinding"], "transfer full disclosure blinding", { nonZero: true })
+  );
+}
+
 export function wrapEncryptedEnvelopeV1(kind, ciphertext) {
   const raw = bytes(ciphertext, "encrypted envelope ciphertext");
   if (raw.length !== envelopeCiphertextSize(kind)) {
