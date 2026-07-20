@@ -123,6 +123,10 @@
       "types": "./src/privacy/protocol-v1.d.ts",
       "import": "./src/privacy/protocol-v1.js"
     },
+    "./transfer-v5": {
+      "types": "./src/privacy/transfer-v5.d.ts",
+      "import": "./src/privacy/transfer-v5.js"
+    },
     "./planner": {
       "types": "./src/privacy/planner.d.ts",
       "import": "./src/privacy/planner.js"
