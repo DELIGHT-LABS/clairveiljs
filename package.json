@@ -1,6 +1,6 @@
 {
   "name": "clairveiljs",
-  "version": "0.1.0",
+  "version": "0.1.10",
   "description": "Clairveil JavaScript SDK for privacy core, Cosmos transport, EVM transport, wallet, note, transfer, withdraw, disclosure, and prover flows.",
   "type": "module",
   "license": "Apache-2.0",
@@ -48,7 +48,10 @@
     "test:conformance": "node --test test/conformance.test.js test/prover-contract.test.js test/disclosure-conformance.test.js",
     "test:conformance:required": "node --import ./tools/require-conformance-fixtures.js --test test/conformance.test.js test/prover-contract.test.js test/disclosure-conformance.test.js",
     "test:e2e:local": "node --test test/e2e-local.e2e.js",
-    "prepublishOnly": "npm run check && npm run typecheck && npm test && npm run test:conformance:required"
+    "verify:package": "npm run check && npm run typecheck && npm test",
+    "verify:release": "npm run verify:package && npm run test:conformance:required",
+    "prepack": "npm run verify:package",
+    "prepublishOnly": "npm run verify:release"
   },
   "exports": {
     ".": {
