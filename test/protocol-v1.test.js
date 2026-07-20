@@ -18,8 +18,10 @@ import {
   computeNoteNullifierV1,
   computeTransferFullDisclosureDigestV2,
   computeTransferUserDisclosureDigestV2,
+  decryptDisclosureV1,
   decryptTransferNoteV1,
   emptyNoteTreeRootsV1,
+  encryptDisclosureV1,
   encryptNoteForTransferV1,
   encryptedEnvelopeKindV1,
   marshalDisclosurePlaintextV1,
@@ -168,6 +170,11 @@ test("privacy-fixed-v1 disclosure plaintext and transfer blinded digests are can
   assert.equal(computeTransferFullDisclosureDigestV2(digestInput).toString(16).padStart(64, "0"), "18328bc0503673a4318c5431c24185ffa65b4903be7a252c27b7e51f9575a251");
   assert.equal(computeTransferUserDisclosureDigestV2({ policy: 0, commitment: disclosure.commitment }), 0n);
   assert.throws(() => marshalDisclosurePlaintextV1({ ...disclosure, policy: 1, disclosedFieldBitmap: 1, senderSpendKeyX: 1n }));
+
+  const encrypted = encryptDisclosureV1(disclosure, recipientView, encryptedEnvelopeKindV1.auditDisclosure);
+  assert.equal(encrypted.length, 472);
+  assert.deepEqual(decryptDisclosureV1(encrypted, 29n, encryptedEnvelopeKindV1.auditDisclosure), disclosure);
+  assert.throws(() => decryptDisclosureV1(encrypted, 29n, encryptedEnvelopeKindV1.userDisclosure), /kind mismatch/);
 });
 
 test("batch 16x32 vector, disclosure, and intent public inputs match Clairveil main", () => {

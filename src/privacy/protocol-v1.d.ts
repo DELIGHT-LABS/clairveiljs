@@ -66,6 +66,8 @@ export function wrapEncryptedEnvelopeV1(kind: number, ciphertext: Uint8Array | H
 export function unwrapEncryptedEnvelopeV1(value: Uint8Array | Hex, expectedKind?: number): Uint8Array;
 export function encryptNoteForTransferV1(note: NoteV1, outputCommitment: Uint8Array | Hex, outputIndex: number): { ciphertext: Uint8Array; viewTag: Uint8Array };
 export function decryptTransferNoteV1(ciphertext: Uint8Array | Hex, scalar: bigint): NoteV1;
+export function encryptDisclosureV1(disclosure: DisclosurePlaintextV1, target: Point, kind: 3 | 4 | 5): Uint8Array;
+export function decryptDisclosureV1(ciphertext: Uint8Array | Hex, scalar: bigint, expectedKind: 3 | 4 | 5): DisclosurePlaintextV1;
 export function encryptDepositNoteV1(note: NoteV1, rootSeed: Uint8Array): Uint8Array;
 export function decryptDepositNoteV1(ciphertext: Uint8Array | Hex, rootSeed: Uint8Array): NoteV1;
 export function validateBatchTransferEffectsV1(message: object): object;

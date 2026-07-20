@@ -701,6 +701,21 @@ export function decryptTransferNoteV1(ciphertext, scalar) {
   return unmarshalNotePlaintextV1(asymDecryptV1(unwrapEncryptedEnvelopeV1(ciphertext, encryptedEnvelopeKindV1.transferNote), scalar));
 }
 
+export function encryptDisclosureV1(disclosure, target, kind) {
+  const envelopeKind = disclosureEnvelopeKindV1(kind);
+  return wrapEncryptedEnvelopeV1(
+    envelopeKind,
+    asymEncryptV1(marshalDisclosurePlaintextV1(disclosure), target).ciphertext
+  );
+}
+
+export function decryptDisclosureV1(ciphertext, scalar, expectedKind) {
+  const envelopeKind = disclosureEnvelopeKindV1(expectedKind);
+  return unmarshalDisclosurePlaintextV1(
+    asymDecryptV1(unwrapEncryptedEnvelopeV1(ciphertext, envelopeKind), scalar)
+  );
+}
+
 export function encryptDepositNoteV1(note, rootSeed) {
   const nonce = randomBytes(12);
   const encrypted = aesGcmEncrypt({ key: sha256(rootSeed), nonce, plaintext: marshalNotePlaintextV1(note) });
@@ -712,7 +727,19 @@ export function decryptDepositNoteV1(ciphertext, rootSeed) {
   return unmarshalNotePlaintextV1(aesGcmDecrypt({ key: sha256(rootSeed), nonce: raw.slice(0, 12), ciphertext: raw.slice(12) }));
 }
 
-function asymEncryptWithViewTagV1(plaintext, receiver, outputCommitment, outputIndex) {
+function disclosureEnvelopeKindV1(kind) {
+  const normalized = Number(kind);
+  if (
+    normalized !== encryptedEnvelopeKindV1.userDisclosure
+    && normalized !== encryptedEnvelopeKindV1.auditDisclosure
+    && normalized !== encryptedEnvelopeKindV1.selfViewDisclosure
+  ) {
+    throw new Error("disclosure envelope kind must be user, audit, or self-view disclosure");
+  }
+  return normalized;
+}
+
+function asymEncryptV1(plaintext, receiver) {
   const receiverPoint = pointFromCoordinates(receiver.x, receiver.y, "receiver public key");
   let scalar = 0n;
   while (scalar === 0n) scalar = bytesToBigIntBE(randomBytes(32)) % CURVE_ORDER;
@@ -720,9 +747,14 @@ function asymEncryptWithViewTagV1(plaintext, receiver, outputCommitment, outputI
   const sharedPoint = scalarMultiply(receiverPoint, scalar);
   const nonce = randomBytes(12);
   const encrypted = aesGcmEncrypt({ key: sha256(packPoint(sharedPoint)), nonce, plaintext });
+  return { ciphertext: concatBytes(packPoint(ephemeral), nonce, encrypted), sharedPoint };
+}
+
+function asymEncryptWithViewTagV1(plaintext, receiver, outputCommitment, outputIndex) {
+  const { ciphertext, sharedPoint } = asymEncryptV1(plaintext, receiver);
   const commitment = fieldFromBytes(outputCommitment, "output commitment", { nonZero: true });
   const tag = canonicalFieldBytes(mimcHash(hashStringToField("clairveil.view_tag.v1"), sharedPoint.x, sharedPoint.y, bytesToBigIntBE(commitment), uint(outputIndex, 32, "output index"))).slice(0, 2);
-  return { ciphertext: concatBytes(packPoint(ephemeral), nonce, encrypted), viewTag: tag };
+  return { ciphertext, viewTag: tag };
 }
 
 function asymDecryptV1(ciphertext, scalar) {
