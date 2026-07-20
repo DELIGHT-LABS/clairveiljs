@@ -7,7 +7,13 @@ import {
 import {
   canonicalBatchTransferPayloadBytesV1,
   computeAssetIdV1,
+  computeBatchFullDisclosureDigestV1,
+  computeBatchTransferIntentV1,
+  computeBatchUserDisclosureDigestV1,
+  computeBatchUserDisclosureVectorRootV1,
+  computeBatchVectorRootV1,
   computeBatchTransferPayloadDigestV1,
+  computeChainDomainV1,
   computeNoteCommitmentV1,
   computeNoteNullifierV1,
   computeTransferFullDisclosureDigestV2,
@@ -162,4 +168,44 @@ test("privacy-fixed-v1 disclosure plaintext and transfer blinded digests are can
   assert.equal(computeTransferFullDisclosureDigestV2(digestInput).toString(16).padStart(64, "0"), "18328bc0503673a4318c5431c24185ffa65b4903be7a252c27b7e51f9575a251");
   assert.equal(computeTransferUserDisclosureDigestV2({ policy: 0, commitment: disclosure.commitment }), 0n);
   assert.throws(() => marshalDisclosurePlaintextV1({ ...disclosure, policy: 1, disclosedFieldBitmap: 1, senderSpendKeyX: 1n }));
+});
+
+test("batch 16x32 vector, disclosure, and intent public inputs match Clairveil main", () => {
+  const nullifiers = Array(16).fill(0n); nullifiers[0] = 1n;
+  const commitments = Array(32).fill(0n); commitments[0] = 2n;
+  const fullDigests = Array(32).fill(0n); fullDigests[0] = 3n;
+  const rawUserDigests = Array(32).fill(0n);
+  const policies = Array(32).fill(0);
+  const nullifierRoot = computeBatchVectorRootV1("nullifier", 1, nullifiers);
+  const commitmentRoot = computeBatchVectorRootV1("commitment", 1, commitments);
+  const userRoot = computeBatchUserDisclosureVectorRootV1(1, policies, rawUserDigests);
+  const fullRoot = computeBatchVectorRootV1("full_disclosure", 1, fullDigests);
+  const pad = value => value.toString(16).padStart(64, "0");
+  assert.deepEqual([nullifierRoot, commitmentRoot, userRoot, fullRoot].map(pad), [
+    "021c58c9c3f7aa80fd13c1f0c2895441f5c974a4df42a7ec24cf0b6d0b6f8bdd",
+    "2214fdd91882e60da9c1cecea7d3ede71a1879b649c4d4e7afe89953a0cad663",
+    "0800ac722e07e30f4a9009e9a514f4a1f9d037abd2b9cf63b8ee3a92893df8ad",
+    "11b02147c6388fbc4f7853591139fac5f9fed4a7b8d7a2e8c16f393a3b265dbd"
+  ]);
+  assert.equal(pad(computeBatchTransferIntentV1({
+    chainDomain: computeChainDomainV1("clairveil-test-1"), merkleRoot: 4n, inputCount: 1, outputCount: 1, assetID: 5n,
+    nullifierRoot, commitmentRoot, userDisclosureRoot: userRoot, fullDisclosureRoot: fullRoot,
+    payloadDigestHi: 6n, payloadDigestLo: 7n, expiresAtUnix: 100
+  })), "0a3b7787337b64960d2d28f4e812cbb84cd66053ede4c207524b6f6638de0ee0");
+
+  const senderSpend = derivePubKeyFromScalar(17n); const senderView = derivePubKeyFromScalar(19n);
+  const recipientSpend = derivePubKeyFromScalar(23n); const recipientView = derivePubKeyFromScalar(29n);
+  const disclosureInput = {
+    outputIndex: 0, commitment: 101n, policy: 7, disclosedFieldBitmap: 7, selectedAmount: 7n,
+    selectedFromSpendKeyX: senderSpend.x, selectedFromSpendKeyY: senderSpend.y, selectedFromViewKeyX: senderView.x, selectedFromViewKeyY: senderView.y,
+    selectedToSpendKeyX: recipientSpend.x, selectedToSpendKeyY: recipientSpend.y, selectedToViewKeyX: recipientView.x, selectedToViewKeyY: recipientView.y,
+    assetID: computeAssetIdV1("uclair"), userDisclosureBlinding: 13n
+  };
+  assert.equal(pad(computeBatchUserDisclosureDigestV1(disclosureInput)), "03fed151a125937b87fb9f4651be30c4965378a4d91c7006380ab95e57925de2");
+  assert.equal(pad(computeBatchFullDisclosureDigestV1({
+    outputIndex: 0, commitment: 101n, amount: 7n, assetID: disclosureInput.assetID,
+    senderSpendKeyX: senderSpend.x, senderSpendKeyY: senderSpend.y, senderViewKeyX: senderView.x, senderViewKeyY: senderView.y,
+    recipientSpendKeyX: recipientSpend.x, recipientSpendKeyY: recipientSpend.y, recipientViewKeyX: recipientView.x, recipientViewKeyY: recipientView.y,
+    fullDisclosureBlinding: 17n
+  })), "113143773b99fdbdce53f4dd4ce914e887d0fb880a4be55eb3dae9075f75258b");
 });

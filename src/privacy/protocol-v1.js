@@ -30,6 +30,12 @@ export const encryptedEnvelopeV1HeaderSize = 20;
 export const noteMemoCapacityV1 = 128;
 export const batchTransferPayloadDomainV1 = "clairveil.batch-transfer-payload.v1";
 export const transferPayloadDomainV1 = "clairveil.transfer-payload.v1";
+export const batchVectorKindV1 = Object.freeze({
+  nullifier: "nullifier",
+  commitment: "commitment",
+  userDisclosure: "user_disclosure",
+  fullDisclosure: "full_disclosure"
+});
 
 export const encryptedEnvelopeKindV1 = Object.freeze({
   depositNote: 1,
@@ -483,6 +489,176 @@ export function computeTransferFullDisclosureDigestV2(input) {
     required(["toSpendPubKeyX"], "transfer full disclosure recipient spend x"), required(["toSpendPubKeyY"], "transfer full disclosure recipient spend y"),
     required(["toViewPubKeyX"], "transfer full disclosure recipient view x"), required(["toViewPubKeyY"], "transfer full disclosure recipient view y"),
     required(["disclosureBlinding", "fullDisclosureBlinding"], "transfer full disclosure blinding", { nonZero: true })
+  );
+}
+
+function batchVectorCapacity(kind) {
+  switch (kind) {
+    case batchVectorKindV1.nullifier:
+      return 16;
+    case batchVectorKindV1.commitment:
+    case batchVectorKindV1.userDisclosure:
+    case batchVectorKindV1.fullDisclosure:
+      return 32;
+    default:
+      throw new Error(`unsupported batch vector kind ${JSON.stringify(kind)}`);
+  }
+}
+
+function batchVectorKindLabel(kind, part) {
+  if (!["leaf", "node", "root"].includes(part)) throw new Error(`unsupported batch vector domain part ${JSON.stringify(part)}`);
+  batchVectorCapacity(kind);
+  return `clairveil.batch-vector.${kind}.${part}.v1`;
+}
+
+function requireBatchField(input, names, label, options) {
+  for (const name of names) if (input?.[name] != null) return field(input[name], label, options);
+  throw new Error(`${label} is required`);
+}
+
+function batchKeyBundle(input, prefix, label) {
+  const values = [
+    requireBatchField(input, [`${prefix}SpendKeyX`, `${prefix}_spend_key_x`], `${label} spend key x`),
+    requireBatchField(input, [`${prefix}SpendKeyY`, `${prefix}_spend_key_y`], `${label} spend key y`),
+    requireBatchField(input, [`${prefix}ViewKeyX`, `${prefix}_view_key_x`], `${label} view key x`),
+    requireBatchField(input, [`${prefix}ViewKeyY`, `${prefix}_view_key_y`], `${label} view key y`)
+  ];
+  return values;
+}
+
+function validateBatchKeyBundle(values, label) {
+  pointFromCoordinates(values[0], values[1], `${label} spend public key`);
+  pointFromCoordinates(values[2], values[3], `${label} view public key`);
+}
+
+export function validateBatchJoinSplitCountsV1(inputCount, outputCount) {
+  const inputs = Number(uint(inputCount, 32, "batch input count"));
+  const outputs = Number(uint(outputCount, 32, "batch output count"));
+  if (inputs < 1 || inputs > 16) throw new Error("batch input count must be in 1..16");
+  if (outputs < 1 || outputs > 32) throw new Error("batch output count must be in 1..32");
+  return true;
+}
+
+export function computeBatchVectorRootV1(kind, count, values) {
+  const capacity = batchVectorCapacity(kind);
+  const active = Number(uint(count, 32, `${kind} vector count`));
+  if (active < 1 || active > capacity) throw new Error(`${kind} vector count must be in [1,${capacity}]`);
+  if (!Array.isArray(values) || values.length !== capacity) throw new Error(`${kind} vector must contain exactly ${capacity} values`);
+  const leafDomain = domainFieldV1(batchVectorKindLabel(kind, "leaf"));
+  const nodeDomain = domainFieldV1(batchVectorKindLabel(kind, "node"));
+  const rootDomain = domainFieldV1(batchVectorKindLabel(kind, "root"));
+  let layer = values.map((value, index) => {
+    const canonical = field(value, `${kind} vector value ${index}`);
+    const enabled = index < active;
+    if (enabled && canonical === 0n) throw new Error(`${kind} vector active value ${index} must be non-zero`);
+    if (!enabled && canonical !== 0n) throw new Error(`${kind} vector disabled value ${index} must be zero`);
+    return mimcHash(leafDomain, BigInt(index), enabled ? 1n : 0n, canonical);
+  });
+  for (let level = 0; layer.length > 1; level += 1) {
+    const next = [];
+    for (let index = 0; index < layer.length; index += 2) next.push(mimcHash(nodeDomain, BigInt(level), layer[index], layer[index + 1]));
+    layer = next;
+  }
+  return mimcHash(rootDomain, BigInt(capacity), BigInt(active), layer[0]);
+}
+
+export function computeBatchUserDisclosureVectorRootV1(count, policies, rawDigests) {
+  const active = Number(uint(count, 32, "batch user disclosure vector count"));
+  if (active < 1 || active > 32) throw new Error("batch user disclosure vector count must be in [1,32]");
+  if (!Array.isArray(policies) || policies.length !== 32 || !Array.isArray(rawDigests) || rawDigests.length !== 32) {
+    throw new Error("batch user disclosure vector requires exactly 32 policies and raw digests");
+  }
+  const domain = domainFieldV1("clairveil.user-disclosure-leaf.v1");
+  const values = rawDigests.map((rawDigest, index) => {
+    const raw = field(rawDigest, `batch user disclosure raw digest ${index}`);
+    const policy = Number(uint(policies[index], 32, `batch user disclosure policy ${index}`));
+    if (policy > 7) throw new Error(`batch user disclosure policy ${index} exceeds 3-bit policy`);
+    if (index >= active) {
+      if (policy !== 0 || raw !== 0n) throw new Error(`batch disabled user disclosure output ${index} must use zero policy and digest`);
+      return 0n;
+    }
+    if (policy === 0 && raw !== 0n) throw new Error(`batch all-private output ${index} must use zero user disclosure digest`);
+    if (policy !== 0 && raw === 0n) throw new Error(`batch disclosed output ${index} must use a non-zero user disclosure digest`);
+    return mimcHash(domain, BigInt(index), 1n, BigInt(policy), raw);
+  });
+  return computeBatchVectorRootV1(batchVectorKindV1.userDisclosure, active, values);
+}
+
+export function computeBatchUserDisclosureDigestV1(input) {
+  const outputIndex = uint(input?.outputIndex ?? input?.output_index ?? 0, 32, "batch user disclosure output index");
+  const commitment = requireBatchField(input, ["commitment"], "batch user disclosure commitment", { nonZero: true });
+  const policy = Number(uint(input?.policy ?? 0, 32, "batch user disclosure policy"));
+  const bitmap = Number(uint(input?.disclosedFieldBitmap ?? input?.disclosed_field_bitmap ?? 0, 32, "batch user disclosure bitmap"));
+  const amount = requireBatchField(input, ["selectedAmount", "selected_amount", "amount"], "batch user disclosure selected amount");
+  const sender = batchKeyBundle(input, "selectedFrom", "batch user disclosure sender");
+  const recipient = batchKeyBundle(input, "selectedTo", "batch user disclosure recipient");
+  const assetID = requireBatchField(input, ["assetID", "assetId", "asset_id"], "batch user disclosure asset ID");
+  const blinding = input?.userDisclosureBlinding ?? input?.user_disclosure_blinding;
+  const zero = values => values.every(value => value === 0n);
+  if (policy === 0) {
+    if (bitmap !== 0 || amount !== 0n || !zero(sender) || !zero(recipient) || assetID !== 0n || (blinding != null && field(blinding, "batch user disclosure blinding") !== 0n)) {
+      throw new Error("batch all-private disclosure must use zero bitmap, selected fields, and blinding");
+    }
+    return 0n;
+  }
+  if (policy > 7 || bitmap !== policy) throw new Error("batch user disclosure bitmap must equal policy in 1..7");
+  if (assetID === 0n) throw new Error("batch user disclosure asset ID must be non-zero");
+  if ((policy & 1) === 0 && amount !== 0n) throw new Error("batch undisclosed amount must be zero");
+  if ((policy & 4) === 0) {
+    if (!zero(sender)) throw new Error("batch undisclosed sender keys must be zero");
+  } else validateBatchKeyBundle(sender, "batch selected sender");
+  if ((policy & 2) === 0) {
+    if (!zero(recipient)) throw new Error("batch undisclosed recipient keys must be zero");
+  } else validateBatchKeyBundle(recipient, "batch selected recipient");
+  const userBlinding = field(blinding, "batch user disclosure blinding", { nonZero: true });
+  return mimcHash(
+    domainFieldV1("clairveil.user-disclosure.v2"), outputIndex, commitment, BigInt(policy), BigInt(bitmap), amount,
+    ...sender, ...recipient, assetID, userBlinding
+  );
+}
+
+export function computeBatchFullDisclosureDigestV1(input) {
+  const outputIndex = uint(input?.outputIndex ?? input?.output_index ?? 0, 32, "batch full disclosure output index");
+  const commitment = requireBatchField(input, ["commitment"], "batch full disclosure commitment", { nonZero: true });
+  const amount = uint(input?.amount, 64, "batch full disclosure amount");
+  const assetID = requireBatchField(input, ["assetID", "assetId", "asset_id"], "batch full disclosure asset ID", { nonZero: true });
+  const sender = batchKeyBundle(input, "sender", "batch full disclosure sender");
+  const recipient = batchKeyBundle(input, "recipient", "batch full disclosure recipient");
+  validateBatchKeyBundle(sender, "batch full disclosure sender");
+  validateBatchKeyBundle(recipient, "batch full disclosure recipient");
+  const fullBlinding = requireBatchField(input, ["fullDisclosureBlinding", "full_disclosure_blinding", "disclosureBlinding"], "batch full disclosure blinding", { nonZero: true });
+  return mimcHash(
+    domainFieldV1("clairveil.full-disclosure.v2"), outputIndex, commitment, amount, assetID,
+    ...sender, ...recipient, fullBlinding
+  );
+}
+
+export function computeBatchTransferIntentV1(input = {}) {
+  const inputCount = Number(uint(input.inputCount ?? input.input_count ?? 0, 32, "batch input count"));
+  const outputCount = Number(uint(input.outputCount ?? input.output_count ?? 0, 32, "batch output count"));
+  validateBatchJoinSplitCountsV1(inputCount, outputCount);
+  const chainDomain = input.chainDomain || {};
+  const payloadDigest = input.payloadDigest || {};
+  const chainHi = requireBatchField({ ...input, chainDomainHi: input.chainDomainHi ?? chainDomain.hi }, ["chainDomainHi", "chain_domain_hi"], "batch chain domain hi");
+  const chainLo = requireBatchField({ ...input, chainDomainLo: input.chainDomainLo ?? chainDomain.lo }, ["chainDomainLo", "chain_domain_lo"], "batch chain domain lo");
+  const merkleRoot = requireBatchField(input, ["merkleRoot", "merkle_root", "root"], "batch merkle root");
+  const assetID = requireBatchField(input, ["assetID", "assetId", "asset_id"], "batch asset ID");
+  const nullifierRoot = requireBatchField(input, ["nullifierRoot", "nullifier_root"], "batch nullifier root");
+  const commitmentRoot = requireBatchField(input, ["commitmentRoot", "commitment_root"], "batch commitment root");
+  const userRoot = requireBatchField(input, ["userDisclosureRoot", "user_disclosure_root"], "batch user disclosure root");
+  const fullRoot = requireBatchField(input, ["fullDisclosureRoot", "full_disclosure_root"], "batch full disclosure root");
+  const digestHi = requireBatchField({ ...input, payloadDigestHi: input.payloadDigestHi ?? payloadDigest.hi }, ["payloadDigestHi", "payload_digest_hi"], "batch payload digest hi");
+  const digestLo = requireBatchField({ ...input, payloadDigestLo: input.payloadDigestLo ?? payloadDigest.lo }, ["payloadDigestLo", "payload_digest_lo"], "batch payload digest lo");
+  for (const [value, label] of [[chainHi, "chain domain hi"], [chainLo, "chain domain lo"], [digestHi, "payload digest hi"], [digestLo, "payload digest lo"]]) {
+    if (value >= (1n << 128n)) throw new Error(`batch ${label} must be an unsigned 128-bit integer`);
+  }
+  const expiresAtUnix = uint(input.expiresAtUnix ?? input.expires_at_unix ?? 0, 63, "batch expires_at_unix");
+  if (expiresAtUnix === 0n) throw new Error("batch expires_at_unix must be positive");
+  return mimcHash(
+    domainFieldV1("clairveil.batch-transfer-intent.v1"), chainHi, chainLo,
+    domainFieldV1("clairveil.batch-joinsplit-16x32.v1"), merkleRoot,
+    BigInt(inputCount), BigInt(outputCount), assetID, nullifierRoot, commitmentRoot,
+    userRoot, fullRoot, digestHi, digestLo, expiresAtUnix
   );
 }
 

@@ -8,6 +8,7 @@ export const encryptedEnvelopeV1HeaderSize: 20;
 export const noteMemoCapacityV1: 128;
 export const batchTransferPayloadDomainV1: "clairveil.batch-transfer-payload.v1";
 export const transferPayloadDomainV1: "clairveil.transfer-payload.v1";
+export const batchVectorKindV1: Readonly<{ nullifier: "nullifier"; commitment: "commitment"; userDisclosure: "user_disclosure"; fullDisclosure: "full_disclosure" }>;
 export const encryptedEnvelopeKindV1: Readonly<{ depositNote: 1; transferNote: 2; userDisclosure: 3; auditDisclosure: 4; selfViewDisclosure: 5 }>;
 
 export interface NoteV1 {
@@ -55,6 +56,12 @@ export function marshalDisclosurePlaintextV1(payload: DisclosurePlaintextV1): Ui
 export function unmarshalDisclosurePlaintextV1(value: Uint8Array | Hex): DisclosurePlaintextV1;
 export function computeTransferUserDisclosureDigestV2(input: object): bigint;
 export function computeTransferFullDisclosureDigestV2(input: object): bigint;
+export function validateBatchJoinSplitCountsV1(inputCount: number | bigint, outputCount: number | bigint): true;
+export function computeBatchVectorRootV1(kind: "nullifier" | "commitment" | "user_disclosure" | "full_disclosure", count: number | bigint, values: bigint[]): bigint;
+export function computeBatchUserDisclosureVectorRootV1(count: number | bigint, policies: number[], rawDigests: bigint[]): bigint;
+export function computeBatchUserDisclosureDigestV1(input: object): bigint;
+export function computeBatchFullDisclosureDigestV1(input: object): bigint;
+export function computeBatchTransferIntentV1(input: object): bigint;
 export function wrapEncryptedEnvelopeV1(kind: number, ciphertext: Uint8Array | Hex): Uint8Array;
 export function unwrapEncryptedEnvelopeV1(value: Uint8Array | Hex, expectedKind?: number): Uint8Array;
 export function encryptNoteForTransferV1(note: NoteV1, outputCommitment: Uint8Array | Hex, outputIndex: number): { ciphertext: Uint8Array; viewTag: Uint8Array };
