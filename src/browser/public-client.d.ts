@@ -11,6 +11,35 @@ export interface PrivacyEventsQuery {
   event_types?: string[];
 }
 
+export interface PrivacyScanCursorInput {
+  height?: Uint64CursorInput;
+  globalSequence?: Uint64CursorInput;
+  global_sequence?: Uint64CursorInput;
+  outputIndex?: number;
+  output_index?: number;
+}
+
+export interface TypedPrivacyScanQuery {
+  after?: PrivacyScanCursorInput;
+  outputLimit?: number;
+  output_limit?: number;
+  eventLimit?: number;
+  event_limit?: number;
+  maxEncodedBytes?: Uint64CursorInput;
+  max_encoded_bytes?: Uint64CursorInput;
+  eventTypes?: string[];
+  event_types?: string[];
+}
+
+export interface CommitmentPathsAtRootQuery {
+  commitmentHexes?: readonly string[];
+  commitment_hexes?: readonly string[];
+  rootHex?: string;
+  root_hex?: string;
+  snapshotHeight?: Uint64CursorInput;
+  snapshot_height?: Uint64CursorInput;
+}
+
 export interface ClairveilPublicClientOptions {
   rest?: string;
   restEndpoints?: string[];
@@ -61,10 +90,14 @@ export class ClairveilPublicClient {
   }): Promise<T>;
   fetchPrivacyEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchScanEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
+  fetchPrivacyScan(options?: TypedPrivacyScanQuery): Promise<object>;
   checkNullifier(nullifierHex: string): Promise<object & { used?: boolean; Used?: boolean }>;
   checkNullifiers(nullifierHexes: readonly string[]): Promise<Map<string, boolean>>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
+  fetchAssetByDenom(denom: string): Promise<object>;
+  fetchAssetByID(assetIdHex: string): Promise<object>;
+  fetchCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<object>;
 }
 
 export function createClairveilPublicClient(options: ClairveilPublicClientOptions): ClairveilPublicClient;

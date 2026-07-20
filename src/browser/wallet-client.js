@@ -503,6 +503,7 @@ function blockEventType(tx) {
   const evmFailure = evmFailureFromTx(tx);
   if (action === "/cosmos.bank.v1beta1.MsgSend") return "bank send";
   if (action === "/clairveil.privacy.v1.MsgDeposit") return "privacy deposit";
+  if (action === "/clairveil.privacy.v1.MsgBatchTransfer") return "privacy batch transfer";
   if (action === "/clairveil.privacy.v1.MsgTransfer") return "privacy transfer";
   if (action === "/clairveil.privacy.v1.MsgWithdraw") return "privacy withdraw";
   if (action === "/cosmos.evm.vm.v1.MsgEthereumTx" && evmFailure) return "ethereumtx failed";

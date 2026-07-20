@@ -36,8 +36,10 @@ import {
 } from "clairveiljs/core";
 import {
   createClairveilClient,
+  createClairveilRegistry,
   cosmosSignDocBindingHash,
   MemoryNoteStore,
+  MsgBatchTransfer,
   MsgDeposit,
   MsgWithdraw,
   nextPrivacyScanOptions,
@@ -4570,6 +4572,99 @@ test("generated Clairveil protobuf bindings are exposed", async () => {
   assert.equal(typeof txWithExtension.MsgDeposit.encode, "function");
   assert.equal(txWithExtension.MsgWithdraw.typeUrl, "/clairveil.privacy.v1.MsgWithdraw");
   assert.equal(query.QueryReserveResponse.typeUrl, "/clairveil.privacy.v1.QueryReserveResponse");
+});
+
+test("BatchTransfer protobuf binding is registered and preserves its expiry", () => {
+  const message = {
+    creator: "clair1batch",
+    proof: new Uint8Array([1, 2, 3]),
+    root: new Uint8Array(32).fill(1),
+    nullifiers: [new Uint8Array(32).fill(2)],
+    outputs: [{
+      commitment: new Uint8Array(32).fill(3),
+      ciphertext: new Uint8Array([4]),
+      viewTag: new Uint8Array([5, 6]),
+      userPrivacyPolicy: 0,
+      userDisclosureMode: 0,
+      userDisclosureDigest: new Uint8Array(),
+      userDisclosureTargetPubkey: new Uint8Array(),
+      userDisclosurePayload: new Uint8Array(),
+      fullDisclosureDigest: new Uint8Array(32).fill(7),
+      auditDisclosurePayload: new Uint8Array([8]),
+      selfViewDisclosurePayload: new Uint8Array()
+    }],
+    auditKeyId: "audit-key-1",
+    auditKeyEpoch: 3n,
+    auditDisclosureTargetPubkey: new Uint8Array(32).fill(9),
+    expiresAtUnix: 4_102_448_400n
+  };
+  const decoded = MsgBatchTransfer.decode(MsgBatchTransfer.encode(message).finish());
+  assert.equal(decoded.expiresAtUnix, 4_102_448_400n);
+  assert.equal(decoded.outputs.length, 1);
+
+  const registry = createClairveilRegistry();
+  const encoded = registry.encode({
+    typeUrl: MsgBatchTransfer.typeUrl,
+    value: MsgBatchTransfer.fromPartial(message)
+  });
+  assert.ok(encoded.length > 0);
+});
+
+test("SDK exposes the typed privacy protocol queries and batch sign-doc boundary", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  const calls = [];
+  client.fetchJson = async (path, options = {}) => {
+    calls.push({ path, options });
+    return { path };
+  };
+
+  await client.fetchPrivacyScan({
+    after: { height: 7n, global_sequence: 8n, output_index: 1 },
+    output_limit: 12,
+    eventTypes: ["batch_transfer"]
+  });
+  await client.fetchAssetByDenom("factory/clair1/module/uclair");
+  await client.fetchAssetByID("ab".repeat(32));
+  await client.fetchCommitmentPathsAtRoot({
+    commitmentHexes: ["cd".repeat(32)],
+    rootHex: "ef".repeat(32),
+    snapshotHeight: 9n
+  });
+
+  assert.equal(calls[0].path, "/clairveil/privacy/v1/privacy_scan");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    after: { height: "7", globalSequence: "8", outputIndex: 1 },
+    outputLimit: 12,
+    eventTypes: ["batch_transfer"]
+  });
+  assert.equal(calls[1].path, "/clairveil/privacy/v1/assets/by_denom/factory%2Fclair1%2Fmodule%2Fuclair");
+  assert.equal(calls[2].path, `/clairveil/privacy/v1/assets/by_id/${"ab".repeat(32)}`);
+  assert.deepEqual(JSON.parse(calls[3].options.body), {
+    commitmentHexes: ["cd".repeat(32)],
+    rootHex: "ef".repeat(32),
+    snapshotHeight: "9"
+  });
+
+  let signDocInput;
+  client.buildDirectSignDoc = async input => {
+    signDocInput = input;
+    return { bodyBytes: "", authInfoBytes: "", chainId: "clairveil-local-3", accountNumber: "0" };
+  };
+  await client.createBatchTransferSignDoc({
+    signer: "clair1batch",
+    pubKeyHex: "02".repeat(33),
+    gasLimit: 1,
+    message: {
+      creator: "clair1batch",
+      expiresAtUnix: 4_102_448_400n
+    }
+  });
+  assert.equal(signDocInput.messages[0].typeUrl, MsgBatchTransfer.typeUrl);
+  assert.equal(signDocInput.messages[0].value.expiresAtUnix, 4_102_448_400n);
 });
 
 test("package metadata is ready for public npm publishing", () => {

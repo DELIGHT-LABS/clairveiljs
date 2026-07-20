@@ -39,8 +39,8 @@
     "selective-disclosure"
   ],
   "scripts": {
-    "codegen:proto": "telescope transpile --config ./telescope.config.json && node tools/patch-generated-helpers.js codegen/generated/helpers.ts && tsc -p tsconfig.codegen.json && node tools/patch-generated-helpers.js src/generated/helpers.js",
-    "check:codegen": "node tools/patch-generated-helpers.js --check codegen/generated/helpers.ts src/generated/helpers.js",
+    "codegen:proto": "telescope transpile --config ./telescope.config.json && node tools/patch-generated-helpers.js codegen/generated/helpers.ts codegen/generated/varint.ts && tsc -p tsconfig.codegen.json && node tools/patch-generated-helpers.js src/generated/helpers.js",
+    "check:codegen": "node tools/patch-generated-helpers.js --check codegen/generated/helpers.ts codegen/generated/varint.ts src/generated/helpers.js",
     "check:generated": "find src/generated -name '*.js' -exec node --check {} \\;",
     "check": "find src -path src/generated -prune -o -name '*.js' -exec node --check {} \\; && find examples -name '*.js' -exec node --check {} \\; && find tools -name '*.js' -exec node --check {} \\; && npm run check:generated && npm run check:codegen",
     "typecheck": "tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --strict test/types.ts",

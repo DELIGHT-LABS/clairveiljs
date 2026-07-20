@@ -954,7 +954,8 @@ const evmExistingTransferMessage = {
   auditDisclosureTargetPubkey: new Uint8Array(),
   auditDisclosurePayload: new Uint8Array(),
   selfViewDisclosureDigest: new Uint8Array(),
-  selfViewDisclosurePayload: new Uint8Array()
+  selfViewDisclosurePayload: new Uint8Array(),
+  expiresAtUnix: 4102448400n
 };
 const evmExistingWithdrawMessage = {
   creator: "demo1example",

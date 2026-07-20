@@ -17,6 +17,9 @@ service Msg {
 
   // Transfer: shielded pool 내부 전송
   rpc Transfer(MsgTransfer) returns (MsgTransferResponse);
+
+  // BatchTransfer: one-proof 1..16 input / 1..32 output shielded transfer
+  rpc BatchTransfer(MsgBatchTransfer) returns (MsgBatchTransferResponse);
 }
 
 enum UserDisclosureMode {
@@ -92,11 +95,52 @@ message MsgTransfer {
   bytes self_view_disclosure_digest = 15;
   bytes self_view_disclosure_payload = 16;
 
-  // Per-output scan performance tags. Tags are not circuit-bound in this
-  // format version; wallets must treat them as untrusted hints. Safe default
-  // scans must full-decrypt on tag mismatch; explicit fast modes may skip
-  // well-formed mismatches only when recovery/rescan policy is in place.
+  // Per-output scan performance tags. The exact tag bytes are bound to the
+  // owner-authorized payload digest and proof, but the circuit does not
+  // constrain their derivation from encrypted-output key material. Wallets
+  // must treat ownership semantics as untrusted hints. Safe default scans must
+  // full-decrypt on tag mismatch; explicit fast modes may skip well-formed
+  // mismatches only when recovery/rescan policy is in place.
   repeated bytes view_tags = 17;
+
+  // Absolute authorization expiry. The owner signature and proof bind this
+  // value; the transaction is expired when block_time >= expires_at_unix.
+  int64 expires_at_unix = 18;
+}
+
+// MsgBatchTransfer performs one atomic 1..16 input / 1..32 output shielded
+// JoinSplit. Field numbers and meanings form the version-1 batch-transfer wire
+// contract. Counts are derived exclusively from the repeated field lengths.
+message MsgBatchTransfer {
+  option (cosmos.msg.v1.signer) = "creator";
+
+  string creator = 1;
+  bytes proof = 2;
+  bytes root = 3;
+  repeated bytes nullifiers = 4;
+  repeated BatchTransferOutput outputs = 5;
+  // Canonical lowercase ASCII [a-z0-9][a-z0-9._-]*, 1..64 bytes.
+  string audit_key_id = 6;
+  uint64 audit_key_epoch = 7;
+  bytes audit_disclosure_target_pubkey = 8;
+  int64 expires_at_unix = 9;
+}
+
+// BatchTransferOutput carries exactly one ordered output effect. The full
+// disclosure digest is shared by mandatory audit and optional self-view
+// disclosure payloads; a separate self-view target or digest is not exposed.
+message BatchTransferOutput {
+  bytes commitment = 1;
+  bytes ciphertext = 2;
+  bytes view_tag = 3;
+  uint32 user_privacy_policy = 4;
+  UserDisclosureMode user_disclosure_mode = 5;
+  bytes user_disclosure_digest = 6;
+  bytes user_disclosure_target_pubkey = 7;
+  bytes user_disclosure_payload = 8;
+  bytes full_disclosure_digest = 9;
+  bytes audit_disclosure_payload = 10;
+  bytes self_view_disclosure_payload = 11;
 }
 
 // MsgDepositResponse
@@ -107,3 +151,7 @@ message MsgWithdrawResponse {}
 
 // MsgTransferResponse
 message MsgTransferResponse {}
+
+// MsgBatchTransferResponse is empty because all scan/output data is stored in
+// typed state and queried separately.
+message MsgBatchTransferResponse {}

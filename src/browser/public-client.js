@@ -206,6 +206,50 @@ function scanEventsQuery({
   return query ? `?${query}` : "";
 }
 
+function jsonRequestBody(value) {
+  return JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item);
+}
+
+function privacyScanRequestBody(options = {}) {
+  const after = options.after;
+  const cursor = after && typeof after === "object"
+    ? {
+      height: after.height ?? 0,
+      globalSequence: after.globalSequence ?? after.global_sequence ?? 0,
+      outputIndex: after.outputIndex ?? after.output_index ?? 0
+    }
+    : undefined;
+  const outputLimit = options.outputLimit ?? options.output_limit;
+  const eventLimit = options.eventLimit ?? options.event_limit;
+  const maxEncodedBytes = options.maxEncodedBytes ?? options.max_encoded_bytes;
+  const eventTypes = options.eventTypes ?? options.event_types;
+  return {
+    ...(cursor ? { after: cursor } : {}),
+    ...(outputLimit != null ? { outputLimit } : {}),
+    ...(eventLimit != null ? { eventLimit } : {}),
+    ...(maxEncodedBytes != null ? { maxEncodedBytes } : {}),
+    ...(eventTypes != null ? { eventTypes } : {})
+  };
+}
+
+function commitmentPathsAtRootRequestBody(options = {}) {
+  const commitments = options.commitmentHexes ?? options.commitment_hexes;
+  if (!Array.isArray(commitments) || commitments.length === 0 || commitments.length > 16) {
+    throw new Error("commitmentHexes must contain 1..16 commitments");
+  }
+  const rootHex = String(options.rootHex ?? options.root_hex ?? "").trim();
+  if (!rootHex) throw new Error("rootHex is required");
+  const snapshotHeight = options.snapshotHeight ?? options.snapshot_height;
+  if (snapshotHeight == null || String(snapshotHeight).trim() === "") {
+    throw new Error("snapshotHeight is required");
+  }
+  return {
+    commitmentHexes: commitments.map(value => String(value || "").trim()),
+    rootHex,
+    snapshotHeight
+  };
+}
+
 export function eventAttribute(event, key) {
   return (event?.attributes || []).find(attribute => attribute.key === key)?.value || "";
 }
@@ -293,6 +337,14 @@ export class ClairveilPublicClient {
     return this.fetchJson(`/clairveil/privacy/v1/scan_events${scanEventsQuery(options)}`);
   }
 
+  async fetchPrivacyScan(options = {}) {
+    return this.fetchJson("/clairveil/privacy/v1/privacy_scan", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: jsonRequestBody(privacyScanRequestBody(options))
+    });
+  }
+
   async checkNullifier(nullifierHex) {
     return this.fetchNullifierJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`);
   }
@@ -346,6 +398,26 @@ export class ClairveilPublicClient {
       throw new Error("reserve denom is required");
     }
     return this.fetchJson(`/clairveil/privacy/v1/reserve/${encodeURIComponent(normalizedDenom)}`);
+  }
+
+  async fetchAssetByDenom(denom) {
+    const canonicalDenom = String(denom || "").trim();
+    if (!canonicalDenom) throw new Error("asset denom is required");
+    return this.fetchJson(`/clairveil/privacy/v1/assets/by_denom/${encodeURIComponent(canonicalDenom)}`);
+  }
+
+  async fetchAssetByID(assetIdHex) {
+    const canonicalAssetID = String(assetIdHex || "").trim();
+    if (!canonicalAssetID) throw new Error("asset ID is required");
+    return this.fetchJson(`/clairveil/privacy/v1/assets/by_id/${encodeURIComponent(canonicalAssetID)}`);
+  }
+
+  async fetchCommitmentPathsAtRoot(options = {}) {
+    return this.fetchJson("/clairveil/privacy/v1/commitment_paths_at_root", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: jsonRequestBody(commitmentPathsAtRootRequestBody(options))
+    });
   }
 }
 

@@ -5,6 +5,7 @@ export * from "./privacy/reservation.js";
 
 export {
   ClairveilJS,
+  MsgBatchTransfer,
   MsgDeposit,
   MsgTransfer,
   MsgWithdraw,
@@ -17,6 +18,7 @@ export {
   eventAttribute,
   isAuditableTransfer,
   msgDepositTypeUrl,
+  msgBatchTransferTypeUrl,
   msgTransferTypeUrl,
   msgWithdrawTypeUrl,
   normalizeRestEndpoint,

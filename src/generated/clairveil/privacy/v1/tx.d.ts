@@ -122,12 +122,62 @@ export interface MsgTransfer {
     selfViewDisclosureDigest: Uint8Array;
     selfViewDisclosurePayload: Uint8Array;
     /**
-     * Per-output scan performance tags. Tags are not circuit-bound in this
-     * format version; wallets must treat them as untrusted hints. Safe default
-     * scans must full-decrypt on tag mismatch; explicit fast modes may skip
-     * well-formed mismatches only when recovery/rescan policy is in place.
+     * Per-output scan performance tags. The exact tag bytes are bound to the
+     * owner-authorized payload digest and proof, but the circuit does not
+     * constrain their derivation from encrypted-output key material. Wallets
+     * must treat ownership semantics as untrusted hints. Safe default scans must
+     * full-decrypt on tag mismatch; explicit fast modes may skip well-formed
+     * mismatches only when recovery/rescan policy is in place.
      */
     viewTags: Uint8Array[];
+    /**
+     * Absolute authorization expiry. The owner signature and proof bind this
+     * value; the transaction is expired when block_time >= expires_at_unix.
+     */
+    expiresAtUnix: bigint;
+}
+/**
+ * MsgBatchTransfer performs one atomic 1..16 input / 1..32 output shielded
+ * JoinSplit. Field numbers and meanings form the version-1 batch-transfer wire
+ * contract. Counts are derived exclusively from the repeated field lengths.
+ * @name MsgBatchTransfer
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.MsgBatchTransfer
+ */
+export interface MsgBatchTransfer {
+    creator: string;
+    proof: Uint8Array;
+    root: Uint8Array;
+    nullifiers: Uint8Array[];
+    outputs: BatchTransferOutput[];
+    /**
+     * Canonical lowercase ASCII [a-z0-9][a-z0-9._-]*, 1..64 bytes.
+     */
+    auditKeyId: string;
+    auditKeyEpoch: bigint;
+    auditDisclosureTargetPubkey: Uint8Array;
+    expiresAtUnix: bigint;
+}
+/**
+ * BatchTransferOutput carries exactly one ordered output effect. The full
+ * disclosure digest is shared by mandatory audit and optional self-view
+ * disclosure payloads; a separate self-view target or digest is not exposed.
+ * @name BatchTransferOutput
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.BatchTransferOutput
+ */
+export interface BatchTransferOutput {
+    commitment: Uint8Array;
+    ciphertext: Uint8Array;
+    viewTag: Uint8Array;
+    userPrivacyPolicy: number;
+    userDisclosureMode: UserDisclosureMode;
+    userDisclosureDigest: Uint8Array;
+    userDisclosureTargetPubkey: Uint8Array;
+    userDisclosurePayload: Uint8Array;
+    fullDisclosureDigest: Uint8Array;
+    auditDisclosurePayload: Uint8Array;
+    selfViewDisclosurePayload: Uint8Array;
 }
 /**
  * MsgDepositResponse
@@ -152,6 +202,15 @@ export interface MsgWithdrawResponse {
  * @see proto type: clairveil.privacy.v1.MsgTransferResponse
  */
 export interface MsgTransferResponse {
+}
+/**
+ * MsgBatchTransferResponse is empty because all scan/output data is stored in
+ * typed state and queried separately.
+ * @name MsgBatchTransferResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.MsgBatchTransferResponse
+ */
+export interface MsgBatchTransferResponse {
 }
 /**
  * MsgDeposit: 투명 자산 -> 익명 자산 변환
@@ -190,6 +249,34 @@ export declare const MsgTransfer: {
     fromPartial(object: DeepPartial<MsgTransfer>): MsgTransfer;
 };
 /**
+ * MsgBatchTransfer performs one atomic 1..16 input / 1..32 output shielded
+ * JoinSplit. Field numbers and meanings form the version-1 batch-transfer wire
+ * contract. Counts are derived exclusively from the repeated field lengths.
+ * @name MsgBatchTransfer
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.MsgBatchTransfer
+ */
+export declare const MsgBatchTransfer: {
+    typeUrl: string;
+    encode(message: MsgBatchTransfer, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): MsgBatchTransfer;
+    fromPartial(object: DeepPartial<MsgBatchTransfer>): MsgBatchTransfer;
+};
+/**
+ * BatchTransferOutput carries exactly one ordered output effect. The full
+ * disclosure digest is shared by mandatory audit and optional self-view
+ * disclosure payloads; a separate self-view target or digest is not exposed.
+ * @name BatchTransferOutput
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.BatchTransferOutput
+ */
+export declare const BatchTransferOutput: {
+    typeUrl: string;
+    encode(message: BatchTransferOutput, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): BatchTransferOutput;
+    fromPartial(object: DeepPartial<BatchTransferOutput>): BatchTransferOutput;
+};
+/**
  * MsgDepositResponse
  * @name MsgDepositResponse
  * @package clairveil.privacy.v1
@@ -224,4 +311,17 @@ export declare const MsgTransferResponse: {
     encode(_: MsgTransferResponse, writer?: BinaryWriter): BinaryWriter;
     decode(input: BinaryReader | Uint8Array, length?: number): MsgTransferResponse;
     fromPartial(_: DeepPartial<MsgTransferResponse>): MsgTransferResponse;
+};
+/**
+ * MsgBatchTransferResponse is empty because all scan/output data is stored in
+ * typed state and queried separately.
+ * @name MsgBatchTransferResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.MsgBatchTransferResponse
+ */
+export declare const MsgBatchTransferResponse: {
+    typeUrl: string;
+    encode(_: MsgBatchTransferResponse, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): MsgBatchTransferResponse;
+    fromPartial(_: DeepPartial<MsgBatchTransferResponse>): MsgBatchTransferResponse;
 };

@@ -3,6 +3,7 @@ import { Registry, encodePubkey, makeAuthInfoBytes, makeSignDoc } from "@cosmjs/
 import { defaultRegistryTypes, StargateClient } from "@cosmjs/stargate";
 import { TxBody, TxRaw } from "cosmjs-types/cosmos/tx/v1beta1/tx";
 import {
+  MsgBatchTransfer as GeneratedMsgBatchTransfer,
   MsgDeposit as GeneratedMsgDeposit,
   MsgTransfer as GeneratedMsgTransfer,
   MsgWithdraw as GeneratedMsgWithdraw,
@@ -91,6 +92,7 @@ export {
 } from "../generated/clairveil/privacy/v1/tx.js";
 
 export const msgDepositTypeUrl = GeneratedMsgDeposit.typeUrl;
+export const msgBatchTransferTypeUrl = GeneratedMsgBatchTransfer.typeUrl;
 export const msgTransferTypeUrl = GeneratedMsgTransfer.typeUrl;
 export const msgWithdrawTypeUrl = GeneratedMsgWithdraw.typeUrl;
 const defaultPrepareScanMaxPages = 1000;
@@ -248,6 +250,7 @@ function requiredDepositProof(input = {}) {
 }
 
 export const MsgDeposit = GeneratedMsgDeposit;
+export const MsgBatchTransfer = GeneratedMsgBatchTransfer;
 export const MsgTransfer = GeneratedMsgTransfer;
 export const MsgWithdraw = GeneratedMsgWithdraw;
 export { UserDisclosureMode };
@@ -256,6 +259,7 @@ export function createClairveilRegistry(extraTypes = []) {
   return new Registry([
     ...defaultRegistryTypes,
     [msgDepositTypeUrl, MsgDeposit],
+    [msgBatchTransferTypeUrl, MsgBatchTransfer],
     [msgTransferTypeUrl, MsgTransfer],
     [msgWithdrawTypeUrl, MsgWithdraw],
     ...extraTypes
@@ -539,6 +543,62 @@ function scanEventsQuery({
   }
   const query = params.toString();
   return query ? `?${query}` : "";
+}
+
+function jsonRequestBody(value) {
+  return JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item);
+}
+
+function privacyScanRequestBody({
+  after,
+  outputLimit,
+  output_limit,
+  eventLimit,
+  event_limit,
+  maxEncodedBytes,
+  max_encoded_bytes,
+  eventTypes,
+  event_types
+} = {}) {
+  const cursor = after && typeof after === "object"
+    ? {
+      height: after.height ?? 0,
+      globalSequence: after.globalSequence ?? after.global_sequence ?? 0,
+      outputIndex: after.outputIndex ?? after.output_index ?? 0
+    }
+    : undefined;
+  return {
+    ...(cursor ? { after: cursor } : {}),
+    ...(outputLimit ?? output_limit) != null ? { outputLimit: outputLimit ?? output_limit } : {},
+    ...(eventLimit ?? event_limit) != null ? { eventLimit: eventLimit ?? event_limit } : {},
+    ...(maxEncodedBytes ?? max_encoded_bytes) != null ? { maxEncodedBytes: maxEncodedBytes ?? max_encoded_bytes } : {},
+    ...(eventTypes ?? event_types) != null ? { eventTypes: eventTypes ?? event_types } : {}
+  };
+}
+
+function commitmentPathsAtRootRequestBody({
+  commitmentHexes,
+  commitment_hexes,
+  rootHex,
+  root_hex,
+  snapshotHeight,
+  snapshot_height
+} = {}) {
+  const commitments = commitmentHexes ?? commitment_hexes;
+  if (!Array.isArray(commitments) || commitments.length === 0 || commitments.length > 16) {
+    throw new Error("commitmentHexes must contain 1..16 commitments");
+  }
+  const normalizedRoot = String(rootHex ?? root_hex ?? "").trim();
+  if (!normalizedRoot) throw new Error("rootHex is required");
+  const height = snapshotHeight ?? snapshot_height;
+  if (height == null || String(height).trim() === "") {
+    throw new Error("snapshotHeight is required");
+  }
+  return {
+    commitmentHexes: commitments.map(value => String(value || "").trim()),
+    rootHex: normalizedRoot,
+    snapshotHeight: height
+  };
 }
 
 function privacyEventsCursor(data, request = {}) {
@@ -1489,6 +1549,15 @@ export class ClairveilJS {
     return data;
   }
 
+  async fetchPrivacyScan(options = {}) {
+    return this.fetchJson("/clairveil/privacy/v1/privacy_scan", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: jsonRequestBody(privacyScanRequestBody(options)),
+      failover: true
+    });
+  }
+
   async fetchTreeState() {
     return this.fetchJson("/clairveil/privacy/v1/tree_state", { failover: true });
   }
@@ -1519,6 +1588,33 @@ export class ClairveilJS {
       throw new Error("reserve denom is required");
     }
     return this.fetchJson(`/clairveil/privacy/v1/reserve/${encodeURIComponent(normalizedDenom)}`, { failover: true });
+  }
+
+  async fetchAssetByDenom(denom) {
+    const canonicalDenom = String(denom || "").trim();
+    if (!canonicalDenom) throw new Error("asset denom is required");
+    return this.fetchJson(
+      `/clairveil/privacy/v1/assets/by_denom/${encodeURIComponent(canonicalDenom)}`,
+      { failover: true }
+    );
+  }
+
+  async fetchAssetByID(assetIdHex) {
+    const canonicalAssetID = String(assetIdHex || "").trim();
+    if (!canonicalAssetID) throw new Error("asset ID is required");
+    return this.fetchJson(
+      `/clairveil/privacy/v1/assets/by_id/${encodeURIComponent(canonicalAssetID)}`,
+      { failover: true }
+    );
+  }
+
+  async fetchCommitmentPathsAtRoot(options = {}) {
+    return this.fetchJson("/clairveil/privacy/v1/commitment_paths_at_root", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: jsonRequestBody(commitmentPathsAtRootRequestBody(options)),
+      failover: true
+    });
   }
 
   async checkNullifier(nullifierHex) {
@@ -2725,6 +2821,22 @@ export class ClairveilJS {
       throw new Error(result.plan?.message || `transfer batch is not ready: ${result.status}`);
     }
     return result;
+  }
+
+  async createBatchTransferSignDoc({ signer, pubKeyHex, gasLimit, message, memo = "Clairveil batch veiled transfer" } = {}) {
+    if (!message || typeof message !== "object") {
+      throw new Error("MsgBatchTransfer message is required");
+    }
+    return this.buildDirectSignDoc({
+      signer,
+      pubKeyHex,
+      gasLimit,
+      messages: [{
+        typeUrl: msgBatchTransferTypeUrl,
+        value: MsgBatchTransfer.fromPartial(message)
+      }],
+      memo
+    });
   }
 
   async createWithdrawSignDoc(input) {

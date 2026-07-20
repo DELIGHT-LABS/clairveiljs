@@ -1,3 +1,4 @@
+import { PrivacyScanCursorV1, CircuitSetIdentity, AssetRegistryEntryV1, PrivacyScanSummaryV2, PrivacyScanOutputV2 } from "./genesis.js";
 import { BinaryReader, BinaryWriter } from "../../../binary.js";
 import { DeepPartial } from "../../../helpers.js";
 /**
@@ -239,6 +240,8 @@ export interface QueryAuditConfigRequest {
  */
 export interface QueryAuditConfigResponse {
     auditMasterPubkeyHex: string;
+    auditKeyId: string;
+    auditKeyEpoch: bigint;
 }
 /**
  * @name QueryDisclosureConfigRequest
@@ -291,6 +294,7 @@ export interface QueryCircuitConfigResponse {
     checksumSource: string;
     generatedAt: string;
     artifacts: QueryCircuitArtifact[];
+    circuitSetIdentity?: CircuitSetIdentity;
 }
 /**
  * @name QueryReserveRequest
@@ -312,6 +316,107 @@ export interface QueryReserveResponse {
     totalWithdrawn: string;
     expectedModuleBalance: string;
     invariantHolds: boolean;
+}
+/**
+ * @name QueryAssetByDenomRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByDenomRequest
+ */
+export interface QueryAssetByDenomRequest {
+    canonicalDenom: string;
+}
+/**
+ * @name QueryAssetByDenomResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByDenomResponse
+ */
+export interface QueryAssetByDenomResponse {
+    asset?: AssetRegistryEntryV1;
+    mappingVersion: string;
+}
+/**
+ * @name QueryAssetByIDRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByIDRequest
+ */
+export interface QueryAssetByIDRequest {
+    assetIdHex: string;
+}
+/**
+ * @name QueryAssetByIDResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByIDResponse
+ */
+export interface QueryAssetByIDResponse {
+    asset?: AssetRegistryEntryV1;
+    mappingVersion: string;
+}
+/**
+ * @name QueryPrivacyScanRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryPrivacyScanRequest
+ */
+export interface QueryPrivacyScanRequest {
+    after?: PrivacyScanCursorV1;
+    outputLimit: number;
+    eventLimit: number;
+    maxEncodedBytes: bigint;
+    eventTypes: string[];
+}
+/**
+ * @name QueryPrivacyScanResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryPrivacyScanResponse
+ */
+export interface QueryPrivacyScanResponse {
+    /**
+     * Summaries are the event boundary and include zero-output events such as
+     * withdrawals. A summary may be repeated on the next page when its outputs
+     * span pages. Consumers MUST collect output_count outputs and observe
+     * has_more=false for that event before marking a multi-output item complete.
+     */
+    summaries: PrivacyScanSummaryV2[];
+    outputs: PrivacyScanOutputV2[];
+    nextCursor?: PrivacyScanCursorV1;
+    hasMore: boolean;
+    outputLimit: number;
+    eventLimit: number;
+    maxEncodedBytes: bigint;
+    scannedEventCount: number;
+    encodedBytes: bigint;
+    scanSchemaVersion: string;
+}
+/**
+ * @name QueryCommitmentPathsAtRootRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCommitmentPathsAtRootRequest
+ */
+export interface QueryCommitmentPathsAtRootRequest {
+    commitmentHexes: string[];
+    rootHex: string;
+    snapshotHeight: bigint;
+}
+/**
+ * @name QueryCommitmentPathAtRoot
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCommitmentPathAtRoot
+ */
+export interface QueryCommitmentPathAtRoot {
+    commitmentHex: string;
+    leafIndex: bigint;
+    path: string[];
+    pathHelper: number[];
+}
+/**
+ * @name QueryCommitmentPathsAtRootResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCommitmentPathsAtRootResponse
+ */
+export interface QueryCommitmentPathsAtRootResponse {
+    rootHex: string;
+    snapshotHeight: bigint;
+    leafCount: bigint;
+    paths: QueryCommitmentPathAtRoot[];
 }
 /**
  * QueryCheckNullifierRequest
@@ -624,4 +729,103 @@ export declare const QueryReserveResponse: {
     encode(message: QueryReserveResponse, writer?: BinaryWriter): BinaryWriter;
     decode(input: BinaryReader | Uint8Array, length?: number): QueryReserveResponse;
     fromPartial(object: DeepPartial<QueryReserveResponse>): QueryReserveResponse;
+};
+/**
+ * @name QueryAssetByDenomRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByDenomRequest
+ */
+export declare const QueryAssetByDenomRequest: {
+    typeUrl: string;
+    encode(message: QueryAssetByDenomRequest, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryAssetByDenomRequest;
+    fromPartial(object: DeepPartial<QueryAssetByDenomRequest>): QueryAssetByDenomRequest;
+};
+/**
+ * @name QueryAssetByDenomResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByDenomResponse
+ */
+export declare const QueryAssetByDenomResponse: {
+    typeUrl: string;
+    encode(message: QueryAssetByDenomResponse, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryAssetByDenomResponse;
+    fromPartial(object: DeepPartial<QueryAssetByDenomResponse>): QueryAssetByDenomResponse;
+};
+/**
+ * @name QueryAssetByIDRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByIDRequest
+ */
+export declare const QueryAssetByIDRequest: {
+    typeUrl: string;
+    encode(message: QueryAssetByIDRequest, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryAssetByIDRequest;
+    fromPartial(object: DeepPartial<QueryAssetByIDRequest>): QueryAssetByIDRequest;
+};
+/**
+ * @name QueryAssetByIDResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByIDResponse
+ */
+export declare const QueryAssetByIDResponse: {
+    typeUrl: string;
+    encode(message: QueryAssetByIDResponse, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryAssetByIDResponse;
+    fromPartial(object: DeepPartial<QueryAssetByIDResponse>): QueryAssetByIDResponse;
+};
+/**
+ * @name QueryPrivacyScanRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryPrivacyScanRequest
+ */
+export declare const QueryPrivacyScanRequest: {
+    typeUrl: string;
+    encode(message: QueryPrivacyScanRequest, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryPrivacyScanRequest;
+    fromPartial(object: DeepPartial<QueryPrivacyScanRequest>): QueryPrivacyScanRequest;
+};
+/**
+ * @name QueryPrivacyScanResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryPrivacyScanResponse
+ */
+export declare const QueryPrivacyScanResponse: {
+    typeUrl: string;
+    encode(message: QueryPrivacyScanResponse, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryPrivacyScanResponse;
+    fromPartial(object: DeepPartial<QueryPrivacyScanResponse>): QueryPrivacyScanResponse;
+};
+/**
+ * @name QueryCommitmentPathsAtRootRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCommitmentPathsAtRootRequest
+ */
+export declare const QueryCommitmentPathsAtRootRequest: {
+    typeUrl: string;
+    encode(message: QueryCommitmentPathsAtRootRequest, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryCommitmentPathsAtRootRequest;
+    fromPartial(object: DeepPartial<QueryCommitmentPathsAtRootRequest>): QueryCommitmentPathsAtRootRequest;
+};
+/**
+ * @name QueryCommitmentPathAtRoot
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCommitmentPathAtRoot
+ */
+export declare const QueryCommitmentPathAtRoot: {
+    typeUrl: string;
+    encode(message: QueryCommitmentPathAtRoot, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryCommitmentPathAtRoot;
+    fromPartial(object: DeepPartial<QueryCommitmentPathAtRoot>): QueryCommitmentPathAtRoot;
+};
+/**
+ * @name QueryCommitmentPathsAtRootResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCommitmentPathsAtRootResponse
+ */
+export declare const QueryCommitmentPathsAtRootResponse: {
+    typeUrl: string;
+    encode(message: QueryCommitmentPathsAtRootResponse, writer?: BinaryWriter): BinaryWriter;
+    decode(input: BinaryReader | Uint8Array, length?: number): QueryCommitmentPathsAtRootResponse;
+    fromPartial(object: DeepPartial<QueryCommitmentPathsAtRootResponse>): QueryCommitmentPathsAtRootResponse;
 };

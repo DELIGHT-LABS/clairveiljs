@@ -121,33 +121,11 @@ const TWO_PWR_32_DBL = 0x100000000;
  * See https://github.com/protocolbuffers/protobuf-javascript/blob/a428c58273abad07c66071d9753bc4d1289de426/experimental/runtime/int64.js#L10
  */
 export function int64FromString(dec) {
-    // Check for minus sign.
-    const minus = dec[0] === "-";
-    if (minus) {
-        dec = dec.slice(1);
-    }
-    // Work 6 decimal digits at a time, acting like we're converting base 1e6
-    // digits to binary. This is safe to do with floating point math because
-    // Number.isSafeInteger(ALL_32_BITS * 1e6) == true.
-    const base = 1e6;
-    let lowBits = 0;
-    let highBits = 0;
-    function add1e6digit(begin, end) {
-        // Note: Number('') is 0.
-        const digit1e6 = Number(dec.slice(begin, end));
-        highBits *= base;
-        lowBits = lowBits * base + digit1e6;
-        // Carry bits from lowBits to
-        if (lowBits >= TWO_PWR_32_DBL) {
-            highBits = highBits + ((lowBits / TWO_PWR_32_DBL) | 0);
-            lowBits = lowBits % TWO_PWR_32_DBL;
-        }
-    }
-    add1e6digit(-24, -18);
-    add1e6digit(-18, -12);
-    add1e6digit(-12, -6);
-    add1e6digit(-6);
-    return minus ? negate(lowBits, highBits) : newBits(lowBits, highBits);
+    const value = BigInt(dec);
+    const unsigned = BigInt.asUintN(64, value);
+    const lo = Number(unsigned & 0xffffffffn);
+    const hi = Number(unsigned >> 32n);
+    return { lo, hi };
 }
 /**
  * Losslessly converts a 64-bit signed integer in 32:32 split representation
@@ -375,6 +353,8 @@ export function writeVarint64(val, buf, pos) {
     buf[pos++] = val.lo;
 }
 export function int64Length(lo, hi) {
+    lo >>>= 0;
+    hi >>>= 0;
     let part0 = lo, part1 = ((lo >>> 28) | (hi << 4)) >>> 0, part2 = hi >>> 24;
     return part2 === 0
         ? part1 === 0

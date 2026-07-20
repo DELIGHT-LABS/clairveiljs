@@ -1,3 +1,4 @@
+import { PrivacyScanCursorV1, CircuitSetIdentity, AssetRegistryEntryV1, PrivacyScanSummaryV2, PrivacyScanOutputV2 } from "./genesis.js";
 import { BinaryReader, BinaryWriter } from "../../../binary.js";
 function createBaseQueryCheckNullifierRequest() {
     return {
@@ -1137,7 +1138,9 @@ export const QueryAuditConfigRequest = {
 };
 function createBaseQueryAuditConfigResponse() {
     return {
-        auditMasterPubkeyHex: ""
+        auditMasterPubkeyHex: "",
+        auditKeyId: "",
+        auditKeyEpoch: BigInt(0)
     };
 }
 /**
@@ -1151,6 +1154,12 @@ export const QueryAuditConfigResponse = {
         if (message.auditMasterPubkeyHex !== "") {
             writer.uint32(10).string(message.auditMasterPubkeyHex);
         }
+        if (message.auditKeyId !== "") {
+            writer.uint32(18).string(message.auditKeyId);
+        }
+        if (message.auditKeyEpoch !== BigInt(0)) {
+            writer.uint32(24).uint64(message.auditKeyEpoch);
+        }
         return writer;
     },
     decode(input, length) {
@@ -1163,6 +1172,12 @@ export const QueryAuditConfigResponse = {
                 case 1:
                     message.auditMasterPubkeyHex = reader.string();
                     break;
+                case 2:
+                    message.auditKeyId = reader.string();
+                    break;
+                case 3:
+                    message.auditKeyEpoch = reader.uint64();
+                    break;
                 default:
                     reader.skipType(tag & 7);
                     break;
@@ -1173,6 +1188,8 @@ export const QueryAuditConfigResponse = {
     fromPartial(object) {
         const message = createBaseQueryAuditConfigResponse();
         message.auditMasterPubkeyHex = object.auditMasterPubkeyHex ?? "";
+        message.auditKeyId = object.auditKeyId ?? "";
+        message.auditKeyEpoch = object.auditKeyEpoch !== undefined && object.auditKeyEpoch !== null ? BigInt(object.auditKeyEpoch.toString()) : BigInt(0);
         return message;
     }
 };
@@ -1387,7 +1404,8 @@ function createBaseQueryCircuitConfigResponse() {
         manifestAvailable: false,
         checksumSource: "",
         generatedAt: "",
-        artifacts: []
+        artifacts: [],
+        circuitSetIdentity: undefined
     };
 }
 /**
@@ -1422,6 +1440,9 @@ export const QueryCircuitConfigResponse = {
         for (const v of message.artifacts) {
             QueryCircuitArtifact.encode(v, writer.uint32(66).fork()).ldelim();
         }
+        if (message.circuitSetIdentity !== undefined) {
+            CircuitSetIdentity.encode(message.circuitSetIdentity, writer.uint32(74).fork()).ldelim();
+        }
         return writer;
     },
     decode(input, length) {
@@ -1455,6 +1476,9 @@ export const QueryCircuitConfigResponse = {
                 case 8:
                     message.artifacts.push(QueryCircuitArtifact.decode(reader, reader.uint32()));
                     break;
+                case 9:
+                    message.circuitSetIdentity = CircuitSetIdentity.decode(reader, reader.uint32());
+                    break;
                 default:
                     reader.skipType(tag & 7);
                     break;
@@ -1472,6 +1496,7 @@ export const QueryCircuitConfigResponse = {
         message.checksumSource = object.checksumSource ?? "";
         message.generatedAt = object.generatedAt ?? "";
         message.artifacts = object.artifacts?.map(e => QueryCircuitArtifact.fromPartial(e)) || [];
+        message.circuitSetIdentity = object.circuitSetIdentity !== undefined && object.circuitSetIdentity !== null ? CircuitSetIdentity.fromPartial(object.circuitSetIdentity) : undefined;
         return message;
     }
 };
@@ -1594,6 +1619,569 @@ export const QueryReserveResponse = {
         message.totalWithdrawn = object.totalWithdrawn ?? "";
         message.expectedModuleBalance = object.expectedModuleBalance ?? "";
         message.invariantHolds = object.invariantHolds ?? false;
+        return message;
+    }
+};
+function createBaseQueryAssetByDenomRequest() {
+    return {
+        canonicalDenom: ""
+    };
+}
+/**
+ * @name QueryAssetByDenomRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByDenomRequest
+ */
+export const QueryAssetByDenomRequest = {
+    typeUrl: "/clairveil.privacy.v1.QueryAssetByDenomRequest",
+    encode(message, writer = BinaryWriter.create()) {
+        if (message.canonicalDenom !== "") {
+            writer.uint32(10).string(message.canonicalDenom);
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseQueryAssetByDenomRequest();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.canonicalDenom = reader.string();
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    },
+    fromPartial(object) {
+        const message = createBaseQueryAssetByDenomRequest();
+        message.canonicalDenom = object.canonicalDenom ?? "";
+        return message;
+    }
+};
+function createBaseQueryAssetByDenomResponse() {
+    return {
+        asset: undefined,
+        mappingVersion: ""
+    };
+}
+/**
+ * @name QueryAssetByDenomResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByDenomResponse
+ */
+export const QueryAssetByDenomResponse = {
+    typeUrl: "/clairveil.privacy.v1.QueryAssetByDenomResponse",
+    encode(message, writer = BinaryWriter.create()) {
+        if (message.asset !== undefined) {
+            AssetRegistryEntryV1.encode(message.asset, writer.uint32(10).fork()).ldelim();
+        }
+        if (message.mappingVersion !== "") {
+            writer.uint32(18).string(message.mappingVersion);
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseQueryAssetByDenomResponse();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.asset = AssetRegistryEntryV1.decode(reader, reader.uint32());
+                    break;
+                case 2:
+                    message.mappingVersion = reader.string();
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    },
+    fromPartial(object) {
+        const message = createBaseQueryAssetByDenomResponse();
+        message.asset = object.asset !== undefined && object.asset !== null ? AssetRegistryEntryV1.fromPartial(object.asset) : undefined;
+        message.mappingVersion = object.mappingVersion ?? "";
+        return message;
+    }
+};
+function createBaseQueryAssetByIDRequest() {
+    return {
+        assetIdHex: ""
+    };
+}
+/**
+ * @name QueryAssetByIDRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByIDRequest
+ */
+export const QueryAssetByIDRequest = {
+    typeUrl: "/clairveil.privacy.v1.QueryAssetByIDRequest",
+    encode(message, writer = BinaryWriter.create()) {
+        if (message.assetIdHex !== "") {
+            writer.uint32(10).string(message.assetIdHex);
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseQueryAssetByIDRequest();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.assetIdHex = reader.string();
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    },
+    fromPartial(object) {
+        const message = createBaseQueryAssetByIDRequest();
+        message.assetIdHex = object.assetIdHex ?? "";
+        return message;
+    }
+};
+function createBaseQueryAssetByIDResponse() {
+    return {
+        asset: undefined,
+        mappingVersion: ""
+    };
+}
+/**
+ * @name QueryAssetByIDResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryAssetByIDResponse
+ */
+export const QueryAssetByIDResponse = {
+    typeUrl: "/clairveil.privacy.v1.QueryAssetByIDResponse",
+    encode(message, writer = BinaryWriter.create()) {
+        if (message.asset !== undefined) {
+            AssetRegistryEntryV1.encode(message.asset, writer.uint32(10).fork()).ldelim();
+        }
+        if (message.mappingVersion !== "") {
+            writer.uint32(18).string(message.mappingVersion);
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseQueryAssetByIDResponse();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.asset = AssetRegistryEntryV1.decode(reader, reader.uint32());
+                    break;
+                case 2:
+                    message.mappingVersion = reader.string();
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    },
+    fromPartial(object) {
+        const message = createBaseQueryAssetByIDResponse();
+        message.asset = object.asset !== undefined && object.asset !== null ? AssetRegistryEntryV1.fromPartial(object.asset) : undefined;
+        message.mappingVersion = object.mappingVersion ?? "";
+        return message;
+    }
+};
+function createBaseQueryPrivacyScanRequest() {
+    return {
+        after: undefined,
+        outputLimit: 0,
+        eventLimit: 0,
+        maxEncodedBytes: BigInt(0),
+        eventTypes: []
+    };
+}
+/**
+ * @name QueryPrivacyScanRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryPrivacyScanRequest
+ */
+export const QueryPrivacyScanRequest = {
+    typeUrl: "/clairveil.privacy.v1.QueryPrivacyScanRequest",
+    encode(message, writer = BinaryWriter.create()) {
+        if (message.after !== undefined) {
+            PrivacyScanCursorV1.encode(message.after, writer.uint32(10).fork()).ldelim();
+        }
+        if (message.outputLimit !== 0) {
+            writer.uint32(16).uint32(message.outputLimit);
+        }
+        if (message.eventLimit !== 0) {
+            writer.uint32(24).uint32(message.eventLimit);
+        }
+        if (message.maxEncodedBytes !== BigInt(0)) {
+            writer.uint32(32).uint64(message.maxEncodedBytes);
+        }
+        for (const v of message.eventTypes) {
+            writer.uint32(42).string(v);
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseQueryPrivacyScanRequest();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.after = PrivacyScanCursorV1.decode(reader, reader.uint32());
+                    break;
+                case 2:
+                    message.outputLimit = reader.uint32();
+                    break;
+                case 3:
+                    message.eventLimit = reader.uint32();
+                    break;
+                case 4:
+                    message.maxEncodedBytes = reader.uint64();
+                    break;
+                case 5:
+                    message.eventTypes.push(reader.string());
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    },
+    fromPartial(object) {
+        const message = createBaseQueryPrivacyScanRequest();
+        message.after = object.after !== undefined && object.after !== null ? PrivacyScanCursorV1.fromPartial(object.after) : undefined;
+        message.outputLimit = object.outputLimit ?? 0;
+        message.eventLimit = object.eventLimit ?? 0;
+        message.maxEncodedBytes = object.maxEncodedBytes !== undefined && object.maxEncodedBytes !== null ? BigInt(object.maxEncodedBytes.toString()) : BigInt(0);
+        message.eventTypes = object.eventTypes?.map(e => e) || [];
+        return message;
+    }
+};
+function createBaseQueryPrivacyScanResponse() {
+    return {
+        summaries: [],
+        outputs: [],
+        nextCursor: undefined,
+        hasMore: false,
+        outputLimit: 0,
+        eventLimit: 0,
+        maxEncodedBytes: BigInt(0),
+        scannedEventCount: 0,
+        encodedBytes: BigInt(0),
+        scanSchemaVersion: ""
+    };
+}
+/**
+ * @name QueryPrivacyScanResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryPrivacyScanResponse
+ */
+export const QueryPrivacyScanResponse = {
+    typeUrl: "/clairveil.privacy.v1.QueryPrivacyScanResponse",
+    encode(message, writer = BinaryWriter.create()) {
+        for (const v of message.summaries) {
+            PrivacyScanSummaryV2.encode(v, writer.uint32(10).fork()).ldelim();
+        }
+        for (const v of message.outputs) {
+            PrivacyScanOutputV2.encode(v, writer.uint32(18).fork()).ldelim();
+        }
+        if (message.nextCursor !== undefined) {
+            PrivacyScanCursorV1.encode(message.nextCursor, writer.uint32(26).fork()).ldelim();
+        }
+        if (message.hasMore === true) {
+            writer.uint32(32).bool(message.hasMore);
+        }
+        if (message.outputLimit !== 0) {
+            writer.uint32(40).uint32(message.outputLimit);
+        }
+        if (message.eventLimit !== 0) {
+            writer.uint32(48).uint32(message.eventLimit);
+        }
+        if (message.maxEncodedBytes !== BigInt(0)) {
+            writer.uint32(56).uint64(message.maxEncodedBytes);
+        }
+        if (message.scannedEventCount !== 0) {
+            writer.uint32(64).uint32(message.scannedEventCount);
+        }
+        if (message.encodedBytes !== BigInt(0)) {
+            writer.uint32(72).uint64(message.encodedBytes);
+        }
+        if (message.scanSchemaVersion !== "") {
+            writer.uint32(82).string(message.scanSchemaVersion);
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseQueryPrivacyScanResponse();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.summaries.push(PrivacyScanSummaryV2.decode(reader, reader.uint32()));
+                    break;
+                case 2:
+                    message.outputs.push(PrivacyScanOutputV2.decode(reader, reader.uint32()));
+                    break;
+                case 3:
+                    message.nextCursor = PrivacyScanCursorV1.decode(reader, reader.uint32());
+                    break;
+                case 4:
+                    message.hasMore = reader.bool();
+                    break;
+                case 5:
+                    message.outputLimit = reader.uint32();
+                    break;
+                case 6:
+                    message.eventLimit = reader.uint32();
+                    break;
+                case 7:
+                    message.maxEncodedBytes = reader.uint64();
+                    break;
+                case 8:
+                    message.scannedEventCount = reader.uint32();
+                    break;
+                case 9:
+                    message.encodedBytes = reader.uint64();
+                    break;
+                case 10:
+                    message.scanSchemaVersion = reader.string();
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    },
+    fromPartial(object) {
+        const message = createBaseQueryPrivacyScanResponse();
+        message.summaries = object.summaries?.map(e => PrivacyScanSummaryV2.fromPartial(e)) || [];
+        message.outputs = object.outputs?.map(e => PrivacyScanOutputV2.fromPartial(e)) || [];
+        message.nextCursor = object.nextCursor !== undefined && object.nextCursor !== null ? PrivacyScanCursorV1.fromPartial(object.nextCursor) : undefined;
+        message.hasMore = object.hasMore ?? false;
+        message.outputLimit = object.outputLimit ?? 0;
+        message.eventLimit = object.eventLimit ?? 0;
+        message.maxEncodedBytes = object.maxEncodedBytes !== undefined && object.maxEncodedBytes !== null ? BigInt(object.maxEncodedBytes.toString()) : BigInt(0);
+        message.scannedEventCount = object.scannedEventCount ?? 0;
+        message.encodedBytes = object.encodedBytes !== undefined && object.encodedBytes !== null ? BigInt(object.encodedBytes.toString()) : BigInt(0);
+        message.scanSchemaVersion = object.scanSchemaVersion ?? "";
+        return message;
+    }
+};
+function createBaseQueryCommitmentPathsAtRootRequest() {
+    return {
+        commitmentHexes: [],
+        rootHex: "",
+        snapshotHeight: BigInt(0)
+    };
+}
+/**
+ * @name QueryCommitmentPathsAtRootRequest
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCommitmentPathsAtRootRequest
+ */
+export const QueryCommitmentPathsAtRootRequest = {
+    typeUrl: "/clairveil.privacy.v1.QueryCommitmentPathsAtRootRequest",
+    encode(message, writer = BinaryWriter.create()) {
+        for (const v of message.commitmentHexes) {
+            writer.uint32(10).string(v);
+        }
+        if (message.rootHex !== "") {
+            writer.uint32(18).string(message.rootHex);
+        }
+        if (message.snapshotHeight !== BigInt(0)) {
+            writer.uint32(24).int64(message.snapshotHeight);
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseQueryCommitmentPathsAtRootRequest();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.commitmentHexes.push(reader.string());
+                    break;
+                case 2:
+                    message.rootHex = reader.string();
+                    break;
+                case 3:
+                    message.snapshotHeight = reader.int64();
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    },
+    fromPartial(object) {
+        const message = createBaseQueryCommitmentPathsAtRootRequest();
+        message.commitmentHexes = object.commitmentHexes?.map(e => e) || [];
+        message.rootHex = object.rootHex ?? "";
+        message.snapshotHeight = object.snapshotHeight !== undefined && object.snapshotHeight !== null ? BigInt(object.snapshotHeight.toString()) : BigInt(0);
+        return message;
+    }
+};
+function createBaseQueryCommitmentPathAtRoot() {
+    return {
+        commitmentHex: "",
+        leafIndex: BigInt(0),
+        path: [],
+        pathHelper: []
+    };
+}
+/**
+ * @name QueryCommitmentPathAtRoot
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCommitmentPathAtRoot
+ */
+export const QueryCommitmentPathAtRoot = {
+    typeUrl: "/clairveil.privacy.v1.QueryCommitmentPathAtRoot",
+    encode(message, writer = BinaryWriter.create()) {
+        if (message.commitmentHex !== "") {
+            writer.uint32(10).string(message.commitmentHex);
+        }
+        if (message.leafIndex !== BigInt(0)) {
+            writer.uint32(16).uint64(message.leafIndex);
+        }
+        for (const v of message.path) {
+            writer.uint32(26).string(v);
+        }
+        writer.uint32(34).fork();
+        for (const v of message.pathHelper) {
+            writer.uint32(v);
+        }
+        writer.ldelim();
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseQueryCommitmentPathAtRoot();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.commitmentHex = reader.string();
+                    break;
+                case 2:
+                    message.leafIndex = reader.uint64();
+                    break;
+                case 3:
+                    message.path.push(reader.string());
+                    break;
+                case 4:
+                    if ((tag & 7) === 2) {
+                        const end2 = reader.uint32() + reader.pos;
+                        while (reader.pos < end2) {
+                            message.pathHelper.push(reader.uint32());
+                        }
+                    }
+                    else {
+                        message.pathHelper.push(reader.uint32());
+                    }
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    },
+    fromPartial(object) {
+        const message = createBaseQueryCommitmentPathAtRoot();
+        message.commitmentHex = object.commitmentHex ?? "";
+        message.leafIndex = object.leafIndex !== undefined && object.leafIndex !== null ? BigInt(object.leafIndex.toString()) : BigInt(0);
+        message.path = object.path?.map(e => e) || [];
+        message.pathHelper = object.pathHelper?.map(e => e) || [];
+        return message;
+    }
+};
+function createBaseQueryCommitmentPathsAtRootResponse() {
+    return {
+        rootHex: "",
+        snapshotHeight: BigInt(0),
+        leafCount: BigInt(0),
+        paths: []
+    };
+}
+/**
+ * @name QueryCommitmentPathsAtRootResponse
+ * @package clairveil.privacy.v1
+ * @see proto type: clairveil.privacy.v1.QueryCommitmentPathsAtRootResponse
+ */
+export const QueryCommitmentPathsAtRootResponse = {
+    typeUrl: "/clairveil.privacy.v1.QueryCommitmentPathsAtRootResponse",
+    encode(message, writer = BinaryWriter.create()) {
+        if (message.rootHex !== "") {
+            writer.uint32(10).string(message.rootHex);
+        }
+        if (message.snapshotHeight !== BigInt(0)) {
+            writer.uint32(16).int64(message.snapshotHeight);
+        }
+        if (message.leafCount !== BigInt(0)) {
+            writer.uint32(24).uint64(message.leafCount);
+        }
+        for (const v of message.paths) {
+            QueryCommitmentPathAtRoot.encode(v, writer.uint32(34).fork()).ldelim();
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        let end = length === undefined ? reader.len : reader.pos + length;
+        const message = createBaseQueryCommitmentPathsAtRootResponse();
+        while (reader.pos < end) {
+            const tag = reader.uint32();
+            switch (tag >>> 3) {
+                case 1:
+                    message.rootHex = reader.string();
+                    break;
+                case 2:
+                    message.snapshotHeight = reader.int64();
+                    break;
+                case 3:
+                    message.leafCount = reader.uint64();
+                    break;
+                case 4:
+                    message.paths.push(QueryCommitmentPathAtRoot.decode(reader, reader.uint32()));
+                    break;
+                default:
+                    reader.skipType(tag & 7);
+                    break;
+            }
+        }
+        return message;
+    },
+    fromPartial(object) {
+        const message = createBaseQueryCommitmentPathsAtRootResponse();
+        message.rootHex = object.rootHex ?? "";
+        message.snapshotHeight = object.snapshotHeight !== undefined && object.snapshotHeight !== null ? BigInt(object.snapshotHeight.toString()) : BigInt(0);
+        message.leafCount = object.leafCount !== undefined && object.leafCount !== null ? BigInt(object.leafCount.toString()) : BigInt(0);
+        message.paths = object.paths?.map(e => QueryCommitmentPathAtRoot.fromPartial(e)) || [];
         return message;
     }
 };

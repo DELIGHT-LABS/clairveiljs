@@ -16,14 +16,27 @@ export {
   userDisclosureModeToJSON
 } from "../generated/clairveil/privacy/v1/tx.js";
 export type {
+  AssetRegistryEntryV1,
+  CircuitIdentity,
+  CircuitSetIdentity,
+  PrivacyScanCursorV1,
+  PrivacyScanOutputV2,
+  PrivacyScanSummaryV2
+} from "../generated/clairveil/privacy/v1/genesis.js";
+export type {
+  BatchTransferOutput,
+  MsgBatchTransfer as MsgBatchTransferMessage,
   MsgDeposit as MsgDepositMessage,
   MsgTransfer as MsgTransferMessage,
   MsgWithdraw as MsgWithdrawMessage,
+  MsgBatchTransferResponse,
   MsgDepositResponse,
   MsgTransferResponse,
   MsgWithdrawResponse
 } from "../generated/clairveil/privacy/v1/tx.js";
 export type {
+  QueryAssetByDenomResponse,
+  QueryAssetByIDResponse,
   QueryAuditConfigResponse,
   QueryCheckNullifierResponse,
   QueryCircuitConfigResponse,
@@ -33,6 +46,7 @@ export type {
   QueryPrivacyEvent,
   QueryPrivacyEventAttribute,
   QueryPrivacyEventsResponse,
+  QueryPrivacyScanResponse,
   QueryReserveResponse,
   QueryTreeStateResponse
 } from "../generated/clairveil/privacy/v1/query.js";
@@ -62,9 +76,13 @@ import type { NoteReservationManager, ReservationBatch } from "../privacy/reserv
 import type { ScanResult } from "../privacy/scan.js";
 import type { MemoryNoteStore } from "../privacy/note-store.js";
 import type { WalletAdapterLike } from "../wallet/adapter.js";
-import type { MsgDeposit as MsgDepositMessage } from "../generated/clairveil/privacy/v1/tx.js";
+import type {
+  MsgBatchTransfer as MsgBatchTransferMessage,
+  MsgDeposit as MsgDepositMessage
+} from "../generated/clairveil/privacy/v1/tx.js";
 
 export const msgDepositTypeUrl: "/clairveil.privacy.v1.MsgDeposit";
+export const msgBatchTransferTypeUrl: "/clairveil.privacy.v1.MsgBatchTransfer";
 export const msgTransferTypeUrl: "/clairveil.privacy.v1.MsgTransfer";
 export const msgWithdrawTypeUrl: "/clairveil.privacy.v1.MsgWithdraw";
 
@@ -76,6 +94,7 @@ export interface MsgCodec<T = object> {
 }
 
 export const MsgDeposit: MsgCodec;
+export const MsgBatchTransfer: MsgCodec;
 export const MsgTransfer: MsgCodec;
 export const MsgWithdraw: MsgCodec;
 
@@ -234,6 +253,35 @@ export interface PrivacyScanOptions extends PrivacyEventsQuery {
   max_pages?: number;
   scanSource?: "scan_events" | "privacy_events" | string;
   scan_source?: "scan_events" | "privacy_events" | string;
+}
+
+export interface PrivacyScanCursorInput {
+  height?: Uint64CursorInput;
+  globalSequence?: Uint64CursorInput;
+  global_sequence?: Uint64CursorInput;
+  outputIndex?: number;
+  output_index?: number;
+}
+
+export interface TypedPrivacyScanQuery {
+  after?: PrivacyScanCursorInput;
+  outputLimit?: number;
+  output_limit?: number;
+  eventLimit?: number;
+  event_limit?: number;
+  maxEncodedBytes?: Uint64CursorInput;
+  max_encoded_bytes?: Uint64CursorInput;
+  eventTypes?: string[];
+  event_types?: string[];
+}
+
+export interface CommitmentPathsAtRootQuery {
+  commitmentHexes?: readonly Hex[];
+  commitment_hexes?: readonly Hex[];
+  rootHex?: Hex;
+  root_hex?: Hex;
+  snapshotHeight?: Uint64CursorInput;
+  snapshot_height?: Uint64CursorInput;
 }
 
 export type RelayChainTimeInput =
@@ -609,12 +657,16 @@ export class ClairveilJS {
   getTx(txHash: Hex): Promise<TxSearchResult | null>;
   waitForTx(txHash: Hex, options?: { attempts?: number; intervalMs?: number }): Promise<TxSearchResult | null>;
   fetchPrivacyEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
+  fetchPrivacyScan(options?: TypedPrivacyScanQuery): Promise<object>;
   fetchTreeState(): Promise<object>;
   fetchCommitmentInfo(commitmentHex: Hex): Promise<object>;
   fetchAuditConfig(): Promise<object>;
   fetchDisclosureConfig(): Promise<object>;
   fetchCircuitConfig(): Promise<object>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
+  fetchAssetByDenom(denom: string): Promise<object>;
+  fetchAssetByID(assetIdHex: Hex): Promise<object>;
+  fetchCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<object>;
   lookupMerklePath(commitmentHex: Hex): Promise<object>;
   checkNullifier(nullifierHex: Hex): Promise<object>;
   checkNullifiers(nullifierHexes: readonly Hex[]): Promise<Map<Hex, boolean>>;
@@ -772,6 +824,13 @@ export class ClairveilJS {
   createDepositSignDoc(input: Parameters<ClairveilJS["prepareDeposit"]>[0]): Promise<PreparedDeposit>;
   createTransferSignDoc(input: Parameters<ClairveilJS["prepareTransfer"]>[0]): Promise<PreparedTransfer & { status: "ready"; signDoc: SignDocBase64 }>;
   createTransferBatchSignDoc(input: Parameters<ClairveilJS["prepareTransferBatch"]>[0]): Promise<PreparedTransferBatch & { status: "ready"; signDoc: SignDocBase64 }>;
+  createBatchTransferSignDoc(input: {
+    signer: ClairAddress;
+    pubKeyHex: Hex;
+    gasLimit: number | bigint;
+    message: MsgBatchTransferMessage;
+    memo?: string;
+  }): Promise<SignDocBase64>;
   createWithdrawSignDoc(input: Parameters<ClairveilJS["prepareWithdraw"]>[0]): Promise<PreparedWithdrawReady>;
   createRelayWithdrawPayload(input: Parameters<ClairveilJS["prepareRelayWithdraw"]>[0]): Promise<PreparedRelayWithdraw & { status: "ready"; payload: PreparedWithdrawPayload }>;
   buildPreparedTransferPayload(input: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;
