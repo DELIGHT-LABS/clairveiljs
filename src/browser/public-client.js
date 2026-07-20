@@ -1,3 +1,5 @@
+import { parseNullifierUsage } from "../privacy/scan.js";
+
 function trimTrailingSlash(value) {
   return String(value || "").replace(/\/$/, "");
 }
@@ -226,7 +228,14 @@ export class ClairveilPublicClient {
     return `${endpoint}${path.startsWith("/") ? path : `/${path}`}`;
   }
 
-  async fetchJson(pathOrUrl, { method, body, headers, failover = true } = {}) {
+  async fetchJson(pathOrUrl, {
+    method,
+    body,
+    headers,
+    failover = true,
+    endpoint,
+    updateActiveEndpoint = endpoint == null
+  } = {}) {
     const text = String(pathOrUrl || "");
     const isAbsolute = /^https?:\/\//i.test(text);
     if (isAbsolute) {
@@ -244,9 +253,10 @@ export class ClairveilPublicClient {
       return result.data;
     }
     const path = text;
+    const initialEndpoint = endpoint || this.activeRestEndpoint;
     const endpoints = failover
-      ? [this.activeRestEndpoint, ...this.restEndpoints.filter(endpoint => endpoint !== this.activeRestEndpoint)]
-      : [this.activeRestEndpoint];
+      ? [initialEndpoint, ...this.restEndpoints.filter(candidate => candidate !== initialEndpoint)]
+      : [initialEndpoint];
     const result = await fetchJsonWithRetry(
       endpoint => this.restUrl(path, endpoint),
       endpoints,
@@ -258,8 +268,21 @@ export class ClairveilPublicClient {
         headers
       }
     );
-    this.activeRestEndpoint = result.endpoint;
+    if (updateActiveEndpoint) this.activeRestEndpoint = result.endpoint;
     return result.data;
+  }
+
+  async fetchNullifierJson(path, options = {}) {
+    return this.fetchJson(path, {
+      ...options,
+      failover: this.nullifierFailover,
+      // Normal queries may fail over. Sensitive nullifier queries stay on the
+      // configured endpoint unless the caller explicitly opted into failover.
+      ...(this.nullifierFailover ? {} : {
+        endpoint: this.rest,
+        updateActiveEndpoint: false
+      })
+    });
   }
 
   async fetchPrivacyEvents(options = {}) {
@@ -271,20 +294,39 @@ export class ClairveilPublicClient {
   }
 
   async checkNullifier(nullifierHex) {
-    return this.fetchJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`, { failover: this.nullifierFailover });
+    return this.fetchNullifierJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`);
   }
 
   async checkNullifiers(nullifierHexes = []) {
     const normalized = [...new Set((nullifierHexes || []).map(value => String(value || "").trim().toLowerCase()).filter(Boolean))];
     const usedByNullifier = new Map();
+    const invalidNullifiers = new Set();
+    const addStatus = (nullifier, value) => {
+      const key = String(nullifier || "").trim().toLowerCase();
+      if (!key || invalidNullifiers.has(key)) return;
+      const used = parseNullifierUsage(value);
+      if (used === null || (usedByNullifier.has(key) && usedByNullifier.get(key) !== used)) {
+        usedByNullifier.delete(key);
+        invalidNullifiers.add(key);
+        return;
+      }
+      usedByNullifier.set(key, used);
+    };
     for (let start = 0; start < normalized.length; start += 1000) {
-      const response = await this.fetchJson("/clairveil/privacy/v1/nullifiers", {
+      const response = await this.fetchNullifierJson("/clairveil/privacy/v1/nullifiers", {
         method: "POST",
-        body: JSON.stringify({ nullifiers: normalized.slice(start, start + 1000) }),
-        failover: this.nullifierFailover
+        body: JSON.stringify({ nullifiers: normalized.slice(start, start + 1000) })
       });
       for (const status of response?.statuses || response?.Statuses || []) {
-        usedByNullifier.set(String(status?.nullifier || status?.Nullifier || "").toLowerCase(), Boolean(status?.used ?? status?.Used));
+        const canonical = status?.nullifier;
+        const alias = status?.Nullifier;
+        if (canonical != null && alias != null &&
+            String(canonical).trim().toLowerCase() !== String(alias).trim().toLowerCase()) {
+          addStatus(canonical, null);
+          addStatus(alias, null);
+        } else {
+          addStatus(canonical ?? alias, status);
+        }
       }
     }
     return usedByNullifier;

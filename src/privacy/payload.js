@@ -41,6 +41,7 @@ import {
   createSpendNoteHashSigner,
   defaultAssetDenom,
   encryptNoteForReceiverWithViewTag,
+  isVerifiedUnspentFoundNote,
   normalizeFoundNote,
   normalizeNote,
   noteSpendPubKeyHex,
@@ -242,7 +243,7 @@ export function summarizeSpendableNotesByDenom(notes, denom = defaultAssetDenom)
   const targetAssetIdHex = canonicalFieldHex(hashStringToField(denom));
   const spendable = [...(notes || [])]
     .map(normalizeFoundNote)
-    .filter(found => !found.isSpent && canonicalFieldHex(found.note.assetID) === targetAssetIdHex)
+    .filter(found => isVerifiedUnspentFoundNote(found) && canonicalFieldHex(found.note.assetID) === targetAssetIdHex)
     .sort(foundNotePlannerCompare);
   const total = spendable.reduce((sum, found) => sum + found.note.amount, 0n);
   return { notes: spendable, total };
@@ -1049,11 +1050,81 @@ export function buildTransferMsgFromPayloadAndProof(payload, proof) {
   };
 }
 
+function literalNullifierUsage(value) {
+  if (typeof value === "boolean") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const hasUsed = Object.prototype.hasOwnProperty.call(value, "used");
+  const hasAlias = Object.prototype.hasOwnProperty.call(value, "Used");
+  if (!hasUsed && !hasAlias) return null;
+  if ((hasUsed && typeof value.used !== "boolean") ||
+      (hasAlias && typeof value.Used !== "boolean")) return null;
+  if (hasUsed && hasAlias && value.used !== value.Used) return null;
+  return hasUsed ? value.used : value.Used;
+}
+
+async function assertProverNullifiersUnspent(nullifierHexes, checkNullifiers) {
+  if (typeof checkNullifiers !== "function") {
+    throw new Error("checkNullifiers is required before proof generation");
+  }
+  const nullifiers = [...new Set((nullifierHexes || []).map(value => String(value || "").trim().toLowerCase()))];
+  if (!nullifiers.length || nullifiers.some(value => !value)) {
+    throw new Error("proof generation requires non-empty nullifiers");
+  }
+  let result;
+  try {
+    result = await checkNullifiers(nullifiers);
+  } catch (error) {
+    throw new Error(`verify nullifiers before proof generation: ${error?.message || "query failed"}`);
+  }
+  const statuses = new Map();
+  const invalidStatuses = new Set();
+  const add = (nullifier, value) => {
+    const key = String(nullifier || "").trim().toLowerCase();
+    if (!key || invalidStatuses.has(key)) return;
+    const used = literalNullifierUsage(value);
+    if (used === null || (statuses.has(key) && statuses.get(key) !== used)) {
+      statuses.delete(key);
+      invalidStatuses.add(key);
+      return;
+    }
+    statuses.set(key, used);
+  };
+  if (result instanceof Map) {
+    for (const [nullifier, value] of result) add(nullifier, value);
+  } else if (Array.isArray(result?.statuses)) {
+    for (const status of result.statuses) {
+      const canonical = status?.nullifier;
+      const alias = status?.Nullifier;
+      if (canonical != null && alias != null &&
+          String(canonical).trim().toLowerCase() !== String(alias).trim().toLowerCase()) {
+        add(canonical, null);
+        add(alias, null);
+      } else {
+        add(canonical ?? alias, status);
+      }
+    }
+  } else if (result && typeof result === "object") {
+    for (const [nullifier, value] of Object.entries(result)) add(nullifier, value);
+  }
+  for (const nullifier of nullifiers) {
+    if (!statuses.has(nullifier)) {
+      throw new Error("verify nullifiers before proof generation: missing or malformed status");
+    }
+    if (statuses.get(nullifier)) {
+      throw new Error("proof generation blocked because an input nullifier is already spent");
+    }
+  }
+}
+
 export async function buildTransferMessage({ proverAdapter, ...input } = {}) {
   if (!proverAdapter?.proveTransfer) {
     throw new Error("proverAdapter.proveTransfer is required");
   }
   const payload = await buildPreparedTransferPayload(input);
+  await assertProverNullifiersUnspent(
+    payload.inputs.map(inputNote => inputNote.nullifier_hex),
+    input.checkNullifiers,
+  );
   const response = await proverAdapter.proveTransfer({
     version: "v1",
     payload
@@ -1069,7 +1140,7 @@ export async function buildTransferMessage({ proverAdapter, ...input } = {}) {
 function selectExactMatchNote(notes, denom, targetAmount) {
   const targetAssetIdHex = canonicalFieldHex(hashStringToField(denom));
   for (const found of notes) {
-    if (found.isSpent) continue;
+    if (!isVerifiedUnspentFoundNote(found)) continue;
     if (found.note.amount !== targetAmount) continue;
     if (canonicalFieldHex(found.note.assetID) !== targetAssetIdHex) continue;
     return found;
@@ -1107,19 +1178,28 @@ export async function buildPreparedWithdrawProverPayload({
   assetDenom,
   recipient,
   chainId,
-  expiresAtUnix = Math.floor(Date.now() / 1000) + 1800,
+  expiresAtUnix,
+  chainNowUnix,
   rootSeed,
   merklePathProvider,
   spendNoteHashSigner,
   accountPrefix
 } = {}) {
+  const localNowUnix = Math.floor(Date.now() / 1000);
+  const authoritativeNowUnix = chainNowUnix == null
+    ? localNowUnix
+    : Number(chainNowUnix);
+  if (!Number.isSafeInteger(authoritativeNowUnix) || authoritativeNowUnix < 0) {
+    throw new Error("chainNowUnix must be a non-negative safe integer");
+  }
+  const resolvedExpiresAtUnix = expiresAtUnix ?? authoritativeNowUnix + 1800;
   const coin = parseCoin(amount, assetDenom ?? denom ?? defaultAssetDenom);
   const targetAmount = positiveBigInt(coin.amount, "withdraw amount");
   const foundNotes = [...(notes || [])].map(normalizeFoundNote);
   const targetAssetIdHex = canonicalFieldHex(hashStringToField(coin.denom));
   const selected = selectExactMatchNote(foundNotes, coin.denom, targetAmount);
   if (!selected) {
-    const sameDenom = foundNotes.filter(found => !found.isSpent && canonicalFieldHex(found.note.assetID) === targetAssetIdHex);
+    const sameDenom = foundNotes.filter(found => isVerifiedUnspentFoundNote(found) && canonicalFieldHex(found.note.assetID) === targetAssetIdHex);
     const total = sameDenom.reduce((sum, found) => sum + found.note.amount, 0n);
     throw new Error(`withdraw requires one exact-match note for ${coin.raw}; spendable ${coin.denom} total is ${total}${coin.denom} across ${sameDenom.length} notes`);
   }
@@ -1136,8 +1216,8 @@ export async function buildPreparedWithdrawProverPayload({
     throw new Error("spendNoteHashSigner or rootSeed is required");
   }
   const normalizedExpiresAtUnix = assertFutureUnixTimestamp(
-    expiresAtUnix,
-    Math.floor(Date.now() / 1000),
+    resolvedExpiresAtUnix,
+    authoritativeNowUnix,
     "withdraw prover payload expired",
     "withdraw prover payload expires_at_unix"
   );
@@ -1222,7 +1302,7 @@ function assertFutureUnixTimestamp(value, nowUnix, expiredMessage, label) {
   if (!Number.isSafeInteger(timestamp)) {
     throw new Error(`${label} must be a safe integer unix timestamp`);
   }
-  if (timestamp <= nowUnix) {
+  if (timestamp < nowUnix) {
     throw new Error(expiredMessage);
   }
   return timestamp;
@@ -1244,13 +1324,24 @@ export function validatePreparedWithdrawPayload(payload, nowUnix = Math.floor(Da
   return true;
 }
 
+function requireRelayChainNowUnix(value) {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0
+  ) {
+    throw new Error("chainNowUnix is required for relay withdraw payload validation");
+  }
+  return value;
+}
+
 export function validateRelayWithdrawPayload(payload, {
-  nowUnix,
+  chainNowUnix,
   expectedChainId,
   expectedRecipient,
   accountPrefix
 } = {}) {
-  validatePreparedWithdrawPayload(payload, nowUnix);
+  validatePreparedWithdrawPayload(payload, requireRelayChainNowUnix(chainNowUnix));
   if (!String(payload.chain_id || "").trim()) {
     throw new Error("withdraw payload chain_id is required");
   }
@@ -1312,20 +1403,25 @@ export function buildRelayWithdrawMsgFromPayload(payload, relayer, options = {})
       throw new Error(`relayer prefix mismatch: expected ${expectedPrefix}, got ${relayerDecoded.prefix}`);
     }
   }
-  return buildWithdrawMsgFromPayload(payload, creator, options.nowUnix);
+  return buildWithdrawMsgFromPayload(payload, creator, requireRelayChainNowUnix(options.chainNowUnix));
 }
 
-export async function buildRelayWithdrawPayload({ proverAdapter, ...input } = {}) {
+async function buildWithdrawPayloadWithProof({ proverAdapter, ...input } = {}) {
   if (!proverAdapter?.proveWithdraw) {
     throw new Error("proverAdapter.proveWithdraw is required");
   }
   const { selectedNote, payload: proverPayload } = await buildPreparedWithdrawProverPayload(input);
+  await assertProverNullifiersUnspent([proverPayload.nullifier_hex], input.checkNullifiers);
   const response = await proverAdapter.proveWithdraw({
     version: "v1",
     payload: proverPayload
   });
   const proof = response?.proof || response;
-  const payload = buildPreparedWithdrawPayloadFromProof(proverPayload, proof);
+  const payload = buildPreparedWithdrawPayloadFromProof(
+    proverPayload,
+    proof,
+    input.chainNowUnix,
+  );
   return {
     selectedNote,
     proverPayload,
@@ -1334,8 +1430,17 @@ export async function buildRelayWithdrawPayload({ proverAdapter, ...input } = {}
   };
 }
 
+export async function buildRelayWithdrawPayload({ proverAdapter, ...input } = {}) {
+  const chainNowUnix = requireRelayChainNowUnix(input.chainNowUnix);
+  return buildWithdrawPayloadWithProof({
+    proverAdapter,
+    ...input,
+    chainNowUnix
+  });
+}
+
 export async function buildWithdrawMessage({ proverAdapter, creator, ...input } = {}) {
-  const { selectedNote, proverPayload, proof, payload } = await buildRelayWithdrawPayload({
+  const { selectedNote, proverPayload, proof, payload } = await buildWithdrawPayloadWithProof({
     proverAdapter,
     ...input
   });
@@ -1344,7 +1449,7 @@ export async function buildWithdrawMessage({ proverAdapter, creator, ...input } 
     proverPayload,
     proof,
     payload,
-    message: buildWithdrawMsgFromPayload(payload, creator)
+    message: buildWithdrawMsgFromPayload(payload, creator, input.chainNowUnix)
   };
 }
 

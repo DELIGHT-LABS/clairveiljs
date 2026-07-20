@@ -1,6 +1,7 @@
 export * from "./core/index.js";
 export * from "./transport/cosmos-client.js";
 export * from "./transport/evm.js";
+export * from "./privacy/reservation.js";
 
 export {
   ClairveilJS,

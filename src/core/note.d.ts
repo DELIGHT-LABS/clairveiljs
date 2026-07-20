@@ -19,13 +19,22 @@ export interface Note {
   memo: string;
 }
 
+export type NullifierStatus = "spent" | "unspent" | "unknown" | "unverified";
+
+/** Found-note input, including legacy cached records that predate nullifierStatus. */
 export interface FoundNote {
   note: Note;
   nullifier: Hex;
   isSpent: boolean;
+  nullifierStatus?: NullifierStatus;
   txHash: Hex;
-  height: number;
-  sequence: number;
+  height: number | string;
+  sequence: number | string;
+}
+
+/** Normalized scanner/store output with an explicit fail-closed nullifier status. */
+export interface NormalizedFoundNote extends FoundNote {
+  nullifierStatus: NullifierStatus;
 }
 
 export interface NoteHashSigner {
@@ -83,6 +92,7 @@ export function createSpendNoteHashSigner(rootSeed: BytesLike): NoteHashSigner;
 export function resolveTransferSignature(signer: NoteHashSigner, messageHash: bigint): Promise<Uint8Array>;
 export function resolveWithdrawSignature(signer: NoteHashSigner, messageHash: bigint): Promise<Uint8Array>;
 export function buildDepositMaterial(input?: { creator?: ClairAddress | string; rootSeed?: BytesLike; shieldedAddress?: ShieldedAddress; amount?: CoinString; memo?: string; assetDenom?: string; shieldedPrefix?: string }): DepositMaterial;
-export function normalizeFoundNote(foundNote: object): FoundNote;
+export function normalizeFoundNote(foundNote: object): NormalizedFoundNote;
+export function isVerifiedUnspentFoundNote(foundNote: object): boolean;
 export function pointFromHex(value: Hex, label?: string): Point;
 export function bytesFromOptionalHex(value: string | undefined | null, label?: string): Uint8Array;

@@ -1,7 +1,7 @@
 import { toBech32 } from "@cosmjs/encoding";
 import { Registry, encodePubkey, makeAuthInfoBytes, makeSignDoc } from "@cosmjs/proto-signing";
 import { defaultRegistryTypes, StargateClient } from "@cosmjs/stargate";
-import { TxRaw } from "cosmjs-types/cosmos/tx/v1beta1/tx";
+import { TxBody, TxRaw } from "cosmjs-types/cosmos/tx/v1beta1/tx";
 import {
   MsgDeposit as GeneratedMsgDeposit,
   MsgTransfer as GeneratedMsgTransfer,
@@ -31,7 +31,8 @@ import {
   buildPreparedWithdrawProverPayload as buildPreparedWithdrawProverPayloadCore,
   buildRelayWithdrawMsgFromPayload as buildRelayWithdrawMsgFromPayloadCore,
   buildRelayWithdrawPayload as buildRelayWithdrawPayloadCore,
-  buildWithdrawMessage as buildWithdrawMessageCore
+  buildWithdrawMessage as buildWithdrawMessageCore,
+  validateRelayWithdrawPayload
 } from "../privacy/payload.js";
 import {
   assertPlanCanBuildTx,
@@ -39,7 +40,14 @@ import {
   planTransferNotes,
   planWithdrawNotes
 } from "../privacy/planner.js";
-import { scanNotes as scanNotesCore } from "../privacy/scan.js";
+import {
+  preparePlanReservation,
+  reservationHeartbeatIntervalMs,
+  reservationStatuses,
+  rollbackPlanReservation,
+  rollbackPlanReservationPreservingError
+} from "../privacy/reservation.js";
+import { parseNullifierUsage, scanNotes as scanNotesCore } from "../privacy/scan.js";
 import {
   createWalletAdapter,
   derivePrivacyMaterialFromWallet
@@ -48,7 +56,9 @@ import {
   base64FromBytes,
   bytesFromBase64,
   bytesFromHex as rawBytesFromHex,
-  hash160
+  hash160,
+  hexFromBytes,
+  sha256Hex
 } from "../core/browser-crypto.js";
 
 export * from "../core/crypto.js";
@@ -58,6 +68,19 @@ export * from "../core/note.js";
 export * from "../privacy/payload.js";
 export * from "../privacy/planner.js";
 export * from "../privacy/prover.js";
+
+function appendReservationCleanupErrors(error, cleanupErrors = []) {
+  if (!cleanupErrors.length || !error || typeof error !== "object") return;
+  try {
+    const existing = Array.isArray(error.reservationCleanupErrors)
+      ? error.reservationCleanupErrors
+      : [];
+    error.reservationCleanupErrors = [...existing, ...cleanupErrors];
+  } catch {
+    // Cleanup annotations are best-effort and must never replace the original error.
+  }
+}
+export * from "../privacy/reservation.js";
 export * from "../privacy/scan.js";
 export * from "../privacy/note-store.js";
 export * from "../core/schemas.js";
@@ -71,7 +94,10 @@ export const msgDepositTypeUrl = GeneratedMsgDeposit.typeUrl;
 export const msgTransferTypeUrl = GeneratedMsgTransfer.typeUrl;
 export const msgWithdrawTypeUrl = GeneratedMsgWithdraw.typeUrl;
 const defaultPrepareScanMaxPages = 1000;
+const cosmosSignDocMetadataField = "__clairveilCosmosSignDoc";
+const cosmosReservationRequiredMemoMarker = "[clairveil-reservation-required:v1]";
 const defaultFetchTimeoutMs = 30000;
+const maxUint64 = (1n << 64n) - 1n;
 const defaultRetryStatuses = Object.freeze([408, 429, 502, 503, 504]);
 const defaultQueryRetry = Object.freeze({
   retries: 2,
@@ -95,6 +121,56 @@ function normalizeNonNegativeInteger(value, label) {
     throw new Error(`${label} must be a non-negative integer`);
   }
   return number;
+}
+
+function uint64CursorBigInt(value, label) {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`${label} must be a non-negative safe integer, bigint, or canonical uint64 string`);
+    }
+    return BigInt(value);
+  }
+  if (typeof value === "bigint") {
+    if (value < 0n || value > maxUint64) {
+      throw new Error(`${label} must be within uint64 range`);
+    }
+    return value;
+  }
+  const text = String(value ?? "").trim();
+  if (!/^(0|[1-9][0-9]*)$/.test(text)) {
+    throw new Error(`${label} must be a canonical uint64 decimal string`);
+  }
+  const parsed = BigInt(text);
+  if (parsed > maxUint64) {
+    throw new Error(`${label} must be within uint64 range`);
+  }
+  return parsed;
+}
+
+function uint64CursorValue(value, label) {
+  const parsed = uint64CursorBigInt(value, label);
+  return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : parsed.toString();
+}
+
+function compareUint64Cursor(left, right, label) {
+  const leftValue = uint64CursorBigInt(left, `${label} left value`);
+  const rightValue = uint64CursorBigInt(right, `${label} right value`);
+  return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
+}
+
+function maxUint64Cursor(values, label) {
+  let maximum = 0n;
+  for (const value of values) {
+    const parsed = uint64CursorBigInt(value ?? 0, label);
+    if (parsed > maximum) maximum = parsed;
+  }
+  return maximum <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(maximum) : maximum.toString();
+}
+
+function decrementUint64Cursor(value, label) {
+  const parsed = uint64CursorBigInt(value ?? 0, label);
+  const decremented = parsed > 0n ? parsed - 1n : 0n;
+  return decremented <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(decremented) : decremented.toString();
 }
 
 function normalizeDelayMs(value, label) {
@@ -239,6 +315,32 @@ function fromBase64(value, label = "base64") {
   return bytesFromBase64(value, label);
 }
 
+function attachBroadcastEvidence(error, { txHash = "", txBytesHash = "" } = {}) {
+  const original = error && typeof error === "object"
+    ? error
+    : new Error(String(error || "broadcast failed"));
+  try {
+    if (txHash && !original.txHash && !original.txhash) {
+      original.txHash = txHash;
+    }
+    if (txBytesHash && !original.txBytesHash && !original.tx_bytes_hash) {
+      original.txBytesHash = txBytesHash;
+    }
+    return original;
+  } catch {
+    const wrapped = new Error(
+      String(original?.message || error || "broadcast failed"),
+      { cause: original }
+    );
+    if (typeof original?.name === "string" && original.name) {
+      wrapped.name = original.name;
+    }
+    if (txHash) wrapped.txHash = txHash;
+    if (txBytesHash) wrapped.txBytesHash = txBytesHash;
+    return wrapped;
+  }
+}
+
 function directSignDocFromBase64(signDoc) {
   return {
     bodyBytes: fromBase64(signDoc.bodyBytes, "bodyBytes"),
@@ -246,6 +348,59 @@ function directSignDocFromBase64(signDoc) {
     chainId: signDoc.chainId,
     accountNumber: BigInt(signDoc.accountNumber)
   };
+}
+
+function markCosmosSignDocReservationRequired(
+  signDoc,
+  reservationBatch
+) {
+  if (
+    !signDoc ||
+    typeof signDoc !== "object" ||
+    !reservationBatch?.reservation_ids?.length
+  ) {
+    return signDoc;
+  }
+  const current = signDoc[cosmosSignDocMetadataField] || {};
+  const bindingHash = cosmosSignDocBindingHash(signDoc);
+  Object.defineProperty(signDoc, cosmosSignDocMetadataField, {
+    value: Object.freeze({
+      ...current,
+      reservationRequired: true,
+      bindingHash
+    }),
+    enumerable: true,
+    configurable: true
+  });
+  return signDoc;
+}
+
+function cosmosSignDocMetadata(signDoc) {
+  return signDoc?.[cosmosSignDocMetadataField] || {};
+}
+
+function reservationRequiredCosmosMemo(memo = "") {
+  return [String(memo || "").trim(), cosmosReservationRequiredMemoMarker]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function cosmosTxBodyRequiresReservation(signDoc) {
+  try {
+    const body = TxBody.decode(fromBase64(signDoc?.bodyBytes, "bodyBytes"));
+    return String(body.memo || "")
+      .split("\n")
+      .some(line => line.trim() === cosmosReservationRequiredMemoMarker);
+  } catch {
+    return false;
+  }
+}
+
+function externalCosmosSignDoc(signDoc) {
+  if (!signDoc || typeof signDoc !== "object") return signDoc;
+  const external = { ...signDoc };
+  delete external[cosmosSignDocMetadataField];
+  return external;
 }
 
 function fromHex(value, label = "hex") {
@@ -391,14 +546,15 @@ function privacyEventsCursor(data, request = {}) {
   let latestHeight = 0;
   let latestTxHash = "";
   for (const event of events) {
-    const height = Number(event?.height || 0);
-    if (height >= latestHeight) {
+    const height = uint64CursorValue(event?.height ?? 0, "privacy event height");
+    if (compareUint64Cursor(height, latestHeight, "privacy event height") >= 0) {
       latestHeight = height;
       latestTxHash = String(event?.tx_hash_hex || "").toUpperCase();
     }
   }
   return {
-    after_height: Number(request.afterHeight ?? request.after_height ?? 0),
+    source: "privacy_events",
+    after_height: uint64CursorValue(request.afterHeight ?? request.after_height ?? 0, "privacy events after height"),
     page: Number(data?.page ?? request.page ?? 1),
     limit: Number(data?.limit ?? request.limit ?? events.length),
     event_types: request.eventTypes ?? request.event_types ?? [],
@@ -414,9 +570,13 @@ function scanEventsCursor(data, request = {}) {
   let latestSequence = 0;
   let latestTxHash = "";
   for (const event of events) {
-    const height = Number(event?.height || 0);
-    const sequence = Number(event?.sequence || 0);
-    if (height > latestHeight || (height === latestHeight && sequence >= latestSequence)) {
+    const height = uint64CursorValue(event?.height ?? 0, "scan event height");
+    const sequence = uint64CursorValue(event?.sequence ?? 0, "scan event sequence");
+    const heightComparison = compareUint64Cursor(height, latestHeight, "scan event height");
+    if (heightComparison > 0 || (
+      heightComparison === 0 &&
+      compareUint64Cursor(sequence, latestSequence, "scan event sequence") >= 0
+    )) {
       latestHeight = height;
       latestSequence = sequence;
       latestTxHash = String(event?.tx_hash_hex ?? event?.txHashHex ?? "").toUpperCase();
@@ -424,13 +584,13 @@ function scanEventsCursor(data, request = {}) {
   }
   return {
     source: "scan_events",
-    after_height: Number(request.afterHeight ?? request.after_height ?? 0),
-    after_sequence: Number(request.afterSequence ?? request.after_sequence ?? 0),
+    after_height: uint64CursorValue(request.afterHeight ?? request.after_height ?? 0, "scan events after height"),
+    after_sequence: uint64CursorValue(request.afterSequence ?? request.after_sequence ?? 0, "scan events after sequence"),
     limit: Number(data?.limit ?? request.limit ?? events.length),
     event_types: request.eventTypes ?? request.event_types ?? [],
     has_more: Boolean(data?.has_more),
-    next_height: Number(data?.next_height ?? data?.nextHeight ?? request.afterHeight ?? request.after_height ?? 0),
-    next_sequence: Number(data?.next_sequence ?? data?.nextSequence ?? request.afterSequence ?? request.after_sequence ?? 0),
+    next_height: uint64CursorValue(data?.next_height ?? data?.nextHeight ?? request.afterHeight ?? request.after_height ?? 0, "scan events next height"),
+    next_sequence: uint64CursorValue(data?.next_sequence ?? data?.nextSequence ?? request.afterSequence ?? request.after_sequence ?? 0, "scan events next sequence"),
     latest_height: latestHeight,
     latest_sequence: latestSequence,
     latest_tx_hash: latestTxHash,
@@ -459,39 +619,45 @@ export function nextPrivacyScanOptions(scanOrCursor = {}, defaults = {}) {
   if (cursor.source === "scan_events" || cursor.next_sequence != null || cursor.nextSequence != null) {
     const hasMore = Boolean(cursor.has_more ?? cursor.hasMore);
     const next = {
-      afterHeight: Number(
+      afterHeight: uint64CursorValue(
         hasMore
           ? cursor.next_height ?? cursor.nextHeight ?? cursor.after_height ?? cursor.afterHeight ?? 0
-          : cursor.next_height ?? cursor.nextHeight ?? cursor.latest_height ?? cursor.latestHeight ?? cursor.after_height ?? cursor.afterHeight ?? 0
+          : cursor.next_height ?? cursor.nextHeight ?? cursor.latest_height ?? cursor.latestHeight ?? cursor.after_height ?? cursor.afterHeight ?? 0,
+        "scan resume height"
       ),
-      afterSequence: Number(
+      afterSequence: uint64CursorValue(
         hasMore
           ? cursor.next_sequence ?? cursor.nextSequence ?? cursor.after_sequence ?? cursor.afterSequence ?? 0
-          : cursor.next_sequence ?? cursor.nextSequence ?? cursor.latest_sequence ?? cursor.latestSequence ?? cursor.after_sequence ?? cursor.afterSequence ?? 0
+          : cursor.next_sequence ?? cursor.nextSequence ?? cursor.latest_sequence ?? cursor.latestSequence ?? cursor.after_sequence ?? cursor.afterSequence ?? 0,
+        "scan resume sequence"
       ),
       limit: Number(cursor.limit ?? defaults.limit ?? 200),
       eventTypes: cursor.event_types ?? cursor.eventTypes ?? defaults.eventTypes ?? defaults.event_types ?? [],
       hasMore,
       completed: !hasMore
     };
+    next.scanSource = "scan_events";
     const maxPages = defaults.maxPages ?? defaults.max_pages;
     if (maxPages != null) next.maxPages = maxPages;
     const includeFoundNotes = defaults.includeFoundNotes ?? defaults.include_found_notes;
     if (includeFoundNotes != null) next.includeFoundNotes = Boolean(includeFoundNotes);
     return next;
   }
-  const afterHeight = Number(cursor.after_height ?? cursor.afterHeight ?? defaults.afterHeight ?? defaults.after_height ?? 0);
-  const latestHeight = Number(cursor.latest_height ?? cursor.latestHeight ?? 0);
+  const afterHeight = uint64CursorValue(cursor.after_height ?? cursor.afterHeight ?? defaults.afterHeight ?? defaults.after_height ?? 0, "privacy events after height");
+  const latestHeight = uint64CursorValue(cursor.latest_height ?? cursor.latestHeight ?? 0, "privacy events latest height");
   const hasMore = Boolean(cursor.has_more ?? cursor.hasMore);
   const nextPage = hasMore
     ? Number(cursor.next_page ?? cursor.nextPage ?? (Number(cursor.page || 1) + 1))
     : 1;
-  const nextAfterHeight = hasMore ? afterHeight : Math.max(afterHeight, latestHeight);
+  const nextAfterHeight = hasMore
+    ? afterHeight
+    : maxUint64Cursor([afterHeight, latestHeight], "privacy events resume height");
   const next = {
     afterHeight: nextAfterHeight,
     page: nextPage,
     limit: Number(cursor.limit ?? defaults.limit ?? 200),
-    eventTypes: cursor.event_types ?? cursor.eventTypes ?? defaults.eventTypes ?? defaults.event_types ?? []
+    eventTypes: cursor.event_types ?? cursor.eventTypes ?? defaults.eventTypes ?? defaults.event_types ?? [],
+    scanSource: cursor.source === "privacy_events" ? "privacy_events" : defaults.scanSource ?? defaults.scan_source ?? "privacy_events"
   };
   const maxPages = defaults.maxPages ?? defaults.max_pages;
   if (maxPages != null) next.maxPages = maxPages;
@@ -513,7 +679,9 @@ function resolveScanOptions({
   maxPages,
   max_pages,
   eventTypes,
-  event_types
+  event_types,
+  scanSource,
+  scan_source
 } = {}) {
   return {
     afterHeight: scan?.afterHeight ?? scan?.after_height ?? afterHeight ?? after_height,
@@ -521,7 +689,8 @@ function resolveScanOptions({
     page: scan?.page ?? page,
     limit: scan?.limit ?? limit,
     maxPages: scan?.maxPages ?? scan?.max_pages ?? maxPages ?? max_pages,
-    eventTypes: scan?.eventTypes ?? scan?.event_types ?? eventTypes ?? event_types
+    eventTypes: scan?.eventTypes ?? scan?.event_types ?? eventTypes ?? event_types,
+    scanSource: scan?.scanSource ?? scan?.scan_source ?? scanSource ?? scan_source
   };
 }
 
@@ -546,6 +715,624 @@ function publicPrivacyAccount(material) {
     disclosure_pubkey_hex: material.disclosurePubKeyHex,
     root_signature_hash: material.rootSignatureHash
   };
+}
+
+async function reservationAvailableNotes(reservationManager, notes) {
+  if (!reservationManager) return notes;
+  if (typeof reservationManager.filterAvailableNotes !== "function") {
+    throw new Error("reservationManager.filterAvailableNotes is required");
+  }
+  return reservationManager.filterAvailableNotes(notes);
+}
+
+function reservationBatchSummary(batch) {
+  if (!batch) return null;
+  return {
+    operation_id: batch.operation_id,
+    lease_owner: batch.lease_owner || batch.reservations?.[0]?.lease_owner || "",
+    lease_token: batch.lease_token || batch.reservations?.[0]?.lease_token || "",
+    lease_until: batch.lease_until || batch.reservations?.[0]?.lease_until || "",
+    reservation_ids: [...(batch.reservation_ids || [])],
+    reservations: [...(batch.reservations || [])]
+  };
+}
+
+function broadcastReservationContext(options = {}) {
+  const reservationManager = options.reservationManager ?? options.reservation_manager ?? null;
+  const reservation = options.reservation ?? options.reservationBatch ?? options.reservation_batch ?? null;
+  const reservationIDs = [...(reservation?.reservation_ids || [])].filter(Boolean).map(String);
+  if (!reservationManager && !reservation) return null;
+  if (!reservationIDs.length) {
+    throw new Error("reserved-note broadcast requires reservation ids");
+  }
+  if (!reservationManager || typeof reservationManager.markBroadcastAttempting !== "function") {
+    throw new Error("reservationManager.markBroadcastAttempting is required for reserved-note broadcast");
+  }
+  const leaseToken = String(
+    reservation?.lease_token || reservation?.reservations?.[0]?.lease_token || ""
+  );
+  if (!leaseToken) {
+    throw new Error("reserved-note broadcast requires the current lease token");
+  }
+  return { reservationManager, reservationIDs, leaseToken };
+}
+
+function signedWithdrawMessage(signedTx) {
+  const body = TxBody.decode(fromBase64(signedTx?.bodyBytes, "bodyBytes"));
+  const withdrawals = body.messages.filter(message => message.typeUrl === msgWithdrawTypeUrl);
+  if (!withdrawals.length) return null;
+  if (body.messages.length !== 1 || withdrawals.length !== 1) {
+    throw new Error("withdraw broadcast must contain exactly one MsgWithdraw");
+  }
+  return GeneratedMsgWithdraw.decode(withdrawals[0].value);
+}
+
+export function cosmosSignDocBindingHash({ bodyBytes, authInfoBytes } = {}) {
+  const txRaw = TxRaw.fromPartial({
+    bodyBytes: fromBase64(bodyBytes, "bodyBytes"),
+    authInfoBytes: fromBase64(authInfoBytes, "authInfoBytes"),
+    signatures: []
+  });
+  return sha256Hex(TxRaw.encode(txRaw).finish());
+}
+
+async function authoritativeReservationRecords(context) {
+  if (!context) return [];
+  if (typeof context.reservationManager.getReservation !== "function") {
+    throw new Error("reservationManager.getReservation is required for reserved-note broadcast validation");
+  }
+  return Promise.all(context.reservationIDs.map(id => context.reservationManager.getReservation(id)));
+}
+
+function assertReservationPayloadMatches(records, payload) {
+  if (!records.length) return;
+  const payloadHash = String(payload?.payload_hash || "").trim();
+  const storedHashes = records.map(record => String(record?.payload_hash ?? record?.payloadHash ?? "").trim());
+  if (!payloadHash || storedHashes.some(hash => !hash || hash !== payloadHash)) {
+    throw new Error("relay payload does not match the reserved payload hash");
+  }
+}
+
+function assertReservationSignDocMatches(records, signDocHash, { allowPayloadBinding = false } = {}) {
+  if (!records.length) return;
+  const mismatched = records.some(record => {
+    const storedHash = String(record?.sign_doc_hash ?? record?.signDocHash ?? "").trim();
+    if (storedHash) return storedHash !== signDocHash;
+    return !(allowPayloadBinding && String(record?.payload_hash ?? record?.payloadHash ?? "").trim());
+  });
+  if (!signDocHash || mismatched) {
+    throw new Error("Cosmos sign doc does not match the reservation ProofReady artifact");
+  }
+}
+
+function assertSignedWithdrawMatchesPayload(message, payload) {
+  const normalizedPayloadHex = value => String(value || "").trim().replace(/^0x/i, "").toLowerCase();
+  const matches =
+    hexFromBytes(message.proof) === normalizedPayloadHex(payload.proof_hex) &&
+    hexFromBytes(message.root) === normalizedPayloadHex(payload.root_hex) &&
+    hexFromBytes(message.nullifier) === normalizedPayloadHex(payload.nullifier_hex) &&
+    String(message.amount) === String(payload.amount) &&
+    String(message.recipient) === String(payload.recipient) &&
+    String(message.chainId) === String(payload.chain_id) &&
+    BigInt(message.expiresAtUnix) === BigInt(payload.expires_at_unix);
+  if (!matches) {
+    throw new Error("relay payload does not match the Cosmos signed transaction being broadcast");
+  }
+}
+
+async function validateRelayBroadcastContext(options, {
+  expectedChainId,
+  accountPrefix,
+  signedTx,
+  reservationContext,
+  signDocHash
+} = {}) {
+  const payload = options?.relayPayload ?? options?.relay_payload ?? null;
+  const reservationRecords = await authoritativeReservationRecords(reservationContext);
+  assertReservationSignDocMatches(reservationRecords, signDocHash, { allowPayloadBinding: Boolean(payload) });
+  const chainTimeProvider = options?.getChainNowUnix ?? options?.get_chain_now_unix;
+  const withdrawMessage = signedWithdrawMessage(signedTx);
+  if (!payload) {
+    if (withdrawMessage) {
+      throw new Error("withdraw broadcast requires relayPayload and authoritative chain time");
+    }
+    if (
+      options?.chainNowUnix != null ||
+      options?.chain_now_unix != null ||
+      chainTimeProvider != null
+    ) {
+      throw new Error("relayPayload is required when relay broadcast chain time is provided");
+    }
+    return;
+  }
+  if (chainTimeProvider != null && typeof chainTimeProvider !== "function") {
+    throw new Error("getChainNowUnix must be a function");
+  }
+  const chainNowUnix = chainTimeProvider
+    ? await chainTimeProvider()
+    : options.chainNowUnix ?? options.chain_now_unix;
+  validateRelayWithdrawPayload(payload, {
+    chainNowUnix,
+    expectedChainId: options.expectedChainId ?? options.expected_chain_id ?? expectedChainId,
+    expectedRecipient: options.expectedRecipient ?? options.expected_recipient,
+    accountPrefix: options.accountPrefix ?? options.account_prefix ?? accountPrefix
+  });
+  assertReservationPayloadMatches(reservationRecords, payload);
+  if (!withdrawMessage) {
+    throw new Error("relayPayload does not match a Cosmos MsgWithdraw transaction");
+  }
+  assertSignedWithdrawMatchesPayload(withdrawMessage, payload);
+}
+
+function attachReservationBookkeepingError(error, bookkeepingError) {
+  const original = error && typeof error === "object"
+    ? error
+    : new Error(String(error || "broadcast failed"));
+  try {
+    original.reservationBookkeepingError = bookkeepingError;
+    original.reservationReconciliationRequired = true;
+    return original;
+  } catch {
+    const wrapped = new Error(
+      String(original?.message || error || "broadcast failed"),
+      { cause: original }
+    );
+    if (typeof original?.name === "string" && original.name) {
+      wrapped.name = original.name;
+    }
+    wrapped.reservationBookkeepingError = bookkeepingError;
+    wrapped.reservationReconciliationRequired = true;
+    return wrapped;
+  }
+}
+
+async function beginBroadcastReservation(context, reason, evidence = {}) {
+  if (!context) return;
+  await context.reservationManager.markBroadcastAttempting(context.reservationIDs, {
+    leaseToken: context.leaseToken,
+    reason,
+    txHash: evidence.txHash || "",
+    txBytesHash: evidence.txBytesHash || "",
+    signDocHash: evidence.signDocHash || ""
+  });
+}
+
+async function markBroadcastReservationUnknown(context, error, evidence = {}) {
+  if (!context) return;
+  try {
+    await context.reservationManager.markUnknown(context.reservationIDs, {
+      leaseToken: context.leaseToken,
+      txHash: evidence.txHash || "",
+      txBytesHash: evidence.txBytesHash || "",
+      signDocHash: evidence.signDocHash || "",
+      error: String(error?.message || error || "broadcast result is unknown"),
+      metadata: { reconcile_reason: "sdk_broadcast_result_unknown" }
+    });
+  } catch (bookkeepingError) {
+    throw attachReservationBookkeepingError(error, bookkeepingError);
+  }
+}
+
+async function markBroadcastReservationSubmitted(context, evidence = {}) {
+  if (!context) return;
+  try {
+    await context.reservationManager.markSubmitted(context.reservationIDs, {
+      leaseToken: context.leaseToken,
+      txHash: evidence.txHash || "",
+      txBytesHash: evidence.txBytesHash || "",
+      signDocHash: evidence.signDocHash || ""
+    });
+  } catch (bookkeepingError) {
+    const error = new Error("transaction was broadcast but reservation submission could not be recorded");
+    error.txHash = evidence.txHash || "";
+    error.txBytesHash = evidence.txBytesHash || "";
+    throw attachReservationBookkeepingError(error, bookkeepingError);
+  }
+}
+
+function isExplicitWalletRejection(error) {
+  return String(error?.code ?? error?.data?.code ?? "") === "4001";
+}
+
+async function markSigningReservationRejected(context, error) {
+  if (!context) return;
+  try {
+    if (typeof context.reservationManager.markBroadcastRejected !== "function") {
+      throw new Error("reservationManager.markBroadcastRejected is required for pre-broadcast wallet rejection");
+    }
+    await context.reservationManager.markBroadcastRejected(context.reservationIDs, {
+      leaseToken: context.leaseToken,
+      error: String(error?.message || error || "wallet request rejected"),
+      providerCode: "4001",
+      metadata: {
+        wallet_rejected_before_broadcast: true,
+        provider_rejection_code: "4001",
+        reconcile_reason: "wallet_rejected_before_broadcast"
+      }
+    });
+  } catch (bookkeepingError) {
+    throw attachReservationBookkeepingError(error, bookkeepingError);
+  }
+}
+
+function transferProofReadyMetadata(built, context = {}) {
+  const output = built?.payload?.outputs?.[0] || {};
+  const coin = context.amount ? parseCoin(context.amount, context.denom || "") : null;
+  const batchItemIndex = context.batchItemIndex ?? context.batch_item_index;
+  const batchItemIndexKnown = context.batchItemIndexKnown ?? context.batch_item_index_known;
+  const expectedOutputCommitment = built?.payload?.outputs?.[0]?.commitment_hex || "";
+  const expectedDisclosureDigest = built?.payload?.audit_disclosure_digest_hex || "";
+  const expectedRecipientHash = context.expectedRecipientHash ?? context.expected_recipient_hash ?? "";
+  const expectedAmount = output.amount || coin?.amount || "";
+  const expectedAmountHash = context.expectedAmountHash ?? context.expected_amount_hash ?? "";
+  const expectedDenom = context.expectedDenom ?? context.expected_denom ?? coin?.denom ?? context.denom ?? "";
+  const operationSuccessEvidenceRequired = Boolean(
+    expectedOutputCommitment &&
+    expectedDisclosureDigest &&
+    expectedRecipientHash &&
+    expectedAmount &&
+    expectedAmountHash &&
+    expectedDenom
+  );
+  return {
+    payloadHash: built?.payload?.payload_hash || "",
+    signDocHash: context.signDocHash ?? context.sign_doc_hash ?? "",
+    expectedOutputCommitment,
+    expectedDisclosureDigest,
+    expectedRecipientHash,
+    expectedAmount,
+    expectedAmountHash,
+    expectedDenom,
+    batchItemIndex: batchItemIndex ?? 0,
+    batchItemIndexKnown: batchItemIndexKnown ?? (operationSuccessEvidenceRequired || (batchItemIndex !== undefined && batchItemIndex !== null)),
+    operationSuccessEvidenceRequired
+  };
+}
+
+function resolveDirectOperationEvidenceHashes({
+  expectedRecipientHash,
+  expected_recipient_hash,
+  expectedAmountHash,
+  expected_amount_hash
+} = {}) {
+  const recipientProvided = operationEvidenceAliasProvided(
+    expectedRecipientHash,
+    expected_recipient_hash
+  );
+  const amountProvided = operationEvidenceAliasProvided(
+    expectedAmountHash,
+    expected_amount_hash
+  );
+  const recipientHash = resolveOperationEvidenceAlias(
+    expectedRecipientHash,
+    expected_recipient_hash,
+    "expectedRecipientHash"
+  );
+  const amountHash = resolveOperationEvidenceAlias(
+    expectedAmountHash,
+    expected_amount_hash,
+    "expectedAmountHash"
+  );
+  if (recipientProvided !== amountProvided) {
+    throw new Error("expected recipient hash and expected amount hash must be provided together");
+  }
+  if (recipientProvided && !recipientHash.trim()) {
+    throw new Error("expectedRecipientHash must not be empty");
+  }
+  if (amountProvided && !amountHash.trim()) {
+    throw new Error("expectedAmountHash must not be empty");
+  }
+  return {
+    provided: recipientProvided,
+    expectedRecipientHash: recipientHash,
+    expectedAmountHash: amountHash
+  };
+}
+
+function operationEvidenceAliasProvided(camelValue, snakeValue) {
+  return (camelValue !== undefined && camelValue !== null) ||
+    (snakeValue !== undefined && snakeValue !== null);
+}
+
+function resolveOperationEvidenceAlias(camelValue, snakeValue, name) {
+  const camelProvided = camelValue !== undefined && camelValue !== null;
+  const snakeProvided = snakeValue !== undefined && snakeValue !== null;
+  if (camelProvided && snakeProvided && String(camelValue) !== String(snakeValue)) {
+    throw new Error(`${name} aliases conflict`);
+  }
+  return String(camelProvided ? camelValue : snakeProvided ? snakeValue : "");
+}
+
+function resolveOperationEvidenceArrayAlias(camelValue, snakeValue, name) {
+  const camelProvided = camelValue !== undefined && camelValue !== null;
+  const snakeProvided = snakeValue !== undefined && snakeValue !== null;
+  if (camelProvided && !Array.isArray(camelValue)) {
+    throw new Error(`${name} must be an array`);
+  }
+  if (snakeProvided && !Array.isArray(snakeValue)) {
+    throw new Error(`${name} must be an array`);
+  }
+  if (camelProvided && snakeProvided) {
+    const camelItems = camelValue.map(String);
+    const snakeItems = snakeValue.map(String);
+    if (camelItems.length !== snakeItems.length ||
+        camelItems.some((value, index) => value !== snakeItems[index])) {
+      throw new Error(`${name} aliases conflict`);
+    }
+  }
+  return camelProvided ? camelValue : snakeProvided ? snakeValue : [];
+}
+
+function resolveBatchOperationEvidence({
+  amounts = [],
+  expectedRecipientHash,
+  expected_recipient_hash,
+  expectedRecipientHashes,
+  expected_recipient_hashes,
+  expectedAmountHashes,
+  expected_amount_hashes
+} = {}) {
+  const recipientHashScalarProvided = operationEvidenceAliasProvided(
+    expectedRecipientHash,
+    expected_recipient_hash
+  );
+  const recipientHashArrayProvided = operationEvidenceAliasProvided(
+    expectedRecipientHashes,
+    expected_recipient_hashes
+  );
+  const amountHashArrayProvided = operationEvidenceAliasProvided(
+    expectedAmountHashes,
+    expected_amount_hashes
+  );
+  const recipientHashScalar = resolveOperationEvidenceAlias(
+    expectedRecipientHash,
+    expected_recipient_hash,
+    "expectedRecipientHash"
+  );
+  const recipientHashArray = resolveOperationEvidenceArrayAlias(
+    expectedRecipientHashes,
+    expected_recipient_hashes,
+    "expectedRecipientHashes"
+  );
+  const amountHashArray = resolveOperationEvidenceArrayAlias(
+    expectedAmountHashes,
+    expected_amount_hashes,
+    "expectedAmountHashes"
+  );
+  const evidenceProvided = recipientHashScalarProvided ||
+    recipientHashArrayProvided || amountHashArrayProvided;
+  if (!evidenceProvided) {
+    return {
+      enabled: false,
+      recipientHashes: [],
+      amountHashes: []
+    };
+  }
+  if (recipientHashArrayProvided && recipientHashArray.length !== amounts.length) {
+    throw new Error("expectedRecipientHashes length must match batch amounts length");
+  }
+  if (amountHashArray.length !== amounts.length) {
+    throw new Error("expectedAmountHashes length must match batch amounts length when batch operation evidence is provided");
+  }
+  const recipientHashes = amounts.map((_, index) =>
+    String(recipientHashArray[index] || recipientHashScalar || "").trim()
+  );
+  const amountHashes = amounts.map((_, index) => String(amountHashArray[index] || "").trim());
+  const missingRecipientIndex = recipientHashes.findIndex(value => !value);
+  if (missingRecipientIndex >= 0) {
+    throw new Error(`expected recipient hash is required for batch item ${missingRecipientIndex}`);
+  }
+  const missingAmountIndex = amountHashes.findIndex(value => !value);
+  if (missingAmountIndex >= 0) {
+    throw new Error(`expected amount hash is required for batch item ${missingAmountIndex}`);
+  }
+  return {
+    enabled: true,
+    recipientHashes,
+    amountHashes
+  };
+}
+
+function withdrawProofReadyMetadata(built, context = {}) {
+  const expiresAtUnix = String(
+    built?.payload?.expires_at_unix ||
+    built?.payload?.expiresAtUnix ||
+    built?.proverPayload?.expires_at_unix ||
+    built?.proverPayload?.expiresAtUnix ||
+    ""
+  );
+  return {
+    payloadHash: built?.payload?.payload_hash || built?.proverPayload?.payload_hash || "",
+    signDocHash: context.signDocHash ?? context.sign_doc_hash ?? "",
+    expectedOutputCommitment: "",
+    expectedDisclosureDigest: "",
+    metadata: expiresAtUnix ? { payload_expires_at_unix: expiresAtUnix } : {}
+  };
+}
+
+async function markReservationProofReady(reservationManager, batch, metadata) {
+  if (!reservationManager || !batch?.reservation_ids?.length) return [];
+  if (typeof reservationManager.markProofReady !== "function") {
+    throw new Error("reservationManager.markProofReady is required");
+  }
+  const reservations = await reservationManager.markProofReady(batch.reservation_ids, {
+    ...metadata,
+    leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || ""
+  });
+  batch.reservations = reservations;
+  batch.lease_until = reservations[0]?.lease_until || batch.lease_until;
+  return reservations;
+}
+
+async function reservationIDsForNotes(reservationManager, batch, notes) {
+  if (!reservationManager || !batch?.reservation_ids?.length) return [];
+  if (typeof reservationManager.lookupKeyForNote !== "function") {
+    throw new Error("reservationManager.lookupKeyForNote is required");
+  }
+  const lookupKeys = new Set();
+  for (const note of notes || []) {
+    lookupKeys.add(await reservationManager.lookupKeyForNote(note));
+  }
+  const reservationIDs = (batch.reservations || [])
+    .filter(reservation => lookupKeys.has(reservation.nullifier_lookup_key))
+    .map(reservation => reservation.reservation_id);
+  return reservationIDs;
+}
+
+function mergeBatchReservations(batch, updated) {
+  const updatedByID = new Map(updated.map(reservation => [reservation.reservation_id, reservation]));
+  batch.reservations = (batch.reservations || []).map(reservation =>
+    updatedByID.get(reservation.reservation_id) || reservation
+  );
+  batch.lease_until = updated[0]?.lease_until || batch.lease_until;
+}
+
+async function markReservationProofReadyForNotes(reservationManager, batch, notes, metadata) {
+  const reservationIDs = await reservationIDsForNotes(reservationManager, batch, notes);
+  if (!reservationIDs.length) return [];
+  const updated = await reservationManager.markProofReady(reservationIDs, {
+    ...metadata,
+    leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || ""
+  });
+  mergeBatchReservations(batch, updated);
+  return updated;
+}
+
+async function markReservationProofReadyForBatchItems(reservationManager, batch, items) {
+  if (!reservationManager || !batch?.reservation_ids?.length) return [];
+  if (typeof reservationManager.markProofReadyBatch !== "function") {
+    throw new Error("reservationManager.markProofReadyBatch is required for atomic batch transfer preparation");
+  }
+  const entries = [];
+  for (const item of items || []) {
+    const reservationIDs = await reservationIDsForNotes(reservationManager, batch, item?.notes);
+    if (!reservationIDs.length) continue;
+    entries.push({
+      reservationIDs,
+      metadata: {
+        ...(item?.metadata || {}),
+        leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || ""
+      }
+    });
+  }
+  if (!entries.length) return [];
+  const updated = await reservationManager.markProofReadyBatch(entries);
+  mergeBatchReservations(batch, updated);
+  return updated;
+}
+
+async function replanProofReadyReservations(reservationManager, batch, error, reason) {
+  if (!reservationManager || !batch?.reservation_ids?.length) return [];
+  if (typeof reservationManager.getReservation !== "function" || typeof reservationManager.markReplanRequired !== "function") {
+    return [];
+  }
+  const proofReadyIDs = [];
+  for (const reservationID of batch.reservation_ids || []) {
+    try {
+      const reservation = await reservationManager.getReservation(reservationID);
+      if (reservation.status === reservationStatuses.ProofReady) {
+        proofReadyIDs.push(reservationID);
+      }
+    } catch (_) {
+      // Best-effort cleanup should not hide the original prepare failure.
+    }
+  }
+  if (!proofReadyIDs.length) return [];
+  return reservationManager.markReplanRequired(proofReadyIDs, {
+    leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || "",
+    error: error?.message || String(error || "reservation replan required"),
+    metadata: {
+      reconcile_reason: reason,
+      no_broadcast_attempt: true,
+      proof_discarded: true
+    }
+  });
+}
+
+async function renewReservationLease(reservationManager, batch) {
+  if (!reservationManager || !batch?.reservation_ids?.length) return [];
+  if (typeof reservationManager.renewLease !== "function") return [];
+  const reservations = await reservationManager.renewLease(batch.reservation_ids, {
+    leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || ""
+  });
+  batch.reservations = reservations;
+  batch.lease_until = reservations[0]?.lease_until || batch.lease_until;
+  return reservations;
+}
+
+async function withReservationHeartbeat(reservationManager, batch, task) {
+  if (!reservationManager || !batch?.reservation_ids?.length || typeof reservationManager.renewLease !== "function") {
+    return task({
+      assertHeartbeatHealthy() {},
+      async heartbeatNow() {}
+    });
+  }
+  await renewReservationLease(reservationManager, batch);
+  const heartbeatIntervalMs = reservationHeartbeatIntervalMs({
+    leaseDurationMs: reservationManager.leaseDurationMs,
+    leaseUntil: batch.lease_until || batch.reservations?.[0]?.lease_until
+  });
+  let heartbeatError = null;
+  let inFlightHeartbeat = null;
+  const heartbeat = async () => {
+    if (heartbeatError) return;
+    try {
+      await renewReservationLease(reservationManager, batch);
+    } catch (error) {
+      heartbeatError = error;
+    }
+  };
+  const heartbeatNow = async () => {
+    if (!inFlightHeartbeat) {
+      inFlightHeartbeat = heartbeat().finally(() => {
+        inFlightHeartbeat = null;
+      });
+    }
+    await inFlightHeartbeat;
+    assertHeartbeatHealthy();
+  };
+  const assertHeartbeatHealthy = () => {
+    if (!heartbeatError) return;
+    const error = new Error("note reservation lease heartbeat failed during proof generation");
+    error.name = "ReservationHeartbeatError";
+    error.cause = heartbeatError;
+    throw error;
+  };
+  const timer = typeof globalThis.setInterval === "function"
+    ? globalThis.setInterval(() => { void heartbeatNow().catch(() => {}); }, heartbeatIntervalMs)
+    : null;
+  let taskCompleted = false;
+  let result;
+  try {
+    result = await task({ assertHeartbeatHealthy, heartbeatNow });
+    taskCompleted = true;
+  } finally {
+    if (timer && typeof globalThis.clearInterval === "function") {
+      globalThis.clearInterval(timer);
+    }
+    if (inFlightHeartbeat) await inFlightHeartbeat;
+  }
+  if (taskCompleted && heartbeatError) {
+    return {
+      ...result,
+      reservationReconciliationRequired: true,
+      reservationReconciliationWarning: {
+        code: "reservation_heartbeat_failed_after_proof_ready",
+        message: "The prepared artifact is durable, but reservation reconciliation is required before broadcast.",
+        cause: heartbeatError?.message || String(heartbeatError)
+      }
+    };
+  }
+  return result;
+}
+
+function reservationReconciliationFields(result = {}) {
+  return result.reservationReconciliationRequired === true
+    ? {
+        reservationReconciliationRequired: true,
+        reservationReconciliationWarning: result.reservationReconciliationWarning
+      }
+    : {};
 }
 
 export class ClairveilJS {
@@ -599,7 +1386,15 @@ export class ClairveilJS {
     return `${endpoint}${path}`;
   }
 
-  async fetchJson(pathOrUrl, { failover = false, retry = this.queryRetry, method, body, headers } = {}) {
+  async fetchJson(pathOrUrl, {
+    failover = false,
+    retry = this.queryRetry,
+    method,
+    body,
+    headers,
+    endpoint,
+    updateActiveEndpoint = endpoint == null
+  } = {}) {
     const text = String(pathOrUrl || "");
     const isAbsolute = /^https?:\/\//i.test(text);
     if (isAbsolute) {
@@ -617,9 +1412,10 @@ export class ClairveilJS {
       return result.data;
     }
     const path = text;
+    const initialEndpoint = endpoint || this.activeRestEndpoint;
     const endpoints = failover
-      ? [this.activeRestEndpoint, ...this.restEndpoints.filter(endpoint => endpoint !== this.activeRestEndpoint)]
-      : [this.activeRestEndpoint];
+      ? [initialEndpoint, ...this.restEndpoints.filter(candidate => candidate !== initialEndpoint)]
+      : [initialEndpoint];
     const result = await fetchJsonWithRetry(
       endpoint => this.restUrl(path, endpoint),
       endpoints,
@@ -631,8 +1427,21 @@ export class ClairveilJS {
         headers
       }
     );
-    this.activeRestEndpoint = result.endpoint;
+    if (updateActiveEndpoint) this.activeRestEndpoint = result.endpoint;
     return result.data;
+  }
+
+  async fetchNullifierJson(path, options = {}) {
+    return this.fetchJson(path, {
+      ...options,
+      failover: this.nullifierFailover,
+      // Normal queries may fail over. Sensitive nullifier queries stay on the
+      // configured endpoint unless the caller explicitly opted into failover.
+      ...(this.nullifierFailover ? {} : {
+        endpoint: this.rest,
+        updateActiveEndpoint: false
+      })
+    });
   }
 
   async getAccountInfo(address) {
@@ -713,22 +1522,41 @@ export class ClairveilJS {
   }
 
   async checkNullifier(nullifierHex) {
-    return this.fetchJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`, { failover: this.nullifierFailover });
+    return this.fetchNullifierJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`);
   }
 
   async checkNullifiers(nullifierHexes = []) {
     const normalized = [...new Set((nullifierHexes || []).map(value => String(value || "").trim().toLowerCase()).filter(Boolean))];
     const usedByNullifier = new Map();
+    const invalidNullifiers = new Set();
+    const addStatus = (nullifier, value) => {
+      const key = String(nullifier || "").trim().toLowerCase();
+      if (!key || invalidNullifiers.has(key)) return;
+      const used = parseNullifierUsage(value);
+      if (used === null || (usedByNullifier.has(key) && usedByNullifier.get(key) !== used)) {
+        usedByNullifier.delete(key);
+        invalidNullifiers.add(key);
+        return;
+      }
+      usedByNullifier.set(key, used);
+    };
     const chunkSize = 1000;
     for (let start = 0; start < normalized.length; start += chunkSize) {
       const chunk = normalized.slice(start, start + chunkSize);
-      const response = await this.fetchJson("/clairveil/privacy/v1/nullifiers", {
+      const response = await this.fetchNullifierJson("/clairveil/privacy/v1/nullifiers", {
         method: "POST",
-        body: JSON.stringify({ nullifiers: chunk }),
-        failover: this.nullifierFailover
+        body: JSON.stringify({ nullifiers: chunk })
       });
       for (const status of response?.statuses || response?.Statuses || []) {
-        usedByNullifier.set(String(status?.nullifier || status?.Nullifier || "").toLowerCase(), Boolean(status?.used ?? status?.Used));
+        const canonical = status?.nullifier;
+        const alias = status?.Nullifier;
+        if (canonical != null && alias != null &&
+            String(canonical).trim().toLowerCase() !== String(alias).trim().toLowerCase()) {
+          addStatus(canonical, null);
+          addStatus(alias, null);
+        } else {
+          addStatus(canonical ?? alias, status);
+        }
       }
     }
     return usedByNullifier;
@@ -760,9 +1588,12 @@ export class ClairveilJS {
     const pageBudget = Math.max(1, Number(maxPages || 1));
     const source = scan_source ?? scanSource;
 
+    let legacyAfterHeight = afterHeight;
+    let legacyAfterHeightAlias = after_height;
+    let legacyPage = page;
     if (source !== "privacy_events") {
-      const startAfterHeight = Number(afterHeight ?? after_height ?? 0);
-      const startAfterSequence = Number(afterSequence ?? after_sequence ?? 0);
+      const startAfterHeight = uint64CursorValue(afterHeight ?? after_height ?? 0, "scan after height");
+      const startAfterSequence = uint64CursorValue(afterSequence ?? after_sequence ?? 0, "scan after sequence");
       const events = [];
       let currentAfterHeight = startAfterHeight;
       let currentAfterSequence = startAfterSequence;
@@ -782,9 +1613,13 @@ export class ClairveilJS {
           events.push(...(data.events || []));
           pagesScanned += 1;
           hasMore = Boolean(data.has_more ?? data.hasMore);
-          const nextHeight = Number(data.next_height ?? data.nextHeight ?? currentAfterHeight);
-          const nextSequence = Number(data.next_sequence ?? data.nextSequence ?? currentAfterSequence);
-          if (hasMore && nextHeight === currentAfterHeight && nextSequence === currentAfterSequence) {
+          const nextHeight = uint64CursorValue(data.next_height ?? data.nextHeight ?? currentAfterHeight, "scan next height");
+          const nextSequence = uint64CursorValue(data.next_sequence ?? data.nextSequence ?? currentAfterSequence, "scan next sequence");
+          if (
+            hasMore &&
+            compareUint64Cursor(nextHeight, currentAfterHeight, "scan height") === 0 &&
+            compareUint64Cursor(nextSequence, currentAfterSequence, "scan sequence") === 0
+          ) {
             throw new Error("scan events cursor did not advance");
           }
           currentAfterHeight = nextHeight;
@@ -838,13 +1673,20 @@ export class ClairveilJS {
       } catch (error) {
         const canFallback = error?.status === 404 || error?.status === 501 || error?.status === 503 || error?.code === "UNSUPPORTED_SCAN_EVENTS_VERSION";
         if (!canFallback) throw error;
+        // The legacy endpoint begins at after_height + 1 and has no sequence
+        // cursor. Rewind one block so a mid-block scan_events cursor cannot
+        // skip the remaining events at that height.
+        const rewindHeight = decrementUint64Cursor(startAfterHeight, "scan fallback height");
+        legacyAfterHeight = rewindHeight;
+        legacyAfterHeightAlias = rewindHeight;
+        legacyPage = 1;
       }
     }
 
-    const startPage = Math.max(1, Number(page || 1));
+    const startPage = Math.max(1, Number(legacyPage || 1));
     const baseRequest = {
-      afterHeight,
-      after_height,
+      afterHeight: legacyAfterHeight,
+      after_height: legacyAfterHeightAlias,
       limit: pageLimit,
       eventTypes: resolvedEventTypes
     };
@@ -914,12 +1756,16 @@ export class ClairveilJS {
   async findPrivacyEventByTxHash(txHash, {
     afterHeight,
     after_height,
+    afterSequence,
+    after_sequence,
     page = 1,
     limit = 200,
     maxPages = defaultPrepareScanMaxPages,
     max_pages,
     eventTypes = ["shielded_transfer"],
-    event_types
+    event_types,
+    scanSource,
+    scan_source
   } = {}) {
     const normalizedTxHash = String(txHash || "").trim().toUpperCase();
     if (!normalizedTxHash) {
@@ -928,6 +1774,35 @@ export class ClairveilJS {
     const pageBudget = Math.max(1, Number(max_pages ?? maxPages ?? defaultPrepareScanMaxPages));
     const pageLimit = Math.max(1, Number(limit || 200));
     const resolvedEventTypes = event_types ?? eventTypes;
+    const source = scan_source ?? scanSource ?? "privacy_events";
+    if (source !== "privacy_events") {
+      let currentAfterHeight = uint64CursorValue(afterHeight ?? after_height ?? 0, "event lookup after height");
+      let currentAfterSequence = uint64CursorValue(afterSequence ?? after_sequence ?? 0, "event lookup after sequence");
+      for (let pagesScanned = 0; pagesScanned < pageBudget; pagesScanned += 1) {
+        const data = await this.fetchScanEvents({
+          afterHeight: currentAfterHeight,
+          afterSequence: currentAfterSequence,
+          limit: pageLimit,
+          eventTypes: resolvedEventTypes
+        });
+        const event = (data.events || []).find(item =>
+          String(item.tx_hash_hex || "").toUpperCase() === normalizedTxHash
+        );
+        if (event) return event;
+        if (!Boolean(data.has_more ?? data.hasMore)) break;
+        const nextHeight = uint64CursorValue(data.next_height ?? data.nextHeight ?? currentAfterHeight, "event lookup next height");
+        const nextSequence = uint64CursorValue(data.next_sequence ?? data.nextSequence ?? currentAfterSequence, "event lookup next sequence");
+        if (
+          compareUint64Cursor(nextHeight, currentAfterHeight, "event lookup height") === 0 &&
+          compareUint64Cursor(nextSequence, currentAfterSequence, "event lookup sequence") === 0
+        ) {
+          throw new Error("scan events cursor did not advance");
+        }
+        currentAfterHeight = nextHeight;
+        currentAfterSequence = nextSequence;
+      }
+      throw new Error(`transfer event not found for tx ${normalizedTxHash}`);
+    }
     let currentPage = Math.max(1, Number(page || 1));
 
     for (let pagesScanned = 0; pagesScanned < pageBudget; pagesScanned += 1) {
@@ -1018,16 +1893,36 @@ export class ClairveilJS {
     after_sequence,
     page,
     eventTypes,
-    event_types
+    event_types,
+    scanSource,
+    scan_source
   } = {}) {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     let resolvedAfterHeight = afterHeight ?? after_height;
     let resolvedAfterSequence = afterSequence ?? after_sequence;
     let resolvedPage = page;
+    let resolvedScanSource = scan_source ?? scanSource;
     if (resolvedAfterHeight == null && noteStore) {
       const cached = await noteStore.load();
       const cachedCursor = cached.scanCursor || {};
-      if (cachedCursor.has_more && (cachedCursor.next_sequence != null || cachedCursor.nextSequence != null)) {
+      if (cachedCursor.source === "scan_events" || cachedCursor.source === "privacy_events") {
+        const next = nextPrivacyScanOptions(cachedCursor, { limit, maxPages });
+        const requestedSource = resolvedScanSource;
+        const sourceChanged = Boolean(requestedSource && requestedSource !== cachedCursor.source);
+        if (sourceChanged) {
+          // ScanEvents resumes after an exact (height, sequence), while the legacy
+          // endpoint starts at after_height + 1. Rewind one height when translating
+          // either cursor so a source switch may duplicate events but cannot skip one.
+          resolvedAfterHeight = decrementUint64Cursor(next.afterHeight ?? 0, "scan source switch height");
+          resolvedAfterSequence = 0;
+          resolvedPage = 1;
+        } else {
+          resolvedAfterHeight = next.afterHeight;
+          resolvedAfterSequence = next.afterSequence ?? 0;
+          resolvedPage = resolvedPage ?? next.page;
+          resolvedScanSource = next.scanSource ?? cachedCursor.source;
+        }
+      } else if (cachedCursor.has_more && (cachedCursor.next_sequence != null || cachedCursor.nextSequence != null)) {
         resolvedAfterHeight = cachedCursor.next_height ?? cachedCursor.nextHeight ?? cached.lastScannedHeight ?? 0;
         resolvedAfterSequence = cachedCursor.next_sequence ?? cachedCursor.nextSequence ?? cached.lastScannedSequence ?? 0;
       } else if (cachedCursor.has_more && (cachedCursor.next_page || cachedCursor.nextPage)) {
@@ -1046,6 +1941,7 @@ export class ClairveilJS {
       afterHeight: resolvedAfterHeight,
       afterSequence: resolvedAfterSequence,
       page: resolvedPage,
+      scanSource: resolvedScanSource,
       eventTypes: event_types ?? eventTypes,
       includeFoundNotes: true
     });
@@ -1072,37 +1968,48 @@ export class ClairveilJS {
     const nullifiers = [];
     for (const note of current.notes || []) {
       const nullifier = String(note?.nullifier || "").trim().toLowerCase();
-      if (!nullifier || note.isSpent || note.spent) continue;
+      if (!nullifier) continue;
       nullifiers.push(nullifier);
     }
     if (!nullifiers.length) return current;
+    const nullifierStatuses = new Map();
     try {
       const statuses = await this.checkNullifiers(nullifiers);
-      const spent = nullifiers.filter(nullifier => Boolean(statuses.get(nullifier)));
-      if (spent.length) {
-        current = await noteStore.markSpent(spent);
+      for (const nullifier of nullifiers) {
+        if (statuses.has(nullifier)) {
+          const used = parseNullifierUsage(statuses.get(nullifier));
+          if (used !== null) {
+            nullifierStatuses.set(nullifier, used ? "spent" : "unspent");
+          }
+        }
       }
-      const missing = nullifiers.filter(nullifier => !statuses.has(nullifier));
-      if (!missing.length) return current;
+      const missing = nullifiers.filter(nullifier => !nullifierStatuses.has(nullifier));
+      if (!missing.length) {
+        return typeof noteStore.setNullifierStatuses === "function"
+          ? noteStore.setNullifierStatuses(nullifierStatuses)
+          : current;
+      }
       nullifiers.length = 0;
       nullifiers.push(...missing);
     } catch {
-      // Fall back to individual checks below when the batch path is temporarily unavailable.
+      // Check every note individually before marking a cached nullifier as unknown.
     }
-    const spent = [];
     for (const nullifier of nullifiers) {
       try {
         const result = await this.checkNullifier(nullifier);
-        if (Boolean(result?.used ?? result?.Used ?? result)) spent.push(nullifier);
+        const used = parseNullifierUsage(result);
+        nullifierStatuses.set(nullifier, used === null ? "unknown" : used ? "spent" : "unspent");
       } catch {
-        // Leave cached notes unchanged when the nullifier query is temporarily unavailable.
+        nullifierStatuses.set(nullifier, "unknown");
       }
     }
-    return spent.length ? noteStore.markSpent(spent) : current;
+    return typeof noteStore.setNullifierStatuses === "function"
+      ? noteStore.setNullifierStatuses(nullifierStatuses)
+      : current;
   }
 
-  async planWalletTransfer({ wallet, material, amount, denom, limit = 200, maxPages = defaultPrepareScanMaxPages, scan: scanOptions } = {}) {
-    const resolvedScanOptions = resolveScanOptions({ scan: scanOptions, limit, maxPages });
+  async planWalletTransfer({ wallet, material, amount, denom, limit = 200, maxPages = defaultPrepareScanMaxPages, scan: scanOptions, scanSource, scan_source } = {}) {
+    const resolvedScanOptions = resolveScanOptions({ scan: scanOptions, limit, maxPages, scanSource, scan_source });
     const scan = await this.scanWalletNotes({
       wallet,
       material,
@@ -1121,8 +2028,8 @@ export class ClairveilJS {
     };
   }
 
-  async planWalletWithdraw({ wallet, material, amount, denom, limit = 200, maxPages = defaultPrepareScanMaxPages, scan: scanOptions } = {}) {
-    const resolvedScanOptions = resolveScanOptions({ scan: scanOptions, limit, maxPages });
+  async planWalletWithdraw({ wallet, material, amount, denom, limit = 200, maxPages = defaultPrepareScanMaxPages, scan: scanOptions, scanSource, scan_source } = {}) {
+    const resolvedScanOptions = resolveScanOptions({ scan: scanOptions, limit, maxPages, scanSource, scan_source });
     const scan = await this.scanWalletNotes({
       wallet,
       material,
@@ -1185,30 +2092,51 @@ export class ClairveilJS {
     userDisclosureMode,
     userDisclosureTargetPubKeyHex = "",
     auditDisclosureTargetPubKeyHex,
+    expectedRecipientHash,
+    expected_recipient_hash,
+    expectedAmountHash,
+    expected_amount_hash,
     denom,
     allowPlanStep = false,
     scan,
     afterHeight,
     after_height,
+    afterSequence,
+    after_sequence,
     page,
     limit = 200,
     maxPages = defaultPrepareScanMaxPages,
     max_pages,
     eventTypes,
     event_types,
-    gasLimit = 8000000
+    scanSource,
+    scan_source,
+    gasLimit = 8000000,
+    reservationManager,
+    reservation_manager
   } = {}) {
+    const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
+    const operationEvidence = resolveDirectOperationEvidenceHashes({
+      expectedRecipientHash,
+      expected_recipient_hash,
+      expectedAmountHash,
+      expected_amount_hash
+    });
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveScanOptions({
       scan,
       afterHeight,
       after_height,
+      afterSequence,
+      after_sequence,
       page,
       limit,
       maxPages,
       max_pages,
       eventTypes,
-      event_types
+      event_types,
+      scanSource,
+      scan_source
     });
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
@@ -1217,8 +2145,9 @@ export class ClairveilJS {
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
       includeFoundNotes: true
     });
+    const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
     const plan = planTransferNotes({
-      notes: scanResult.foundNotes,
+      notes: availableFoundNotes,
       amount,
       denom: denom ?? this.defaultDenom
     });
@@ -1245,52 +2174,93 @@ export class ClairveilJS {
     const isFinal = plan.status === "final_transfer_ready";
     const stepRecipient = isFinal ? recipient : privacy.shieldedAddress;
     const stepAmount = isFinal ? amount : plan.nextAmount;
-    const built = await this.buildTransferMessage({
-      proverAdapter,
-      creator: privacy.address,
-      inputs: plan.selection.inputs,
-      recipient: stepRecipient,
-      amount: stepAmount,
-      transferDenom: denom ?? this.defaultDenom,
-      rootSeed: privacy.rootSeed,
-      shieldedPrefix: this.shieldedPrefix,
-      userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
-      userDisclosureMode: isFinal ? userDisclosureMode : "none",
-      userDisclosureTargetPubKeyHex: isFinal ? userDisclosureTargetPubKeyHex : "",
-      auditDisclosureTargetPubKeyHex: auditPubKeyHex
-    });
-    const signDoc = await this.buildDirectSignDoc({
-      signer: privacy.address,
-      pubKeyHex: privacy.pubKeyHex,
-      gasLimit,
-      messages: [
-        {
-          typeUrl: msgTransferTypeUrl,
-          value: built.message
+    let reservationBatch = null;
+    try {
+      reservationBatch = await preparePlanReservation(resolvedReservationManager, {
+        plan,
+        kind: isFinal ? "transfer" : "self_merge",
+        metadata: {
+          amount: stepAmount,
+          recipient: stepRecipient,
+          finalAmount: amount,
+          finalRecipient: recipient
         }
-      ],
-      memo: "Clairveil veiled transfer"
-    });
+      });
+      const heartbeatResult = await withReservationHeartbeat(resolvedReservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
+        const built = await this.buildTransferMessage({
+          proverAdapter,
+          creator: privacy.address,
+          inputs: plan.selection.inputs,
+          recipient: stepRecipient,
+          amount: stepAmount,
+          transferDenom: denom ?? this.defaultDenom,
+          rootSeed: privacy.rootSeed,
+          shieldedPrefix: this.shieldedPrefix,
+          userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
+          userDisclosureMode: isFinal ? userDisclosureMode : "none",
+          userDisclosureTargetPubKeyHex: isFinal ? userDisclosureTargetPubKeyHex : "",
+          auditDisclosureTargetPubKeyHex: auditPubKeyHex
+        });
+        assertHeartbeatHealthy();
+        const signDoc = await this.buildDirectSignDoc({
+          signer: privacy.address,
+          pubKeyHex: privacy.pubKeyHex,
+          gasLimit,
+          messages: [
+            {
+              typeUrl: msgTransferTypeUrl,
+              value: built.message
+            }
+          ],
+          memo: reservationBatch
+            ? reservationRequiredCosmosMemo("Clairveil veiled transfer")
+            : "Clairveil veiled transfer"
+        });
+        const signDocHash = cosmosSignDocBindingHash(signDoc);
+        await heartbeatNow();
+        await markReservationProofReady(resolvedReservationManager, reservationBatch, transferProofReadyMetadata(built, {
+          amount: stepAmount,
+          denom: denom ?? this.defaultDenom,
+          expectedRecipientHash: isFinal ? operationEvidence.expectedRecipientHash : "",
+          expectedAmountHash: isFinal ? operationEvidence.expectedAmountHash : "",
+          signDocHash
+        }));
+        return {
+          built,
+          signDoc: markCosmosSignDocReservationRequired(
+            signDoc,
+            reservationBatch
+          )
+        };
+      });
+      const { built, signDoc } = heartbeatResult;
 
-    return {
-      status: "ready",
-      plan,
-      scan: scanResult,
-      signDoc,
-      payload: built.payload,
-      proof: built.proof,
-      message: built.message,
-      prepared: {
-        planAction: isFinal ? "final_transfer" : "self_merge",
-        isFinal,
-        amount: stepAmount,
-        recipient: stepRecipient,
-        finalAmount: amount,
-        finalRecipient: recipient,
-        selectedInputTotal: plan.selection.total.toString()
-      },
-      privacyAccount: publicPrivacyAccount(privacy)
-    };
+      return {
+        ...reservationReconciliationFields(heartbeatResult),
+        status: "ready",
+        plan,
+        scan: scanResult,
+        signDoc,
+        payload: built.payload,
+        proof: built.proof,
+        message: built.message,
+        reservation: reservationBatchSummary(reservationBatch),
+        prepared: {
+          planAction: isFinal ? "final_transfer" : "self_merge",
+          isFinal,
+          amount: stepAmount,
+          recipient: stepRecipient,
+          finalAmount: amount,
+          finalRecipient: recipient,
+          selectedInputTotal: plan.selection.total.toString(),
+          reservation: reservationBatchSummary(reservationBatch)
+        },
+        privacyAccount: publicPrivacyAccount(privacy)
+      };
+    } catch (error) {
+      await rollbackPlanReservationPreservingError(resolvedReservationManager, reservationBatch, error);
+      throw error;
+    }
   }
 
   async prepareTransferBatch({
@@ -1303,29 +2273,55 @@ export class ClairveilJS {
     userDisclosureMode = "none",
     userDisclosureTargetPubKeyHex = "",
     auditDisclosureTargetPubKeyHex,
+    expectedRecipientHash,
+    expected_recipient_hash,
+    expectedRecipientHashes,
+    expected_recipient_hashes,
+    expectedAmountHashes,
+    expected_amount_hashes,
     denom,
     scan,
     afterHeight,
     after_height,
+    afterSequence,
+    after_sequence,
     page,
     limit = 200,
     maxPages = defaultPrepareScanMaxPages,
     max_pages,
     eventTypes,
     event_types,
-    gasLimit = 25000000
+    scanSource,
+    scan_source,
+    gasLimit = 25000000,
+    reservationManager,
+    reservation_manager
   } = {}) {
+    const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
+    const operationEvidence = resolveBatchOperationEvidence({
+      amounts,
+      expectedRecipientHash,
+      expected_recipient_hash,
+      expectedRecipientHashes,
+      expected_recipient_hashes,
+      expectedAmountHashes,
+      expected_amount_hashes
+    });
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveScanOptions({
       scan,
       afterHeight,
       after_height,
+      afterSequence,
+      after_sequence,
       page,
       limit,
       maxPages,
       max_pages,
       eventTypes,
-      event_types
+      event_types,
+      scanSource,
+      scan_source
     });
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
@@ -1334,8 +2330,9 @@ export class ClairveilJS {
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
       includeFoundNotes: true
     });
+    const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
     const plan = planTransferBatchNotes({
-      notes: scanResult.foundNotes,
+      notes: availableFoundNotes,
       amounts,
       denom: denom ?? this.defaultDenom
     });
@@ -1351,52 +2348,110 @@ export class ClairveilJS {
 
     const auditPubKeyHex = auditDisclosureTargetPubKeyHex
       || (await this.fetchAuditConfig()).audit_master_pubkey_hex;
-    const builtItems = [];
-    for (let i = 0; i < amounts.length; i += 1) {
-      const built = await this.buildTransferMessage({
-        proverAdapter,
-        creator: privacy.address,
-        inputs: plan.selections[i].inputs,
-        recipient,
-        amount: amounts[i],
-        transferDenom: denom ?? this.defaultDenom,
-        rootSeed: privacy.rootSeed,
-        shieldedPrefix: this.shieldedPrefix,
-        userPrivacyPolicy,
-        userDisclosureMode,
-        userDisclosureTargetPubKeyHex,
-        auditDisclosureTargetPubKeyHex: auditPubKeyHex
+    let reservationBatch = null;
+    try {
+      reservationBatch = await preparePlanReservation(resolvedReservationManager, {
+        plan,
+        kind: "batch_transfer",
+        metadata: {
+          amounts: [...amounts],
+          recipient
+        }
       });
-      builtItems.push(built);
+      const heartbeatResult = await withReservationHeartbeat(resolvedReservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
+        const items = [];
+        for (let i = 0; i < amounts.length; i += 1) {
+          const built = await this.buildTransferMessage({
+            proverAdapter,
+            creator: privacy.address,
+            inputs: plan.selections[i].inputs,
+            recipient,
+            amount: amounts[i],
+            transferDenom: denom ?? this.defaultDenom,
+            rootSeed: privacy.rootSeed,
+            shieldedPrefix: this.shieldedPrefix,
+            userPrivacyPolicy,
+            userDisclosureMode,
+            userDisclosureTargetPubKeyHex,
+            auditDisclosureTargetPubKeyHex: auditPubKeyHex
+          });
+          items.push(built);
+          assertHeartbeatHealthy();
+        }
+        const signDoc = await this.buildDirectSignDoc({
+          signer: privacy.address,
+          pubKeyHex: privacy.pubKeyHex,
+          gasLimit,
+          messages: items.map(built => ({
+            typeUrl: msgTransferTypeUrl,
+            value: built.message
+          })),
+          memo: reservationBatch
+            ? reservationRequiredCosmosMemo("Clairveil batch veiled transfer")
+            : "Clairveil batch veiled transfer"
+        });
+        const signDocHash = cosmosSignDocBindingHash(signDoc);
+        await heartbeatNow();
+        await markReservationProofReadyForBatchItems(
+          resolvedReservationManager,
+          reservationBatch,
+          items.map((built, i) => ({
+            notes: plan.selections[i].inputs,
+            metadata: transferProofReadyMetadata(built, {
+              amount: amounts[i],
+              denom: denom ?? this.defaultDenom,
+              expectedRecipientHash: operationEvidence.recipientHashes[i] || "",
+              expectedAmountHash: operationEvidence.amountHashes[i] || "",
+              batchItemIndex: i,
+              batchItemIndexKnown: true,
+              signDocHash
+            })
+          })),
+        );
+        return {
+          builtItems: items,
+          signDoc: markCosmosSignDocReservationRequired(
+            signDoc,
+            reservationBatch
+          )
+        };
+      });
+      const { builtItems, signDoc } = heartbeatResult;
+
+      return {
+        ...reservationReconciliationFields(heartbeatResult),
+        status: "ready",
+        plan,
+        scan: scanResult,
+        signDoc,
+        payloads: builtItems.map(built => built.payload),
+        proofs: builtItems.map(built => built.proof),
+        messages: builtItems.map(built => built.message),
+        reservation: reservationBatchSummary(reservationBatch),
+        prepared: {
+          planAction: "batch_transfer",
+          amounts: [...amounts],
+          recipient,
+          selectedInputTotals: plan.selections.map(selection => selection.total.toString()),
+          reservation: reservationBatchSummary(reservationBatch)
+        },
+        privacyAccount: publicPrivacyAccount(privacy)
+      };
+    } catch (error) {
+      const cleanupErrors = [];
+      try {
+        await replanProofReadyReservations(resolvedReservationManager, reservationBatch, error, "batch_prepare_failed_after_partial_proof_ready");
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      try {
+        await rollbackPlanReservation(resolvedReservationManager, reservationBatch);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      appendReservationCleanupErrors(error, cleanupErrors);
+      throw error;
     }
-
-    const signDoc = await this.buildDirectSignDoc({
-      signer: privacy.address,
-      pubKeyHex: privacy.pubKeyHex,
-      gasLimit,
-      messages: builtItems.map(built => ({
-        typeUrl: msgTransferTypeUrl,
-        value: built.message
-      })),
-      memo: "Clairveil batch veiled transfer"
-    });
-
-    return {
-      status: "ready",
-      plan,
-      scan: scanResult,
-      signDoc,
-      payloads: builtItems.map(built => built.payload),
-      proofs: builtItems.map(built => built.proof),
-      messages: builtItems.map(built => built.message),
-      prepared: {
-        planAction: "batch_transfer",
-        amounts: [...amounts],
-        recipient,
-        selectedInputTotals: plan.selections.map(selection => selection.total.toString())
-      },
-      privacyAccount: publicPrivacyAccount(privacy)
-    };
   }
 
   async prepareWithdraw({
@@ -1410,26 +2465,39 @@ export class ClairveilJS {
     scan,
     afterHeight,
     after_height,
+    afterSequence,
+    after_sequence,
     page,
     limit = 200,
     maxPages = defaultPrepareScanMaxPages,
     max_pages,
     eventTypes,
     event_types,
+    scanSource,
+    scan_source,
     expiresAtUnix,
-    gasLimit = 5000000
+    chainNowUnix,
+    chain_now_unix,
+    gasLimit = 5000000,
+    reservationManager,
+    reservation_manager
   } = {}) {
+    const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveScanOptions({
       scan,
       afterHeight,
       after_height,
+      afterSequence,
+      after_sequence,
       page,
       limit,
       maxPages,
       max_pages,
       eventTypes,
-      event_types
+      event_types,
+      scanSource,
+      scan_source
     });
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
@@ -1438,8 +2506,9 @@ export class ClairveilJS {
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
       includeFoundNotes: true
     });
+    const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
     const plan = planWithdrawNotes({
-      notes: scanResult.foundNotes,
+      notes: availableFoundNotes,
       amount,
       denom: assetDenom ?? denom ?? this.defaultDenom
     });
@@ -1453,42 +2522,79 @@ export class ClairveilJS {
     }
     assertPlanCanBuildTx(plan);
 
-    const built = await this.buildWithdrawMessage({
-      proverAdapter,
-      creator: privacy.address,
-      notes: scanResult.foundNotes,
-      amount,
-      assetDenom: assetDenom ?? denom ?? this.defaultDenom,
-      recipient,
-      rootSeed: privacy.rootSeed,
-      chainId: this.chainId,
-      expiresAtUnix
-    });
-    const signDoc = await this.buildDirectSignDoc({
-      signer: privacy.address,
-      pubKeyHex: privacy.pubKeyHex,
-      gasLimit,
-      messages: [
-        {
-          typeUrl: msgWithdrawTypeUrl,
-          value: built.message
+    let reservationBatch = null;
+    try {
+      reservationBatch = await preparePlanReservation(resolvedReservationManager, {
+        plan,
+        kind: "withdraw",
+        metadata: {
+          amount,
+          recipient
         }
-      ],
-      memo: "Clairveil veiled withdraw"
-    });
+      });
+      const heartbeatResult = await withReservationHeartbeat(resolvedReservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
+        const built = await this.buildWithdrawMessage({
+          proverAdapter,
+          creator: privacy.address,
+          notes: [plan.selectedNote],
+          amount,
+          assetDenom: assetDenom ?? denom ?? this.defaultDenom,
+          recipient,
+          rootSeed: privacy.rootSeed,
+          chainId: this.chainId,
+          expiresAtUnix,
+          chainNowUnix: chainNowUnix ?? chain_now_unix
+        });
+        assertHeartbeatHealthy();
+        const signDoc = await this.buildDirectSignDoc({
+          signer: privacy.address,
+          pubKeyHex: privacy.pubKeyHex,
+          gasLimit,
+          messages: [
+            {
+              typeUrl: msgWithdrawTypeUrl,
+              value: built.message
+            }
+          ],
+          memo: reservationBatch
+            ? reservationRequiredCosmosMemo("Clairveil veiled withdraw")
+            : "Clairveil veiled withdraw"
+        });
+        const signDocHash = cosmosSignDocBindingHash(signDoc);
+        await heartbeatNow();
+        await markReservationProofReady(
+          resolvedReservationManager,
+          reservationBatch,
+          withdrawProofReadyMetadata(built, { signDocHash })
+        );
+        return {
+          built,
+          signDoc: markCosmosSignDocReservationRequired(
+            signDoc,
+            reservationBatch
+          )
+        };
+      });
+      const { built, signDoc } = heartbeatResult;
 
-    return {
-      status: "ready",
-      plan,
-      scan: scanResult,
-      signDoc,
-      proverPayload: built.proverPayload,
-      proof: built.proof,
-      payload: built.payload,
-      message: built.message,
-      selectedNote: built.selectedNote,
-      privacyAccount: publicPrivacyAccount(privacy)
-    };
+      return {
+        ...reservationReconciliationFields(heartbeatResult),
+        status: "ready",
+        plan,
+        scan: scanResult,
+        signDoc,
+        proverPayload: built.proverPayload,
+        proof: built.proof,
+        payload: built.payload,
+        message: built.message,
+        selectedNote: built.selectedNote,
+        reservation: reservationBatchSummary(reservationBatch),
+        privacyAccount: publicPrivacyAccount(privacy)
+      };
+    } catch (error) {
+      await rollbackPlanReservationPreservingError(resolvedReservationManager, reservationBatch, error);
+      throw error;
+    }
   }
 
   async prepareRelayWithdraw({
@@ -1502,25 +2608,38 @@ export class ClairveilJS {
     scan,
     afterHeight,
     after_height,
+    afterSequence,
+    after_sequence,
     page,
     limit = 200,
     maxPages = defaultPrepareScanMaxPages,
     max_pages,
     eventTypes,
     event_types,
-    expiresAtUnix
+    scanSource,
+    scan_source,
+    expiresAtUnix,
+    chainNowUnix,
+    chain_now_unix,
+    reservationManager,
+    reservation_manager
   } = {}) {
+    const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveScanOptions({
       scan,
       afterHeight,
       after_height,
+      afterSequence,
+      after_sequence,
       page,
       limit,
       maxPages,
       max_pages,
       eventTypes,
-      event_types
+      event_types,
+      scanSource,
+      scan_source
     });
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
@@ -1529,8 +2648,9 @@ export class ClairveilJS {
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
       includeFoundNotes: true
     });
+    const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
     const plan = planWithdrawNotes({
-      notes: scanResult.foundNotes,
+      notes: availableFoundNotes,
       amount,
       denom: assetDenom ?? denom ?? this.defaultDenom
     });
@@ -1544,27 +2664,47 @@ export class ClairveilJS {
     }
     assertPlanCanBuildTx(plan);
 
-    const built = await this.buildRelayWithdrawPayload({
-      proverAdapter,
-      notes: scanResult.foundNotes,
-      amount,
-      assetDenom: assetDenom ?? denom ?? this.defaultDenom,
-      recipient,
-      rootSeed: privacy.rootSeed,
-      chainId: this.chainId,
-      expiresAtUnix
-    });
+    let reservationBatch = null;
+    try {
+      reservationBatch = await preparePlanReservation(resolvedReservationManager, {
+        plan,
+        kind: "relay_withdraw"
+      });
+      const heartbeatResult = await withReservationHeartbeat(resolvedReservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
+        const built = await this.buildRelayWithdrawPayload({
+          proverAdapter,
+          notes: [plan.selectedNote],
+          amount,
+          assetDenom: assetDenom ?? denom ?? this.defaultDenom,
+          recipient,
+          rootSeed: privacy.rootSeed,
+          chainId: this.chainId,
+          expiresAtUnix,
+          chainNowUnix: chainNowUnix ?? chain_now_unix
+        });
+        assertHeartbeatHealthy();
+        await heartbeatNow();
+        await markReservationProofReady(resolvedReservationManager, reservationBatch, withdrawProofReadyMetadata(built));
+        return { built };
+      });
+      const { built } = heartbeatResult;
 
-    return {
-      status: "ready",
-      plan,
-      scan: scanResult,
-      proverPayload: built.proverPayload,
-      proof: built.proof,
-      payload: built.payload,
-      selectedNote: built.selectedNote,
-      privacyAccount: publicPrivacyAccount(privacy)
-    };
+      return {
+        ...reservationReconciliationFields(heartbeatResult),
+        status: "ready",
+        plan,
+        scan: scanResult,
+        proverPayload: built.proverPayload,
+        proof: built.proof,
+        payload: built.payload,
+        selectedNote: built.selectedNote,
+        reservation: reservationBatchSummary(reservationBatch),
+        privacyAccount: publicPrivacyAccount(privacy)
+      };
+    } catch (error) {
+      await rollbackPlanReservationPreservingError(resolvedReservationManager, reservationBatch, error);
+      throw error;
+    }
   }
 
   async createDepositSignDoc(input) {
@@ -1617,7 +2757,8 @@ export class ClairveilJS {
       merklePathProvider: this,
       shieldedPrefix: this.shieldedPrefix,
       transferDenom: input?.transferDenom ?? input?.denom ?? this.defaultDenom,
-      ...input
+      ...input,
+      checkNullifiers: input?.checkNullifiers ?? (nullifiers => this.checkNullifiers(nullifiers))
     });
   }
 
@@ -1637,7 +2778,8 @@ export class ClairveilJS {
       accountPrefix: this.accountPrefix,
       assetDenom: input?.assetDenom ?? input?.denom ?? this.defaultDenom,
       ...input,
-      chainId: input?.chainId ?? this.chainId
+      chainId: input?.chainId ?? this.chainId,
+      checkNullifiers: input?.checkNullifiers ?? (nullifiers => this.checkNullifiers(nullifiers))
     });
   }
 
@@ -1647,7 +2789,8 @@ export class ClairveilJS {
       accountPrefix: this.accountPrefix,
       assetDenom: input?.assetDenom ?? input?.denom ?? this.defaultDenom,
       ...input,
-      chainId: input?.chainId ?? this.chainId
+      chainId: input?.chainId ?? this.chainId,
+      checkNullifiers: input?.checkNullifiers ?? (nullifiers => this.checkNullifiers(nullifiers))
     });
   }
 
@@ -1655,6 +2798,7 @@ export class ClairveilJS {
     payload,
     relayer,
     creator,
+    chainNowUnix,
     nowUnix,
     expectedChainId,
     expectedRecipient,
@@ -1664,7 +2808,7 @@ export class ClairveilJS {
       throw new Error("payload is required for relay withdraw");
     }
     return buildRelayWithdrawMsgFromPayloadCore(payload, relayer ?? creator, {
-      nowUnix,
+      chainNowUnix: chainNowUnix ?? nowUnix,
       expectedChainId: expectedChainId ?? this.chainId,
       expectedRecipient,
       accountPrefix: accountPrefix ?? this.accountPrefix
@@ -1680,6 +2824,7 @@ export class ClairveilJS {
     gasLimit = 5000000,
     feeAmount = [],
     memo = "Clairveil relay withdraw",
+    chainNowUnix,
     nowUnix,
     expectedChainId,
     expectedRecipient,
@@ -1689,7 +2834,7 @@ export class ClairveilJS {
     const message = this.buildRelayWithdrawMessageFromPayload({
       payload,
       relayer: signer,
-      nowUnix,
+      chainNowUnix: chainNowUnix ?? nowUnix,
       expectedChainId,
       expectedRecipient,
       accountPrefix
@@ -1854,11 +2999,44 @@ export class ClairveilJS {
   }
 
   async broadcastSignedTx(signedTx, waitOptions) {
-    const client = await this.connect();
+    const reservationContext = broadcastReservationContext(waitOptions || signedTx || {});
+    const signDocHash = cosmosSignDocBindingHash(signedTx);
+    const reservationRequired = cosmosSignDocMetadata(signedTx).reservationRequired ||
+      cosmosTxBodyRequiresReservation(signedTx);
+    if (reservationRequired && !reservationContext) {
+      throw new Error("prepared reserved Cosmos signed transaction requires reservationManager and reservation");
+    }
     const txBytes = this.buildTxRawBytes(signedTx);
-    const txhash = await client.broadcastTxSync(txBytes);
-    const tx = await this.waitForTx(txhash, waitOptions);
-    const txCode = Number(tx?.code ?? 0);
+    const txBytesHash = sha256Hex(txBytes);
+    await validateRelayBroadcastContext(waitOptions || signedTx || {}, {
+      expectedChainId: this.chainId,
+      accountPrefix: this.accountPrefix,
+      signedTx,
+      reservationContext,
+      signDocHash
+    });
+    const client = await this.connect();
+    await beginBroadcastReservation(
+      reservationContext,
+      "cosmos_broadcast_tx_sync",
+      { txBytesHash, signDocHash }
+    );
+    let txhash = "";
+    let tx;
+    try {
+      txhash = await client.broadcastTxSync(txBytes);
+      tx = await this.waitForTx(txhash, waitOptions);
+    } catch (error) {
+      const wrapped = attachBroadcastEvidence(error, { txHash: txhash, txBytesHash });
+      await markBroadcastReservationUnknown(reservationContext, wrapped, { txHash: txhash, txBytesHash });
+      throw wrapped;
+    }
+    const rawTxCode = tx?.code;
+    const txCode = typeof rawTxCode === "number"
+      ? Number.isSafeInteger(rawTxCode) && rawTxCode >= 0 ? rawTxCode : null
+      : typeof rawTxCode === "string" && /^(0|[1-9][0-9]*)$/.test(rawTxCode)
+        ? Number(rawTxCode)
+        : null;
     const rawLog = String(tx?.raw_log || "");
     const broadcast = {
       txhash,
@@ -1866,30 +3044,111 @@ export class ClairveilJS {
       raw_log: tx ? rawLog : `transaction was broadcast but not found yet: ${txhash}`
     };
     if (tx && txCode !== 0) {
-      const error = new Error(`broadcasted transaction failed with code ${txCode}: ${rawLog || "no raw log"}`);
+      const detail = txCode == null
+        ? "missing or malformed code"
+        : `code ${txCode}: ${rawLog || "no raw log"}`;
+      const error = new Error(`broadcasted transaction did not include an explicit successful result (${detail})`);
       error.txhash = txhash;
+      error.txHash = txhash;
+      error.txBytesHash = txBytesHash;
       error.broadcast = broadcast;
       error.tx = tx;
+      await markBroadcastReservationUnknown(reservationContext, error, { txHash: txhash, txBytesHash });
       throw error;
     }
-    return {
+    const result = {
       ok: Boolean(tx && txCode === 0),
       broadcast,
       tx,
+      txBytesHash,
       error: tx ? "" : broadcast.raw_log
     };
+    if (result.ok) {
+      await markBroadcastReservationSubmitted(reservationContext, { txHash: txhash, txBytesHash });
+    } else {
+      await markBroadcastReservationUnknown(
+        reservationContext,
+        new Error(result.error),
+        { txHash: txhash, txBytesHash }
+      );
+    }
+    return result;
   }
 
-  async signDirectAndBroadcast({ wallet, signDoc, waitOptions } = {}) {
+  async signDirectAndBroadcast(input = {}) {
+    const {
+      wallet,
+      signDoc,
+      waitOptions,
+      attempts,
+      intervalMs,
+      reservationManager,
+      reservation_manager,
+      reservation,
+      reservationBatch,
+      reservation_batch
+    } = input;
+    if (attempts !== undefined && waitOptions?.attempts !== undefined && attempts !== waitOptions.attempts) {
+      throw new Error("attempts conflicts with waitOptions.attempts");
+    }
+    if (intervalMs !== undefined && waitOptions?.intervalMs !== undefined && intervalMs !== waitOptions.intervalMs) {
+      throw new Error("intervalMs conflicts with waitOptions.intervalMs");
+    }
+    const resolvedWaitOptions = {
+      ...(waitOptions || {}),
+      ...(attempts !== undefined ? { attempts } : {}),
+      ...(intervalMs !== undefined ? { intervalMs } : {})
+    };
+    const resolvedReservation = reservation ?? reservationBatch ?? reservation_batch;
+    const reservationContext = broadcastReservationContext({
+      ...resolvedWaitOptions,
+      reservationManager: reservationManager ?? reservation_manager ?? null,
+      reservation: resolvedReservation
+    });
+    const signDocHash = cosmosSignDocBindingHash(signDoc);
+    const reservationRequired = cosmosSignDocMetadata(signDoc).reservationRequired ||
+      cosmosTxBodyRequiresReservation(signDoc);
+    if (reservationRequired && !reservationContext) {
+      throw new Error("prepared reserved Cosmos sign doc requires reservationManager and reservation");
+    }
+    const walletSignDoc = externalCosmosSignDoc(signDoc);
+    const broadcastOptions = {
+      ...resolvedWaitOptions,
+      reservationManager: reservationManager ?? reservation_manager ?? null,
+      reservation: resolvedReservation,
+      relayPayload: input.relayPayload ?? input.relay_payload,
+      getChainNowUnix: input.getChainNowUnix ?? input.get_chain_now_unix,
+      chainNowUnix: input.chainNowUnix ?? input.chain_now_unix,
+      expectedChainId: input.expectedChainId ?? input.expected_chain_id,
+      expectedRecipient: input.expectedRecipient ?? input.expected_recipient,
+      accountPrefix: input.accountPrefix ?? input.account_prefix
+    };
+    await validateRelayBroadcastContext(broadcastOptions, {
+      expectedChainId: this.chainId,
+      accountPrefix: this.accountPrefix,
+      signedTx: walletSignDoc,
+      reservationContext,
+      signDocHash
+    });
     const adapter = createWalletAdapter(wallet);
-    const signed = await adapter.signDirect(directSignDocFromBase64(signDoc), { signDoc });
+    let signed;
+    try {
+      signed = await adapter.signDirect(directSignDocFromBase64(walletSignDoc), {
+        signDoc: walletSignDoc
+      });
+    } catch (error) {
+      if (isExplicitWalletRejection(error)) {
+        await markSigningReservationRejected(reservationContext, error);
+      }
+      throw error;
+    }
     const signedDoc = signed.signed || {};
     const signature = signed.signature?.signature || signed.signature;
     return this.broadcastSignedTx({
-      bodyBytes: toBase64(signedDoc.bodyBytes || fromBase64(signDoc.bodyBytes, "bodyBytes")),
-      authInfoBytes: toBase64(signedDoc.authInfoBytes || fromBase64(signDoc.authInfoBytes, "authInfoBytes")),
+      bodyBytes: toBase64(signedDoc.bodyBytes || fromBase64(walletSignDoc.bodyBytes, "bodyBytes")),
+      authInfoBytes: toBase64(signedDoc.authInfoBytes || fromBase64(walletSignDoc.authInfoBytes, "authInfoBytes")),
       signature
-    }, waitOptions);
+    }, broadcastOptions);
   }
 }
 

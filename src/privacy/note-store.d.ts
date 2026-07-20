@@ -1,8 +1,8 @@
 import type { Hex } from "../core/crypto.js";
-import type { FoundNote } from "../core/note.js";
+import type { FoundNote, NormalizedFoundNote } from "../core/note.js";
 import type { ScanResult } from "./scan.js";
 
-export interface StoredFoundNote extends FoundNote {
+export interface StoredFoundNote extends NormalizedFoundNote {
   commitment_hex: Hex;
   nullifier_hex: Hex;
   amount: string;
@@ -12,21 +12,21 @@ export interface StoredFoundNote extends FoundNote {
   spend_pubkey_hex: Hex;
   view_pubkey_hex: Hex;
   tx_hash: Hex;
-  sequence: number;
+  sequence: number | string;
   spent: boolean;
 }
 
 export interface NoteStoreScanCursor {
-  after_height?: number;
-  after_sequence?: number;
+  after_height?: number | string;
+  after_sequence?: number | string;
   page?: number;
   limit?: number;
   event_types?: string[];
   has_more?: boolean;
-  latest_height?: number;
-  latest_sequence?: number;
-  next_height?: number;
-  next_sequence?: number;
+  latest_height?: number | string;
+  latest_sequence?: number | string;
+  next_height?: number | string;
+  next_sequence?: number | string;
   latest_tx_hash?: Hex;
   [key: string]: unknown;
 }
@@ -34,10 +34,10 @@ export interface NoteStoreScanCursor {
 export interface NoteStoreState {
   owner?: string;
   notes: StoredFoundNote[];
-  lastScannedHeight?: number;
-  lastScannedSequence?: number;
+  lastScannedHeight?: number | string;
+  lastScannedSequence?: number | string;
   lastScannedTxHash?: Hex | "";
-  rollbackHeight?: number;
+  rollbackHeight?: number | string;
   scanCursor?: NoteStoreScanCursor | null;
   [key: string]: unknown;
 }
@@ -52,11 +52,12 @@ export class MemoryNoteStore {
   clear(): Promise<NoteStoreState>;
   mergeScanResult(scanResult: ScanResult & { scanCursor?: NoteStoreScanCursor }, options?: {
     owner?: string;
-    rollbackToHeight?: number;
-    rollback_to_height?: number;
+    rollbackToHeight?: number | string;
+    rollback_to_height?: number | string;
   }): Promise<NoteStoreState>;
-  rollbackToHeight(height: number): Promise<NoteStoreState>;
+  rollbackToHeight(height: number | string): Promise<NoteStoreState>;
   markSpent(nullifiers: Hex[] | Hex): Promise<NoteStoreState>;
+  setNullifierStatuses(statuses: Map<Hex, "spent" | "unspent" | "unknown" | "unverified"> | Record<Hex, "spent" | "unspent" | "unknown" | "unverified">): Promise<NoteStoreState>;
 }
 
 export class LocalStorageNoteStore extends MemoryNoteStore {

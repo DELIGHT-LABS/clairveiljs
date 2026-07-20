@@ -123,6 +123,10 @@
       "types": "./src/privacy/prover.d.ts",
       "import": "./src/privacy/prover.js"
     },
+    "./reservation": {
+      "types": "./src/privacy/reservation.d.ts",
+      "import": "./src/privacy/reservation.js"
+    },
     "./scan": {
       "types": "./src/privacy/scan.d.ts",
       "import": "./src/privacy/scan.js"

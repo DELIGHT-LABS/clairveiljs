@@ -10,10 +10,12 @@ import type {
   PreparedWithdrawProverPayload,
   PreparedWithdrawProverPayloadInput,
   PreparedWithdrawProverPayloadResult,
+  NullifierStatusReader,
   TransferMessage,
   WithdrawMessage
 } from "../privacy/payload.js";
 import type { ProverAdapter } from "../privacy/prover.js";
+import type { NoteReservationManager, ReservationBatch } from "../privacy/reservation.js";
 
 export interface Eip1193Provider {
   request(input: { method: string; params?: unknown[] }): Promise<unknown>;
@@ -34,6 +36,88 @@ export interface EvmTransactionRequest {
   nonce?: EvmQuantity;
   chainId?: EvmQuantity;
 }
+
+type EvmReservationManagerBinding =
+  | { reservationManager: NoteReservationManager; reservation_manager?: NoteReservationManager | null }
+  | { reservationManager?: NoteReservationManager | null; reservation_manager: NoteReservationManager };
+
+type EvmReservationBatchBinding =
+  | { reservation: ReservationBatch; reservationBatch?: ReservationBatch | null; reservation_batch?: ReservationBatch | null }
+  | { reservation?: ReservationBatch | null; reservationBatch: ReservationBatch; reservation_batch?: ReservationBatch | null }
+  | { reservation?: ReservationBatch | null; reservationBatch?: ReservationBatch | null; reservation_batch: ReservationBatch };
+
+type EvmReservationBroadcastBinding =
+  | (EvmReservationManagerBinding & EvmReservationBatchBinding)
+  | {
+      reservationManager?: null;
+      reservation_manager?: null;
+      reservation?: null;
+      reservationBatch?: null;
+      reservation_batch?: null;
+    };
+
+type EvmRelayBroadcastChainTime =
+  | {
+      chainNowUnix: number;
+      chain_now_unix?: number;
+      getChainNowUnix?: never;
+      get_chain_now_unix?: never;
+    }
+  | {
+      chainNowUnix?: number;
+      chain_now_unix: number;
+      getChainNowUnix?: never;
+      get_chain_now_unix?: never;
+    }
+  | {
+      chainNowUnix?: never;
+      chain_now_unix?: never;
+      getChainNowUnix: () => number | Promise<number>;
+      get_chain_now_unix?: never;
+    }
+  | {
+      chainNowUnix?: never;
+      chain_now_unix?: never;
+      getChainNowUnix?: never;
+      get_chain_now_unix: () => number | Promise<number>;
+    };
+
+export type EvmRelayBroadcastValidation =
+  | ((
+      | { relayPayload: PreparedWithdrawPayload; relay_payload?: never }
+      | { relayPayload?: never; relay_payload: PreparedWithdrawPayload }
+    ) & EvmRelayBroadcastChainTime & {
+      expectedChainId?: string;
+      expected_chain_id?: string;
+      expectedRecipient?: ClairAddress | string;
+      expected_recipient?: ClairAddress | string;
+      expectedEvmChainId?: EvmQuantity;
+      expected_evm_chain_id?: EvmQuantity;
+      accountPrefix?: string;
+      account_prefix?: string;
+      relayTransactionOptions?: EvmPrivacyTransactionOptions;
+      relay_transaction_options?: EvmPrivacyTransactionOptions;
+    })
+  | {
+      relayPayload?: never;
+      relay_payload?: never;
+      chainNowUnix?: never;
+      chain_now_unix?: never;
+      getChainNowUnix?: never;
+      get_chain_now_unix?: never;
+      expectedChainId?: never;
+      expected_chain_id?: never;
+      expectedRecipient?: never;
+      expected_recipient?: never;
+      expectedEvmChainId?: never;
+      expected_evm_chain_id?: never;
+      accountPrefix?: never;
+      account_prefix?: never;
+      relayTransactionOptions?: never;
+      relay_transaction_options?: never;
+    };
+
+export type EvmReservationBroadcastOptions = EvmReservationBroadcastBinding & EvmRelayBroadcastValidation;
 
 export interface EvmCallRequest extends Partial<Omit<EvmTransactionRequest, "to">> {
   to?: string;
@@ -149,13 +233,23 @@ export interface EvmDepositTransactionResult {
   transaction: EvmTransactionRequest;
 }
 
-export interface EvmTransferTransactionInput extends PreparedTransferPayloadInput {
-  message?: TransferMessage;
+interface EvmTransferTransactionFields extends PreparedTransferPayloadInput {
   payload?: PreparedTransferPayload;
   proof?: PreparedTransferProof;
-  proverAdapter?: ProverAdapter;
   transactionOptions?: EvmPrivacyTransactionOptions;
 }
+
+export type EvmTransferTransactionInput =
+  | (EvmTransferTransactionFields & {
+      message: TransferMessage;
+      proverAdapter?: ProverAdapter;
+      checkNullifiers?: NullifierStatusReader;
+    })
+  | (EvmTransferTransactionFields & {
+      message?: undefined;
+      proverAdapter: ProverAdapter;
+      checkNullifiers: NullifierStatusReader;
+    });
 
 export interface EvmTransferTransactionResult {
   status: "ready";
@@ -165,27 +259,54 @@ export interface EvmTransferTransactionResult {
   transaction: EvmTransactionRequest;
 }
 
-export interface EvmWithdrawTransactionInput extends PreparedWithdrawProverPayloadInput {
-  message?: EvmWithdrawMessage;
-  payload?: PreparedWithdrawPayload;
+interface EvmWithdrawTransactionFields extends Omit<PreparedWithdrawProverPayloadInput, "checkNullifiers"> {
   proof?: PreparedWithdrawProof;
   proverPayload?: PreparedWithdrawProverPayload;
   selectedNote?: FoundNote;
-  proverAdapter?: ProverAdapter;
   transactionOptions?: EvmPrivacyTransactionOptions;
   evmRecipient?: string;
   evm_recipient?: string;
   relayer?: string;
   creator?: string;
   address?: string;
-  nowUnix?: number;
-  now_unix?: number;
   expectedChainId?: string;
   expected_chain_id?: string;
   expectedRecipient?: ClairAddress | string;
   expected_recipient?: ClairAddress | string;
   chain_id?: string;
+  nowUnix?: number;
+  now_unix?: number;
 }
+
+type EvmPayloadRelayChainTime =
+  | { chainNowUnix: number; chain_now_unix?: number; nowUnix?: number; now_unix?: number }
+  | { chainNowUnix?: number; chain_now_unix: number; nowUnix?: number; now_unix?: number }
+  | { chainNowUnix?: number; chain_now_unix?: number; nowUnix: number; now_unix?: number }
+  | { chainNowUnix?: number; chain_now_unix?: number; nowUnix?: number; now_unix: number };
+
+export type EvmWithdrawTransactionInput =
+  | (EvmWithdrawTransactionFields & {
+      message: EvmWithdrawMessage;
+      payload?: PreparedWithdrawPayload;
+      proverAdapter?: ProverAdapter;
+      checkNullifiers?: NullifierStatusReader;
+      chainNowUnix?: number;
+      chain_now_unix?: number;
+    })
+  | (EvmWithdrawTransactionFields & {
+      message?: undefined;
+      payload: PreparedWithdrawPayload;
+      proverAdapter?: ProverAdapter;
+      checkNullifiers?: NullifierStatusReader;
+    } & EvmPayloadRelayChainTime)
+  | (EvmWithdrawTransactionFields & {
+      message?: undefined;
+      payload?: undefined;
+      proverAdapter: ProverAdapter;
+      checkNullifiers: NullifierStatusReader;
+      chainNowUnix?: number;
+      chain_now_unix?: number;
+    });
 
 export interface EvmWithdrawTransactionResult {
   status: "ready";
@@ -217,6 +338,8 @@ export function encodeEvmPrivacyWithdraw(message: EvmWithdrawMessage, options?: 
 export function defaultEncodeEvmDeposit(message: EvmDepositMessage, options?: EvmPrivacyTransactionOptions): Hex;
 export function defaultEncodeEvmTransfer(message: TransferMessage, options?: EvmPrivacyTransactionOptions): Hex;
 export function defaultEncodeEvmWithdraw(message: EvmWithdrawMessage, options?: EvmPrivacyTransactionOptions): Hex;
+export function evmTransactionBindingHash(transaction: EvmTransactionRequest): Hex;
+export function markEvmTransactionReservationRequired<T extends EvmTransactionRequest>(transaction: T): T;
 export function createEip1193WalletAdapter(input?: { provider: Eip1193Provider; account?: string }): Eip1193WalletAdapter;
 export function createEvmContractAdapter(input?: {
   contractAddress?: string;
@@ -263,7 +386,7 @@ export class ClairveilEvmClient {
   buildTransferTransaction(input?: EvmTransferTransactionInput): Promise<EvmTransferTransactionResult>;
   buildPreparedWithdrawProverPayload(input?: PreparedWithdrawProverPayloadInput): Promise<PreparedWithdrawProverPayloadResult>;
   buildWithdrawTransaction(input?: EvmWithdrawTransactionInput): Promise<EvmWithdrawTransactionResult>;
-  sendTransaction(wallet: Eip1193WalletAdapter | null | undefined, transaction: EvmTransactionRequest): Promise<Hex | string>;
+  sendTransaction(wallet: Eip1193WalletAdapter | null | undefined, transaction: EvmTransactionRequest, reservationOptions?: EvmReservationBroadcastOptions): Promise<Hex | string>;
   privacyAccount(material: PrivacyMaterial): EvmPublicPrivacyAccount;
 }
 

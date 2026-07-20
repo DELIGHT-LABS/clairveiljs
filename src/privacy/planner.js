@@ -4,6 +4,7 @@ import {
 } from "../core/crypto.js";
 import {
   defaultAssetDenom,
+  isVerifiedUnspentFoundNote,
   normalizeFoundNote,
   parseCoin
 } from "../core/note.js";
@@ -37,7 +38,7 @@ function sameDenomExactMatch(notes, denom, target) {
   const assetIdHex = canonicalFieldHex(hashStringToField(denom));
   for (const note of notes || []) {
     const found = normalizeFoundNote(note);
-    if (found.isSpent) continue;
+    if (!isVerifiedUnspentFoundNote(found)) continue;
     if (found.note.amount !== target) continue;
     if (canonicalFieldHex(found.note.assetID) !== assetIdHex) continue;
     return found;

@@ -465,14 +465,64 @@ export function normalizeFoundNote(foundNote) {
     throw new Error("found note is required");
   }
   const note = normalizeNote(foundNote.note ?? foundNote.Note ?? foundNote);
+  const requestedNullifierStatuses = ["nullifierStatus", "nullifier_status", "NullifierStatus"]
+    .filter(key => Object.prototype.hasOwnProperty.call(foundNote, key))
+    .map(key => String(foundNote[key] ?? "").trim().toLowerCase());
+  const validNullifierStatuses = new Set(["spent", "unspent", "unknown", "unverified"]);
+  const requestedNullifierStatus = requestedNullifierStatuses.length > 0 &&
+    requestedNullifierStatuses.every(status => validNullifierStatuses.has(status)) &&
+    requestedNullifierStatuses.every(status => status === requestedNullifierStatuses[0])
+      ? requestedNullifierStatuses[0]
+      : "";
+  // Handoff snapshots have used both isSpent and spent. Only a literal true
+  // is chain-spent evidence: Boolean("false") must not quarantine a note, and
+  // spent:true must never be ignored during a legacy snapshot migration.
+  const suppliedSpent = [
+    foundNote.isSpent,
+    foundNote.IsSpent,
+    foundNote.spent,
+    foundNote.Spent,
+  ].some(value => value === true);
+  const nullifierStatus = validNullifierStatuses.has(requestedNullifierStatus)
+    ? requestedNullifierStatus
+    : (suppliedSpent ? "spent" : "unverified");
+  const normalizeEventCoordinate = (value, label) => {
+    if (typeof value === "number") {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`${label} must be a non-negative safe integer, bigint, or canonical uint64 string`);
+      }
+      return value;
+    }
+    if (typeof value === "bigint") {
+      if (value < 0n || value > ((1n << 64n) - 1n)) {
+        throw new Error(`${label} must be within uint64 range`);
+      }
+      return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value.toString();
+    }
+    const text = String(value ?? 0).trim();
+    if (!/^(0|[1-9][0-9]*)$/.test(text)) {
+      throw new Error(`${label} must be a canonical uint64 decimal string`);
+    }
+    const parsed = BigInt(text);
+    if (parsed > ((1n << 64n) - 1n)) {
+      throw new Error(`${label} must be within uint64 range`);
+    }
+    return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : parsed.toString();
+  };
   return {
     note,
     nullifier: String(foundNote.nullifier ?? foundNote.Nullifier ?? computeNoteNullifierHex(note)).toLowerCase(),
-    isSpent: Boolean(foundNote.isSpent ?? foundNote.IsSpent ?? false),
+    isSpent: suppliedSpent || nullifierStatus === "spent",
+    nullifierStatus: suppliedSpent ? "spent" : nullifierStatus,
     txHash: String(foundNote.txHash ?? foundNote.tx_hash ?? foundNote.TxHash ?? ""),
-    height: Number(foundNote.height ?? foundNote.Height ?? 0),
-    sequence: Number(foundNote.sequence ?? foundNote.Sequence ?? 0)
+    height: normalizeEventCoordinate(foundNote.height ?? foundNote.Height ?? 0, "found note height"),
+    sequence: normalizeEventCoordinate(foundNote.sequence ?? foundNote.Sequence ?? 0, "found note sequence")
   };
+}
+
+export function isVerifiedUnspentFoundNote(foundNote) {
+  const found = normalizeFoundNote(foundNote);
+  return !found.isSpent && found.nullifierStatus === "unspent";
 }
 
 export function pointFromHex(value, label = "public key") {

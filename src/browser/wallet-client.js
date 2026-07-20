@@ -6,8 +6,10 @@ import {
 } from "../transport/cosmos-client.js";
 import {
   createClairveilEvmClient,
+  evmTransactionBindingHash,
   evmAddressToBech32,
   isEvmAddress,
+  markEvmTransactionReservationRequired,
   normalizeEvmAddress
 } from "../transport/evm.js";
 import {
@@ -28,11 +30,29 @@ import {
   planWithdrawNotes
 } from "../privacy/planner.js";
 import {
+  preparePlanReservation,
+  reservationHeartbeatIntervalMs,
+  rollbackPlanReservation,
+  rollbackPlanReservationPreservingError
+} from "../privacy/reservation.js";
+import {
   createHttpProverAdapter
 } from "../privacy/prover.js";
 
 const defaultPrepareScanMaxPages = 1000;
 const defaultFetchTimeoutMs = 30000;
+
+function appendReservationCleanupErrors(error, cleanupErrors = []) {
+  if (!cleanupErrors.length || !error || typeof error !== "object") return;
+  try {
+    const existing = Array.isArray(error.reservationCleanupErrors)
+      ? error.reservationCleanupErrors
+      : [];
+    error.reservationCleanupErrors = [...existing, ...cleanupErrors];
+  } catch {
+    // Cleanup annotations are best-effort and must never replace the original error.
+  }
+}
 
 function trimTrailingSlash(value) {
   return String(value || "").replace(/\/$/, "");
@@ -117,6 +137,8 @@ async function fetchJson(url, options = {}) {
 function privacyEventsQuery({
   afterHeight,
   after_height,
+  afterSequence,
+  after_sequence,
   page,
   limit,
   eventTypes,
@@ -125,6 +147,8 @@ function privacyEventsQuery({
   const params = new URLSearchParams();
   const resolvedAfterHeight = afterHeight ?? after_height;
   if (resolvedAfterHeight != null) params.set("after_height", String(resolvedAfterHeight));
+  const resolvedAfterSequence = afterSequence ?? after_sequence;
+  if (resolvedAfterSequence != null) params.set("after_sequence", String(resolvedAfterSequence));
   if (page != null) params.set("page", String(page));
   if (limit != null) params.set("limit", String(limit));
   const resolvedEventTypes = eventTypes ?? event_types;
@@ -154,15 +178,289 @@ function addIfPresent(target, key, value) {
   }
 }
 
+function evmReceiptStatusKind(status) {
+  if (typeof status === "number") {
+    if (status === 1) return "success";
+    if (status === 0) return "failure";
+    return "unknown";
+  }
+  if (typeof status === "bigint") {
+    if (status === 1n) return "success";
+    if (status === 0n) return "failure";
+    return "unknown";
+  }
+  if (typeof status !== "string") return "unknown";
+  const normalized = status.trim().toLowerCase();
+  if (/^0x0*1$/.test(normalized)) return "success";
+  if (/^0x0+$/.test(normalized)) return "failure";
+  return "unknown";
+}
+
 function scanOptionsFromBody(body = {}) {
   const scan = body.scan || {};
   return {
     afterHeight: scan.afterHeight ?? scan.after_height ?? body.scanAfterHeight ?? body.scan_after_height ?? body.afterHeight ?? body.after_height,
+    afterSequence: scan.afterSequence ?? scan.after_sequence ?? body.scanAfterSequence ?? body.scan_after_sequence ?? body.afterSequence ?? body.after_sequence,
     page: scan.page ?? body.scanPage ?? body.scan_page ?? body.page,
     limit: scan.limit ?? body.scanLimit ?? body.scan_limit ?? body.limit,
     maxPages: scan.maxPages ?? scan.max_pages ?? body.scanMaxPages ?? body.scan_max_pages ?? body.maxPages ?? body.max_pages,
-    eventTypes: scan.eventTypes ?? scan.event_types ?? body.eventTypes ?? body.event_types
+    eventTypes: scan.eventTypes ?? scan.event_types ?? body.eventTypes ?? body.event_types,
+    scanSource: scan.scanSource ?? scan.scan_source ?? body.scanSource ?? body.scan_source
   };
+}
+
+function relayChainNowUnixFromBody(body = {}) {
+  return body.chainNowUnix
+    ?? body.chain_now_unix
+    ?? body.nowUnix
+    ?? body.now_unix;
+}
+
+async function reservationAvailableNotes(reservationManager, notes) {
+  if (!reservationManager) return notes;
+  if (typeof reservationManager.filterAvailableNotes !== "function") {
+    throw new Error("reservationManager.filterAvailableNotes is required");
+  }
+  return reservationManager.filterAvailableNotes(notes);
+}
+
+function reservationBatchSummary(batch) {
+  if (!batch) return null;
+  return {
+    operation_id: batch.operation_id,
+    lease_owner: batch.lease_owner || batch.reservations?.[0]?.lease_owner || "",
+    lease_token: batch.lease_token || batch.reservations?.[0]?.lease_token || "",
+    lease_until: batch.lease_until || batch.reservations?.[0]?.lease_until || "",
+    reservation_ids: [...(batch.reservation_ids || [])],
+    reservations: [...(batch.reservations || [])]
+  };
+}
+
+function transferProofReadyMetadata(built, context = {}) {
+  const output = built?.payload?.outputs?.[0] || {};
+  const coin = context.amount ? parseCoin(context.amount, context.denom || "") : null;
+  const batchItemIndex = context.batchItemIndex ?? context.batch_item_index;
+  const batchItemIndexKnown = context.batchItemIndexKnown ?? context.batch_item_index_known;
+  const expectedOutputCommitment = built?.payload?.outputs?.[0]?.commitment_hex || "";
+  const expectedDisclosureDigest = built?.payload?.audit_disclosure_digest_hex || "";
+  const expectedRecipientHash = context.expectedRecipientHash ?? context.expected_recipient_hash ?? "";
+  const expectedAmount = output.amount || coin?.amount || "";
+  const expectedAmountHash = context.expectedAmountHash ?? context.expected_amount_hash ?? "";
+  const expectedDenom = context.expectedDenom ?? context.expected_denom ?? coin?.denom ?? context.denom ?? "";
+  const operationSuccessEvidenceRequired = Boolean(
+    expectedOutputCommitment &&
+    expectedDisclosureDigest &&
+    expectedRecipientHash &&
+    expectedAmount &&
+    expectedAmountHash &&
+    expectedDenom
+  );
+  return {
+    payloadHash: built?.payload?.payload_hash || "",
+    txBytesHash: context.txBytesHash ?? context.tx_bytes_hash ?? "",
+    expectedOutputCommitment,
+    expectedDisclosureDigest,
+    expectedRecipientHash,
+    expectedAmount,
+    expectedAmountHash,
+    expectedDenom,
+    batchItemIndex: batchItemIndex ?? 0,
+    batchItemIndexKnown: batchItemIndexKnown ?? (operationSuccessEvidenceRequired || (batchItemIndex !== undefined && batchItemIndex !== null)),
+    operationSuccessEvidenceRequired
+  };
+}
+
+function resolveDirectOperationEvidenceHashes({
+  expectedRecipientHash,
+  expected_recipient_hash,
+  expectedAmountHash,
+  expected_amount_hash
+} = {}) {
+  const recipientProvided = operationEvidenceAliasProvided(
+    expectedRecipientHash,
+    expected_recipient_hash
+  );
+  const amountProvided = operationEvidenceAliasProvided(
+    expectedAmountHash,
+    expected_amount_hash
+  );
+  const recipientHash = resolveOperationEvidenceAlias(
+    expectedRecipientHash,
+    expected_recipient_hash,
+    "expectedRecipientHash"
+  );
+  const amountHash = resolveOperationEvidenceAlias(
+    expectedAmountHash,
+    expected_amount_hash,
+    "expectedAmountHash"
+  );
+  if (recipientProvided !== amountProvided) {
+    throw new Error("expected recipient hash and expected amount hash must be provided together");
+  }
+  if (recipientProvided && !recipientHash.trim()) {
+    throw new Error("expectedRecipientHash must not be empty");
+  }
+  if (amountProvided && !amountHash.trim()) {
+    throw new Error("expectedAmountHash must not be empty");
+  }
+  return {
+    provided: recipientProvided,
+    expectedRecipientHash: recipientHash,
+    expectedAmountHash: amountHash
+  };
+}
+
+function operationEvidenceAliasProvided(camelValue, snakeValue) {
+  return (camelValue !== undefined && camelValue !== null) ||
+    (snakeValue !== undefined && snakeValue !== null);
+}
+
+function resolveOperationEvidenceAlias(camelValue, snakeValue, name) {
+  const camelProvided = camelValue !== undefined && camelValue !== null;
+  const snakeProvided = snakeValue !== undefined && snakeValue !== null;
+  if (camelProvided && snakeProvided && String(camelValue) !== String(snakeValue)) {
+    throw new Error(`${name} aliases conflict`);
+  }
+  return String(camelProvided ? camelValue : snakeProvided ? snakeValue : "");
+}
+
+function withdrawProofReadyMetadata(built, context = {}) {
+  const expiresAtUnix = String(
+    built?.payload?.expires_at_unix ||
+    built?.payload?.expiresAtUnix ||
+    built?.proverPayload?.expires_at_unix ||
+    built?.proverPayload?.expiresAtUnix ||
+    ""
+  );
+  return {
+    payloadHash: built?.payload?.payload_hash || built?.proverPayload?.payload_hash || "",
+    txBytesHash: context.txBytesHash ?? context.tx_bytes_hash ?? "",
+    metadata: expiresAtUnix ? { payload_expires_at_unix: expiresAtUnix } : {}
+  };
+}
+
+async function markReservationProofReady(reservationManager, batch, metadata) {
+  if (!reservationManager || !batch?.reservation_ids?.length) return [];
+  if (typeof reservationManager.markProofReady !== "function") {
+    throw new Error("reservationManager.markProofReady is required");
+  }
+  const reservations = await reservationManager.markProofReady(batch.reservation_ids, {
+    ...metadata,
+    leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || ""
+  });
+  batch.reservations = reservations;
+  batch.lease_until = reservations[0]?.lease_until || batch.lease_until;
+  return reservations;
+}
+
+async function markReservationReplanRequired(reservationManager, reservation, error, reason) {
+  if (!reservationManager || !reservation?.reservation_ids?.length) return [];
+  if (typeof reservationManager.markReplanRequired !== "function") {
+    throw new Error("reservationManager.markReplanRequired is required");
+  }
+  return reservationManager.markReplanRequired(reservation.reservation_ids, {
+    leaseToken: reservation.lease_token || reservation.reservations?.[0]?.lease_token || "",
+    error: error?.message || String(error || "reservation replan required"),
+    metadata: {
+      reconcile_reason: reason,
+      no_broadcast_attempt: true,
+      proof_discarded: true
+    }
+  });
+}
+
+async function replanProofReadyReservationPreservingError(reservationManager, reservation, error, reason) {
+  try {
+    await markReservationReplanRequired(reservationManager, reservation, error, reason);
+  } catch (cleanupError) {
+    appendReservationCleanupErrors(error, [cleanupError]);
+  }
+}
+
+async function renewReservationLease(reservationManager, batch) {
+  if (!reservationManager || !batch?.reservation_ids?.length) return [];
+  if (typeof reservationManager.renewLease !== "function") return [];
+  const reservations = await reservationManager.renewLease(batch.reservation_ids, {
+    leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || ""
+  });
+  batch.reservations = reservations;
+  batch.lease_until = reservations[0]?.lease_until || batch.lease_until;
+  return reservations;
+}
+
+async function withReservationHeartbeat(reservationManager, batch, task) {
+  if (!reservationManager || !batch?.reservation_ids?.length || typeof reservationManager.renewLease !== "function") {
+    return task({
+      assertHeartbeatHealthy() {},
+      async heartbeatNow() {}
+    });
+  }
+  await renewReservationLease(reservationManager, batch);
+  const heartbeatIntervalMs = reservationHeartbeatIntervalMs({
+    leaseDurationMs: reservationManager.leaseDurationMs,
+    leaseUntil: batch.lease_until || batch.reservations?.[0]?.lease_until
+  });
+  let heartbeatError = null;
+  let inFlightHeartbeat = null;
+  const heartbeat = async () => {
+    if (heartbeatError) return;
+    try {
+      await renewReservationLease(reservationManager, batch);
+    } catch (error) {
+      heartbeatError = error;
+    }
+  };
+  const heartbeatNow = async () => {
+    if (!inFlightHeartbeat) {
+      inFlightHeartbeat = heartbeat().finally(() => {
+        inFlightHeartbeat = null;
+      });
+    }
+    await inFlightHeartbeat;
+    assertHeartbeatHealthy();
+  };
+  const assertHeartbeatHealthy = () => {
+    if (!heartbeatError) return;
+    const error = new Error("note reservation lease heartbeat failed during proof generation");
+    error.name = "ReservationHeartbeatError";
+    error.cause = heartbeatError;
+    throw error;
+  };
+  const timer = typeof globalThis.setInterval === "function"
+    ? globalThis.setInterval(() => { void heartbeatNow().catch(() => {}); }, heartbeatIntervalMs)
+    : null;
+  let taskCompleted = false;
+  let result;
+  try {
+    result = await task({ assertHeartbeatHealthy, heartbeatNow });
+    taskCompleted = true;
+  } finally {
+    if (timer && typeof globalThis.clearInterval === "function") {
+      globalThis.clearInterval(timer);
+    }
+    if (inFlightHeartbeat) await inFlightHeartbeat;
+  }
+  if (taskCompleted && heartbeatError) {
+    return {
+      ...result,
+      reservationReconciliationRequired: true,
+      reservationReconciliationWarning: {
+        code: "reservation_heartbeat_failed_after_proof_ready",
+        message: "The prepared artifact is durable, but reservation reconciliation is required before broadcast.",
+        cause: heartbeatError?.message || String(heartbeatError)
+      }
+    };
+  }
+  return result;
+}
+
+function reservationReconciliationFields(result = {}) {
+  return result.reservationReconciliationRequired === true
+    ? {
+        reservationReconciliationRequired: true,
+        reservationReconciliationWarning: result.reservationReconciliationWarning
+      }
+    : {};
 }
 
 function positiveCoinForDenom(amount, denom, label) {
@@ -489,13 +787,21 @@ export class ClairveilBrowserClient {
 
   async waitForEvmTransaction(txHash) {
     const receipt = await this.waitForEvmReceipt(txHash);
+    const receiptStatus = evmReceiptStatusKind(receipt?.status);
+    const receiptSucceeded = receiptStatus === "success";
     return {
       txHash: String(txHash || "").replace(/^0x/i, "").toUpperCase(),
       evmTxHash: `0x${String(txHash || "").replace(/^0x/i, "").toLowerCase()}`,
       receipt,
       tx: null,
-      ok: Boolean(receipt && (!receipt.status || receipt.status === "0x1")),
-      error: receipt?.status && receipt.status !== "0x1" ? `EVM tx failed with receipt status ${receipt.status}` : "",
+      ok: Boolean(receipt && receiptSucceeded),
+      error: receipt
+        ? receiptSucceeded
+          ? ""
+          : receiptStatus === "failure"
+            ? `EVM tx failed with receipt status ${String(receipt.status)}`
+            : `EVM tx did not include an explicit successful receipt status: ${String(receipt.status ?? "missing")}`
+        : "",
       errors: receipt ? [] : [`EVM tx was broadcast but receipt was not found yet: ${txHash}`]
     };
   }
@@ -534,6 +840,10 @@ export class ClairveilBrowserClient {
 
   async broadcastSignedTx(input, waitOptions) {
     return this.cosmos.broadcastSignedTx(input, waitOptions);
+  }
+
+  async signDirectAndBroadcast(input) {
+    return this.cosmos.signDirectAndBroadcast(input);
   }
 
   async prepareDeposit(body) {
@@ -612,8 +922,15 @@ export class ClairveilBrowserClient {
     const userPrivacyPolicy = body.privacyPolicy ?? body.privacy_policy ?? "all-private";
     const userDisclosureMode = body.disclosureMode ?? body.disclosure_mode ?? "none";
     const userDisclosureTargetPubKeyHex = body.disclosurePubKeyHex ?? body.disclosure_pubkey_hex ?? "";
+    const operationEvidence = resolveDirectOperationEvidenceHashes({
+      expectedRecipientHash: body.expectedRecipientHash,
+      expected_recipient_hash: body.expected_recipient_hash,
+      expectedAmountHash: body.expectedAmountHash,
+      expected_amount_hash: body.expected_amount_hash
+    });
     const allowPlanStep = Boolean(body.allowPlanStep ?? body.allow_plan_step);
     const scanOptions = scanOptionsFromBody(body);
+    const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
 
     if (walletType !== "evm") {
       const prepared = await this.cosmos.prepareTransfer({
@@ -624,13 +941,20 @@ export class ClairveilBrowserClient {
         userPrivacyPolicy,
         userDisclosureMode,
         userDisclosureTargetPubKeyHex,
+        ...(operationEvidence.provided ? {
+          expectedRecipientHash: operationEvidence.expectedRecipientHash,
+          expectedAmountHash: operationEvidence.expectedAmountHash
+        } : {}),
         allowPlanStep,
         scan: scanOptions,
-        gasLimit: 8000000
+        gasLimit: 8000000,
+        reservationManager
       });
       if (prepared.status !== "ready") throw plannerError(prepared);
       return {
+        ...reservationReconciliationFields(prepared),
         signDoc: prepared.signDoc,
+        reservation: prepared.reservation || null,
         prepared: {
           ...prepared.prepared,
           shieldedAddress: prepared.privacyAccount.shielded_address,
@@ -652,7 +976,8 @@ export class ClairveilBrowserClient {
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
       includeFoundNotes: true
     });
-    const plan = planTransferNotes({ notes: scan.foundNotes, amount, denom: this.denom });
+    const availableFoundNotes = await reservationAvailableNotes(reservationManager, scan.foundNotes);
+    const plan = planTransferNotes({ notes: availableFoundNotes, amount, denom: this.denom });
     if (plan.status === "self_merge_required" && !allowPlanStep) throw plannerError({ status: plan.status, plan, scan });
     if (!plan.canBuildTx) throw plannerError({ status: plan.status, plan, scan });
     assertPlanCanBuildTx(plan);
@@ -662,40 +987,78 @@ export class ClairveilBrowserClient {
     const isFinal = plan.status === "final_transfer_ready";
     const stepRecipient = isFinal ? recipient : material.shieldedAddress;
     const stepAmount = isFinal ? amount : plan.nextAmount;
-    const built = await this.cosmos.buildTransferMessage({
-      proverAdapter: this.proverAdapter(),
-      creator: material.address,
-      inputs: plan.selection.inputs,
-      recipient: stepRecipient,
-      amount: stepAmount,
-      transferDenom: this.denom,
-      rootSeed: material.rootSeed,
-      shieldedPrefix: this.shieldedPrefix,
-      userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
-      userDisclosureMode: isFinal ? userDisclosureMode : "none",
-      userDisclosureTargetPubKeyHex: isFinal ? userDisclosureTargetPubKeyHex : "",
-      auditDisclosureTargetPubKeyHex: auditPubKeyHex,
-      disableSelfViewDisclosure: true
-    });
-    const transaction = this.evm.contract.buildTransferTransaction(built.message);
-    return {
-      transaction: { chainId: this.evmChainId, gas: this.evmGasLimit, ...transaction },
-      prepared: {
-        ...built,
-        planAction: isFinal ? "final_transfer" : "self_merge",
-        isFinal,
-        amount: stepAmount,
-        recipient: stepRecipient,
-        finalAmount: amount,
-        finalRecipient: recipient,
-        selectedInputTotal: plan.selection.total.toString(),
-        shieldedAddress: material.shieldedAddress,
-        privacyPolicy: userPrivacyPolicy,
-        disclosureMode: userDisclosureMode,
-        planStatus: plan.status
-      },
-      plan
-    };
+    let reservationBatch = null;
+    try {
+      reservationBatch = await preparePlanReservation(reservationManager, {
+        plan,
+        kind: isFinal ? "transfer" : "self_merge",
+        metadata: {
+          amount: stepAmount,
+          recipient: stepRecipient,
+          finalAmount: amount,
+          finalRecipient: recipient
+        }
+      });
+      const heartbeatResult = await withReservationHeartbeat(reservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
+        const built = await this.cosmos.buildTransferMessage({
+          proverAdapter: this.proverAdapter(),
+          creator: material.address,
+          inputs: plan.selection.inputs,
+          recipient: stepRecipient,
+          amount: stepAmount,
+          transferDenom: this.denom,
+          rootSeed: material.rootSeed,
+          shieldedPrefix: this.shieldedPrefix,
+          userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
+          userDisclosureMode: isFinal ? userDisclosureMode : "none",
+          userDisclosureTargetPubKeyHex: isFinal ? userDisclosureTargetPubKeyHex : "",
+          auditDisclosureTargetPubKeyHex: auditPubKeyHex,
+          disableSelfViewDisclosure: true
+        });
+        assertHeartbeatHealthy();
+        let transaction = {
+          chainId: this.evmChainId,
+          gas: this.evmGasLimit,
+          ...this.evm.contract.buildTransferTransaction(built.message)
+        };
+        if (reservationBatch) transaction = markEvmTransactionReservationRequired(transaction);
+        const txBytesHash = reservationBatch ? evmTransactionBindingHash(transaction) : "";
+        await heartbeatNow();
+        await markReservationProofReady(reservationManager, reservationBatch, transferProofReadyMetadata(built, {
+          amount: stepAmount,
+          denom: this.denom,
+          expectedRecipientHash: isFinal ? operationEvidence.expectedRecipientHash : "",
+          expectedAmountHash: isFinal ? operationEvidence.expectedAmountHash : "",
+          txBytesHash
+        }));
+        return { built, transaction };
+      });
+      const { built, transaction } = heartbeatResult;
+      return {
+        ...reservationReconciliationFields(heartbeatResult),
+        transaction,
+        reservation: reservationBatchSummary(reservationBatch),
+        prepared: {
+          ...built,
+          planAction: isFinal ? "final_transfer" : "self_merge",
+          isFinal,
+          amount: stepAmount,
+          recipient: stepRecipient,
+          finalAmount: amount,
+          finalRecipient: recipient,
+          selectedInputTotal: plan.selection.total.toString(),
+          shieldedAddress: material.shieldedAddress,
+          privacyPolicy: userPrivacyPolicy,
+          disclosureMode: userDisclosureMode,
+          planStatus: plan.status,
+          reservation: reservationBatchSummary(reservationBatch)
+        },
+        plan
+      };
+    } catch (error) {
+      await rollbackPlanReservationPreservingError(reservationManager, reservationBatch, error);
+      throw error;
+    }
   }
 
   async prepareTransferBatch(body) {
@@ -710,6 +1073,7 @@ export class ClairveilBrowserClient {
     const userDisclosureMode = body.disclosureMode ?? body.disclosure_mode ?? "none";
     const userDisclosureTargetPubKeyHex = body.disclosurePubKeyHex ?? body.disclosure_pubkey_hex ?? "";
     const scanOptions = scanOptionsFromBody(body);
+    const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
 
     const prepared = await this.cosmos.prepareTransferBatch({
       proverAdapter: this.proverAdapter(),
@@ -719,12 +1083,21 @@ export class ClairveilBrowserClient {
       userPrivacyPolicy,
       userDisclosureMode,
       userDisclosureTargetPubKeyHex,
+      expectedRecipientHash: body.expectedRecipientHash,
+      expected_recipient_hash: body.expected_recipient_hash,
+      expectedRecipientHashes: body.expectedRecipientHashes,
+      expected_recipient_hashes: body.expected_recipient_hashes,
+      expectedAmountHashes: body.expectedAmountHashes,
+      expected_amount_hashes: body.expected_amount_hashes,
       scan: scanOptions,
-      gasLimit: body.gasLimit ?? body.gas_limit ?? 25000000
+      gasLimit: body.gasLimit ?? body.gas_limit ?? 25000000,
+      reservationManager
     });
     if (prepared.status !== "ready") throw plannerError(prepared);
     return {
+      ...reservationReconciliationFields(prepared),
       signDoc: prepared.signDoc,
+      reservation: prepared.reservation || null,
       prepared: {
         ...prepared.prepared,
         shieldedAddress: prepared.privacyAccount.shielded_address,
@@ -747,6 +1120,7 @@ export class ClairveilBrowserClient {
     const rawRecipient = body.recipient;
     const evmRecipient = isEvmAddress(rawRecipient) ? normalizeEvmAddress(rawRecipient, "withdraw recipient") : "";
     const recipient = evmRecipient ? evmAddressToBech32(evmRecipient, this.accountPrefix) : rawRecipient;
+    const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
 
     if (walletType !== "evm") {
       const prepared = await this.cosmos.prepareWithdraw({
@@ -756,17 +1130,28 @@ export class ClairveilBrowserClient {
         recipient,
         scan: scanOptionsFromBody(body),
         expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
-        gasLimit: 5000000
+        chainNowUnix: body.chainNowUnix ?? body.chain_now_unix,
+        gasLimit: 5000000,
+        reservationManager
       });
       if (prepared.status !== "ready") throw plannerError(prepared);
       return {
+        ...reservationReconciliationFields(prepared),
         signDoc: prepared.signDoc,
+        payload: prepared.payload,
+        proof: prepared.proof,
+        message: prepared.message,
+        reservation: prepared.reservation || null,
         prepared: {
           shieldedAddress: prepared.privacyAccount.shielded_address,
           amount: prepared.payload.amount,
           recipient: prepared.payload.recipient,
           selectedNoteNullifier: prepared.selectedNote?.nullifier || prepared.payload.nullifier_hex,
-          expiresAtUnix: prepared.payload.expires_at_unix
+          expiresAtUnix: prepared.payload.expires_at_unix,
+          payload: prepared.payload,
+          proof: prepared.proof,
+          message: prepared.message,
+          reservation: prepared.reservation || null
         },
         plan: prepared.plan
       };
@@ -780,34 +1165,77 @@ export class ClairveilBrowserClient {
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
       includeFoundNotes: true
     });
-    const plan = planWithdrawNotes({ notes: scan.foundNotes, amount, denom: this.denom });
+    const availableFoundNotes = await reservationAvailableNotes(reservationManager, scan.foundNotes);
+    const plan = planWithdrawNotes({ notes: availableFoundNotes, amount, denom: this.denom });
     if (!plan.canBuildTx) throw plannerError({ status: plan.status, plan, scan });
     assertPlanCanBuildTx(plan);
-    const built = await this.cosmos.buildWithdrawMessage({
-      proverAdapter: this.proverAdapter(),
-      creator: material.address,
-      notes: scan.foundNotes,
-      amount,
-      assetDenom: this.denom,
-      recipient,
-      rootSeed: material.rootSeed,
-      chainId: this.chainId,
-      expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix
-    });
-    const message = evmRecipient ? { ...built.message, evmRecipient } : built.message;
-    const transaction = this.evm.contract.buildWithdrawTransaction(message);
-    return {
-      transaction: { chainId: this.evmChainId, gas: this.evmGasLimit, ...transaction },
-      prepared: {
-        shieldedAddress: material.shieldedAddress,
-        amount: built.payload.amount,
-        recipient: built.payload.recipient,
-        evmRecipient,
-        selectedNoteNullifier: built.selectedNote?.nullifier || built.payload.nullifier_hex,
-        expiresAtUnix: built.payload.expires_at_unix
-      },
-      plan
-    };
+    let reservationBatch = null;
+    try {
+      reservationBatch = await preparePlanReservation(reservationManager, {
+        plan,
+        kind: "withdraw",
+        metadata: {
+          amount,
+          recipient
+        }
+      });
+      const heartbeatResult = await withReservationHeartbeat(reservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
+        const built = await this.cosmos.buildWithdrawMessage({
+          proverAdapter: this.proverAdapter(),
+          creator: material.address,
+          notes: [plan.selectedNote],
+          amount,
+          assetDenom: this.denom,
+          recipient,
+          rootSeed: material.rootSeed,
+          chainId: this.chainId,
+          expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
+          chainNowUnix: body.chainNowUnix ?? body.chain_now_unix
+        });
+        assertHeartbeatHealthy();
+        const message = evmRecipient ? { ...built.message, evmRecipient } : built.message;
+        const evmBuilt = await this.evm.buildWithdrawTransaction({
+          message,
+          payload: built.payload,
+          proof: built.proof
+        });
+        let transaction = {
+          chainId: this.evmChainId,
+          gas: this.evmGasLimit,
+          ...evmBuilt.transaction
+        };
+        if (reservationBatch) transaction = markEvmTransactionReservationRequired(transaction);
+        const txBytesHash = reservationBatch ? evmTransactionBindingHash(transaction) : "";
+        await heartbeatNow();
+        await markReservationProofReady(reservationManager, reservationBatch, withdrawProofReadyMetadata(built, { txBytesHash }));
+        return { built, transaction, message };
+      });
+      const { built, transaction, message } = heartbeatResult;
+      return {
+        ...reservationReconciliationFields(heartbeatResult),
+        transaction,
+        payload: built.payload,
+        proof: built.proof,
+        message,
+        reservation: reservationBatchSummary(reservationBatch),
+        prepared: {
+          shieldedAddress: material.shieldedAddress,
+          amount: built.payload.amount,
+          recipient: built.payload.recipient,
+          evmRecipient,
+          selectedNoteNullifier: built.selectedNote?.nullifier || built.payload.nullifier_hex,
+          expiresAtUnix: built.payload.expires_at_unix,
+          payload: built.payload,
+          proof: built.proof,
+          message,
+          reservation: reservationBatchSummary(reservationBatch)
+        },
+        plan
+      };
+    } catch (error) {
+      await rollbackPlanReservationPreservingError(reservationManager, reservationBatch, error);
+      throw error;
+    }
   }
 
   async prepareRelayWithdraw(body) {
@@ -817,27 +1245,48 @@ export class ClairveilBrowserClient {
     const rawRecipient = body.recipient;
     const evmRecipient = isEvmAddress(rawRecipient) ? normalizeEvmAddress(rawRecipient, "withdraw recipient") : "";
     const recipient = evmRecipient ? evmAddressToBech32(evmRecipient, this.accountPrefix) : rawRecipient;
+    const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
     const prepared = await this.cosmos.prepareRelayWithdraw({
       proverAdapter: this.proverAdapter(),
       material,
       amount,
       recipient,
       scan: scanOptionsFromBody(body),
-      expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix
+      expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
+      chainNowUnix: relayChainNowUnixFromBody(body),
+      reservationManager
     });
     if (prepared.status !== "ready") throw plannerError(prepared);
     if (walletType === "evm") {
-      const built = await this.evm.buildWithdrawTransaction({
-        payload: prepared.payload,
-        proof: prepared.proof,
-        proverPayload: prepared.proverPayload,
-        selectedNote: prepared.selectedNote,
-        evmRecipient: evmRecipient || undefined,
-        transactionOptions: body.transactionOptions ?? body.transaction_options
-      });
+      let built;
+      try {
+        built = await this.evm.buildWithdrawTransaction({
+          payload: prepared.payload,
+          proof: prepared.proof,
+          proverPayload: prepared.proverPayload,
+          selectedNote: prepared.selectedNote,
+          evmRecipient: evmRecipient || undefined,
+          chainNowUnix: relayChainNowUnixFromBody(body),
+          transactionOptions: body.transactionOptions ?? body.transaction_options
+        });
+      } catch (error) {
+        await replanProofReadyReservationPreservingError(
+          reservationManager,
+          prepared.reservation,
+          error,
+          "evm_relay_transaction_build_failed_before_handoff"
+        );
+        throw error;
+      }
+      let transaction = { chainId: this.evmChainId, gas: this.evmGasLimit, ...built.transaction };
+      if (prepared.reservation) {
+        transaction = markEvmTransactionReservationRequired(transaction);
+      }
       return {
+        ...reservationReconciliationFields(prepared),
         payload: prepared.payload,
-        transaction: { chainId: this.evmChainId, gas: this.evmGasLimit, ...built.transaction },
+        transaction,
+        reservation: prepared.reservation || null,
         prepared: {
           shieldedAddress: prepared.privacyAccount.shielded_address,
           amount: prepared.payload.amount,
@@ -847,13 +1296,16 @@ export class ClairveilBrowserClient {
           expiresAtUnix: prepared.payload.expires_at_unix,
           payload: prepared.payload,
           proof: prepared.proof,
-          message: built.message
+          message: built.message,
+          reservation: prepared.reservation || null
         },
         plan: prepared.plan
       };
     }
     return {
+      ...reservationReconciliationFields(prepared),
       payload: prepared.payload,
+      reservation: prepared.reservation || null,
       prepared: {
         shieldedAddress: prepared.privacyAccount.shielded_address,
         amount: prepared.payload.amount,
@@ -862,7 +1314,8 @@ export class ClairveilBrowserClient {
         selectedNoteNullifier: prepared.selectedNote?.nullifier || prepared.payload.nullifier_hex,
         expiresAtUnix: prepared.payload.expires_at_unix,
         payload: prepared.payload,
-        proof: prepared.proof
+        proof: prepared.proof,
+        reservation: prepared.reservation || null
       },
       plan: prepared.plan
     };
@@ -872,7 +1325,7 @@ export class ClairveilBrowserClient {
     return this.cosmos.buildRelayWithdrawMessageFromPayload({
       payload: body.payload,
       relayer: body.relayer ?? body.creator ?? body.address,
-      nowUnix: body.nowUnix ?? body.now_unix,
+      chainNowUnix: relayChainNowUnixFromBody(body),
       expectedChainId: body.expectedChainId ?? body.expected_chain_id,
       expectedRecipient: body.expectedRecipient ?? body.expected_recipient,
       accountPrefix: body.accountPrefix ?? body.account_prefix
@@ -887,7 +1340,7 @@ export class ClairveilBrowserClient {
       gasLimit: body.gasLimit ?? body.gas_limit,
       feeAmount: body.feeAmount ?? body.fee_amount ?? [],
       memo: body.memo,
-      nowUnix: body.nowUnix ?? body.now_unix,
+      chainNowUnix: relayChainNowUnixFromBody(body),
       expectedChainId: body.expectedChainId ?? body.expected_chain_id,
       expectedRecipient: body.expectedRecipient ?? body.expected_recipient,
       accountPrefix: body.accountPrefix ?? body.account_prefix
@@ -905,24 +1358,35 @@ export class ClairveilBrowserClient {
     const {
       afterHeight,
       after_height,
+      afterSequence,
+      after_sequence,
       page,
       limit,
       maxPages,
       max_pages,
       eventTypes,
       event_types,
+      scanSource,
+      scan_source,
+      noteStore,
+      note_store,
       includeFoundNotes = false
     } = body || {};
     return this.cosmos.scanWalletNotes({
       material,
       afterHeight,
       after_height,
+      afterSequence,
+      after_sequence,
       page,
       limit,
       maxPages,
       max_pages,
       eventTypes,
       event_types,
+      scanSource,
+      scan_source,
+      noteStore: noteStore ?? note_store,
       includeFoundNotes
     });
   }
@@ -938,10 +1402,12 @@ export class ClairveilBrowserClient {
   async decodeUserDisclosure(body) {
     const request = { txHash: body.txHash ?? body.tx_hash };
     addIfPresent(request, "afterHeight", body.afterHeight ?? body.after_height);
+    addIfPresent(request, "afterSequence", body.afterSequence ?? body.after_sequence);
     addIfPresent(request, "page", body.page);
     addIfPresent(request, "limit", body.limit);
     addIfPresent(request, "maxPages", body.maxPages ?? body.max_pages);
     addIfPresent(request, "eventTypes", body.eventTypes ?? body.event_types);
+    addIfPresent(request, "scanSource", body.scanSource ?? body.scan_source);
     if (body.address && (body.pubKeyHex || body.pub_key_hex) && (body.signatureBase64 || body.signature_base64)) {
       const walletType = this.walletTypeFromBody(body);
       Object.assign(request, walletType === "evm"
@@ -954,10 +1420,12 @@ export class ClairveilBrowserClient {
   async decodeSelfViewDisclosure(body) {
     const request = { txHash: body.txHash ?? body.tx_hash };
     addIfPresent(request, "afterHeight", body.afterHeight ?? body.after_height);
+    addIfPresent(request, "afterSequence", body.afterSequence ?? body.after_sequence);
     addIfPresent(request, "page", body.page);
     addIfPresent(request, "limit", body.limit);
     addIfPresent(request, "maxPages", body.maxPages ?? body.max_pages);
     addIfPresent(request, "eventTypes", body.eventTypes ?? body.event_types);
+    addIfPresent(request, "scanSource", body.scanSource ?? body.scan_source);
     addIfPresent(request, "disclosureScalar", body.disclosureScalar ?? body.disclosure_scalar);
     addIfPresent(request, "disclosureScalarHex", body.disclosureScalarHex ?? body.disclosure_scalar_hex);
     if (body.address && (body.pubKeyHex || body.pub_key_hex) && (body.signatureBase64 || body.signature_base64)) {
@@ -975,10 +1443,12 @@ export class ClairveilBrowserClient {
       disclosurePrivKeyHex: body.disclosurePrivKeyHex ?? body.disclosure_privkey_hex
     };
     addIfPresent(request, "afterHeight", body.afterHeight ?? body.after_height);
+    addIfPresent(request, "afterSequence", body.afterSequence ?? body.after_sequence);
     addIfPresent(request, "page", body.page);
     addIfPresent(request, "limit", body.limit);
     addIfPresent(request, "maxPages", body.maxPages ?? body.max_pages);
     addIfPresent(request, "eventTypes", body.eventTypes ?? body.event_types);
+    addIfPresent(request, "scanSource", body.scanSource ?? body.scan_source);
     return this.cosmos.decodeAuditDisclosure(request);
   }
 

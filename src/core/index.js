@@ -5,6 +5,7 @@ export * from "./note.js";
 export * from "../privacy/payload.js";
 export * from "../privacy/planner.js";
 export * from "../privacy/prover.js";
+export * from "../privacy/reservation.js";
 export * from "../privacy/scan.js";
 export * from "../privacy/note-store.js";
 export * from "./schemas.js";

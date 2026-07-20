@@ -176,7 +176,19 @@ export function computePreparedTransferPayloadHash(payload: PreparedTransferPayl
 export function buildPreparedTransferPayload(input: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;
 export function validatePreparedTransferProof(payload: PreparedTransferPayload, proof: PreparedTransferProof): true;
 export function buildTransferMsgFromPayloadAndProof(payload: PreparedTransferPayload, proof: PreparedTransferProof): TransferMessage;
-export function buildTransferMessage(input?: PreparedTransferPayloadInput & { proverAdapter?: ProverAdapter }): Promise<TransferMessageBuildResult>;
+export type NullifierUsage =
+  | boolean
+  | { used: boolean; Used?: never }
+  | { used?: never; Used: boolean };
+export type NullifierStatusEntry =
+  ({ nullifier: Hex; Nullifier?: never } | { nullifier?: never; Nullifier: Hex }) &
+  Exclude<NullifierUsage, boolean>;
+export type NullifierStatusResult =
+  | Map<string, NullifierUsage>
+  | Record<string, NullifierUsage>
+  | { statuses: readonly NullifierStatusEntry[] };
+export type NullifierStatusReader = (nullifiers: readonly Hex[]) => NullifierStatusResult | Promise<NullifierStatusResult>;
+export function buildTransferMessage(input: PreparedTransferPayloadInput & { proverAdapter: ProverAdapter; checkNullifiers: NullifierStatusReader }): Promise<TransferMessageBuildResult>;
 export function computePreparedWithdrawProverPayloadHash(payload: PreparedWithdrawProverPayload): Hex;
 export interface PreparedWithdrawProverPayloadInput {
   notes?: FoundNote[];
@@ -186,10 +198,12 @@ export interface PreparedWithdrawProverPayloadInput {
   recipient?: ClairAddress | string;
   chainId?: string;
   expiresAtUnix?: number;
+  chainNowUnix?: number;
   rootSeed?: BytesLike;
   merklePathProvider?: MerklePathProviderLike;
   spendNoteHashSigner?: NoteHashSigner;
   accountPrefix?: string;
+  checkNullifiers?: NullifierStatusReader;
 }
 
 export interface PreparedWithdrawProverPayload {
@@ -251,7 +265,8 @@ export interface RelayWithdrawPayloadBuildResult {
 }
 
 export interface RelayWithdrawRelayOptions {
-  nowUnix?: number;
+  /** Latest chain block time in whole Unix seconds. Local wall-clock time is not accepted. */
+  chainNowUnix: number;
   expectedChainId?: string;
   expectedRecipient?: ClairAddress | string;
   accountPrefix?: string;
@@ -262,14 +277,18 @@ export function computePreparedWithdrawPayloadHash(payload: PreparedWithdrawPayl
 export function validatePreparedWithdrawProof(proverPayload: PreparedWithdrawProverPayload, proof: PreparedWithdrawProof, nowUnix?: number): true;
 export function buildPreparedWithdrawPayloadFromProof(proverPayload: PreparedWithdrawProverPayload, proof: PreparedWithdrawProof, nowUnix?: number): PreparedWithdrawPayload;
 export function validatePreparedWithdrawPayload(payload: PreparedWithdrawPayload, nowUnix?: number): true;
-export function validateRelayWithdrawPayload(payload: PreparedWithdrawPayload, options?: RelayWithdrawRelayOptions): true;
+export function validateRelayWithdrawPayload(payload: PreparedWithdrawPayload, options: RelayWithdrawRelayOptions): true;
 export function buildWithdrawMsgFromPayload(payload: PreparedWithdrawPayload, creator: ClairAddress | string, nowUnix?: number): WithdrawMessage;
-export function buildRelayWithdrawMsgFromPayload(payload: PreparedWithdrawPayload, relayer: ClairAddress | string, options?: RelayWithdrawRelayOptions): WithdrawMessage;
-export function buildRelayWithdrawPayload(input?: PreparedWithdrawProverPayloadInput & {
-  proverAdapter?: ProverAdapter;
+export function buildRelayWithdrawMsgFromPayload(payload: PreparedWithdrawPayload, relayer: ClairAddress | string, options: RelayWithdrawRelayOptions): WithdrawMessage;
+export function buildRelayWithdrawPayload(input: Omit<PreparedWithdrawProverPayloadInput, "chainNowUnix"> & {
+  /** Latest chain block time in whole Unix seconds. */
+  chainNowUnix: number;
+  proverAdapter: ProverAdapter;
+  checkNullifiers: NullifierStatusReader;
 }): Promise<RelayWithdrawPayloadBuildResult>;
-export function buildWithdrawMessage(input?: PreparedWithdrawProverPayloadInput & {
-  proverAdapter?: ProverAdapter;
+export function buildWithdrawMessage(input: PreparedWithdrawProverPayloadInput & {
+  proverAdapter: ProverAdapter;
+  checkNullifiers: NullifierStatusReader;
   creator?: ClairAddress | string;
 }): Promise<WithdrawMessageBuildResult>;
 export function createRestMerklePathProvider(input?: { rest: string; fetchImpl?: typeof fetch; timeoutMs?: number }): { lookupMerklePath(commitmentHex: Hex): Promise<MerklePathResult> };

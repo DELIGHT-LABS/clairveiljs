@@ -36,12 +36,13 @@ It uses CosmJS as the transport/signing foundation and provides Clairveil-specif
 
 ## Entrypoints
 
-Use the shared privacy core from `clairveiljs/core`, Cosmos transport from `clairveiljs/cosmos` or `clairveiljs/cosmos-client`, and EVM transport from `clairveiljs/evm`.
+Use the shared privacy core from `clairveiljs/core`, Cosmos transport from `clairveiljs/cosmos` or `clairveiljs/cosmos-client`, EVM transport from `clairveiljs/evm`, and wallet note reservation helpers from `clairveiljs/reservation`.
 
 ```js
 import { deriveShieldedAddress } from "clairveiljs/core";
 import { createClairveilClient } from "clairveiljs/cosmos";
 import { createClairveilEvmClient } from "clairveiljs/evm";
+import { createNoteReservationManager } from "clairveiljs/reservation";
 ```
 
 ## Install
@@ -70,7 +71,7 @@ src/
   generated/  Telescope protobuf bindings
 ```
 
-Public consumers should import through the package export map (`clairveiljs`, `clairveiljs/core`, `clairveiljs/cosmos`, `clairveiljs/cosmos-client`, `clairveiljs/evm`, `clairveiljs/browser-dapp`, `clairveiljs/generated/...`) instead of reaching into files directly. The export map preserves semantic entrypoints even when an entrypoint shares an internal implementation; for example, `clairveiljs/browser-dapp` points at the browser wallet client surface.
+Public consumers should import through the package export map (`clairveiljs`, `clairveiljs/core`, `clairveiljs/cosmos`, `clairveiljs/cosmos-client`, `clairveiljs/evm`, `clairveiljs/browser-dapp`, `clairveiljs/reservation`, `clairveiljs/generated/...`) instead of reaching into files directly. The export map preserves semantic entrypoints even when an entrypoint shares an internal implementation; for example, `clairveiljs/browser-dapp` points at the browser wallet client surface.
 
 Minimal SDK usage examples live in [`examples/`](https://github.com/DELIGHT-LABS/clairveiljs/tree/main/examples). Start with [`examples/minimal-keplr-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-keplr-flow.js) for Keplr/Cosmos and [`examples/minimal-metamask-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-metamask-flow.js) for MetaMask/EVM. Both examples derive wallet privacy material, prepare a deposit, scan notes, prepare a transfer, and broadcast through the SDK surface. The Keplr/Cosmos example requires a `depositProofProvider` because Cosmos `MsgDeposit` includes a `DepositCircuit` proof.
 
@@ -502,6 +503,28 @@ const auditReport = await dapp.decodeAuditDisclosure({
 console.log(userReport.verified, auditReport.plane);
 ```
 
+The relay examples below fetch authoritative time from the latest chain block. Keep the REST endpoint aligned with the client configuration, and fail closed if the latest block does not contain a valid timestamp.
+
+```js
+const chainRestEndpoint = "https://rest.example-chain.invalid";
+
+async function fetchLatestChainBlockTimeUnix() {
+  const response = await fetch(
+    `${chainRestEndpoint}/cosmos/base/tendermint/v1beta1/blocks/latest`
+  );
+  if (!response.ok) {
+    throw new Error(`latest block time query failed with HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  const value = data?.block?.header?.time ?? data?.sdk_block?.header?.time;
+  const milliseconds = Date.parse(String(value || ""));
+  if (!Number.isFinite(milliseconds)) {
+    throw new Error("latest block response omitted a valid block time");
+  }
+  return Math.floor(milliseconds / 1000);
+}
+```
+
 ## Withdraw
 
 Withdraw requires one exact-match note. If the planner returns `exact_note_required`, create the exact note with a shielded self-transfer first.
@@ -519,20 +542,33 @@ const withdraw = await clairveil.prepareWithdraw({
 if (withdraw.status === "ready") {
   const broadcast = await clairveil.signDirectAndBroadcast({
     wallet,
-    signDoc: withdraw.signDoc
+    signDoc: withdraw.signDoc,
+    relayPayload: withdraw.payload,
+    getChainNowUnix: fetchLatestChainBlockTimeUnix
   });
   if (!broadcast.ok) throw new Error(broadcast.error || "withdraw was not confirmed");
 }
 ```
 
-For relay withdraw, the wallet/DApp prepares a final payload and sends it to a product-defined relayer endpoint. Use the same `prepareRelayWithdraw(...)` call for Cosmos and EVM profiles. Cosmos returns a payload for relayer-side `MsgWithdraw` signing. EVM returns the same payload plus an `IPrivacy.withdraw` transaction request, but the relayer must still rebuild or byte-for-byte validate that transaction from the payload before broadcasting it from its own EVM account. Do not trust a client-supplied `transaction` without checking its `to`, `data`, `chainId`, recipient, expiry, and payload hash.
+For relay withdraw, the wallet/DApp prepares a final payload and sends it to a product-defined relayer endpoint. Use the same `prepareRelayWithdraw(...)` call for Cosmos and EVM profiles. Cosmos returns a payload for relayer-side `MsgWithdraw` signing. EVM returns the same payload plus an `IPrivacy.withdraw` transaction request, but the relayer must still rebuild or byte-for-byte validate that transaction from the payload before broadcasting it from its own EVM account. Do not trust a client-supplied `transaction` without checking its `to`, `data`, `chainId`, recipient, expiry, and payload hash. Both examples below assume `reservationManager` has already been created with the complete setup in [Note reservation](#note-reservation).
 
 ```js
+const latestChainBlockTimeUnix = await fetchLatestChainBlockTimeUnix();
 const prepared = await clairveil.prepareRelayWithdraw({
   wallet,
   amount: "5uclair",
   recipient: "clair1...",
-  proverAdapter
+  proverAdapter,
+  reservationManager,
+  chainNowUnix: latestChainBlockTimeUnix
+});
+if (prepared.status !== "ready") {
+  throw new Error(`relay withdraw preparation failed: ${prepared.plan?.status || prepared.status}`);
+}
+
+await reservationManager.recordRelayHandoff(prepared.reservation.reservation_ids, {
+  leaseToken: prepared.reservation.lease_token,
+  payloadHash: prepared.payload.payload_hash
 });
 
 await fetch("/relayer/withdraw", {
@@ -545,13 +581,22 @@ await fetch("/relayer/withdraw", {
 For an EVM profile, forward `prepared.transaction` to the relayer as a candidate transaction instead of asking the user wallet to send it. The relayer should reject it unless it matches the transaction it rebuilds from `prepared.payload`:
 
 ```js
+const latestChainBlockTimeUnix = await fetchLatestChainBlockTimeUnix();
 const prepared = await clairveil.prepareRelayWithdraw({
   walletType: "evm",
   address,
   pubKeyHex,
   signatureBase64,
   amount: "5aokrw",
-  recipient: "0x..."
+  recipient: "0x...",
+  chainNowUnix: latestChainBlockTimeUnix,
+  reservationManager
+});
+// The browser EVM client throws when relay-withdraw preparation cannot produce a ready result.
+
+await reservationManager.recordRelayHandoff(prepared.reservation.reservation_ids, {
+  leaseToken: prepared.reservation.lease_token,
+  payloadHash: prepared.payload.payload_hash
 });
 
 await fetch("/relayer/evm-withdraw", {
@@ -565,14 +610,120 @@ await fetch("/relayer/evm-withdraw", {
 ```
 
 ```js
+const latestChainBlockTimeUnix = await fetchLatestChainBlockTimeUnix();
 const relay = await relayerClient.createRelayWithdrawSignDoc({
   payload,
   relayer: relayerAddress,
   pubKeyHex: relayerPubKeyHex,
+  chainNowUnix: latestChainBlockTimeUnix,
   expectedChainId: "clairveil-1",
   expectedRecipient: payload.recipient
 });
+
+await relayerClient.signDirectAndBroadcast({
+  wallet: relayerWallet,
+  signDoc: relay.signDoc,
+  relayPayload: relay.payload,
+  // Fetch the latest chain block time again after any signing delay.
+  getChainNowUnix: fetchLatestChainBlockTimeUnix
+});
 ```
+
+### Note Reservations
+
+Wallets and DApps that can prepare multiple private transactions concurrently should pass a reservation manager into `prepareTransfer(...)`, `prepareWithdraw(...)`, and `prepareRelayWithdraw(...)`. The manager filters already-reserved notes before planning, records the selected notes while proofs are being built, renews leases during SDK proof/payload construction, and returns reservation metadata on prepared results. After a prepared result is handed back to wallet UI or a relayer flow, callers can keep the lease fresh with `heartbeatLease(...)`/`renewLease(...)`.
+
+```js
+import {
+  createBrowserReservationStore,
+  createNoteReservationManager,
+  reservationStatuses
+} from "clairveiljs/reservation";
+
+const reservationStateText = new TextEncoder();
+const reservationStateKeyMaterial = await crypto.subtle.importKey(
+  "raw", material.rootSeed, "HKDF", false, ["deriveKey"]
+);
+const reservationStateKey = await crypto.subtle.deriveKey({
+  name: "HKDF",
+  hash: "SHA-256",
+  salt: reservationStateText.encode(`${chainId}:${address}`),
+  info: reservationStateText.encode("clairveil/reservation-state/v1")
+}, reservationStateKeyMaterial, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+const encryptReservationState = async state => {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv }, reservationStateKey,
+    reservationStateText.encode(JSON.stringify(state))
+  );
+  return { version: 1, iv: [...iv], ciphertext: [...new Uint8Array(ciphertext)] };
+};
+const decryptReservationState = async value => {
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: new Uint8Array(value.iv) }, reservationStateKey,
+    new Uint8Array(value.ciphertext)
+  );
+  return JSON.parse(new TextDecoder().decode(plaintext));
+};
+
+const reservationStore = createBrowserReservationStore({
+  namespace: `${chainId}:${address}`,
+  requireLocks: true,
+  encodeState: encryptReservationState,
+  decodeState: decryptReservationState
+});
+
+const reservationManager = createNoteReservationManager({
+  store: reservationStore,
+  ownerKeyId: `${chainId}:${address}`,
+  indexKey: material.rootSeed,
+  // Optional: the SDK generates a fresh worker id when this is omitted.
+  leaseOwner: `browser-tab:${crypto.randomUUID()}`
+});
+
+const latestChainBlockTimeUnix = await fetchLatestChainBlockTimeUnix();
+const prepared = await clairveil.prepareRelayWithdraw({
+  wallet,
+  amount: "5uclair",
+  recipient: "clair1...",
+  proverAdapter,
+  reservationManager,
+  chainNowUnix: latestChainBlockTimeUnix
+});
+
+if (prepared.reservation?.reservation_ids?.length) {
+  console.log(prepared.reservation.reservations[0].status === reservationStatuses.ProofReady);
+}
+
+```
+
+Use a namespace that is stable for the chain and wallet identity. `indexKey` is required and should come from wallet-private material, such as the privacy root seed; do not use a public account id as the default reservation lookup key. `unsafeAllowPublicIndexKey: true` exists only for single-user demos that knowingly accept that weaker privacy boundary. A reservation manager always requires an explicit `store`; it never silently creates an in-memory store. `createBrowserReservationStore(...)` uses IndexedDB and requires the Web Locks API by default so two tabs cannot reserve the same note at the same time. It fails closed when IndexedDB is unavailable; `unsafeAllowMemoryFallback: true` is an explicit demo/test-only opt-in. Production callers must provide paired `encodeState`/`decodeState` callbacks that encrypt the complete reservation state at rest. `unsafeAllowPlaintext: true` is an explicit demo/test-only opt-in; reservation records include operational metadata such as amounts, transaction evidence, and timestamps. For single-flow tests, callers may explicitly pass `new MemoryReservationStore()`, but it does not protect another tab or process and does not survive restart.
+
+The example derives a non-extractable, namespace-separated AES-GCM key from the wallet-private root seed. Applications may instead load an equivalent stable key from their secure key-management layer, but must never persist that key beside the ciphertext.
+
+When deriving a reservation lookup key directly, use `nullifierLookupKeyFromHex(indexKey, nullifierHex)` for 32-byte nullifier hex strings. `nullifierLookupKey(indexKey, nullifier)` treats string nullifiers as raw UTF-8 labels and rejects hex-shaped nullifier strings to avoid accidental mismatches.
+
+The SDK moves reservations through `Reserved -> Proving -> ProofReady` while it prepares the payload. `Reserved` is the durable note-inventory lock and has no worker lease; beginning `Proving` atomically claims the batch lease. Only `Proving` and `ProofReady` retain worker lease fields. The SDK generates a fresh `leaseOwner` for each manager by default; callers that supply one must keep it unique per browser tab or worker so recovery can leave another tab's unexpired work alone. The proof heartbeat interval is derived from the active lease window rather than fixed at 60 seconds, so short leases are renewed before expiry where timers allow. After that, the wallet or DApp owns the broadcast/reconcile step:
+
+- Pass both `reservationManager` and the prepared `reservation` to `signDirectAndBroadcast(...)`, `broadcastSignedTx(...)`, or EVM `sendTransaction(...)`. These methods atomically set `broadcast_in_flight` and increment `broadcast_attempt_count` before the external RPC call, then record `Submitted`, `Unknown`, or `ManualReview`. A failed terminal write leaves the durable marker in place and blocks resubmission until reconciliation. Withdraw/relay submissions must also pass the matching `relayPayload` plus a fresh `chainNowUnix`, or preferably `getChainNowUnix`. When an EVM request contains `chainId`, also pass that network ID as `expectedEvmChainId`. Unbound relay requests are rebuilt and caller-supplied sender, gas, and fee fields are stripped after validation. If a reservation already carries an authoritative `txBytesHash`, supported sender, gas, and fee fields covered by that binding may be preserved; unsupported transaction keys are always stripped before submission. The SDK decodes the Cosmos body or rebuilds the EVM calldata and rejects a missing or mismatched payload before external submission. If custom EVM transaction encoding options were used, pass the same options as `relayTransactionOptions`.
+- Custom wallet/provider integrations must call `markBroadcastAttempting(ids, { leaseToken, txHash?, txBytesHash?, signDocHash? })` immediately before crossing the external broadcast boundary, persisting any transaction identity already available before using the outcome-specific methods below.
+- Call `markSubmitted(ids, { leaseToken, txHash | txBytesHash })` only after a transaction was actually submitted. A `signDocHash` alone is not enough for `Submitted`.
+- Call `markUnknown(ids, { leaseToken, txHash | txBytesHash, signDocHash?, error })` only when the transaction may have reached the network. A `signDocHash` is supplemental evidence and cannot establish that boundary by itself.
+- Keep the `ProofReady` lease alive while a wallet or relayer is waiting. `markSubmitted(...)` and `markUnknown(...)` require the current, unexpired lease token; if the lease expires, reconcile or replan instead of advancing stale ownership.
+- Immediately before copying or uploading a relay payload, call `recordRelayHandoff(ids, { leaseToken, payloadHash: prepared.payload.payload_hash })` and wait for it to persist. If that call fails, do not expose the payload. Once it succeeds, do not use local proof-discard/release paths; reconcile the externally deliverable payload instead.
+- For wallet rejection or local proof discard before broadcast, use `markReplanRequired(...)` with the current live lease instead of leaving `ProofReady` active. An expired `ProofReady` lease must move to `ManualReview`; a refreshed page cannot prove that an older proof artifact was destroyed and must not make the note spendable again.
+- If you directly discard a local batch, `Reserved` can be released directly; `Proving` requires its current batch lease token via `releaseReservedOrProving(ids, { leaseToken })`. `rollbackPlanReservation(...)` handles both cases for you.
+- If a rollback sees that the lease already expired, it does not release the note. It moves the reservation to `ManualReview` best-effort so the original prepare/prover error is preserved and the note is not silently reused.
+- Resolve `ManualReview` only after an operator has reviewed the chain and payload history. `resolveManualReview(ids, { target: "Released" | "ReplanRequired" | "Failed", operatorId, approvalReference, reason })` records the approval metadata and moves the linked note into the approved outcome.
+- After a relay payload is copied or handed to a relayer, do not release the reservation by TTL or a local cancel button. The relayer may still submit the proof until expiry, so reconcile by checking nullifier status, submitted tx evidence, or manual review.
+- Relay payload validation and relay signing require `chainNowUnix` from the latest chain block time. Do not substitute browser time; fetch it again immediately before relay broadcast and reject submission if it is unavailable.
+- For submitted EVM transactions with a failed receipt, check nullifier status before deciding between `ConfirmedSpent`, `ReplanRequired`, or `ManualReview`. `Submitted` or `Unknown` reservations can only move to `ReplanRequired` when `markReplanRequired(...)` proves both `nullifierUnspentConfirmed: true` and `txAbsentOrFailedConfirmed: true`; retain `checkedHeight` and `txHashChecked` as the audit trail for that tx lookup.
+
+Reservations can also carry operation success evidence. Nullifier spent proves that the input note was consumed, but payroll/payment success requires a matching persisted transaction identity plus the expected output commitment, audit disclosure digest, recipient hash, amount hash, denom, and, when relevant, item index. `markProofReady(...)` accepts `expectedOutputCommitment`, `expectedDisclosureDigest`, `expectedRecipientHash`, `expectedAmount`, `expectedAmountHash`, `expectedDenom`, `batchItemIndex`, `batchItemIndexKnown`, and `operationSuccessEvidenceRequired`. A payroll or batch transfer sets `batchItemIndexKnown: true`; a direct integration may leave it false when position is not part of its success predicate. High-level transfer prepares fill note-lock evidence automatically, but operation success checking is enabled only when the complete success predicate, including recipient and amount hashes, is available. Use `hashRecipient(recipient, { shieldedPrefix })` and `hashAmount(denom, amount)` from `clairveiljs/reservation`; both reject empty identity fields, and the latter accepts only non-negative uint64 minimal-denom amounts before computing SHA-256 over canonical `denom:amount`.
+
+Scan migrations must treat a note as spendable only when its latest nullifier check explicitly records `nullifierStatus: "unspent"`. Older cached `isSpent: false` entries, missing responses, malformed responses, and query failures are unverified and must stay out of the planner until revalidated.
+
+When later calling `reconcileSpentNotes(...)`, include matching tx/event evidence under `operationSuccessEvidence` or `successEvidence`. `operation_status: "Succeeded"` requires an actual tx identity matching the stored submitted `txHash` or `txBytesHash`; `signDocHash` is only a supplemental mismatch guard and cannot establish chain execution by itself. A bare `txResult: { code: 0 }` also has no identity and cannot succeed. Nullifier spent alone is not enough. For a multi-input operation, include spent evidence for every linked input in the same reconcile call. Incomplete evidence records `ManualReview` across the linked operation, while an explicit identity or expected-output mismatch records `ConflictSpent` with `operation_success_evidence_errors`. Confirmed spent inputs remain quarantined in both cases, and a later complete evidence set atomically resolves every linked reservation to the same operation outcome. If you only use reservations as a note inventory lock, leave `operationSuccessEvidenceRequired` unset and keep operation success checks in your downstream operation database.
 
 ## Async Prover Jobs
 

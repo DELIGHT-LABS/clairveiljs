@@ -5,6 +5,7 @@ export * from "../core/note.js";
 export * from "../privacy/payload.js";
 export * from "../privacy/planner.js";
 export * from "../privacy/prover.js";
+export * from "../privacy/reservation.js";
 export * from "../privacy/scan.js";
 export * from "../privacy/note-store.js";
 export * from "../core/schemas.js";
@@ -57,6 +58,7 @@ import type {
 } from "../privacy/payload.js";
 import type { TransferBatchPlan, TransferPlan, WithdrawPlan } from "../privacy/planner.js";
 import type { ProverAdapter } from "../privacy/prover.js";
+import type { NoteReservationManager, ReservationBatch } from "../privacy/reservation.js";
 import type { ScanResult } from "../privacy/scan.js";
 import type { MemoryNoteStore } from "../privacy/note-store.js";
 import type { WalletAdapterLike } from "../wallet/adapter.js";
@@ -117,14 +119,92 @@ export interface TxSearchResult {
 
 export interface BroadcastSignedTxResult {
   ok: boolean;
+  txBytesHash: Hex;
   broadcast: {
     txhash: Hex | string;
-    code: number;
+    code: number | null;
     raw_log: string;
   };
   tx: TxSearchResult | null;
   error?: string;
 }
+
+type RequiredReservationManagerBinding =
+  | { reservationManager: NoteReservationManager; reservation_manager?: NoteReservationManager | null }
+  | { reservationManager?: NoteReservationManager | null; reservation_manager: NoteReservationManager };
+
+type RequiredReservationBatchBinding =
+  | { reservation: ReservationBatch; reservationBatch?: ReservationBatch | null; reservation_batch?: ReservationBatch | null }
+  | { reservation?: ReservationBatch | null; reservationBatch: ReservationBatch; reservation_batch?: ReservationBatch | null }
+  | { reservation?: ReservationBatch | null; reservationBatch?: ReservationBatch | null; reservation_batch: ReservationBatch };
+
+export type ReservationBroadcastBinding =
+  | (RequiredReservationManagerBinding & RequiredReservationBatchBinding)
+  | {
+      reservationManager?: null;
+      reservation_manager?: null;
+      reservation?: null;
+      reservationBatch?: null;
+      reservation_batch?: null;
+    };
+
+type RelayBroadcastChainTime =
+  | {
+      chainNowUnix: number;
+      chain_now_unix?: number;
+      getChainNowUnix?: never;
+      get_chain_now_unix?: never;
+    }
+  | {
+      chainNowUnix?: number;
+      chain_now_unix: number;
+      getChainNowUnix?: never;
+      get_chain_now_unix?: never;
+    }
+  | {
+      chainNowUnix?: never;
+      chain_now_unix?: never;
+      getChainNowUnix: () => number | Promise<number>;
+      get_chain_now_unix?: never;
+    }
+  | {
+      chainNowUnix?: never;
+      chain_now_unix?: never;
+      getChainNowUnix?: never;
+      get_chain_now_unix: () => number | Promise<number>;
+    };
+
+export type RelayBroadcastValidation =
+  | ((
+      | { relayPayload: PreparedWithdrawPayload; relay_payload?: never }
+      | { relayPayload?: never; relay_payload: PreparedWithdrawPayload }
+    ) & RelayBroadcastChainTime & {
+      expectedChainId?: string;
+      expected_chain_id?: string;
+      expectedRecipient?: ClairAddress | string;
+      expected_recipient?: ClairAddress | string;
+      accountPrefix?: string;
+      account_prefix?: string;
+    })
+  | {
+      relayPayload?: never;
+      relay_payload?: never;
+      chainNowUnix?: never;
+      chain_now_unix?: never;
+      getChainNowUnix?: never;
+      get_chain_now_unix?: never;
+      expectedChainId?: never;
+      expected_chain_id?: never;
+      expectedRecipient?: never;
+      expected_recipient?: never;
+      accountPrefix?: never;
+      account_prefix?: never;
+    };
+
+export type ReservationBroadcastOptions = ReservationBroadcastBinding & RelayBroadcastValidation & {
+  attempts?: number;
+  intervalMs?: number;
+};
 
 export interface ReserveResponse {
   denom: string;
@@ -135,11 +215,14 @@ export interface ReserveResponse {
   invariant_holds: boolean;
 }
 
+export type Uint64CursorInput = number | bigint | string;
+export type Uint64CursorValue = number | string;
+
 export interface PrivacyEventsQuery {
-  afterHeight?: number;
-  after_height?: number;
-  afterSequence?: number;
-  after_sequence?: number;
+  afterHeight?: Uint64CursorInput;
+  after_height?: Uint64CursorInput;
+  afterSequence?: Uint64CursorInput;
+  after_sequence?: Uint64CursorInput;
   page?: number;
   limit?: number;
   eventTypes?: string[];
@@ -149,21 +232,40 @@ export interface PrivacyEventsQuery {
 export interface PrivacyScanOptions extends PrivacyEventsQuery {
   maxPages?: number;
   max_pages?: number;
+  scanSource?: "scan_events" | "privacy_events" | string;
+  scan_source?: "scan_events" | "privacy_events" | string;
 }
+
+export type RelayChainTimeInput =
+  | { chainNowUnix: number; chain_now_unix?: number }
+  | { chainNowUnix?: number; chain_now_unix: number };
+
+type CosmosRelayWithdrawRelayOptions = Omit<RelayWithdrawRelayOptions, "chainNowUnix"> & (
+  | {
+      chainNowUnix: number;
+      /** @deprecated Use chainNowUnix with the latest chain block time. */
+      nowUnix?: number;
+    }
+  | {
+      chainNowUnix?: number;
+      /** @deprecated Use chainNowUnix with the latest chain block time. */
+      nowUnix: number;
+    }
+);
 
 export interface PrivacyEventsCursor {
   source?: "scan_events" | string;
-  after_height: number;
-  after_sequence?: number;
+  after_height: Uint64CursorValue;
+  after_sequence?: Uint64CursorValue;
   page?: number;
   limit: number;
   event_types: string[];
   has_more: boolean;
-  latest_height: number;
-  latest_sequence?: number;
+  latest_height: Uint64CursorValue;
+  latest_sequence?: Uint64CursorValue;
   latest_tx_hash: Hex | "";
-  next_height?: number;
-  next_sequence?: number;
+  next_height?: Uint64CursorValue;
+  next_sequence?: Uint64CursorValue;
   next_page?: number;
   pages_scanned?: number;
   completed?: boolean;
@@ -172,11 +274,12 @@ export interface PrivacyEventsCursor {
 }
 
 export interface PrivacyScanResumeOptions {
-  afterHeight: number;
-  afterSequence?: number;
+  afterHeight: Uint64CursorValue;
+  afterSequence?: Uint64CursorValue;
   page?: number;
   limit: number;
   eventTypes: string[];
+  scanSource?: "scan_events" | "privacy_events" | string;
   maxPages?: number;
   includeFoundNotes?: boolean;
   hasMore: boolean;
@@ -213,6 +316,17 @@ export interface QueryRetryOptions {
   retryStatuses?: number[];
 }
 
+export interface ReservationReconciliationWarning {
+  code: "reservation_heartbeat_failed_after_proof_ready";
+  message: string;
+  cause?: string;
+}
+
+export interface ReservationReconciliationState {
+  reservationReconciliationRequired?: true;
+  reservationReconciliationWarning?: ReservationReconciliationWarning;
+}
+
 export interface PreparedDeposit {
   status: "ready";
   signDoc: SignDocBase64;
@@ -229,9 +343,10 @@ export interface PreparedTransferSummary {
   finalAmount: CoinString;
   finalRecipient: ShieldedAddress;
   selectedInputTotal: string;
+  reservation?: ReservationBatch | null;
 }
 
-export interface PreparedTransfer {
+export interface PreparedTransfer extends ReservationReconciliationState {
   status: string;
   plan: TransferPlan;
   scan: ScanResult;
@@ -239,6 +354,7 @@ export interface PreparedTransfer {
   payload?: PreparedTransferPayload;
   proof?: PreparedTransferProof;
   message?: TransferMessage;
+  reservation?: ReservationBatch | null;
   prepared?: PreparedTransferSummary;
   privacyAccount: PrivacyAccountSummary;
 }
@@ -248,9 +364,10 @@ export interface PreparedTransferBatchSummary {
   amounts: CoinString[];
   recipient: ShieldedAddress;
   selectedInputTotals: string[];
+  reservation?: ReservationBatch | null;
 }
 
-export interface PreparedTransferBatch {
+export interface PreparedTransferBatch extends ReservationReconciliationState {
   status: string;
   plan: TransferBatchPlan;
   scan: ScanResult;
@@ -258,24 +375,41 @@ export interface PreparedTransferBatch {
   payloads?: PreparedTransferPayload[];
   proofs?: PreparedTransferProof[];
   messages?: TransferMessage[];
+  reservation?: ReservationBatch | null;
   prepared?: PreparedTransferBatchSummary;
   privacyAccount: PrivacyAccountSummary;
 }
 
-export interface PreparedWithdraw {
-  status: string;
+interface PreparedWithdrawBase extends ReservationReconciliationState {
   plan: WithdrawPlan;
   scan: ScanResult;
-  signDoc?: SignDocBase64;
-  proverPayload?: PreparedWithdrawProverPayload;
-  proof?: PreparedWithdrawProof;
-  payload?: PreparedWithdrawPayload;
-  message?: WithdrawMessage;
-  selectedNote?: FoundNote;
+  reservation?: ReservationBatch | null;
   privacyAccount: PrivacyAccountSummary;
 }
 
-export interface PreparedRelayWithdraw {
+export interface PreparedWithdrawReady extends PreparedWithdrawBase {
+  status: "ready";
+  signDoc: SignDocBase64;
+  proverPayload: PreparedWithdrawProverPayload;
+  proof: PreparedWithdrawProof;
+  payload: PreparedWithdrawPayload;
+  message: WithdrawMessage;
+  selectedNote: FoundNote;
+}
+
+export interface PreparedWithdrawNotReady extends PreparedWithdrawBase {
+  status: Exclude<WithdrawPlan["status"], "withdraw_ready">;
+  signDoc?: never;
+  proverPayload?: never;
+  proof?: never;
+  payload?: never;
+  message?: never;
+  selectedNote?: never;
+}
+
+export type PreparedWithdraw = PreparedWithdrawReady | PreparedWithdrawNotReady;
+
+export interface PreparedRelayWithdraw extends ReservationReconciliationState {
   status: string;
   plan: WithdrawPlan;
   scan: ScanResult;
@@ -283,6 +417,7 @@ export interface PreparedRelayWithdraw {
   proof?: PreparedWithdrawProof;
   payload?: PreparedWithdrawPayload;
   selectedNote?: FoundNote;
+  reservation?: ReservationBatch | null;
   privacyAccount: PrivacyAccountSummary;
 }
 
@@ -337,6 +472,115 @@ export function assertSignerPubKey(address: ClairAddress, pubKeyHex: Hex, prefix
 };
 export function eventAttribute(event: object, key: string): string;
 export function isAuditableTransfer(event: object): boolean;
+export function cosmosSignDocBindingHash(signDoc: Pick<SignDocBase64, "bodyBytes" | "authInfoBytes">): Hex;
+
+export type DirectOperationEvidenceHashes =
+  | {
+      expectedRecipientHash?: never;
+      expected_recipient_hash?: never;
+      expectedAmountHash?: never;
+      expected_amount_hash?: never;
+    }
+  | {
+      expectedRecipientHash: string;
+      expectedAmountHash: string;
+      expected_recipient_hash?: string;
+      expected_amount_hash?: string;
+    }
+  | {
+      expected_recipient_hash: string;
+      expected_amount_hash: string;
+      expectedRecipientHash?: string;
+      expectedAmountHash?: string;
+    }
+  | {
+      expectedRecipientHash: string;
+      expected_amount_hash: string;
+      expected_recipient_hash?: string;
+      expectedAmountHash?: string;
+    }
+  | {
+      expected_recipient_hash: string;
+      expectedAmountHash: string;
+      expectedRecipientHash?: string;
+      expected_amount_hash?: string;
+    };
+
+type BatchRecipientHashEvidence =
+  | {
+      expectedRecipientHash: string;
+      expected_recipient_hash?: string;
+      expectedRecipientHashes?: readonly string[];
+      expected_recipient_hashes?: readonly string[];
+    }
+  | {
+      expected_recipient_hash: string;
+      expectedRecipientHash?: string;
+      expectedRecipientHashes?: readonly string[];
+      expected_recipient_hashes?: readonly string[];
+    }
+  | {
+      expectedRecipientHashes: readonly string[];
+      expectedRecipientHash?: string;
+      expected_recipient_hash?: string;
+      expected_recipient_hashes?: readonly string[];
+    }
+  | {
+      expected_recipient_hashes: readonly string[];
+      expectedRecipientHash?: string;
+      expected_recipient_hash?: string;
+      expectedRecipientHashes?: readonly string[];
+    };
+
+type BatchAmountHashEvidence =
+  | {
+      expectedAmountHashes: readonly string[];
+      expected_amount_hashes?: readonly string[];
+    }
+  | {
+      expected_amount_hashes: readonly string[];
+      expectedAmountHashes?: readonly string[];
+    };
+
+export type BatchOperationEvidenceHashes =
+  | {
+      expectedRecipientHash?: never;
+      expected_recipient_hash?: never;
+      expectedRecipientHashes?: never;
+      expected_recipient_hashes?: never;
+      expectedAmountHashes?: never;
+      expected_amount_hashes?: never;
+    }
+  | (BatchRecipientHashEvidence & BatchAmountHashEvidence);
+
+export type PrepareTransferBatchInput = {
+  wallet?: WalletAdapterLike;
+  material?: PrivacyMaterial;
+  amounts: CoinString[];
+  recipient: ShieldedAddress;
+  proverAdapter: ProverAdapter;
+  gasLimit?: number;
+  userPrivacyPolicy?: string | number;
+  userDisclosureMode?: string | number;
+  userDisclosureTargetPubKeyHex?: Hex;
+  auditDisclosureTargetPubKeyHex?: Hex;
+  denom?: string;
+  afterHeight?: Uint64CursorInput;
+  after_height?: Uint64CursorInput;
+  afterSequence?: Uint64CursorInput;
+  after_sequence?: Uint64CursorInput;
+  page?: number;
+  limit?: number;
+  maxPages?: number;
+  max_pages?: number;
+  eventTypes?: string[];
+  event_types?: string[];
+  scan?: PrivacyScanOptions;
+  scanSource?: "scan_events" | "privacy_events" | string;
+  scan_source?: "scan_events" | "privacy_events" | string;
+  reservationManager?: NoteReservationManager | null;
+  reservation_manager?: NoteReservationManager | null;
+} & BatchOperationEvidenceHashes;
 
 export class ClairveilJS {
   constructor(options: ClairveilClientOptions);
@@ -347,6 +591,14 @@ export class ClairveilJS {
   restUrl(path: string, endpoint?: string): string;
   fetchJson<T = object>(pathOrUrl: string, options?: {
     failover?: boolean;
+    retry?: QueryRetryOptions | false;
+    method?: string;
+    body?: BodyInit | null;
+    headers?: Record<string, string>;
+    endpoint?: string;
+    updateActiveEndpoint?: boolean;
+  }): Promise<T>;
+  fetchNullifierJson<T = object>(path: string, options?: {
     retry?: QueryRetryOptions | false;
     method?: string;
     body?: BodyInit | null;
@@ -365,7 +617,7 @@ export class ClairveilJS {
   fetchReserve(denom: string): Promise<ReserveResponse>;
   lookupMerklePath(commitmentHex: Hex): Promise<object>;
   checkNullifier(nullifierHex: Hex): Promise<object>;
-  checkNullifiers(nullifierHexes: Hex[]): Promise<Map<Hex, boolean>>;
+  checkNullifiers(nullifierHexes: readonly Hex[]): Promise<Map<Hex, boolean>>;
   deriveWalletPrivacyMaterial(wallet: WalletAdapterLike): Promise<PrivacyMaterial>;
   scanNotes(input: WalletScanInput): Promise<ScanResult & {
     scanCursor: PrivacyEventsCursor;
@@ -373,17 +625,14 @@ export class ClairveilJS {
   }>;
   fetchScanEvents(options?: PrivacyEventsQuery): Promise<object & {
     events?: object[];
-    next_height?: number;
-    next_sequence?: number;
+    next_height?: Uint64CursorValue;
+    next_sequence?: Uint64CursorValue;
     has_more?: boolean;
     scan_format_version?: number;
     view_tag_version?: number;
   }>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
-  findPrivacyEventByTxHash(txHash: Hex, options?: PrivacyEventsQuery & {
-    maxPages?: number;
-    max_pages?: number;
-  }): Promise<object>;
+  findPrivacyEventByTxHash(txHash: Hex, options?: PrivacyScanOptions): Promise<object>;
   derivePrivacyAccount(input: {
     address: ClairAddress;
     pubKeyHex?: Hex;
@@ -421,6 +670,8 @@ export class ClairveilJS {
     limit?: number;
     maxPages?: number;
     scan?: PrivacyScanOptions;
+    scanSource?: "scan_events" | "privacy_events" | string;
+    scan_source?: "scan_events" | "privacy_events" | string;
   }): Promise<{ plan: TransferPlan; scan: ScanResult }>;
   planWalletWithdraw(input: {
     wallet?: WalletAdapterLike;
@@ -430,6 +681,8 @@ export class ClairveilJS {
     limit?: number;
     maxPages?: number;
     scan?: PrivacyScanOptions;
+    scanSource?: "scan_events" | "privacy_events" | string;
+    scan_source?: "scan_events" | "privacy_events" | string;
   }): Promise<{ plan: WithdrawPlan; scan: ScanResult }>;
   buildDepositMessage(input: BuildDepositMessageInput): object;
   prepareDeposit(input: PrepareDepositInput): Promise<PreparedDeposit>;
@@ -446,26 +699,23 @@ export class ClairveilJS {
     userDisclosureTargetPubKeyHex?: Hex;
     auditDisclosureTargetPubKeyHex?: Hex;
     denom?: string;
+    afterHeight?: Uint64CursorInput;
+    after_height?: Uint64CursorInput;
+    afterSequence?: Uint64CursorInput;
+    after_sequence?: Uint64CursorInput;
+    page?: number;
     limit?: number;
     maxPages?: number;
+    max_pages?: number;
+    eventTypes?: string[];
+    event_types?: string[];
     scan?: PrivacyScanOptions;
-  }): Promise<PreparedTransfer>;
-  prepareTransferBatch(input: {
-    wallet?: WalletAdapterLike;
-    material?: PrivacyMaterial;
-    amounts: CoinString[];
-    recipient: ShieldedAddress;
-    proverAdapter: ProverAdapter;
-    gasLimit?: number;
-    userPrivacyPolicy?: string | number;
-    userDisclosureMode?: string | number;
-    userDisclosureTargetPubKeyHex?: Hex;
-    auditDisclosureTargetPubKeyHex?: Hex;
-    denom?: string;
-    limit?: number;
-    maxPages?: number;
-    scan?: PrivacyScanOptions;
-  }): Promise<PreparedTransferBatch>;
+    scanSource?: "scan_events" | "privacy_events" | string;
+    scan_source?: "scan_events" | "privacy_events" | string;
+    reservationManager?: NoteReservationManager | null;
+    reservation_manager?: NoteReservationManager | null;
+  } & DirectOperationEvidenceHashes): Promise<PreparedTransfer>;
+  prepareTransferBatch(input: PrepareTransferBatchInput): Promise<PreparedTransferBatch>;
   prepareWithdraw(input: {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
@@ -475,10 +725,24 @@ export class ClairveilJS {
     gasLimit?: number;
     denom?: string;
     assetDenom?: string;
+    afterHeight?: Uint64CursorInput;
+    after_height?: Uint64CursorInput;
+    afterSequence?: Uint64CursorInput;
+    after_sequence?: Uint64CursorInput;
+    page?: number;
     limit?: number;
     maxPages?: number;
+    max_pages?: number;
+    eventTypes?: string[];
+    event_types?: string[];
     scan?: PrivacyScanOptions;
+    scanSource?: "scan_events" | "privacy_events" | string;
+    scan_source?: "scan_events" | "privacy_events" | string;
     expiresAtUnix?: number;
+    chainNowUnix?: number;
+    chain_now_unix?: number;
+    reservationManager?: NoteReservationManager | null;
+    reservation_manager?: NoteReservationManager | null;
   }): Promise<PreparedWithdraw>;
   prepareRelayWithdraw(input: {
     wallet?: WalletAdapterLike;
@@ -488,33 +752,49 @@ export class ClairveilJS {
     proverAdapter: ProverAdapter;
     denom?: string;
     assetDenom?: string;
+    afterHeight?: Uint64CursorInput;
+    after_height?: Uint64CursorInput;
+    afterSequence?: Uint64CursorInput;
+    after_sequence?: Uint64CursorInput;
+    page?: number;
     limit?: number;
     maxPages?: number;
+    max_pages?: number;
+    eventTypes?: string[];
+    event_types?: string[];
     scan?: PrivacyScanOptions;
+    scanSource?: "scan_events" | "privacy_events" | string;
+    scan_source?: "scan_events" | "privacy_events" | string;
     expiresAtUnix?: number;
-  }): Promise<PreparedRelayWithdraw>;
+    reservationManager?: NoteReservationManager | null;
+    reservation_manager?: NoteReservationManager | null;
+  } & RelayChainTimeInput): Promise<PreparedRelayWithdraw>;
   createDepositSignDoc(input: Parameters<ClairveilJS["prepareDeposit"]>[0]): Promise<PreparedDeposit>;
   createTransferSignDoc(input: Parameters<ClairveilJS["prepareTransfer"]>[0]): Promise<PreparedTransfer & { status: "ready"; signDoc: SignDocBase64 }>;
   createTransferBatchSignDoc(input: Parameters<ClairveilJS["prepareTransferBatch"]>[0]): Promise<PreparedTransferBatch & { status: "ready"; signDoc: SignDocBase64 }>;
-  createWithdrawSignDoc(input: Parameters<ClairveilJS["prepareWithdraw"]>[0]): Promise<PreparedWithdraw & { status: "ready"; signDoc: SignDocBase64 }>;
+  createWithdrawSignDoc(input: Parameters<ClairveilJS["prepareWithdraw"]>[0]): Promise<PreparedWithdrawReady>;
   createRelayWithdrawPayload(input: Parameters<ClairveilJS["prepareRelayWithdraw"]>[0]): Promise<PreparedRelayWithdraw & { status: "ready"; payload: PreparedWithdrawPayload }>;
   buildPreparedTransferPayload(input: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;
   buildTransferMessage(input: PreparedTransferPayloadInput & {
-    proverAdapter?: ProverAdapter;
+    proverAdapter: ProverAdapter;
+    checkNullifiers?: import("../privacy/payload.js").NullifierStatusReader;
   }): Promise<TransferMessageBuildResult>;
   buildPreparedWithdrawProverPayload(input: PreparedWithdrawProverPayloadInput): Promise<PreparedWithdrawProverPayloadResult>;
-  buildRelayWithdrawPayload(input: PreparedWithdrawProverPayloadInput & {
-    proverAdapter?: ProverAdapter;
+  buildRelayWithdrawPayload(input: Omit<PreparedWithdrawProverPayloadInput, "chainNowUnix"> & {
+    chainNowUnix: number;
+    proverAdapter: ProverAdapter;
+    checkNullifiers?: import("../privacy/payload.js").NullifierStatusReader;
   }): Promise<RelayWithdrawPayloadBuildResult>;
   buildWithdrawMessage(input: PreparedWithdrawProverPayloadInput & {
-    proverAdapter?: ProverAdapter;
+    proverAdapter: ProverAdapter;
     creator?: ClairAddress | string;
+    checkNullifiers?: import("../privacy/payload.js").NullifierStatusReader;
   }): Promise<WithdrawMessageBuildResult>;
   buildRelayWithdrawMessageFromPayload(input: {
     payload: PreparedWithdrawPayload;
     relayer?: ClairAddress | string;
     creator?: ClairAddress | string;
-  } & RelayWithdrawRelayOptions): WithdrawMessage;
+  } & CosmosRelayWithdrawRelayOptions): WithdrawMessage;
   createRelayWithdrawSignDoc(input: {
     payload: PreparedWithdrawPayload;
     relayer?: ClairAddress | string;
@@ -524,7 +804,7 @@ export class ClairveilJS {
     gasLimit?: number;
     feeAmount?: Array<object>;
     memo?: string;
-  } & RelayWithdrawRelayOptions): Promise<PreparedRelayWithdrawSignDoc>;
+  } & CosmosRelayWithdrawRelayOptions): Promise<PreparedRelayWithdrawSignDoc>;
   decodeUserDisclosure(input: {
     txHash?: Hex;
     tx_hash?: Hex;
@@ -535,15 +815,7 @@ export class ClairveilJS {
     signature_base64?: Base64;
     skipSignerPubKeyCheck?: boolean;
     skip_signer_pubkey_check?: boolean;
-    afterHeight?: number;
-    after_height?: number;
-    page?: number;
-    limit?: number;
-    maxPages?: number;
-    max_pages?: number;
-    eventTypes?: string[];
-    event_types?: string[];
-  }): Promise<import("../core/disclosure.js").DisclosureReport>;
+  } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
   decodeSelfViewDisclosure(input: {
     txHash?: Hex;
     tx_hash?: Hex;
@@ -558,29 +830,13 @@ export class ClairveilJS {
     disclosure_scalar?: bigint | string | number;
     disclosureScalarHex?: Hex;
     disclosure_scalar_hex?: Hex;
-    afterHeight?: number;
-    after_height?: number;
-    page?: number;
-    limit?: number;
-    maxPages?: number;
-    max_pages?: number;
-    eventTypes?: string[];
-    event_types?: string[];
-  }): Promise<import("../core/disclosure.js").DisclosureReport>;
+  } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
   decodeAuditDisclosure(input: {
     txHash?: Hex;
     tx_hash?: Hex;
     disclosurePrivKeyHex?: Hex;
     disclosure_privkey_hex?: Hex;
-    afterHeight?: number;
-    after_height?: number;
-    page?: number;
-    limit?: number;
-    maxPages?: number;
-    max_pages?: number;
-    eventTypes?: string[];
-    event_types?: string[];
-  }): Promise<import("../core/disclosure.js").DisclosureReport>;
+  } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
   buildDirectSignDoc(input: {
     signer: ClairAddress;
     pubKeyHex: Hex;
@@ -590,8 +846,8 @@ export class ClairveilJS {
     feeAmount?: Array<object>;
   }): Promise<SignDocBase64>;
   buildTxRawBytes(signedTx: SignedTxBase64): Uint8Array;
-  broadcastSignedTx(signedTx: SignedTxBase64, waitOptions?: object): Promise<BroadcastSignedTxResult>;
-  signDirectAndBroadcast(input: { wallet: WalletAdapterLike; signDoc: SignDocBase64; waitOptions?: object }): Promise<BroadcastSignedTxResult>;
+  broadcastSignedTx(signedTx: SignedTxBase64, waitOptions?: ReservationBroadcastOptions): Promise<BroadcastSignedTxResult>;
+  signDirectAndBroadcast(input: ReservationBroadcastOptions & { wallet: WalletAdapterLike; signDoc: SignDocBase64; waitOptions?: { attempts?: number; intervalMs?: number } }): Promise<BroadcastSignedTxResult>;
 }
 
 export function createClairveilClient(options: {

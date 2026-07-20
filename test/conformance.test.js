@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { fromBech32, toBech32 } from "@cosmjs/encoding";
 import {
   buildRootSigningMessage,
   bytesFromHex,
@@ -8,6 +9,7 @@ import {
   deriveSpendKeys,
   deriveViewKeys,
   encodeShieldedAddress,
+  FIELD_MODULUS,
   hexFromBytes
 } from "clairveiljs/core";
 import {
@@ -40,10 +42,25 @@ import {
 } from "clairveiljs/payload";
 import { MsgWithdraw } from "clairveiljs/cosmos";
 import { derivePrivacyMaterialFromWallet } from "clairveiljs/wallet-adapter";
+import {
+  activeReservationStatuses,
+  canRecoverReservationAfterLeaseExpiry,
+  canTransitionReservation,
+  createNoteReservationManager,
+  hashAmount,
+  hashRecipient,
+  MemoryReservationStore,
+  nullifierLookupKey,
+  operationStatuses,
+  preparePlanReservation,
+  requiresReservationLeaseToken,
+  reservationStatuses
+} from "clairveiljs/reservation";
 import { runClairveilConformanceFixtures } from "clairveiljs/conformance";
 import {
   conformanceFixtureRelativePath,
   defaultConformanceFixtureDir,
+  defaultConformanceFixtureNames,
   suggestClairveilConformanceFixtureDirs
 } from "clairveiljs/conformance";
 import {
@@ -122,6 +139,380 @@ test("conformance helper loads selected handoff fixtures", fixtureTestOptions, a
   assert.equal(result.fixtures["privacy_wallet_golden_vectors.json"].schema_version, "v1");
 });
 
+test("conformance helper default fixtures include the reservation contract", fixtureTestOptions, async () => {
+  assert.ok(defaultConformanceFixtureNames.includes("privacy_note_reservation_contract.json"));
+  assert.ok(defaultConformanceFixtureNames.includes("privacy_relay_withdraw_contract.json"));
+  const result = await runClairveilConformanceFixtures({ fixtureDir });
+  const contract = result.fixtures["privacy_note_reservation_contract.json"];
+  assert.equal(contract.version, 3);
+  assert.deepEqual(contract.fixture_migration, {
+    from_version: 1,
+    to_version: 3,
+    downstream_action: "Fail closed for malformed or unavailable nullifier/chain-time evidence, keep the lease heartbeat through ProofReady CAS, durably record leased relay handoff before external delivery, and regenerate fixture/schema validators."
+  });
+  assert.deepEqual(
+    contract.lease_transition_preconditions.token_required_for,
+    [
+      ["Reserved", "Proving"],
+      ["Proving", "ProofReady"],
+      ["Proving", "Reserved"],
+      ["Proving", "ReplanRequired"],
+      ["Proving", "ManualReview"],
+      ["ProofReady", "Submitted"],
+      ["ProofReady", "Unknown"],
+      ["ProofReady", "ReplanRequired"],
+      ["ProofReady", "ManualReview"]
+    ]
+  );
+  assert.deepEqual(
+    contract.lease_transition_preconditions.recovery_without_token_after_expiry_for,
+    [
+    ["Proving", "ReplanRequired"],
+    ["Proving", "ManualReview"],
+    ["ProofReady", "ManualReview"]
+    ]
+  );
+  assert.ok(contract.success_evidence_required.includes("matching_persisted_tx_identity"));
+  assert.ok(contract.success_evidence_required.includes("expected_recipient_hash"));
+  assert.ok(contract.success_evidence_required.includes("expected_amount_hash"));
+  assert.deepEqual(
+    contract.evidence_immutability.mutation_rejection_vectors.map(vector => vector.field),
+    contract.evidence_immutability.write_once_fields
+  );
+  assert.deepEqual(contract.fail_closed_runtime_policy, {
+    nullifier_spent_evidence: {
+      spent_value: true,
+      unspent_value: false,
+      other_values: "unknown_excluded_from_spending"
+    },
+    relay_submission: {
+      chain_time_source: "latest_chain_block_time",
+      chain_time_required: true,
+      recheck_immediately_before_broadcast: true,
+      on_unavailable: "reject_submit"
+    },
+    heartbeat: {
+      coverage: ["proof_generation", "transaction_or_sign_doc_build", "proof_ready_transition"],
+      await_in_flight_before_stop: true
+    },
+    broadcast_boundary: {
+      durable_attempt_before_external_call: true,
+      retry_blocked_until_reconciled: true
+    }
+  });
+});
+
+test("reservation contract fixtures replay lookup, lease, and tx identity semantics", fixtureTestOptions, async () => {
+  const contract = readFixture("privacy_note_reservation_contract.json");
+  const vector = contract.nullifier_lookup_key.test_vectors[0];
+  assert.equal(
+    nullifierLookupKey(vector.index_key_utf8, vector.nullifier_utf8),
+    vector.lookup_key_hex
+  );
+  for (const hashVector of contract.operation_hash_test_vectors || []) {
+    assert.equal(hashRecipient(hashVector.recipient), hashVector.recipient_hash);
+    assert.equal(
+      hashAmount(hashVector.denom, hashVector.amount),
+      hashVector.amount_hash
+    );
+  }
+  for (const rejectionVector of contract.operation_hash_rejection_vectors || []) {
+    if (rejectionVector.reject_hash === "recipient") {
+      assert.throws(
+        () => hashRecipient(rejectionVector.recipient),
+        /(recipient is required|shielded address|bech32)/i
+      );
+    } else {
+      assert.throws(
+        () => hashAmount(rejectionVector.denom, rejectionVector.amount),
+        /(denom is required|denom must be|amount must be)/
+      );
+    }
+  }
+
+  const canonicalRecipient = fromBech32(contract.operation_hash_test_vectors[0].recipient);
+  const nonCanonicalRecipientBytes = Uint8Array.from(canonicalRecipient.data);
+  const compressedPoint = nonCanonicalRecipientBytes.slice(0, 32);
+  const sign = compressedPoint[31] & 0x80;
+  compressedPoint[31] &= 0x7f;
+  let y = 0n;
+  for (let index = compressedPoint.length - 1; index >= 0; index -= 1) {
+    y = (y << 8n) | BigInt(compressedPoint[index]);
+  }
+  const nonCanonicalY = y + FIELD_MODULUS;
+  assert.ok(nonCanonicalY < (1n << 255n));
+  let remaining = nonCanonicalY;
+  for (let index = 0; index < compressedPoint.length; index += 1) {
+    compressedPoint[index] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
+  compressedPoint[31] |= sign;
+  nonCanonicalRecipientBytes.set(compressedPoint, 0);
+  const nonCanonicalRecipient = toBech32(canonicalRecipient.prefix, nonCanonicalRecipientBytes, 200);
+  assert.throws(
+    () => hashRecipient(nonCanonicalRecipient),
+    /valid shielded address/
+  );
+
+  const note = {
+    note: {
+      receiverSpendPubKeyX: 1n,
+      receiverSpendPubKeyY: 2n,
+      receiverViewPubKeyX: 3n,
+      receiverViewPubKeyY: 4n,
+      amount: 5n,
+      assetID: 7n,
+      randomness: 8n,
+      memo: ""
+    },
+    nullifier: "ab".repeat(32),
+    txHash: "DISCOVERY-TX",
+    height: 12,
+    sequence: 3
+  };
+  const manager = createNoteReservationManager({
+    store: new MemoryReservationStore(),
+    ownerKeyId: "clairveil:conformance",
+    indexKey: vector.index_key_utf8
+  });
+  const batch = await preparePlanReservation(manager, {
+    plan: { selectedNote: note },
+    kind: "payment"
+  });
+  await assert.rejects(
+    () => manager.markProofReady(batch.reservation_ids, { leaseToken: "wrong" }),
+    /lease token/
+  );
+  await manager.markProofReady(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    expectedOutputCommitment: "OUTPUT",
+    expectedDisclosureDigest: "DISCLOSURE",
+    expectedRecipientHash: "RECIPIENT",
+    expectedAmountHash: "AMOUNT",
+    expectedDenom: "uclair",
+    // Direct integration does not make a batch item position part of its predicate.
+    batchItemIndexKnown: false,
+    operationSuccessEvidenceRequired: true
+  });
+  await manager.markBroadcastAttempting(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    txHash: contract.operation_identity_evidence.vectors[0].stored_tx_hash
+  });
+  await manager.markSubmitted(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    txHash: contract.operation_identity_evidence.vectors[0].stored_tx_hash
+  });
+  await manager.reconcileSpentNotes([{
+    ...note,
+    isSpent: true,
+    operationSuccessEvidence: {
+      txResult: contract.operation_identity_evidence.vectors[0].tx_result,
+      outputCommitment: "OUTPUT",
+      disclosureDigest: "DISCLOSURE",
+      recipientHash: "RECIPIENT",
+      amountHash: "AMOUNT",
+      denom: "uclair"
+    }
+  }]);
+  const record = await manager.getReservation(batch.reservation_ids[0]);
+  assert.equal(record.status, reservationStatuses.ConfirmedSpent);
+  assert.equal(
+    record.metadata.operation_status,
+    operationStatuses[contract.operation_identity_evidence.vectors[0].operation_status]
+  );
+  assert.deepEqual(record.metadata.operation_success_evidence_errors, [
+    "tx_hash_or_tx_result identity missing"
+  ]);
+});
+
+test("reservation contract fixture replays state, lease, and direct operation-evidence policy", fixtureTestOptions, async () => {
+  const contract = readFixture("privacy_note_reservation_contract.json");
+  assert.deepEqual(activeReservationStatuses, contract.active_reservation_statuses);
+  for (const [from, to] of contract.allowed_transitions) {
+    assert.equal(canTransitionReservation(from, to), true, `${from} -> ${to}`);
+  }
+  for (const [from, to] of contract.rejected_transitions) {
+    assert.equal(canTransitionReservation(from, to), false, `${from} -> ${to}`);
+  }
+  const fixtureTransitions = new Set(
+    contract.allowed_transitions.map(([from, to]) => `${from}\0${to}`)
+  );
+  for (const from of Object.values(reservationStatuses)) {
+    for (const to of Object.values(reservationStatuses)) {
+      if (canTransitionReservation(from, to)) {
+        assert.equal(
+          fixtureTransitions.has(`${from}\0${to}`),
+          true,
+          `fixture is missing allowed transition ${from} -> ${to}`
+        );
+      }
+    }
+  }
+  const actualLeaseRequiredTransitions = contract.allowed_transitions.filter(([from, to]) =>
+    requiresReservationLeaseToken(from, to)
+  );
+  assert.deepEqual(
+    actualLeaseRequiredTransitions,
+    contract.lease_transition_preconditions.token_required_for
+  );
+  const actualExpiredLeaseRecoveryTransitions = contract.allowed_transitions.filter(([from, to]) =>
+    canRecoverReservationAfterLeaseExpiry(from, to)
+  );
+  assert.deepEqual(
+    actualExpiredLeaseRecoveryTransitions,
+    contract.lease_transition_preconditions.recovery_without_token_after_expiry_for
+  );
+
+  const makeManager = () => createNoteReservationManager({
+    store: new MemoryReservationStore(),
+    ownerKeyId: "clairveil:conformance-direct",
+    indexKey: "conformance-direct-index-key"
+  });
+  const makeNote = (nullifier, sequence) => ({
+    note: {
+      receiverSpendPubKeyX: 1n,
+      receiverSpendPubKeyY: 2n,
+      receiverViewPubKeyX: 3n,
+      receiverViewPubKeyY: 4n,
+      amount: 5n,
+      assetID: 7n,
+      randomness: 8n,
+      memo: ""
+    },
+    nullifier,
+    txHash: "DISCOVERY-TX",
+    height: 12,
+    sequence
+  });
+  const prepare = async (manager, note) => {
+    const batch = await preparePlanReservation(manager, {
+      plan: { selectedNote: note },
+      kind: "payment"
+    });
+    await manager.markProofReady(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      expectedOutputCommitment: "OUTPUT",
+      expectedDisclosureDigest: "DISCLOSURE",
+      expectedRecipientHash: "RECIPIENT",
+      expectedAmountHash: "AMOUNT",
+      expectedDenom: "uclair",
+      // Direct integrations may omit an item position from the success predicate.
+      batchItemIndexKnown: false,
+      operationSuccessEvidenceRequired: true
+    });
+    await manager.markBroadcastAttempting(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      txHash: "EXPECTED-TX"
+    });
+    await manager.markSubmitted(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      txHash: "EXPECTED-TX"
+    });
+    return batch;
+  };
+  const evidence = {
+    outputCommitment: "OUTPUT",
+    disclosureDigest: "DISCLOSURE",
+    recipientHash: "RECIPIENT",
+    amountHash: "AMOUNT",
+    denom: "uclair"
+  };
+
+  const immutableManager = makeManager();
+  const immutableNote = makeNote("ab".repeat(32), 3);
+  const immutableBatch = await preparePlanReservation(immutableManager, {
+    plan: { selectedNote: immutableNote },
+    kind: "payment"
+  });
+  await immutableManager.markProofReady(immutableBatch.reservation_ids, {
+    leaseToken: immutableBatch.lease_token,
+    payloadHash: "payload-a",
+    expectedOutputCommitment: "output-a",
+    expectedDisclosureDigest: "disclosure-a",
+    expectedRecipientHash: "recipient-a",
+    expectedAmount: "7",
+    expectedAmountHash: "amount-a",
+    expectedDenom: "uclair",
+    batchItemIndex: 0,
+    batchItemIndexKnown: true,
+    operationSuccessEvidenceRequired: true
+  });
+  await immutableManager.markBroadcastAttempting(immutableBatch.reservation_ids, {
+    leaseToken: immutableBatch.lease_token,
+    txHash: "tx-a"
+  });
+  const immutableRecord = await immutableManager.getReservation(immutableBatch.reservation_ids[0]);
+  const predicateFields = new Set([
+    "expected_output_commitment",
+    "expected_disclosure_digest",
+    "expected_recipient_hash",
+    "expected_amount",
+    "expected_amount_hash",
+    "expected_denom",
+    "batch_item_index",
+    "batch_item_index_known",
+    "operation_success_evidence_required"
+  ]);
+  for (const vector of contract.evidence_immutability.mutation_rejection_vectors.filter(
+    vector => predicateFields.has(vector.field)
+  )) {
+    const mutation = vector.field === "operation_success_evidence_required"
+      ? { metadata: { ...immutableRecord.metadata, [vector.field]: vector.mutation } }
+      : { [vector.field]: vector.mutation };
+    await assert.rejects(
+      () => immutableManager.store.compareAndSetReservationStatus(
+        immutableRecord.reservation_id,
+        reservationStatuses.ProofReady,
+        reservationStatuses.Submitted,
+        {
+          lease_owner: immutableRecord.lease_owner,
+          lease_token: immutableRecord.lease_token,
+          submitted_tx_hash: "tx-a",
+          ...mutation
+        }
+      ),
+      /not allowed|write-once/
+    );
+  }
+
+  const [bareIdentity, mismatchedIdentity, matchingIdentity] = contract.operation_identity_evidence.vectors;
+  const mismatchedManager = makeManager();
+  const mismatchedNote = makeNote("cd".repeat(32), 4);
+  const mismatchedBatch = await prepare(mismatchedManager, mismatchedNote);
+  await mismatchedManager.reconcileSpentNotes([{
+    ...mismatchedNote,
+    isSpent: true,
+    operationSuccessEvidence: {
+      txResult: mismatchedIdentity.tx_result,
+      ...evidence
+    }
+  }]);
+  const mismatched = await mismatchedManager.getReservation(
+    mismatchedBatch.reservation_ids[0]
+  );
+  assert.equal(mismatched.metadata.operation_status, operationStatuses[mismatchedIdentity.operation_status]);
+  assert.deepEqual(mismatched.metadata.operation_success_evidence_errors, [
+    "tx_hash_or_tx_bytes mismatch"
+  ]);
+
+  const matchingManager = makeManager();
+  const matchingNote = makeNote("ef".repeat(32), 5);
+  const matchingBatch = await prepare(matchingManager, matchingNote);
+  await matchingManager.reconcileSpentNotes([{
+    ...matchingNote,
+    isSpent: true,
+    operationSuccessEvidence: {
+      txResult: matchingIdentity.tx_result,
+      ...evidence
+    }
+  }]);
+  const matching = await matchingManager.getReservation(
+    matchingBatch.reservation_ids[0]
+  );
+  assert.equal(matching.metadata.operation_status, operationStatuses[matchingIdentity.operation_status]);
+  assert.deepEqual(matching.metadata.operation_success_evidence_errors, []);
+});
+
 test("conformance helper defaults use repo-relative fixture discovery", () => {
   assert.equal(conformanceFixtureRelativePath, "x/privacy/client/sdk/conformance/testdata");
   assert.equal(defaultConformanceFixtureDir, `../clairveil/${conformanceFixtureRelativePath}`);
@@ -185,6 +576,9 @@ test("readonly note scan matches the Go reference bundle", fixtureTestOptions, a
     attributes: [{
       key: "cipher_text_1",
       value: hexFromBytes(asymEncrypt(noteBytes, view.pubKey))
+    }, {
+      key: "commitment_1",
+      value: vectors.note.commitment_hex
     }]
   };
   const transferScan = await scanNotes({
@@ -194,6 +588,49 @@ test("readonly note scan matches the Go reference bundle", fixtureTestOptions, a
   });
 
   assert.deepEqual(foundNoteSummary(transferScan.foundNotes[0]), reference.scan.transfer_found[0]);
+});
+
+test("raw scans reject missing or mismatched commitments", fixtureTestOptions, async () => {
+  const vectors = readFixture("privacy_wallet_golden_vectors.json");
+  const rootSeed = bytesFromHex(vectors.sender_root_seed.root_seed_hex, "sender root seed");
+  const noteBytes = bytesFromHex(vectors.note.note_json_hex, "golden note JSON");
+  const view = deriveViewKeys(rootSeed);
+  const transferCiphertext = hexFromBytes(asymEncrypt(noteBytes, view.pubKey));
+
+  const missingDepositCommitment = await scanNotes({
+    rootSeed,
+    events: [{
+      event_type: "deposit",
+      attributes: [{ key: "encrypted_note", value: vectors.note.encrypted_note_hex }]
+    }],
+    includeFoundNotes: true
+  });
+  assert.equal(missingDepositCommitment.foundNotes.length, 0);
+
+  const missingTransferCommitment = await scanNotes({
+    rootSeed,
+    events: [{
+      event_type: "shielded_transfer",
+      attributes: [{ key: "cipher_text_1", value: transferCiphertext }]
+    }],
+    includeFoundNotes: true
+  });
+  assert.equal(missingTransferCommitment.foundNotes.length, 0);
+
+  const mismatchedTransferCommitment = await scanNotes({
+    rootSeed,
+    events: [{
+      event_type: "shielded_transfer",
+      attributes: [
+        { key: "cipher_text_1", value: transferCiphertext },
+        { key: "commitment_1", value: "00".repeat(32) },
+        { key: "cipher_text_2", value: transferCiphertext },
+        { key: "commitment_2", value: "ff".repeat(32) }
+      ]
+    }],
+    includeFoundNotes: true
+  });
+  assert.equal(mismatchedTransferCommitment.foundNotes.length, 0);
 });
 
 test("prepared transfer and withdraw payload hashes match Go fixtures", fixtureTestOptions, () => {
@@ -237,7 +674,8 @@ test("withdraw planner and relay payload validation reject unsafe variants", fix
     nullifier: computeNoteNullifierHex(note),
     txHash: vectors.scan.tx_hash_hex,
     height: vectors.scan.height,
-    isSpent: false
+    isSpent: false,
+    nullifierStatus: "unspent"
   };
 
   const plan = planWithdrawNotes({
@@ -300,7 +738,7 @@ test("relay withdraw handoff builds the Go-compatible relay message", fixtureTes
 
   assert.equal(
     validateRelayWithdrawPayload(payload, {
-      nowUnix: 4102444800,
+      chainNowUnix: 4102444800,
       expectedChainId: expected.chain_id,
       expectedRecipient: expected.recipient,
       accountPrefix: "clair"
@@ -309,7 +747,7 @@ test("relay withdraw handoff builds the Go-compatible relay message", fixtureTes
   );
 
   const message = buildRelayWithdrawMsgFromPayload(payload, relay.relayer.address, {
-    nowUnix: 4102444800,
+    chainNowUnix: 4102444800,
     expectedChainId: expected.chain_id,
     expectedRecipient: expected.recipient,
     accountPrefix: "clair"
@@ -325,8 +763,29 @@ test("relay withdraw handoff builds the Go-compatible relay message", fixtureTes
   assert.equal(message.expiresAtUnix.toString(), String(expected.expires_at_unix));
 
   assert.throws(
+    () => validateRelayWithdrawPayload(payload, {
+      expectedChainId: expected.chain_id,
+      expectedRecipient: expected.recipient,
+      accountPrefix: "clair"
+    }),
+    /chainNowUnix is required/
+  );
+
+  for (const chainNowUnix of [null, "", " ", false, true, Number.NaN]) {
+    assert.throws(
+      () => validateRelayWithdrawPayload(payload, {
+        chainNowUnix,
+        expectedChainId: expected.chain_id,
+        expectedRecipient: expected.recipient,
+        accountPrefix: "clair"
+      }),
+      /chainNowUnix is required/
+    );
+  }
+
+  assert.throws(
     () => buildRelayWithdrawMsgFromPayload(payload, relay.relayer.address, {
-      nowUnix: 4102444800,
+      chainNowUnix: 4102444800,
       expectedChainId: "wrong-chain",
       accountPrefix: "clair"
     }),
@@ -334,15 +793,19 @@ test("relay withdraw handoff builds the Go-compatible relay message", fixtureTes
   );
   assert.throws(
     () => buildRelayWithdrawMsgFromPayload(payload, relay.relayer.address, {
-      nowUnix: 4102444800,
+      chainNowUnix: 4102444800,
       expectedRecipient: "clair1pyysjzgfpyysjzgfpyysjzgfpyysjzgf0j5ga5",
       accountPrefix: "clair"
     }),
     /withdraw payload recipient mismatch/
   );
+  assert.doesNotThrow(() => buildRelayWithdrawMsgFromPayload(payload, relay.relayer.address, {
+    chainNowUnix: expected.expires_at_unix,
+    accountPrefix: "clair"
+  }));
   assert.throws(
     () => buildRelayWithdrawMsgFromPayload(payload, relay.relayer.address, {
-      nowUnix: expected.expires_at_unix,
+    chainNowUnix: expected.expires_at_unix + 1,
       accountPrefix: "clair"
     }),
     /withdraw payload expired/

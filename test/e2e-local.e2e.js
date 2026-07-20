@@ -167,12 +167,29 @@ function assertDisclosureReport(report, label, config, amount) {
   assert.equal(report.asset_denom ?? report.summary?.asset_denom, config.denom);
 }
 
-async function broadcastPrepared(client, wallet, prepared, label, config) {
+async function latestChainBlockTimeUnix(config) {
+  const response = await fetch(`${config.rest}/cosmos/base/tendermint/v1beta1/blocks/latest`);
+  if (!response.ok) {
+    throw new Error(`latest block time query failed with HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  const value = data?.block?.header?.time ?? data?.sdk_block?.header?.time;
+  const milliseconds = Date.parse(String(value || ""));
+  if (!Number.isFinite(milliseconds)) throw new Error("latest block response omitted a valid block time");
+  return Math.floor(milliseconds / 1000);
+}
+
+async function broadcastPrepared(client, wallet, prepared, label, config, { relayWithdraw = false } = {}) {
   assert.equal(prepared.status, "ready", `${label} should be ready`);
   assert.ok(prepared.signDoc, `${label} should include a signDoc`);
+  if (relayWithdraw) assert.ok(prepared.payload, `${label} should include a withdraw payload`);
   const result = await client.signDirectAndBroadcast({
     wallet,
     signDoc: prepared.signDoc,
+    ...(relayWithdraw ? {
+      relayPayload: prepared.payload,
+      getChainNowUnix: () => latestChainBlockTimeUnix(config)
+    } : {}),
     waitOptions: config.waitOptions
   });
   return assertBroadcastOk(result, label);
@@ -357,7 +374,7 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
     });
     assert.equal(withdraw.status, "ready", withdraw.plan?.message || "withdraw should be ready");
 
-    await broadcastPrepared(client, wallet, withdraw, "withdraw", config);
+    await broadcastPrepared(client, wallet, withdraw, "withdraw", config, { relayWithdraw: true });
   } finally {
     await client.disconnect();
   }

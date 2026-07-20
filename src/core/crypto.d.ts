@@ -81,6 +81,7 @@ export function deriveSpendKeys(rootSeed: BytesLike): KeyPair;
 export function deriveViewKeys(rootSeed: BytesLike): KeyPair;
 export function deriveDisclosureKeys(rootSeed: BytesLike): KeyPair;
 export function encodeShieldedAddress(spendPubKey: Point, viewPubKey: Point, options?: string | PrefixOptions): ShieldedAddress;
+export function canonicalizeShieldedAddressForOperationHash(address: string, options?: string | PrefixOptions): ShieldedAddress;
 export function decodeShieldedAddress(address: ShieldedAddress, options?: string | PrefixOptions): { spendPubKey: Point; viewPubKey: Point };
 export function deriveShieldedAddress(rootSeed: BytesLike, options?: PrefixOptions): ShieldedAddress;
 export function derivePrivacyMaterial(input: { address: ClairAddress; pubKeyHex: Hex; signatureBase64: Base64; shieldedPrefix?: string }): PrivacyMaterial;

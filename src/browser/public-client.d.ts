@@ -1,8 +1,10 @@
+export type Uint64CursorInput = number | bigint | string;
+
 export interface PrivacyEventsQuery {
-  afterHeight?: number;
-  after_height?: number;
-  afterSequence?: number;
-  after_sequence?: number;
+  afterHeight?: Uint64CursorInput;
+  after_height?: Uint64CursorInput;
+  afterSequence?: Uint64CursorInput;
+  after_sequence?: Uint64CursorInput;
   page?: number;
   limit?: number;
   eventTypes?: string[];
@@ -44,11 +46,23 @@ export class ClairveilPublicClient {
   restEndpoints: string[];
   activeRestEndpoint: string;
   restUrl(path: string, endpoint?: string): string;
-  fetchJson<T = object>(pathOrUrl: string, options?: { method?: string; body?: BodyInit | null; headers?: Record<string, string>; failover?: boolean }): Promise<T>;
+  fetchJson<T = object>(pathOrUrl: string, options?: {
+    method?: string;
+    body?: BodyInit | null;
+    headers?: Record<string, string>;
+    failover?: boolean;
+    endpoint?: string;
+    updateActiveEndpoint?: boolean;
+  }): Promise<T>;
+  fetchNullifierJson<T = object>(path: string, options?: {
+    method?: string;
+    body?: BodyInit | null;
+    headers?: Record<string, string>;
+  }): Promise<T>;
   fetchPrivacyEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchScanEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   checkNullifier(nullifierHex: string): Promise<object & { used?: boolean; Used?: boolean }>;
-  checkNullifiers(nullifierHexes: string[]): Promise<Map<string, boolean>>;
+  checkNullifiers(nullifierHexes: readonly string[]): Promise<Map<string, boolean>>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
 }

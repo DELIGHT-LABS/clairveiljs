@@ -13,7 +13,9 @@ export const defaultConformanceFixtureNames = Object.freeze([
   "privacy_wallet_readonly_reference_bundle.json",
   "privacy_prover_example_bundle.json",
   "privacy_prover_http_api_contract.json",
-  "privacy_send_capable_reference_flow.json"
+  "privacy_send_capable_reference_flow.json",
+  "privacy_note_reservation_contract.json",
+  "privacy_relay_withdraw_contract.json"
 ]);
 
 export function suggestClairveilConformanceFixtureDirs({ cwd = process.cwd() } = {}) {

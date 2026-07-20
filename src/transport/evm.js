@@ -19,6 +19,7 @@ import {
   normalizeBech32Prefix,
   normalizeHex
 } from "../core/crypto.js";
+import { sha256Hex } from "../core/browser-crypto.js";
 
 const { keccak_256: keccak256 } = sha3;
 const zeroWord = "0".repeat(64);
@@ -30,6 +31,307 @@ const referenceWithdrawSignature = "withdraw(bytes,bytes32,bytes32,uint256,addre
 const evmPrivacyDepositSignature = "deposit((string,bytes,bytes))";
 const evmPrivacyTransferSignature = "transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))";
 const evmPrivacyWithdrawSignature = "withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))";
+const evmTransactionMarker = Symbol("clairveil.evm-transaction");
+const evmTransactionMetadataField = "__clairveilEvmTransaction";
+
+function normalizedEvmQuantity(value, label) {
+  if (value == null || String(value).trim() === "") return "";
+  let quantity;
+  try {
+    quantity = BigInt(value);
+  } catch {
+    throw new Error(`${label} must be an EVM quantity`);
+  }
+  if (quantity < 0n) throw new Error(`${label} must be non-negative`);
+  return `0x${quantity.toString(16)}`;
+}
+
+function markedEvmTransaction(transaction, metadata = {}) {
+  if (!transaction || typeof transaction !== "object") return transaction;
+  const current = {
+    ...(transaction[evmTransactionMetadataField] || {}),
+    ...(transaction[evmTransactionMarker] || {})
+  };
+  const next = Object.freeze({ ...current, ...metadata });
+  const marked = { ...transaction };
+  Object.defineProperty(marked, evmTransactionMetadataField, {
+    value: next,
+    enumerable: true,
+    configurable: true
+  });
+  Object.defineProperty(marked, evmTransactionMarker, {
+    value: next,
+    enumerable: true,
+    configurable: true
+  });
+  return marked;
+}
+
+function evmTransactionMetadata(transaction) {
+  return {
+    ...(transaction?.[evmTransactionMetadataField] || {}),
+    ...(transaction?.[evmTransactionMarker] || {})
+  };
+}
+
+function canonicalExternalEvmTransaction(transaction) {
+  if (!transaction || typeof transaction !== "object") return transaction;
+  const canonical = {};
+  for (const key of ["from", "to", "data"]) {
+    if (!Object.prototype.hasOwnProperty.call(transaction, key) || transaction[key] == null) continue;
+    canonical[key] = String(transaction[key]).trim().toLowerCase();
+  }
+  for (const [key, label] of [
+    ["value", "transaction value"],
+    ["gas", "transaction gas"],
+    ["gasPrice", "transaction gasPrice"],
+    ["maxFeePerGas", "transaction maxFeePerGas"],
+    ["maxPriorityFeePerGas", "transaction maxPriorityFeePerGas"],
+    ["nonce", "transaction nonce"],
+    ["chainId", "transaction chainId"]
+  ]) {
+    if (!Object.prototype.hasOwnProperty.call(transaction, key)) continue;
+    const normalized = normalizedEvmQuantity(transaction[key], label);
+    if (normalized) canonical[key] = normalized;
+  }
+  return canonical;
+}
+
+function externalEvmTransaction(transaction) {
+  return canonicalExternalEvmTransaction(transaction);
+}
+
+export function markEvmTransactionReservationRequired(transaction) {
+  return markedEvmTransaction(transaction, { reservationRequired: true });
+}
+
+export function evmTransactionBindingHash(transaction = {}) {
+  const external = canonicalExternalEvmTransaction(transaction);
+  const canonical = {
+    from: external.from || "",
+    to: external.to || "",
+    data: external.data || "",
+    value: external.value || "0x0",
+    gas: external.gas || "",
+    gasPrice: external.gasPrice || "",
+    maxFeePerGas: external.maxFeePerGas || "",
+    maxPriorityFeePerGas: external.maxPriorityFeePerGas || "",
+    nonce: external.nonce || "",
+    chainId: external.chainId || ""
+  };
+  return sha256Hex(JSON.stringify(canonical));
+}
+
+function broadcastReservationContext(options = {}) {
+  const reservationManager = options.reservationManager ?? options.reservation_manager ?? null;
+  const reservation = options.reservation ?? options.reservationBatch ?? options.reservation_batch ?? null;
+  const reservationIDs = [...(reservation?.reservation_ids || [])].filter(Boolean).map(String);
+  if (!reservationManager && !reservation) return null;
+  if (!reservationIDs.length) {
+    throw new Error("reserved-note broadcast requires reservation ids");
+  }
+  if (!reservationManager || typeof reservationManager.markBroadcastAttempting !== "function") {
+    throw new Error("reservationManager.markBroadcastAttempting is required for reserved-note broadcast");
+  }
+  const leaseToken = String(
+    reservation?.lease_token || reservation?.reservations?.[0]?.lease_token || ""
+  );
+  if (!leaseToken) {
+    throw new Error("reserved-note broadcast requires the current lease token");
+  }
+  return { reservationManager, reservationIDs, leaseToken };
+}
+
+function isKnownWithdrawTransaction(transaction) {
+  if (evmTransactionMetadata(transaction).operation === "withdraw") return true;
+  const data = String(transaction?.data || "").trim().replace(/^0x/i, "").toLowerCase();
+  return [evmPrivacyWithdrawSignature, referenceWithdrawSignature]
+    .some(signature => data.startsWith(functionSelector(signature).toLowerCase()));
+}
+
+async function authoritativeReservationRecords(context) {
+  if (!context) return [];
+  if (typeof context.reservationManager.getReservation !== "function") {
+    throw new Error("reservationManager.getReservation is required for reserved-note broadcast validation");
+  }
+  return Promise.all(context.reservationIDs.map(id => context.reservationManager.getReservation(id)));
+}
+
+function assertReservationPayloadMatches(records, payload) {
+  if (!records.length) return;
+  const payloadHash = String(payload?.payload_hash || "").trim();
+  const storedHashes = records.map(record => String(record?.payload_hash ?? record?.payloadHash ?? "").trim());
+  if (!payloadHash || storedHashes.some(hash => !hash || hash !== payloadHash)) {
+    throw new Error("relay payload does not match the reserved payload hash");
+  }
+}
+
+function assertReservationTransactionMatches(records, transactionHash, { allowPayloadBinding = false } = {}) {
+  if (!records.length) return;
+  const mismatched = records.some(record => {
+    const storedHash = String(record?.tx_bytes_hash ?? record?.txBytesHash ?? "").trim();
+    if (storedHash) return storedHash !== transactionHash;
+    return !(allowPayloadBinding && String(record?.payload_hash ?? record?.payloadHash ?? "").trim());
+  });
+  if (!transactionHash || mismatched) {
+    throw new Error("EVM transaction does not match the reservation ProofReady artifact");
+  }
+}
+
+async function validateRelayBroadcastContext(options, {
+  expectedChainId,
+  accountPrefix,
+  transaction,
+  contract,
+  reservationContext,
+  transactionHash
+} = {}) {
+  const payload = options?.relayPayload ?? options?.relay_payload ?? null;
+  const reservationRecords = await authoritativeReservationRecords(reservationContext);
+  assertReservationTransactionMatches(reservationRecords, transactionHash, { allowPayloadBinding: Boolean(payload) });
+  const reservationHasTransactionBinding = reservationRecords.some(record =>
+    Boolean(String(record?.tx_bytes_hash ?? record?.txBytesHash ?? "").trim())
+  );
+  const chainTimeProvider = options?.getChainNowUnix ?? options?.get_chain_now_unix;
+  if (!payload) {
+    if (isKnownWithdrawTransaction(transaction)) {
+      throw new Error("withdraw broadcast requires relayPayload and authoritative chain time");
+    }
+    if (
+      options?.chainNowUnix != null ||
+      options?.chain_now_unix != null ||
+      chainTimeProvider != null
+    ) {
+      throw new Error("relayPayload is required when relay broadcast chain time is provided");
+    }
+    return transaction;
+  }
+  if (chainTimeProvider != null && typeof chainTimeProvider !== "function") {
+    throw new Error("getChainNowUnix must be a function");
+  }
+  const chainNowUnix = chainTimeProvider
+    ? await chainTimeProvider()
+    : options.chainNowUnix ?? options.chain_now_unix;
+  validateRelayWithdrawPayload(payload, {
+    chainNowUnix,
+    expectedChainId: options.expectedChainId ?? options.expected_chain_id ?? expectedChainId,
+    expectedRecipient: options.expectedRecipient ?? options.expected_recipient,
+    accountPrefix: options.accountPrefix ?? options.account_prefix ?? accountPrefix
+  });
+  assertReservationPayloadMatches(reservationRecords, payload);
+  if (!contract || typeof contract.buildWithdrawTransaction !== "function") {
+    throw new Error("withdraw broadcast requires a contract adapter for payload binding");
+  }
+  const message = buildWithdrawMsgFromPayload(payload, "", chainNowUnix);
+  const expectedTransaction = contract.buildWithdrawTransaction(
+    message,
+    options.relayTransactionOptions ?? options.relay_transaction_options ?? {}
+  );
+  const actualTo = String(transaction?.to || "").trim().toLowerCase();
+  const expectedTo = String(expectedTransaction?.to || "").trim().toLowerCase();
+  const actualData = String(transaction?.data || "").trim().toLowerCase();
+  const expectedData = String(expectedTransaction?.data || "").trim().toLowerCase();
+  const actualValue = normalizedEvmQuantity(transaction?.value ?? "0x0", "transaction value");
+  const expectedValue = normalizedEvmQuantity(expectedTransaction?.value ?? "0x0", "expected transaction value");
+  if (!actualTo || actualTo !== expectedTo || !actualData || actualData !== expectedData || actualValue !== expectedValue) {
+    throw new Error("relay payload does not match the EVM transaction being broadcast");
+  }
+  const actualEvmChainId = normalizedEvmQuantity(transaction?.chainId, "transaction chainId");
+  const expectedEvmChainId = normalizedEvmQuantity(
+    options?.expectedEvmChainId ?? options?.expected_evm_chain_id,
+    "expectedEvmChainId"
+  );
+  if (actualEvmChainId && !expectedEvmChainId) {
+    throw new Error("expectedEvmChainId is required when the relay transaction includes chainId");
+  }
+  if (actualEvmChainId !== expectedEvmChainId) {
+    throw new Error("relay transaction chainId does not match expectedEvmChainId");
+  }
+  return {
+    ...(reservationHasTransactionBinding ? transaction : {}),
+    ...expectedTransaction,
+    ...(expectedEvmChainId ? { chainId: expectedEvmChainId } : {})
+  };
+}
+
+function attachReservationBookkeepingError(error, bookkeepingError) {
+  const original = error && typeof error === "object"
+    ? error
+    : new Error(String(error || "broadcast failed"));
+  try {
+    original.reservationBookkeepingError = bookkeepingError;
+    original.reservationReconciliationRequired = true;
+    return original;
+  } catch {
+    const wrapped = new Error(
+      String(original?.message || error || "broadcast failed"),
+      { cause: original }
+    );
+    if (typeof original?.name === "string" && original.name) {
+      wrapped.name = original.name;
+    }
+    wrapped.reservationBookkeepingError = bookkeepingError;
+    wrapped.reservationReconciliationRequired = true;
+    return wrapped;
+  }
+}
+
+async function beginBroadcastReservation(context, txBytesHash) {
+  if (!context) return;
+  await context.reservationManager.markBroadcastAttempting(context.reservationIDs, {
+    leaseToken: context.leaseToken,
+    reason: "evm_eth_send_transaction",
+    txBytesHash
+  });
+}
+
+async function markBroadcastReservationManualReview(context, error) {
+  if (!context) return;
+  try {
+    await context.reservationManager.markManualReview(context.reservationIDs, {
+      leaseToken: context.leaseToken,
+      error: String(error?.message || error || "EVM broadcast result is unknown"),
+      metadata: {
+        opaque_broadcast_error: true,
+        no_broadcast_attempt: false,
+        reconcile_reason: "sdk_evm_broadcast_result_unknown"
+      }
+    });
+  } catch (bookkeepingError) {
+    throw attachReservationBookkeepingError(error, bookkeepingError);
+  }
+}
+
+function isExplicitWalletRejection(error) {
+  return String(error?.code ?? error?.data?.code ?? "") === "4001";
+}
+
+async function markBroadcastReservationRejected(context, error) {
+  if (!context) return;
+  try {
+    await context.reservationManager.markBroadcastRejected(context.reservationIDs, {
+      leaseToken: context.leaseToken,
+      providerCode: "4001",
+      error: String(error?.message || error || "wallet request rejected")
+    });
+  } catch (bookkeepingError) {
+    throw attachReservationBookkeepingError(error, bookkeepingError);
+  }
+}
+
+async function markBroadcastReservationSubmitted(context, txHash) {
+  if (!context) return;
+  try {
+    await context.reservationManager.markSubmitted(context.reservationIDs, {
+      leaseToken: context.leaseToken,
+      txHash
+    });
+  } catch (bookkeepingError) {
+    const error = new Error("EVM transaction was submitted but reservation submission could not be recorded");
+    error.txHash = txHash;
+    throw attachReservationBookkeepingError(error, bookkeepingError);
+  }
+}
 
 export const evmPrivacyPrecompileAddress = "0x100000000000000000000000000000000000000b";
 export const defaultEvmPrivacyPrecompileAddress = evmPrivacyPrecompileAddress;
@@ -567,16 +869,19 @@ export function createEip1193WalletAdapter({ provider, account } = {}) {
       return signature;
     },
     async sendTransaction(transaction) {
-      const from = transaction.from ? normalizeEvmAddress(transaction.from, "transaction from") : await this.getAddress();
+      const externalTransaction = externalEvmTransaction(transaction);
+      const from = externalTransaction.from
+        ? normalizeEvmAddress(externalTransaction.from, "transaction from")
+        : await this.getAddress();
       return provider.request({
         method: "eth_sendTransaction",
-        params: [{ ...transaction, from }]
+        params: [{ ...externalTransaction, from }]
       });
     },
     async call(transaction, blockTag = "latest") {
       return provider.request({
         method: "eth_call",
-        params: [transaction, blockTag]
+        params: [externalEvmTransaction(transaction), blockTag]
       });
     },
     async getLogs(filter) {
@@ -722,12 +1027,16 @@ export class ClairveilEvmClient {
         shieldedPrefix: this.shieldedPrefix,
         transferDenom: input.transferDenom ?? input.denom ?? this.defaultDenom,
         ...input,
+        checkNullifiers: input.checkNullifiers,
         disableSelfViewDisclosure: input.disableSelfViewDisclosure ?? true
       });
     return {
       status: "ready",
       ...built,
-      transaction: this.contract.buildTransferTransaction(built.message, input.transactionOptions)
+      transaction: markedEvmTransaction(
+        this.contract.buildTransferTransaction(built.message, input.transactionOptions),
+        { operation: "transfer" }
+      )
     };
   }
 
@@ -785,8 +1094,12 @@ export class ClairveilEvmClient {
       if (!String(expectedChainId ?? "").trim()) {
         throw new Error("expectedChainId is required for relay withdraw payload validation");
       }
+      const chainNowUnix = input.chainNowUnix
+        ?? input.chain_now_unix
+        ?? input.nowUnix
+        ?? input.now_unix;
       validateRelayWithdrawPayload(input.payload, {
-        nowUnix: input.nowUnix ?? input.now_unix,
+        chainNowUnix,
         expectedChainId,
         expectedRecipient,
         accountPrefix
@@ -795,7 +1108,7 @@ export class ClairveilEvmClient {
         message: buildWithdrawMsgFromPayload(
           input.payload,
           input.relayer ?? input.creator ?? input.address ?? "",
-          input.nowUnix ?? input.now_unix
+          chainNowUnix
         ),
         payload: input.payload,
         proof: input.proof,
@@ -806,6 +1119,8 @@ export class ClairveilEvmClient {
       built = await buildWithdrawMessage({
         assetDenom: input.assetDenom ?? input.denom ?? this.defaultDenom,
         ...input,
+        chainNowUnix: input.chainNowUnix ?? input.chain_now_unix ?? input.nowUnix ?? input.now_unix,
+        checkNullifiers: input.checkNullifiers,
         recipient,
         accountPrefix,
         chainId: input.chainId ?? this.chainId
@@ -823,16 +1138,54 @@ export class ClairveilEvmClient {
       status: "ready",
       ...built,
       message,
-      transaction: this.contract.buildWithdrawTransaction(message, input.transactionOptions)
+      transaction: markedEvmTransaction(
+        this.contract.buildWithdrawTransaction(message, input.transactionOptions),
+        { operation: "withdraw" }
+      )
     };
   }
 
-  async sendTransaction(wallet, transaction) {
-    if (wallet?.sendTransaction) {
-      return wallet.sendTransaction(transaction);
+  async sendTransaction(wallet, transaction, reservationOptions = {}) {
+    const reservationContext = broadcastReservationContext(reservationOptions);
+    if (evmTransactionMetadata(transaction).reservationRequired && !reservationContext) {
+      throw new Error("prepared reserved EVM transaction requires reservationManager and reservation");
     }
-    const adapter = createEip1193WalletAdapter({ provider: this.provider });
-    return adapter.sendTransaction(transaction);
+    const transactionHash = evmTransactionBindingHash(transaction);
+    const broadcastTransaction = await validateRelayBroadcastContext(reservationOptions, {
+      expectedChainId: this.chainId,
+      accountPrefix: this.accountPrefix,
+      transaction,
+      contract: this.contract,
+      reservationContext,
+      transactionHash
+    });
+    const submittedTransaction = externalEvmTransaction(broadcastTransaction);
+    const broadcastTransactionHash = evmTransactionBindingHash(submittedTransaction);
+    await beginBroadcastReservation(reservationContext, broadcastTransactionHash);
+    let txHash;
+    try {
+      if (wallet?.sendTransaction) {
+        txHash = await wallet.sendTransaction(submittedTransaction);
+      } else {
+        const adapter = createEip1193WalletAdapter({ provider: this.provider });
+        txHash = await adapter.sendTransaction(submittedTransaction);
+      }
+    } catch (error) {
+      if (reservationContext && isExplicitWalletRejection(error)) {
+        await markBroadcastReservationRejected(reservationContext, error);
+      } else {
+        await markBroadcastReservationManualReview(reservationContext, error);
+      }
+      throw error;
+    }
+    const normalizedTxHash = String(txHash || "").trim();
+    if (!/^0x[0-9a-fA-F]{64}$/.test(normalizedTxHash)) {
+      const error = new Error("EVM wallet returned an invalid transaction hash");
+      await markBroadcastReservationManualReview(reservationContext, error);
+      throw error;
+    }
+    await markBroadcastReservationSubmitted(reservationContext, normalizedTxHash);
+    return normalizedTxHash;
   }
 
   privacyAccount(material) {

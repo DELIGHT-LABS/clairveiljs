@@ -10,6 +10,42 @@ import {
   hashStringToField
 } from "../core/crypto.js";
 
+const maxUint64 = (1n << 64n) - 1n;
+
+function uint64CursorBigInt(value, label) {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`${label} must be a non-negative safe integer, bigint, or canonical uint64 string`);
+    }
+    return BigInt(value);
+  }
+  if (typeof value === "bigint") {
+    if (value < 0n || value > maxUint64) throw new Error(`${label} must be within uint64 range`);
+    return value;
+  }
+  const text = String(value ?? "").trim();
+  if (!/^(0|[1-9][0-9]*)$/.test(text)) {
+    throw new Error(`${label} must be a canonical uint64 decimal string`);
+  }
+  const parsed = BigInt(text);
+  if (parsed > maxUint64) throw new Error(`${label} must be within uint64 range`);
+  return parsed;
+}
+
+function uint64CursorValue(value, label) {
+  const parsed = uint64CursorBigInt(value, label);
+  return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : parsed.toString();
+}
+
+function maxUint64Cursor(values, label) {
+  let maximum = 0n;
+  for (const value of values) {
+    const parsed = uint64CursorBigInt(value ?? 0, label);
+    if (parsed > maximum) maximum = parsed;
+  }
+  return maximum <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(maximum) : maximum.toString();
+}
+
 function bigintToString(value) {
   return typeof value === "bigint" ? value.toString() : String(value ?? "0");
 }
@@ -28,7 +64,7 @@ export function serializeFoundNote(foundLike) {
     (assetIdHex === defaultAssetIdHex ? defaultAssetDenom : "")
   );
   const txHash = String(found.txHash || "").toUpperCase();
-  const height = Number(found.height || 0);
+  const height = found.height;
   const spent = Boolean(found.isSpent);
 
   return {
@@ -68,9 +104,11 @@ export function serializeFoundNote(foundLike) {
     ).toLowerCase(),
     nullifier: String(found.nullifier || "").toLowerCase(),
     isSpent: spent,
+    nullifier_status: found.nullifierStatus,
+    nullifierStatus: found.nullifierStatus,
     txHash,
     height,
-    sequence: Number(found.sequence || foundLike?.sequence || foundLike?.Sequence || 0),
+    sequence: found.sequence,
     tx_hash: txHash,
     spent
   };
@@ -90,6 +128,7 @@ export function deserializeFoundNote(serialized) {
       randomness: BigInt(serialized.note.randomness)
     }
   });
+  const spent = serialized.spent === true || found.isSpent === true;
   return {
     ...found,
     commitment_hex: String(serialized.commitment_hex || "").toLowerCase(),
@@ -101,8 +140,11 @@ export function deserializeFoundNote(serialized) {
     spend_pubkey_hex: String(serialized.spend_pubkey_hex || noteSpendPubKeyHex(found.note)).toLowerCase(),
     view_pubkey_hex: String(serialized.view_pubkey_hex || noteViewPubKeyHex(found.note)).toLowerCase(),
     tx_hash: String(serialized.tx_hash || found.txHash || "").toUpperCase(),
-    sequence: Number(serialized.sequence || found.sequence || 0),
-    spent: Boolean(serialized.spent ?? found.isSpent)
+    sequence: found.sequence,
+    spent,
+    isSpent: spent,
+    nullifier_status: spent ? "spent" : found.nullifierStatus,
+    nullifierStatus: spent ? "spent" : found.nullifierStatus
   };
 }
 
@@ -129,18 +171,68 @@ function emptyState(owner = "") {
 
 function latestNoteCursor(notes) {
   const sorted = [...notes].sort((left, right) => {
-    const heightCompare = Number(left.height || 0) - Number(right.height || 0);
-    if (heightCompare !== 0) return heightCompare;
-    const sequenceCompare = Number(left.sequence || 0) - Number(right.sequence || 0);
-    if (sequenceCompare !== 0) return sequenceCompare;
+    const leftHeight = uint64CursorBigInt(left.height ?? 0, "found note height");
+    const rightHeight = uint64CursorBigInt(right.height ?? 0, "found note height");
+    if (leftHeight !== rightHeight) return leftHeight < rightHeight ? -1 : 1;
+    const leftSequence = uint64CursorBigInt(left.sequence ?? 0, "found note sequence");
+    const rightSequence = uint64CursorBigInt(right.sequence ?? 0, "found note sequence");
+    if (leftSequence !== rightSequence) return leftSequence < rightSequence ? -1 : 1;
     return String(left.txHash || left.tx_hash || "").localeCompare(String(right.txHash || right.tx_hash || ""));
   });
   const latest = sorted.at(-1);
   return {
-    height: Number(latest?.height || 0),
-    sequence: Number(latest?.sequence || 0),
+    height: uint64CursorValue(latest?.height ?? 0, "found note height"),
+    sequence: uint64CursorValue(latest?.sequence ?? 0, "found note sequence"),
     txHash: String(latest?.txHash || latest?.tx_hash || "").toUpperCase()
   };
+}
+
+function cursorValue(cursor, keys = []) {
+  for (const key of keys) {
+    const value = cursor?.[key];
+    if (value === undefined || value === null || value === "") continue;
+    return uint64CursorValue(value, `scan cursor ${key}`);
+  }
+  return null;
+}
+
+function rewindScanState(current, rollbackHeight) {
+  const currentCursor = current.scanCursor || {};
+  const scanEventsCursor =
+    currentCursor.source === "scan_events" ||
+    currentCursor.next_sequence != null ||
+    currentCursor.nextSequence != null;
+  const source = scanEventsCursor ? "scan_events" : "privacy_events";
+  const requestedHeight = uint64CursorBigInt(rollbackHeight, "rollback height");
+  const currentScannedHeight = uint64CursorBigInt(current.lastScannedHeight ?? 0, "last scanned height");
+  const rewindBoundary = requestedHeight < currentScannedHeight ? requestedHeight : currentScannedHeight;
+  // Legacy privacy_events starts from after_height + 1. Rewind one extra
+  // height so the deleted rollback boundary is reconstructed on the next
+  // scan; ScanEvents resumes at (height, sequence 0). Never advance a store
+  // that has not scanned as far as the requested rollback boundary.
+  const resumeHeight = uint64CursorValue(
+    source === "privacy_events" && rewindBoundary > 0n
+      ? rewindBoundary - 1n
+      : rewindBoundary,
+    "rollback resume height"
+  );
+  const scanCursor = source === "scan_events"
+    ? {
+        source,
+        after_height: resumeHeight,
+        after_sequence: 0,
+        next_height: resumeHeight,
+        next_sequence: 0,
+        has_more: false,
+        page: 1
+      }
+    : {
+        source,
+        after_height: resumeHeight,
+        page: 1,
+        has_more: false
+      };
+  return { resumeHeight, scanCursor };
 }
 
 export class MemoryNoteStore {
@@ -177,15 +269,27 @@ export class MemoryNoteStore {
     rollback_to_height
   } = {}) {
     const current = await this.load();
-    const rollbackHeight = Number(
+    const rollbackValue =
       rollbackToHeight ??
       rollback_to_height ??
       scanResult?.rollbackToHeight ??
-      scanResult?.rollback_to_height ??
-      0
-    );
-    const currentNotes = rollbackHeight > 0
-      ? current.notes.filter(found => Number(found.height || 0) <= rollbackHeight)
+      scanResult?.rollback_to_height;
+    const rollbackRequested =
+      rollbackValue !== undefined &&
+      rollbackValue !== null &&
+      rollbackValue !== "";
+    const rollbackHeight = rollbackRequested
+      ? uint64CursorValue(rollbackValue, "rollback height")
+      : 0;
+    const rollbackHeightBigInt = rollbackRequested
+      ? uint64CursorBigInt(rollbackHeight, "rollback height")
+      : 0n;
+    // The rollback boundary is re-scanned from its beginning, so cached notes
+    // at that height cannot be trusted after a reorg.
+    const currentNotes = rollbackRequested
+      ? current.notes.filter(found =>
+          uint64CursorBigInt(found.height ?? 0, "found note height") < rollbackHeightBigInt
+        )
       : current.notes;
     const byKey = new Map();
     for (const found of currentNotes) {
@@ -196,45 +300,67 @@ export class MemoryNoteStore {
     }
     const notes = [...byKey.values()]
       .map(deserializeFoundNote)
-      .sort((a, b) => Number(a.height) - Number(b.height));
-    const scanCursor = scanResult?.scanCursor ?? scanResult?.scan_cursor ?? current.scanCursor ?? null;
+      .sort((a, b) => {
+        const leftHeight = uint64CursorBigInt(a.height, "found note height");
+        const rightHeight = uint64CursorBigInt(b.height, "found note height");
+        if (leftHeight !== rightHeight) return leftHeight < rightHeight ? -1 : 1;
+        const leftSequence = uint64CursorBigInt(a.sequence, "found note sequence");
+        const rightSequence = uint64CursorBigInt(b.sequence, "found note sequence");
+        if (leftSequence !== rightSequence) return leftSequence < rightSequence ? -1 : 1;
+        return String(a.txHash || a.tx_hash || "").localeCompare(String(b.txHash || b.tx_hash || ""));
+      });
+    const incomingScanCursor = scanResult?.scanCursor ?? scanResult?.scan_cursor ?? null;
+    const rollbackScanState = rollbackRequested && incomingScanCursor == null
+      ? rewindScanState(current, rollbackHeight)
+      : null;
+    const scanCursor = incomingScanCursor ?? rollbackScanState?.scanCursor ?? current.scanCursor ?? null;
     const latest = latestNoteCursor(notes);
     const hasMore = Boolean(scanCursor?.has_more ?? scanCursor?.hasMore);
-    const cursorAfterHeight = Number(scanCursor?.after_height ?? scanCursor?.afterHeight ?? 0);
-    const cursorAfterSequence = Number(scanCursor?.after_sequence ?? scanCursor?.afterSequence ?? 0);
-    const lastScannedHeight = hasMore
-      ? Math.max(
+    const cursorAfterHeight = cursorValue(scanCursor, ["after_height", "afterHeight"]) ?? 0;
+    const cursorAfterSequence = cursorValue(scanCursor, ["after_sequence", "afterSequence"]) ?? 0;
+    const nextHeight = cursorValue(scanCursor, ["next_height", "nextHeight"]);
+    const nextSequence = cursorValue(scanCursor, ["next_sequence", "nextSequence"]);
+    const authoritativeHeight = nextHeight ?? cursorAfterHeight;
+    const authoritativeSequence = nextSequence ?? cursorAfterSequence;
+    const lastScannedHeight = rollbackScanState
+      ? rollbackScanState.resumeHeight
+      : hasMore
+      ? maxUint64Cursor([
         rollbackHeight || 0,
-        rollbackHeight > 0 ? 0 : current.lastScannedHeight || 0,
-        cursorAfterHeight
-      )
-      : Math.max(
+        rollbackRequested ? 0 : current.lastScannedHeight || 0,
+        authoritativeHeight
+      ], "last scanned height")
+      : maxUint64Cursor([
         rollbackHeight || 0,
-        rollbackHeight > 0 ? 0 : current.lastScannedHeight || 0,
-        Number(scanCursor?.latest_height || scanCursor?.latestHeight || 0),
+        rollbackRequested ? 0 : current.lastScannedHeight || 0,
+        authoritativeHeight,
+        scanCursor?.latest_height ?? scanCursor?.latestHeight ?? 0,
         latest.height
-      );
-    const lastScannedSequence = hasMore
-      ? Math.max(
-        rollbackHeight > 0 ? 0 : current.lastScannedSequence || 0,
-        cursorAfterSequence
-      )
-      : Number(
-        scanCursor?.next_sequence ??
-        scanCursor?.nextSequence ??
-        scanCursor?.latest_sequence ??
-        scanCursor?.latestSequence ??
-        latest.sequence ??
-        current.lastScannedSequence ??
-        0
-      );
-    const lastScannedTxHash = String(
-      scanCursor?.latest_tx_hash ??
-      scanCursor?.latestTxHash ??
-      latest.txHash ??
-      current.lastScannedTxHash ??
-      ""
-    ).toUpperCase();
+      ], "last scanned height");
+    const lastScannedSequence = rollbackScanState
+      ? 0
+      : nextSequence ?? (hasMore
+        ? maxUint64Cursor([
+          rollbackRequested ? 0 : current.lastScannedSequence || 0,
+          authoritativeSequence
+        ], "last scanned sequence")
+        : uint64CursorValue(
+          scanCursor?.latest_sequence ??
+          scanCursor?.latestSequence ??
+          latest.sequence ??
+          current.lastScannedSequence ??
+          0,
+          "last scanned sequence"
+        ));
+    const lastScannedTxHash = rollbackScanState
+      ? ""
+      : String(
+        scanCursor?.latest_tx_hash ??
+        scanCursor?.latestTxHash ??
+        latest.txHash ??
+        current.lastScannedTxHash ??
+        ""
+      ).toUpperCase();
     return this.save({
       owner,
       lastScannedHeight,
@@ -247,18 +373,22 @@ export class MemoryNoteStore {
   }
 
   async rollbackToHeight(height) {
-    const rollbackHeight = Number(height || 0);
-    if (!Number.isFinite(rollbackHeight) || rollbackHeight < 0) {
-      throw new Error("rollback height must be a non-negative number");
-    }
+    const rollbackHeight = uint64CursorValue(height ?? 0, "rollback height");
+    const rollbackHeightBigInt = uint64CursorBigInt(rollbackHeight, "rollback height");
     const current = await this.load();
-    const notes = current.notes.filter(found => Number(found.height || 0) <= rollbackHeight);
-    const latest = latestNoteCursor(notes);
+    const notes = current.notes.filter(found =>
+      uint64CursorBigInt(found.height ?? 0, "found note height") < rollbackHeightBigInt
+    );
+    const { resumeHeight, scanCursor } = rewindScanState(current, rollbackHeight);
     return this.save({
       ...current,
       rollbackHeight,
-      lastScannedHeight: Math.min(Number(current.lastScannedHeight || 0), rollbackHeight),
-      lastScannedTxHash: latest.txHash,
+      lastScannedHeight: resumeHeight,
+      // Re-read the rollback height from its beginning. A cursor beyond this
+      // point can skip events that need to be reconstructed after a reorg.
+      lastScannedSequence: 0,
+      lastScannedTxHash: "",
+      scanCursor,
       notes
     });
   }
@@ -270,8 +400,38 @@ export class MemoryNoteStore {
       ...current,
       notes: current.notes.map(found => ({
         ...found,
-        isSpent: wanted.has(String(found.nullifier || "").toLowerCase()) ? true : found.isSpent
+        isSpent: wanted.has(String(found.nullifier || "").toLowerCase()) ? true : found.isSpent,
+        nullifier_status: wanted.has(String(found.nullifier || "").toLowerCase())
+          ? "spent"
+          : found.nullifier_status,
+        nullifierStatus: wanted.has(String(found.nullifier || "").toLowerCase())
+          ? "spent"
+          : found.nullifierStatus
       }))
+    });
+  }
+
+  async setNullifierStatuses(statuses = new Map()) {
+    const entries = statuses instanceof Map
+      ? [...statuses.entries()]
+      : Object.entries(statuses || {});
+    const resolved = new Map(entries
+      .map(([nullifier, status]) => [String(nullifier || "").trim().toLowerCase(), status])
+      .filter(([nullifier]) => Boolean(nullifier)));
+    const current = await this.load();
+    return this.save({
+      ...current,
+      notes: current.notes.map(found => {
+        const status = resolved.get(String(found.nullifier || "").toLowerCase());
+        if (!["spent", "unspent", "unknown", "unverified"].includes(status)) return found;
+        return {
+          ...found,
+          isSpent: status === "spent",
+          spent: status === "spent",
+          nullifier_status: status,
+          nullifierStatus: status
+        };
+      })
     });
   }
 }

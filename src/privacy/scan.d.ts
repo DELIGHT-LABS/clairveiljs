@@ -1,15 +1,16 @@
 import type { BytesLike, Hex } from "../core/crypto.js";
-import type { FoundNote } from "../core/note.js";
+import type { FoundNote, NormalizedFoundNote } from "../core/note.js";
 
 export interface ScanResult {
   notes: Array<{
     index: number;
-    status: "spendable" | "spent";
+    status: "spendable" | "spent" | "unverified";
+    nullifier_status: "spent" | "unspent" | "unknown" | "unverified";
     amount: string;
     nullifier: Hex;
     tx_hash: Hex;
-    height: number;
-    sequence: number;
+    height: number | string;
+    sequence: number | string;
   }>;
   summary: {
     total_spendable: string;
@@ -22,17 +23,30 @@ export interface ScanResult {
     new_notes_found: number;
     pages_scanned?: number;
     max_pages?: number;
+    unverified_nullifier_count?: number;
   };
-  foundNotes?: FoundNote[];
+  foundNotes?: NormalizedFoundNote[];
 }
 
 export function parseNoteBytes(bytes: BytesLike): object;
-export function processPrivacyEvent(event: object, input: { rootSeed?: BytesLike; spendScalar?: bigint; viewScalar?: bigint }): FoundNote[];
-export function normalizeFoundNotes(notes: Array<object | FoundNote>): FoundNote[];
+export function parseNullifierUsage(value: unknown): boolean | null;
+export function processPrivacyEvent(event: object, input: { rootSeed?: BytesLike; spendScalar?: bigint; viewScalar?: bigint }): NormalizedFoundNote[];
+export function normalizeFoundNotes(notes: Array<object | FoundNote>): NormalizedFoundNote[];
+export type ScanNullifierUsage =
+  | boolean
+  | { used: boolean; Used?: never }
+  | { used?: never; Used: boolean };
+export type ScanNullifierStatusEntry =
+  ({ nullifier: Hex; Nullifier?: never } | { nullifier?: never; Nullifier: Hex }) &
+  Exclude<ScanNullifierUsage, boolean>;
+export type ScanNullifierStatusResult =
+  Map<Hex, ScanNullifierUsage> |
+  Record<Hex, ScanNullifierUsage> |
+  { statuses: readonly ScanNullifierStatusEntry[] };
 export function scanNotes(input: {
   rootSeed?: BytesLike;
   events?: object[];
-  checkNullifier?: (nullifier: Hex) => Promise<object | boolean> | object | boolean;
-  checkNullifiers?: (nullifiers: Hex[]) => Promise<Map<Hex, boolean> | Record<Hex, boolean> | { statuses?: Array<{ nullifier: Hex; used: boolean }> }>;
+  checkNullifier?: (nullifier: Hex) => Promise<ScanNullifierUsage> | ScanNullifierUsage;
+  checkNullifiers?: (nullifiers: Hex[]) => ScanNullifierStatusResult | Promise<ScanNullifierStatusResult>;
   includeFoundNotes?: boolean;
 }): Promise<ScanResult>;

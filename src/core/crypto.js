@@ -184,6 +184,26 @@ function pointSign(point) {
   return mod(point.x) > fieldHalf;
 }
 
+function assertNonIdentityPoint(point) {
+  if (mod(point.x) === 0n && mod(point.y) === 1n) {
+    throw new Error("point identity is not allowed");
+  }
+  return point;
+}
+
+function assertPrimeOrderPoint(point) {
+  const multiplied = scalarMultiply(point, CURVE_ORDER);
+  if (mod(multiplied.x) !== 0n || mod(multiplied.y) !== 1n) {
+    throw new Error("point is not in the prime-order subgroup");
+  }
+  return point;
+}
+
+function assertPrimeOrderNonIdentityPoint(point) {
+  assertNonIdentityPoint(point);
+  return assertPrimeOrderPoint(point);
+}
+
 export function packPoint(point) {
   const out = bigIntToBytesLE(point.y, 32);
   if (pointSign(point)) {
@@ -218,7 +238,7 @@ export function unpackPoint(bytesLike) {
   if (pointSign({ x, y }) !== sign) {
     x = mod(-x);
   }
-  return { x, y };
+  return assertPrimeOrderPoint({ x, y });
 }
 
 export function unpackPointHex(hex) {
@@ -243,19 +263,79 @@ export function pointAdd(p, q) {
   };
 }
 
+function extendedPoint(point) {
+  const x = mod(point.x);
+  const y = mod(point.y);
+  return {
+    X: x,
+    Y: y,
+    Z: 1n,
+    T: (x * y) % FIELD_MODULUS
+  };
+}
+
+function extendedIdentity() {
+  return { X: 0n, Y: 1n, Z: 1n, T: 0n };
+}
+
+// Complete extended-coordinate formulas for the a=-1 twisted Edwards curve.
+// Keeping the scalar-multiplication loop projective avoids hundreds of field
+// inversions; only the final conversion back to affine coordinates inverts Z.
+function extendedAdd(p, q) {
+  const a = mod((p.Y - p.X) * (q.Y - q.X));
+  const b = mod((p.Y + p.X) * (q.Y + q.X));
+  const c = mod(2n * CURVE_D * p.T * q.T);
+  const d = mod(2n * p.Z * q.Z);
+  const e = mod(b - a);
+  const f = mod(d - c);
+  const g = mod(d + c);
+  const h = mod(b + a);
+  return {
+    X: mod(e * f),
+    Y: mod(g * h),
+    Z: mod(f * g),
+    T: mod(e * h)
+  };
+}
+
+function extendedDouble(point) {
+  const a = mod(point.X * point.X);
+  const b = mod(point.Y * point.Y);
+  const c = mod(2n * point.Z * point.Z);
+  const d = mod(-a);
+  const e = mod((point.X + point.Y) * (point.X + point.Y) - a - b);
+  const g = mod(d + b);
+  const f = mod(g - c);
+  const h = mod(d - b);
+  return {
+    X: mod(e * f),
+    Y: mod(g * h),
+    Z: mod(f * g),
+    T: mod(e * h)
+  };
+}
+
+function affinePoint(point) {
+  const inverseZ = modInv(point.Z);
+  return {
+    x: mod(point.X * inverseZ),
+    y: mod(point.Y * inverseZ)
+  };
+}
+
 export function scalarMultiply(point, scalar) {
   let k = BigInt(scalar);
   if (k < 0n) {
     throw new Error("scalar must be non-negative");
   }
-  let result = CURVE_IDENTITY;
-  let addend = { x: mod(point.x), y: mod(point.y) };
+  let result = extendedIdentity();
+  let addend = extendedPoint(point);
   while (k > 0n) {
-    if (k & 1n) result = pointAdd(result, addend);
-    addend = pointAdd(addend, addend);
+    if (k & 1n) result = extendedAdd(result, addend);
+    addend = extendedDouble(addend);
     k >>= 1n;
   }
-  return result;
+  return affinePoint(result);
 }
 
 export function deriveScalarFromSeed(seed) {
@@ -363,9 +443,45 @@ export function decodeShieldedAddress(address, options = {}) {
     throw new Error(`invalid shielded address length: ${decoded.data.length}`);
   }
   return {
-    spendPubKey: unpackPoint(decoded.data.slice(0, 32)),
-    viewPubKey: unpackPoint(decoded.data.slice(32, 64))
+    spendPubKey: assertNonIdentityPoint(unpackPoint(decoded.data.slice(0, 32))),
+    viewPubKey: assertNonIdentityPoint(unpackPoint(decoded.data.slice(32, 64)))
   };
+}
+
+function unpackPointForGoOperationHash(bytesLike) {
+  const bytes = Uint8Array.from(bytesLike);
+  if (bytes.length !== 32) {
+    throw new Error("compressed disclosure public key must be 32 bytes");
+  }
+  const yBytes = Uint8Array.from(bytes);
+  const sign = (yBytes[31] & 0x80) !== 0;
+  yBytes[31] &= 0x7f;
+  const y = bytesToBigIntLE(yBytes);
+  if (y >= FIELD_MODULUS) {
+    throw new Error("compressed disclosure public key has non-canonical y");
+  }
+  const y2 = (y * y) % FIELD_MODULUS;
+  const numerator = mod(1n - y2);
+  const denominator = mod(CURVE_A - CURVE_D * y2);
+  const ratio = mod(numerator * modInv(denominator));
+  let x = modSqrt(ratio);
+  if (pointSign({ x, y }) !== sign) x = mod(-x);
+  return assertPrimeOrderNonIdentityPoint({ x, y });
+}
+
+// canonicalizeShieldedAddressForOperationHash mirrors the Go payroll hash
+// helper and rejects compressed points that do not decode onto the curve.
+export function canonicalizeShieldedAddressForOperationHash(address, options = {}) {
+  const shieldedPrefix = shieldedPrefixFromOptions(options);
+  const decoded = fromBech32(String(address || "").trim());
+  if (decoded.prefix !== shieldedPrefix || decoded.data.length !== 64) {
+    throw new Error("invalid shielded address");
+  }
+  return encodeShieldedAddress(
+    unpackPointForGoOperationHash(decoded.data.slice(0, 32)),
+    unpackPointForGoOperationHash(decoded.data.slice(32, 64)),
+    { shieldedPrefix }
+  );
 }
 
 export function deriveShieldedAddress(rootSeed, options = {}) {
@@ -449,7 +565,7 @@ export function asymDecrypt(ciphertextBytes, scalar) {
     throw new Error("invalid ciphertext length");
   }
 
-  const ephemeralPub = unpackPoint(bytes.slice(0, 32));
+  const ephemeralPub = assertNonIdentityPoint(unpackPoint(bytes.slice(0, 32)));
   const nonce = bytes.slice(32, 44);
   const ciphertextAndTag = bytes.slice(44);
   const sharedPoint = scalarMultiply(ephemeralPub, BigInt(scalar));

@@ -7,8 +7,11 @@ import type {
   PrivacyScanOptions,
   PrivacyScanResumeOptions,
   QueryRetryOptions,
+  ReservationReconciliationState,
   ReserveResponse,
+  BatchOperationEvidenceHashes,
   BroadcastSignedTxResult,
+  ReservationBroadcastOptions,
   SignedTxBase64,
   SignDocBase64,
   TxSearchResult
@@ -27,7 +30,10 @@ import type {
   WithdrawMessage,
 } from "../privacy/payload.js";
 import type { TransferBatchPlan, TransferPlan, WithdrawPlan } from "../privacy/planner.js";
+import type { NoteReservationManager, ReservationBatch } from "../privacy/reservation.js";
 import type { ScanResult } from "../privacy/scan.js";
+import type { MemoryNoteStore } from "../privacy/note-store.js";
+import type { WalletAdapterLike } from "../wallet/adapter.js";
 
 export interface BrowserWalletProfile {
   id?: string;
@@ -196,7 +202,39 @@ export type PreparedDeposit = PreparedCosmosDeposit | PreparedEvmDeposit;
 export type PreparedDepositForDefault<TDefaultWalletType extends BrowserWalletType> =
   TDefaultWalletType extends "evm" ? PreparedEvmDeposit : PreparedCosmosDeposit;
 
-export interface PrepareTransferInput extends BrowserWalletIdentityInput {
+export type DirectOperationEvidenceHashes =
+  | {
+      expectedRecipientHash?: never;
+      expected_recipient_hash?: never;
+      expectedAmountHash?: never;
+      expected_amount_hash?: never;
+    }
+  | {
+      expectedRecipientHash: string;
+      expectedAmountHash: string;
+      expected_recipient_hash?: string;
+      expected_amount_hash?: string;
+    }
+  | {
+      expected_recipient_hash: string;
+      expected_amount_hash: string;
+      expectedRecipientHash?: string;
+      expectedAmountHash?: string;
+    }
+  | {
+      expectedRecipientHash: string;
+      expected_amount_hash: string;
+      expected_recipient_hash?: string;
+      expectedAmountHash?: string;
+    }
+  | {
+      expected_recipient_hash: string;
+      expectedAmountHash: string;
+      expectedRecipientHash?: string;
+      expected_amount_hash?: string;
+    };
+
+export type PrepareTransferInput = BrowserWalletIdentityInput & DirectOperationEvidenceHashes & {
   amount: CoinString;
   recipient: ShieldedAddress;
   allowPlanStep?: boolean;
@@ -211,9 +249,13 @@ export interface PrepareTransferInput extends BrowserWalletIdentityInput {
   disclosure_mode?: TransferUserDisclosureMode;
   disclosurePubKeyHex?: Hex;
   disclosure_pubkey_hex?: Hex;
-}
+  reservationManager?: NoteReservationManager | null;
+  reservation_manager?: NoteReservationManager | null;
+};
 
-export type PrepareTransferBaseInput = Omit<PrepareTransferInput, "walletType" | "wallet_type">;
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+export type PrepareTransferBaseInput = DistributiveOmit<PrepareTransferInput, "walletType" | "wallet_type">;
 
 export type PrepareCosmosTransferInput = PrepareTransferBaseInput & {
   walletType?: "cosmos";
@@ -245,25 +287,28 @@ export interface PreparedTransferSummary {
   payload?: PreparedTransferPayload;
   proof?: PreparedTransferProof;
   message?: TransferMessage;
+  reservation?: ReservationBatch | null;
 }
 
-export interface PreparedCosmosTransfer {
+export interface PreparedCosmosTransfer extends ReservationReconciliationState {
   signDoc: SignDocBase64;
   transaction?: never;
+  reservation?: ReservationBatch | null;
   prepared: PreparedTransferSummary;
   plan: TransferPlan;
 }
 
-export interface PreparedEvmTransfer {
+export interface PreparedEvmTransfer extends ReservationReconciliationState {
   signDoc?: never;
   transaction: EvmTransactionRequest;
+  reservation?: ReservationBatch | null;
   prepared: PreparedTransferSummary;
   plan: TransferPlan;
 }
 
 export type PreparedTransfer = PreparedCosmosTransfer | PreparedEvmTransfer;
 
-export interface PrepareTransferBatchInput extends BrowserWalletIdentityInput {
+export type PrepareTransferBatchInput = BrowserWalletIdentityInput & BatchOperationEvidenceHashes & {
   amounts: CoinString[];
   recipient: ShieldedAddress;
   limit?: number;
@@ -278,14 +323,16 @@ export interface PrepareTransferBatchInput extends BrowserWalletIdentityInput {
   disclosure_mode?: TransferUserDisclosureMode;
   disclosurePubKeyHex?: Hex;
   disclosure_pubkey_hex?: Hex;
-}
+  reservationManager?: NoteReservationManager | null;
+  reservation_manager?: NoteReservationManager | null;
+};
 
-export type PrepareCosmosTransferBatchInput = Omit<PrepareTransferBatchInput, "walletType" | "wallet_type"> & {
+export type PrepareCosmosTransferBatchInput = DistributiveOmit<PrepareTransferBatchInput, "walletType" | "wallet_type"> & {
   walletType?: "cosmos";
   wallet_type?: "cosmos";
 };
 
-export type PrepareExplicitCosmosTransferBatchInput = Omit<PrepareTransferBatchInput, "walletType" | "wallet_type"> & (
+export type PrepareExplicitCosmosTransferBatchInput = DistributiveOmit<PrepareTransferBatchInput, "walletType" | "wallet_type"> & (
   | { walletType: "cosmos"; wallet_type?: "cosmos" }
   | { walletType?: "cosmos"; wallet_type: "cosmos" }
 );
@@ -305,11 +352,13 @@ export interface PreparedTransferBatchSummary {
   payloads?: PreparedTransferPayload[];
   proofs?: PreparedTransferProof[];
   messages?: TransferMessage[];
+  reservation?: ReservationBatch | null;
 }
 
-export interface PreparedCosmosTransferBatch {
+export interface PreparedCosmosTransferBatch extends ReservationReconciliationState {
   signDoc: SignDocBase64;
   transaction?: never;
+  reservation?: ReservationBatch | null;
   prepared: PreparedTransferBatchSummary;
   plan: TransferBatchPlan;
 }
@@ -323,6 +372,10 @@ export interface PrepareWithdrawInput extends BrowserWalletIdentityInput {
   scan?: PrivacyScanOptions;
   expiresAtUnix?: number;
   expires_at_unix?: number;
+  chainNowUnix?: number;
+  chain_now_unix?: number;
+  reservationManager?: NoteReservationManager | null;
+  reservation_manager?: NoteReservationManager | null;
 }
 
 export type PrepareWithdrawBaseInput = Omit<PrepareWithdrawInput, "walletType" | "wallet_type">;
@@ -352,32 +405,55 @@ export interface PreparedWithdrawSummary {
   payload?: PreparedWithdrawPayload;
   proof?: PreparedWithdrawProof;
   message?: WithdrawMessage;
+  reservation?: ReservationBatch | null;
 }
 
-export interface PreparedCosmosWithdraw {
+export interface PreparedCosmosWithdraw extends ReservationReconciliationState {
   signDoc: SignDocBase64;
   transaction?: never;
+  payload: PreparedWithdrawPayload;
+  proof: PreparedWithdrawProof;
+  message: WithdrawMessage;
+  reservation?: ReservationBatch | null;
   prepared: PreparedWithdrawSummary;
   plan: WithdrawPlan;
 }
 
-export interface PreparedEvmWithdraw {
+export interface PreparedEvmWithdraw extends ReservationReconciliationState {
   signDoc?: never;
   transaction: EvmTransactionRequest;
+  payload: PreparedWithdrawPayload;
+  proof: PreparedWithdrawProof;
+  message: WithdrawMessage;
+  reservation?: ReservationBatch | null;
   prepared: PreparedWithdrawSummary;
   plan: WithdrawPlan;
 }
 
 export type PreparedWithdraw = PreparedCosmosWithdraw | PreparedEvmWithdraw;
 
-export interface PrepareEvmRelayWithdrawTransactionOptionsInput {
+type RelayChainTimeInput = {
+  chainNowUnix?: number;
+  chain_now_unix?: number;
+  /** @deprecated Use chainNowUnix with the latest chain block time. */
+  nowUnix?: number;
+  /** @deprecated Use chain_now_unix with the latest chain block time. */
+  now_unix?: number;
+} & (
+  | { chainNowUnix: number }
+  | { chain_now_unix: number }
+  | { nowUnix: number }
+  | { now_unix: number }
+);
+
+export type PrepareEvmRelayWithdrawTransactionOptionsInput = {
   transactionOptions?: EvmPrivacyTransactionOptions;
   transaction_options?: EvmPrivacyTransactionOptions;
-}
+} & RelayChainTimeInput;
 
 export type PrepareRelayWithdrawBaseInput = PrepareWithdrawBaseInput;
 
-export type PrepareCosmosRelayWithdrawInput = PrepareRelayWithdrawBaseInput & {
+export type PrepareCosmosRelayWithdrawInput = PrepareRelayWithdrawBaseInput & RelayChainTimeInput & {
   walletType?: "cosmos";
   wallet_type?: "cosmos";
 };
@@ -406,25 +482,27 @@ export interface PreparedEvmRelayWithdrawSummary extends Omit<PreparedRelayWithd
   message?: EvmWithdrawMessage;
 }
 
-export interface PreparedCosmosRelayWithdraw {
+export interface PreparedCosmosRelayWithdraw extends ReservationReconciliationState {
   payload: PreparedWithdrawPayload;
   signDoc?: never;
   transaction?: never;
+  reservation?: ReservationBatch | null;
   prepared: PreparedRelayWithdrawSummary;
   plan: WithdrawPlan;
 }
 
-export interface PreparedEvmRelayWithdraw {
+export interface PreparedEvmRelayWithdraw extends ReservationReconciliationState {
   payload: PreparedWithdrawPayload;
   signDoc?: never;
   transaction: EvmTransactionRequest;
+  reservation?: ReservationBatch | null;
   prepared: PreparedEvmRelayWithdrawSummary;
   plan: WithdrawPlan;
 }
 
 export type PreparedRelayWithdraw = PreparedCosmosRelayWithdraw | PreparedEvmRelayWithdraw;
 
-export interface CreateRelayWithdrawSignDocInput {
+export type CreateRelayWithdrawSignDocInput = {
   payload: PreparedWithdrawPayload;
   relayer?: ClairAddress | string;
   creator?: ClairAddress | string;
@@ -436,15 +514,13 @@ export interface CreateRelayWithdrawSignDocInput {
   feeAmount?: Array<object>;
   fee_amount?: Array<object>;
   memo?: string;
-  nowUnix?: number;
-  now_unix?: number;
   expectedChainId?: string;
   expected_chain_id?: string;
   expectedRecipient?: ClairAddress | string;
   expected_recipient?: ClairAddress | string;
   accountPrefix?: string;
   account_prefix?: string;
-}
+} & RelayChainTimeInput;
 
 export interface PreparedRelayWithdrawSignDoc {
   signDoc: SignDocBase64;
@@ -455,6 +531,8 @@ export interface PreparedRelayWithdrawSignDoc {
 
 export interface ScanWalletNotesInput extends BrowserWalletIdentityInput, PrivacyScanOptions {
   includeFoundNotes?: boolean;
+  noteStore?: MemoryNoteStore;
+  note_store?: MemoryNoteStore;
 }
 
 export type ScanWalletNotesResult = ScanResult & {
@@ -502,7 +580,12 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   waitForEvmTransaction(txHash: Hex): Promise<BrowserEvmTransactionWaitResult>;
   evmNativeSendTransaction(input: { to: string; amount: CoinString }): BrowserEvmNativeSendTransaction;
   buildBankSendSignDoc(input: { from: ClairAddress; pubKeyHex: Hex; to: ClairAddress; amount: CoinString }): Promise<SignDocBase64>;
-  broadcastSignedTx(input: SignedTxBase64, waitOptions?: { attempts?: number; intervalMs?: number }): Promise<BroadcastSignedTxResult>;
+  broadcastSignedTx(input: SignedTxBase64, waitOptions?: ReservationBroadcastOptions): Promise<BroadcastSignedTxResult>;
+  signDirectAndBroadcast(input: ReservationBroadcastOptions & {
+    wallet: WalletAdapterLike;
+    signDoc: SignDocBase64;
+    waitOptions?: { attempts?: number; intervalMs?: number };
+  }): Promise<BroadcastSignedTxResult>;
   prepareDeposit(input: TDefaultWalletType extends "evm" ? PrepareDefaultEvmProfileDepositInput : never): Promise<PreparedEvmDeposit>;
   prepareDeposit(input: PrepareEvmDepositInput): Promise<PreparedEvmDeposit>;
   prepareDeposit(input: PrepareCosmosDepositInput): Promise<PreparedCosmosDeposit>;
@@ -524,7 +607,7 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   createRelayWithdrawSignDoc(input: CreateRelayWithdrawSignDocInput): Promise<PreparedRelayWithdrawSignDoc>;
   scanWalletNotes(input: ScanWalletNotesInput): Promise<ScanWalletNotesResult>;
   checkNullifier(nullifierHex: Hex): Promise<object & { used?: boolean; Used?: boolean }>;
-  checkNullifiers(nullifierHexes: Hex[]): Promise<Map<Hex, boolean>>;
+  checkNullifiers(nullifierHexes: readonly Hex[]): Promise<Map<Hex, boolean>>;
   decodeUserDisclosure(input: DecodeUserDisclosureInput): Promise<DisclosureReport>;
   decodeSelfViewDisclosure(input: DecodeSelfViewDisclosureInput): Promise<DisclosureReport>;
   decodeAuditDisclosure(input: DecodeAuditDisclosureInput): Promise<DisclosureReport>;
