@@ -1,56 +1,58 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { derivePubKeyFromScalar, packPoint } from "clairveiljs/core";
-import { base64FromBytes } from "clairveiljs/browser-crypto";
+import { derivePubKeyFromScalar, signNoteHash } from "clairveiljs/core";
+import { base64FromBytes, bytesFromBase64 } from "clairveiljs/browser-crypto";
 import {
+  buildPreparedBatchTransferPayload,
   buildMsgBatchTransferFromPrepared,
-  preparedBatchTransferPayloadVersion,
-  preparedBatchTransferProofVersion
+  preparedBatchTransferProofVersion,
+  serializeBatchTransferProofRequest,
+  validatePreparedBatchTransferPayloadEnvelope
 } from "clairveiljs/batch-transfer";
-import { encryptedEnvelopeKindV1, wrapEncryptedEnvelopeV1 } from "clairveiljs/protocol-v1";
+import { computeAssetIdV1, emptyNoteTreeRootsV1, unmarshalDisclosurePlaintextV1 } from "clairveiljs/protocol-v1";
 import { createHttpProverAdapter } from "clairveiljs/prover";
 
-function field(value) {
-  const output = new Uint8Array(32);
-  output[31] = value;
-  return output;
-}
-
-function batchPayload() {
-  const audit = derivePubKeyFromScalar(31n);
-  const transferCiphertext = wrapEncryptedEnvelopeV1(encryptedEnvelopeKindV1.transferNote, new Uint8Array(410));
-  const auditPayload = wrapEncryptedEnvelopeV1(encryptedEnvelopeKindV1.auditDisclosure, new Uint8Array(452));
-  return {
-    version: preparedBatchTransferPayloadVersion,
-    circuit_set_id: "privacy-note-v1",
-    creator: "clair1creator",
-    chain_id: "clairveil-test-1",
-    expires_at_unix: 4_102_448_400,
-    root: base64FromBytes(field(1)),
-    inputs: [{ nullifier: base64FromBytes(field(2)) }],
-    outputs: [{}],
-    message_outputs: [{
-      commitment: base64FromBytes(field(3)),
-      ciphertext: base64FromBytes(transferCiphertext),
-      view_tag: base64FromBytes(Uint8Array.of(1, 2)),
-      user_privacy_policy: 0,
-      user_disclosure_mode: 0,
-      user_disclosure_digest: "",
-      user_disclosure_target_pubkey: "",
-      user_disclosure_payload: "",
-      full_disclosure_digest: base64FromBytes(field(4)),
-      audit_disclosure_payload: base64FromBytes(auditPayload),
-      self_view_disclosure_payload: ""
-    }],
-    audit_key_id: "audit-key-1",
-    audit_key_epoch: 1,
-    audit_disclosure_target_pubkey: base64FromBytes(packPoint(audit)),
-    payload_hash: "0000000000000000000000000000000000000000000000000000000000000005"
+async function batchPayload({ privacyPolicy = 0, disclosureMode = 0 } = {}) {
+  const ownerSpend = derivePubKeyFromScalar(17n);
+  const ownerView = derivePubKeyFromScalar(19n);
+  const recipientSpend = derivePubKeyFromScalar(23n);
+  const recipientView = derivePubKeyFromScalar(29n);
+  const assetID = computeAssetIdV1("uclair");
+  const inputNote = {
+    receiverSpendPubKeyX: ownerSpend.x, receiverSpendPubKeyY: ownerSpend.y,
+    receiverViewPubKeyX: ownerView.x, receiverViewPubKeyY: ownerView.y,
+    amount: 7n, assetID, randomness: 11n, memo: "input"
   };
+  const outputNote = {
+    receiverSpendPubKeyX: recipientSpend.x, receiverSpendPubKeyY: recipientSpend.y,
+    receiverViewPubKeyX: recipientView.x, receiverViewPubKeyY: recipientView.y,
+    amount: 7n, assetID, randomness: 13n, memo: "payment"
+  };
+  return buildPreparedBatchTransferPayload({
+    creator: "clair1creator",
+    chainId: "clairveil-test-1",
+    expiresAtUnix: 4_102_448_400,
+    inputs: [{
+      note: inputNote,
+      merklePath: emptyNoteTreeRootsV1(32).slice(0, 32).map(value => value.toString(16).padStart(64, "0")),
+      merklePathHelper: Array(32).fill(0)
+    }],
+    outputs: [{
+      kind: "payment", note: outputNote, privacyPolicy, disclosureMode,
+      userDisclosureBlinding: privacyPolicy ? 21n : 0n, fullDisclosureBlinding: 15n
+    }],
+    auditKeyId: "audit-key-1",
+    auditKeyEpoch: 1,
+    auditDisclosureTargetPubKey: derivePubKeyFromScalar(31n),
+    disableSelfViewDisclosure: true,
+    signer: {
+      signNoteHash: intent => signNoteHash(intent, { spendScalar: 17n, spendPubKey: ownerSpend })
+    }
+  });
 }
 
 test("one-proof batch prover uses the Clairveil main route and binds the response hash", async () => {
-  const payload = batchPayload();
+  const payload = await batchPayload();
   const proof = new Uint8Array(164).fill(7);
   let call;
   const adapter = createHttpProverAdapter({
@@ -70,7 +72,7 @@ test("one-proof batch prover uses the Clairveil main route and binds the respons
   });
   const response = await adapter.proveBatchTransfer(payload);
   assert.equal(call.url, "https://prover.example/v1/proofs/batch-transfer");
-  assert.deepEqual(call.body, { version: "v1", payload });
+  assert.deepEqual(call.body, JSON.parse(serializeBatchTransferProofRequest(payload)));
   assert.deepEqual(response.proof.proof_bytes, proof);
 
   const message = buildMsgBatchTransferFromPrepared(payload, response.proof, { nowUnix: 1_700_000_000 });
@@ -81,7 +83,7 @@ test("one-proof batch prover uses the Clairveil main route and binds the respons
 });
 
 test("one-proof batch prover rejects a proof bound to another prepared operation", async () => {
-  const payload = batchPayload();
+  const payload = await batchPayload();
   const adapter = createHttpProverAdapter({
     baseURL: "https://prover.example",
     fetchImpl: async () => new Response(JSON.stringify({
@@ -94,4 +96,18 @@ test("one-proof batch prover rejects a proof bound to another prepared operation
     }), { status: 200 })
   });
   await assert.rejects(() => adapter.proveBatchTransfer(payload), /payload hash mismatch/);
+});
+
+test("one-proof batch preparation binds public disclosure and rejects post-signature mutation", async () => {
+  const payload = await batchPayload({ privacyPolicy: 7, disclosureMode: 1 });
+  const output = payload.message_outputs[0];
+  const disclosure = unmarshalDisclosurePlaintextV1(bytesFromBase64(output.user_disclosure_payload));
+  assert.equal(disclosure.plane, 1);
+  assert.equal(disclosure.policy, 7);
+  assert.equal(disclosure.disclosedFieldBitmap, 7);
+  assert.notEqual(output.user_disclosure_digest, "");
+  assert.throws(
+    () => validatePreparedBatchTransferPayloadEnvelope({ ...payload, audit_key_id: "another-audit-key" }),
+    /payload hash mismatch/
+  );
 });

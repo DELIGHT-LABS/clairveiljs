@@ -12,6 +12,7 @@ import {
   batchTransferProofRequestVersion,
   batchTransferProofResponseVersion,
   normalizePreparedBatchTransferProof,
+  serializeBatchTransferProofRequest,
   validatePreparedBatchTransferPayloadEnvelope
 } from "./batch-transfer.js";
 import {
@@ -31,7 +32,7 @@ function normalizeBaseURL(baseURL) {
   return url;
 }
 
-async function postJSON({ baseURL, path, body, bearerToken, timeoutMs, fetchImpl }) {
+async function postJSON({ baseURL, path, body, serializedBody, bearerToken, timeoutMs, fetchImpl }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const headers = new Headers();
@@ -44,7 +45,7 @@ async function postJSON({ baseURL, path, body, bearerToken, timeoutMs, fetchImpl
     const response = await fetchImpl(new URL(path, baseURL), {
       method: "POST",
       headers,
-      body: JSON.stringify(body),
+      body: serializedBody ?? JSON.stringify(body),
       signal: controller.signal
     });
     const text = await response.text();
@@ -224,6 +225,7 @@ export function createHttpProverAdapter({
           baseURL: normalizedBaseURL,
           path: batchTransferProofPath,
           body: normalizedRequest,
+          serializedBody: serializeBatchTransferProofRequest(normalizedRequest.payload),
           bearerToken,
           timeoutMs,
           fetchImpl
