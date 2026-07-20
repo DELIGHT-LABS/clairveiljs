@@ -8,6 +8,13 @@ import {
   validatePreparedWithdrawProof
 } from "./payload.js";
 import {
+  batchTransferProofPath,
+  batchTransferProofRequestVersion,
+  batchTransferProofResponseVersion,
+  normalizePreparedBatchTransferProof,
+  validatePreparedBatchTransferPayloadEnvelope
+} from "./batch-transfer.js";
+import {
   wrapProverError
 } from "../core/errors.js";
 
@@ -125,6 +132,20 @@ function unwrapWithdrawProof(request, response) {
   };
 }
 
+function unwrapBatchTransferProof(request, response) {
+  const label = "batch transfer proof response";
+  assertResponseObject(response, label);
+  if (response.version !== batchTransferProofResponseVersion) {
+    throw new Error(`${label}.version must be ${batchTransferProofResponseVersion}`);
+  }
+  return {
+    ...response,
+    proof: normalizePreparedBatchTransferProof(request.payload, response.proof, {
+      nowUnix: Math.floor(Date.now() / 1000)
+    })
+  };
+}
+
 export function createHttpProverAdapter({
   baseURL,
   bearerToken = "",
@@ -181,6 +202,33 @@ export function createHttpProverAdapter({
           fetchImpl
         });
         return unwrapWithdrawProof(normalizedRequest, response);
+      } catch (error) {
+        throw wrapProverError(error);
+      }
+    },
+
+    async proveBatchTransfer(request) {
+      const isEnvelope = Boolean(request && typeof request === "object" && Object.prototype.hasOwnProperty.call(request, "payload"));
+      const normalizedRequest = {
+        version: isEnvelope ? (request.version || batchTransferProofRequestVersion) : batchTransferProofRequestVersion,
+        payload: isEnvelope ? request.payload : request
+      };
+      if (normalizedRequest.version !== batchTransferProofRequestVersion) {
+        throw new Error(`unsupported batch transfer proof request version ${JSON.stringify(normalizedRequest.version)}`);
+      }
+      try {
+        validatePreparedBatchTransferPayloadEnvelope(normalizedRequest.payload, {
+          nowUnix: Math.floor(Date.now() / 1000)
+        });
+        const response = await postJSON({
+          baseURL: normalizedBaseURL,
+          path: batchTransferProofPath,
+          body: normalizedRequest,
+          bearerToken,
+          timeoutMs,
+          fetchImpl
+        });
+        return unwrapBatchTransferProof(normalizedRequest, response);
       } catch (error) {
         throw wrapProverError(error);
       }

@@ -3,10 +3,18 @@ import type {
   PreparedTransferProof,
   PreparedWithdrawProof
 } from "./payload.js";
+import type {
+  PreparedBatchTransferPayload,
+  PreparedBatchTransferProof
+} from "./batch-transfer.js";
 
 export interface ProverAdapter {
   proveTransfer(request: object): Promise<{ version: typeof transferProofResponseVersion; proof: PreparedTransferProof }>;
   proveWithdraw(request: object): Promise<{ version: typeof withdrawProofResponseVersion; proof: PreparedWithdrawProof }>;
+}
+
+export interface BatchTransferProverAdapter {
+  proveBatchTransfer(request: { version?: "v1"; payload?: PreparedBatchTransferPayload } | PreparedBatchTransferPayload): Promise<{ version: "v1"; proof: PreparedBatchTransferProof & { proof_bytes: Uint8Array } }>;
 }
 
 export const transferProofRequestVersion: "v1";
@@ -19,7 +27,7 @@ export function createHttpProverAdapter(input?: {
   bearerToken?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
-}): ProverAdapter;
+}): ProverAdapter & BatchTransferProverAdapter;
 
 export function createAsyncJobProverAdapter(input: {
   submitTransferJob: (request: object) => Promise<object>;
