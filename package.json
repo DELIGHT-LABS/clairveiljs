@@ -119,6 +119,10 @@
       "types": "./src/privacy/payload.d.ts",
       "import": "./src/privacy/payload.js"
     },
+    "./protocol-v1": {
+      "types": "./src/privacy/protocol-v1.d.ts",
+      "import": "./src/privacy/protocol-v1.js"
+    },
     "./planner": {
       "types": "./src/privacy/planner.d.ts",
       "import": "./src/privacy/planner.js"

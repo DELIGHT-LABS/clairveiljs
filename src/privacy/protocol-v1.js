@@ -1,0 +1,602 @@
+import {
+  CURVE_ORDER,
+  FIELD_MODULUS,
+  bytesToBigIntBE,
+  canonicalFieldBytes,
+  canonicalFieldHex,
+  hashStringToField,
+  mimcHash,
+  packPoint,
+  scalarMultiply,
+  unpackPoint
+} from "../core/crypto.js";
+import {
+  aesGcmDecrypt,
+  aesGcmEncrypt,
+  bytesFromHex,
+  concatBytes,
+  hexFromBytes,
+  randomBytes,
+  sha256,
+  utf8Bytes,
+  utf8String
+} from "../core/browser-crypto.js";
+
+export const privacyFixedV1 = "privacy-fixed-v1";
+export const activeCircuitSetIdV1 = "privacy-note-v1";
+export const notePlaintextV1Size = 350;
+export const disclosurePlaintextV1Size = 392;
+export const encryptedEnvelopeV1HeaderSize = 20;
+export const noteMemoCapacityV1 = 128;
+export const batchTransferPayloadDomainV1 = "clairveil.batch-transfer-payload.v1";
+export const transferPayloadDomainV1 = "clairveil.transfer-payload.v1";
+
+export const encryptedEnvelopeKindV1 = Object.freeze({
+  depositNote: 1,
+  transferNote: 2,
+  userDisclosure: 3,
+  auditDisclosure: 4,
+  selfViewDisclosure: 5
+});
+
+const fixedBinaryVersion = 1;
+const maxUint64 = (1n << 64n) - 1n;
+
+function bytes(value, label = "bytes") {
+  if (value instanceof Uint8Array) return Uint8Array.from(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+  if (typeof value === "string") return bytesFromHex(value, label);
+  if (Array.isArray(value)) return Uint8Array.from(value);
+  throw new Error(`${label} must be bytes`);
+}
+
+function uint(value, bits, label) {
+  const parsed = typeof value === "bigint" ? value : BigInt(value ?? 0);
+  if (parsed < 0n || parsed >= (1n << BigInt(bits))) {
+    throw new Error(`${label} must be an unsigned ${bits}-bit integer`);
+  }
+  return parsed;
+}
+
+function field(value, label, { nonZero = false } = {}) {
+  const parsed = typeof value === "bigint" ? value : BigInt(value ?? 0);
+  if (parsed < 0n || parsed >= FIELD_MODULUS || (nonZero && parsed === 0n)) {
+    throw new Error(`${label} must be a${nonZero ? " non-zero" : ""} canonical BN254 field element`);
+  }
+  return parsed;
+}
+
+function fieldFromBytes(value, label, options) {
+  const raw = bytes(value, label);
+  if (raw.length !== 32) throw new Error(`${label} must be exactly 32 bytes`);
+  field(bytesToBigIntBE(raw), label, options);
+  return raw;
+}
+
+function u16be(value) {
+  const parsed = Number(uint(value, 16, "u16"));
+  return Uint8Array.of(parsed >>> 8, parsed & 0xff);
+}
+
+function u32be(value) {
+  const parsed = Number(uint(value, 32, "u32"));
+  return Uint8Array.of((parsed >>> 24) & 0xff, (parsed >>> 16) & 0xff, (parsed >>> 8) & 0xff, parsed & 0xff);
+}
+
+function u64be(value, label = "u64") {
+  let parsed = uint(value, 64, label);
+  const output = new Uint8Array(8);
+  for (let index = 7; index >= 0; index -= 1) {
+    output[index] = Number(parsed & 0xffn);
+    parsed >>= 8n;
+  }
+  return output;
+}
+
+function readU16(data, offset) {
+  return (data[offset] << 8) | data[offset + 1];
+}
+
+function readU32(data, offset) {
+  return (((data[offset] << 24) >>> 0) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3]) >>> 0;
+}
+
+function readU64(data, offset) {
+  let value = 0n;
+  for (let index = 0; index < 8; index += 1) value = (value << 8n) | BigInt(data[offset + index]);
+  return value;
+}
+
+function writeLengthPrefixed(value, label = "field") {
+  const raw = bytes(value, label);
+  return concatBytes(u32be(raw.length), raw);
+}
+
+function writeByteSlice(values, label) {
+  if (!Array.isArray(values)) throw new Error(`${label} must be an array`);
+  return concatBytes(u32be(values.length), ...values.map((value, index) => writeLengthPrefixed(value, `${label} ${index}`)));
+}
+
+function fixedDomainTag(label) {
+  return sha256(label).slice(0, 16);
+}
+
+function pointFromCoordinates(x, y, label) {
+  const point = { x: field(x, `${label} x`), y: field(y, `${label} y`) };
+  try {
+    return unpackPoint(packPoint(point));
+  } catch (error) {
+    throw new Error(`${label} must be a canonical prime-subgroup point: ${error.message}`);
+  }
+}
+
+function validUtf8(bytesValue) {
+  try {
+    return utf8String(bytesValue).length >= 0;
+  } catch {
+    return false;
+  }
+}
+
+function envelopeTag() {
+  return fixedDomainTag("clairveil.encrypted-envelope.v1");
+}
+
+function envelopeCiphertextSize(kind) {
+  switch (Number(kind)) {
+    case encryptedEnvelopeKindV1.depositNote:
+      return notePlaintextV1Size + 28;
+    case encryptedEnvelopeKindV1.transferNote:
+      return notePlaintextV1Size + 60;
+    case encryptedEnvelopeKindV1.userDisclosure:
+    case encryptedEnvelopeKindV1.auditDisclosure:
+    case encryptedEnvelopeKindV1.selfViewDisclosure:
+      return disclosurePlaintextV1Size + 60;
+    default:
+      throw new Error(`unsupported encrypted envelope kind ${kind}`);
+  }
+}
+
+export function domainFieldV1(label) {
+  const name = String(label || "");
+  return bytesToBigIntBE(sha256(concatBytes(
+    utf8Bytes("clairveil.field-domain.v1"),
+    u32be(utf8Bytes(name).length),
+    utf8Bytes(name)
+  ))) % FIELD_MODULUS;
+}
+
+export function computeAssetIdV1(denom) {
+  const canonicalDenom = String(denom || "").trim();
+  if (!/^[a-zA-Z][a-zA-Z0-9/:._-]*$/.test(canonicalDenom)) {
+    throw new Error("canonical asset denom is required");
+  }
+  const encoded = utf8Bytes(canonicalDenom);
+  return bytesToBigIntBE(sha256(concatBytes(
+    utf8Bytes("clairveil.asset-id.v1"),
+    u32be(encoded.length),
+    encoded
+  ))) % FIELD_MODULUS;
+}
+
+export function computeNoteCommitmentV1(note) {
+  const normalized = validateNoteV1(note);
+  return mimcHash(
+    domainFieldV1("clairveil.note-commitment.v1"),
+    normalized.receiverSpendPubKeyX,
+    normalized.receiverSpendPubKeyY,
+    normalized.receiverViewPubKeyX,
+    normalized.receiverViewPubKeyY,
+    normalized.amount,
+    normalized.assetID,
+    normalized.randomness
+  );
+}
+
+export function computeNoteNullifierV1(note) {
+  const normalized = validateNoteV1(note);
+  return mimcHash(
+    domainFieldV1("clairveil.note-nullifier.v1"),
+    computeNoteCommitmentV1(normalized),
+    normalized.randomness,
+    normalized.receiverSpendPubKeyX,
+    normalized.receiverSpendPubKeyY
+  );
+}
+
+export function computeNoteTreeNodeV1(level, left, right) {
+  return mimcHash(
+    domainFieldV1("clairveil.note-tree-node.v1"),
+    uint(level, 32, "merkle level"),
+    field(left, "merkle left"),
+    field(right, "merkle right")
+  );
+}
+
+export function emptyNoteTreeRootsV1(depth) {
+  const parsedDepth = Number(uint(depth, 32, "merkle depth"));
+  const roots = [0n];
+  for (let level = 0; level < parsedDepth; level += 1) {
+    roots.push(computeNoteTreeNodeV1(level, roots[level], roots[level]));
+  }
+  return roots;
+}
+
+export function validateNoteV1(note) {
+  if (!note || typeof note !== "object") throw new Error("NoteV1 is required");
+  const normalized = {
+    receiverSpendPubKeyX: field(note.receiverSpendPubKeyX ?? note.rsx, "NoteV1 receiver spend pubkey x"),
+    receiverSpendPubKeyY: field(note.receiverSpendPubKeyY ?? note.rsy, "NoteV1 receiver spend pubkey y"),
+    receiverViewPubKeyX: field(note.receiverViewPubKeyX ?? note.rvx, "NoteV1 receiver view pubkey x"),
+    receiverViewPubKeyY: field(note.receiverViewPubKeyY ?? note.rvy, "NoteV1 receiver view pubkey y"),
+    amount: uint(note.amount ?? note.am, 64, "NoteV1 amount"),
+    assetID: field(note.assetID ?? note.assetId ?? note.as, "NoteV1 asset id", { nonZero: true }),
+    randomness: field(note.randomness ?? note.rn, "NoteV1 randomness"),
+    memo: String(note.memo ?? note.mm ?? "")
+  };
+  if (utf8Bytes(normalized.memo).length > noteMemoCapacityV1) {
+    throw new Error(`NoteV1 memo exceeds fixed capacity ${noteMemoCapacityV1}`);
+  }
+  pointFromCoordinates(normalized.receiverSpendPubKeyX, normalized.receiverSpendPubKeyY, "NoteV1 receiver spend public key");
+  pointFromCoordinates(normalized.receiverViewPubKeyX, normalized.receiverViewPubKeyY, "NoteV1 receiver view public key");
+  if (computeNoteCommitmentUnchecked(normalized) === 0n || computeNoteNullifierUnchecked(normalized) === 0n) {
+    throw new Error("NoteV1 active commitment and nullifier must be non-zero");
+  }
+  return normalized;
+}
+
+function computeNoteCommitmentUnchecked(note) {
+  return mimcHash(
+    domainFieldV1("clairveil.note-commitment.v1"),
+    note.receiverSpendPubKeyX, note.receiverSpendPubKeyY,
+    note.receiverViewPubKeyX, note.receiverViewPubKeyY,
+    note.amount, note.assetID, note.randomness
+  );
+}
+
+function computeNoteNullifierUnchecked(note) {
+  return mimcHash(
+    domainFieldV1("clairveil.note-nullifier.v1"),
+    computeNoteCommitmentUnchecked(note), note.randomness,
+    note.receiverSpendPubKeyX, note.receiverSpendPubKeyY
+  );
+}
+
+export function marshalNotePlaintextV1(note) {
+  const normalized = validateNoteV1(note);
+  const memo = utf8Bytes(normalized.memo);
+  const output = new Uint8Array(notePlaintextV1Size);
+  let offset = 0;
+  output.set(fixedDomainTag("clairveil.note-plaintext.v1"), offset); offset += 16;
+  output.set(u16be(fixedBinaryVersion), offset); offset += 2;
+  offset += 2;
+  for (const value of [
+    normalized.receiverSpendPubKeyX, normalized.receiverSpendPubKeyY,
+    normalized.receiverViewPubKeyX, normalized.receiverViewPubKeyY
+  ]) {
+    output.set(canonicalFieldBytes(value), offset); offset += 32;
+  }
+  output.set(u64be(normalized.amount, "NoteV1 amount"), offset); offset += 8;
+  output.set(canonicalFieldBytes(normalized.assetID), offset); offset += 32;
+  output.set(canonicalFieldBytes(normalized.randomness), offset); offset += 32;
+  output.set(u16be(memo.length), offset); offset += 2;
+  output.set(memo, offset);
+  return output;
+}
+
+export function unmarshalNotePlaintextV1(value) {
+  const encoded = bytes(value, "NotePlaintextV1");
+  if (encoded.length !== notePlaintextV1Size) throw new Error(`NotePlaintextV1 must be exactly ${notePlaintextV1Size} bytes`);
+  let offset = 0;
+  const tag = fixedDomainTag("clairveil.note-plaintext.v1");
+  if (!equalBytes(encoded.slice(offset, offset + 16), tag)) throw new Error("invalid NotePlaintextV1 domain tag");
+  offset += 16;
+  if (readU16(encoded, offset) !== fixedBinaryVersion) throw new Error("unsupported NotePlaintextV1 version");
+  offset += 2;
+  if (encoded[offset] !== 0 || encoded[offset + 1] !== 0) throw new Error("NotePlaintextV1 reserved flags must be zero");
+  offset += 2;
+  const fields = [];
+  for (let index = 0; index < 4; index += 1) {
+    fields.push(bytesToBigIntBE(fieldFromBytes(encoded.slice(offset, offset + 32), `NoteV1 key coordinate ${index}`)));
+    offset += 32;
+  }
+  const amount = readU64(encoded, offset); offset += 8;
+  const assetID = bytesToBigIntBE(fieldFromBytes(encoded.slice(offset, offset + 32), "NoteV1 asset id", { nonZero: true })); offset += 32;
+  const randomness = bytesToBigIntBE(fieldFromBytes(encoded.slice(offset, offset + 32), "NoteV1 randomness")); offset += 32;
+  const memoLength = readU16(encoded, offset); offset += 2;
+  if (memoLength > noteMemoCapacityV1) throw new Error("NotePlaintextV1 memo exceeds fixed capacity");
+  const memoBytes = encoded.slice(offset, offset + noteMemoCapacityV1);
+  if (memoBytes.slice(memoLength).some(byte => byte !== 0)) throw new Error("NotePlaintextV1 memo padding must be zero");
+  if (!validUtf8(memoBytes.slice(0, memoLength))) throw new Error("NotePlaintextV1 memo must be valid UTF-8");
+  return validateNoteV1({
+    receiverSpendPubKeyX: fields[0], receiverSpendPubKeyY: fields[1],
+    receiverViewPubKeyX: fields[2], receiverViewPubKeyY: fields[3],
+    amount, assetID, randomness, memo: utf8String(memoBytes.slice(0, memoLength))
+  });
+}
+
+export function wrapEncryptedEnvelopeV1(kind, ciphertext) {
+  const raw = bytes(ciphertext, "encrypted envelope ciphertext");
+  if (raw.length !== envelopeCiphertextSize(kind)) {
+    throw new Error(`encrypted envelope kind ${kind} ciphertext must be exactly ${envelopeCiphertextSize(kind)} bytes`);
+  }
+  return concatBytes(envelopeTag(), u16be(fixedBinaryVersion), Uint8Array.of(Number(kind), 0), raw);
+}
+
+export function unwrapEncryptedEnvelopeV1(value, expectedKind) {
+  const encoded = bytes(value, "encrypted envelope");
+  if (encoded.length < encryptedEnvelopeV1HeaderSize) throw new Error("encrypted envelope is shorter than its header");
+  if (!equalBytes(encoded.slice(0, 16), envelopeTag())) throw new Error("invalid encrypted envelope domain tag");
+  if (readU16(encoded, 16) !== fixedBinaryVersion) throw new Error("unsupported encrypted envelope version");
+  const kind = encoded[18];
+  if (expectedKind != null && kind !== Number(expectedKind)) throw new Error(`encrypted envelope kind mismatch: got ${kind}, expected ${expectedKind}`);
+  if (encoded[19] !== 0) throw new Error("encrypted envelope reserved byte must be zero");
+  const raw = encoded.slice(encryptedEnvelopeV1HeaderSize);
+  if (raw.length !== envelopeCiphertextSize(kind)) throw new Error(`encrypted envelope kind ${kind} has invalid fixed length`);
+  return raw;
+}
+
+export function encryptNoteForTransferV1(note, outputCommitment, outputIndex) {
+  const normalized = validateNoteV1(note);
+  const raw = asymEncryptWithViewTagV1(
+    marshalNotePlaintextV1(normalized),
+    { x: normalized.receiverViewPubKeyX, y: normalized.receiverViewPubKeyY },
+    outputCommitment,
+    outputIndex
+  );
+  return {
+    ciphertext: wrapEncryptedEnvelopeV1(encryptedEnvelopeKindV1.transferNote, raw.ciphertext),
+    viewTag: raw.viewTag
+  };
+}
+
+export function decryptTransferNoteV1(ciphertext, scalar) {
+  return unmarshalNotePlaintextV1(asymDecryptV1(unwrapEncryptedEnvelopeV1(ciphertext, encryptedEnvelopeKindV1.transferNote), scalar));
+}
+
+export function encryptDepositNoteV1(note, rootSeed) {
+  const nonce = randomBytes(12);
+  const encrypted = aesGcmEncrypt({ key: sha256(rootSeed), nonce, plaintext: marshalNotePlaintextV1(note) });
+  return wrapEncryptedEnvelopeV1(encryptedEnvelopeKindV1.depositNote, concatBytes(nonce, encrypted));
+}
+
+export function decryptDepositNoteV1(ciphertext, rootSeed) {
+  const raw = unwrapEncryptedEnvelopeV1(ciphertext, encryptedEnvelopeKindV1.depositNote);
+  return unmarshalNotePlaintextV1(aesGcmDecrypt({ key: sha256(rootSeed), nonce: raw.slice(0, 12), ciphertext: raw.slice(12) }));
+}
+
+function asymEncryptWithViewTagV1(plaintext, receiver, outputCommitment, outputIndex) {
+  const receiverPoint = pointFromCoordinates(receiver.x, receiver.y, "receiver public key");
+  let scalar = 0n;
+  while (scalar === 0n) scalar = bytesToBigIntBE(randomBytes(32)) % CURVE_ORDER;
+  const ephemeral = scalarMultiply({ x: 9671717474070082183213120605117400219616337014328744928644933853176787189663n, y: 16950150798460657717958625567821834550301663161624707787222815936182638968203n }, scalar);
+  const sharedPoint = scalarMultiply(receiverPoint, scalar);
+  const nonce = randomBytes(12);
+  const encrypted = aesGcmEncrypt({ key: sha256(packPoint(sharedPoint)), nonce, plaintext });
+  const commitment = fieldFromBytes(outputCommitment, "output commitment", { nonZero: true });
+  const tag = canonicalFieldBytes(mimcHash(hashStringToField("clairveil.view_tag.v1"), sharedPoint.x, sharedPoint.y, bytesToBigIntBE(commitment), uint(outputIndex, 32, "output index"))).slice(0, 2);
+  return { ciphertext: concatBytes(packPoint(ephemeral), nonce, encrypted), viewTag: tag };
+}
+
+function asymDecryptV1(ciphertext, scalar) {
+  const raw = bytes(ciphertext, "ECIES ciphertext");
+  if (raw.length < 60) throw new Error("ECIES ciphertext is too short");
+  const ephemeral = unpackPoint(raw.slice(0, 32));
+  const sharedPoint = scalarMultiply(ephemeral, field(scalar, "ECIES scalar", { nonZero: true }));
+  return aesGcmDecrypt({ key: sha256(packPoint(sharedPoint)), nonce: raw.slice(32, 44), ciphertext: raw.slice(44) });
+}
+
+function equalBytes(left, right) {
+  if (left.length !== right.length) return false;
+  let different = 0;
+  for (let index = 0; index < left.length; index += 1) different |= left[index] ^ right[index];
+  return different === 0;
+}
+
+function normalizeBatchOutput(output, index) {
+  if (!output || typeof output !== "object") throw new Error(`batch output ${index} is required`);
+  const policy = Number(output.userPrivacyPolicy ?? output.user_privacy_policy ?? 0);
+  const mode = Number(output.userDisclosureMode ?? output.user_disclosure_mode ?? 0);
+  if (!Number.isInteger(policy) || policy < 0 || policy > 7) throw new Error(`batch output ${index} has invalid privacy policy`);
+  if (!Number.isInteger(mode) || mode < 0 || mode > 2) throw new Error(`batch output ${index} has invalid disclosure mode`);
+  const normalized = {
+    commitment: fieldFromBytes(output.commitment, `batch output ${index} commitment`, { nonZero: true }),
+    ciphertext: bytes(output.ciphertext, `batch output ${index} ciphertext`),
+    viewTag: bytes(output.viewTag ?? output.view_tag, `batch output ${index} view tag`),
+    userPrivacyPolicy: policy,
+    userDisclosureMode: mode,
+    userDisclosureDigest: optionalBytes(output.userDisclosureDigest ?? output.user_disclosure_digest, `batch output ${index} user disclosure digest`),
+    userDisclosureTargetPubkey: optionalBytes(output.userDisclosureTargetPubkey ?? output.user_disclosure_target_pubkey, `batch output ${index} user disclosure target`),
+    userDisclosurePayload: optionalBytes(output.userDisclosurePayload ?? output.user_disclosure_payload, `batch output ${index} user disclosure payload`),
+    fullDisclosureDigest: fieldFromBytes(output.fullDisclosureDigest ?? output.full_disclosure_digest, `batch output ${index} full disclosure digest`, { nonZero: true }),
+    auditDisclosurePayload: bytes(output.auditDisclosurePayload ?? output.audit_disclosure_payload, `batch output ${index} audit disclosure payload`),
+    selfViewDisclosurePayload: optionalBytes(output.selfViewDisclosurePayload ?? output.self_view_disclosure_payload, `batch output ${index} self-view disclosure payload`)
+  };
+  unwrapEncryptedEnvelopeV1(normalized.ciphertext, encryptedEnvelopeKindV1.transferNote);
+  if (normalized.viewTag.length !== 2) throw new Error(`batch output ${index} view tag must be exactly 2 bytes`);
+  unwrapEncryptedEnvelopeV1(normalized.auditDisclosurePayload, encryptedEnvelopeKindV1.auditDisclosure);
+  if (normalized.selfViewDisclosurePayload.length) unwrapEncryptedEnvelopeV1(normalized.selfViewDisclosurePayload, encryptedEnvelopeKindV1.selfViewDisclosure);
+  if (policy === 0) {
+    if (mode !== 0 || normalized.userDisclosureDigest.length || normalized.userDisclosureTargetPubkey.length || normalized.userDisclosurePayload.length) {
+      throw new Error(`batch output ${index} all-private disclosure fields must be empty`);
+    }
+  } else {
+    if (![1, 2].includes(mode) || normalized.userDisclosureDigest.length !== 32) throw new Error(`batch output ${index} user disclosure is incomplete`);
+    fieldFromBytes(normalized.userDisclosureDigest, `batch output ${index} user disclosure digest`, { nonZero: true });
+    if (mode === 1) {
+      if (normalized.userDisclosureTargetPubkey.length || normalized.userDisclosurePayload.length !== disclosurePlaintextV1Size) {
+        throw new Error(`batch output ${index} public disclosure must use fixed plaintext`);
+      }
+    } else {
+      if (normalized.userDisclosureTargetPubkey.length !== 32 || !normalized.userDisclosurePayload.length) throw new Error(`batch output ${index} encrypted disclosure is incomplete`);
+      try {
+        unpackPoint(normalized.userDisclosureTargetPubkey);
+      } catch (error) {
+        throw new Error(`batch output ${index} encrypted disclosure target is invalid: ${error.message}`);
+      }
+      unwrapEncryptedEnvelopeV1(normalized.userDisclosurePayload, encryptedEnvelopeKindV1.userDisclosure);
+    }
+  }
+  return normalized;
+}
+
+function optionalBytes(value, label) {
+  if (value == null || value === "") return new Uint8Array();
+  return bytes(value, label);
+}
+
+export function validateBatchTransferEffectsV1(message) {
+  if (!message || typeof message !== "object") throw new Error("MsgBatchTransfer is required");
+  const root = fieldFromBytes(message.root, "batch merkle root", { nonZero: true });
+  const nullifiersRaw = message.nullifiers;
+  if (!Array.isArray(nullifiersRaw) || nullifiersRaw.length < 1 || nullifiersRaw.length > 16) throw new Error("batch input count must be in 1..16");
+  const nullifiers = nullifiersRaw.map((value, index) => fieldFromBytes(value, `batch nullifier ${index}`, { nonZero: true }));
+  const seenNullifiers = new Set(nullifiers.map(hexFromBytes));
+  if (seenNullifiers.size !== nullifiers.length) throw new Error("batch nullifiers must be distinct");
+  if (!Array.isArray(message.outputs) || message.outputs.length < 1 || message.outputs.length > 32) throw new Error("batch output count must be in 1..32");
+  const outputs = message.outputs.map(normalizeBatchOutput);
+  const auditKeyId = String(message.auditKeyId ?? message.audit_key_id ?? "");
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(auditKeyId)) throw new Error("batch audit key ID must be canonical lowercase ASCII");
+  const auditKeyEpoch = uint(message.auditKeyEpoch ?? message.audit_key_epoch ?? 0, 64, "batch audit key epoch");
+  if (auditKeyEpoch === 0n) throw new Error("batch audit key epoch must be positive");
+  const auditDisclosureTargetPubkey = bytes(message.auditDisclosureTargetPubkey ?? message.audit_disclosure_target_pubkey, "batch audit disclosure target public key");
+  if (auditDisclosureTargetPubkey.length !== 32) throw new Error("batch audit disclosure target public key must be exactly 32 bytes");
+  try {
+    unpackPoint(auditDisclosureTargetPubkey);
+  } catch (error) {
+    throw new Error(`batch audit disclosure target public key is invalid: ${error.message}`);
+  }
+  const expiresAtUnix = uint(message.expiresAtUnix ?? message.expires_at_unix ?? 0, 63, "batch expires_at_unix");
+  if (expiresAtUnix === 0n) throw new Error("batch expires_at_unix must be positive");
+  const selfViewEnabled = outputs[0].selfViewDisclosurePayload.length !== 0;
+  if (outputs.some(output => (output.selfViewDisclosurePayload.length !== 0) !== selfViewEnabled)) {
+    throw new Error("batch self-view disclosure must be all-or-none");
+  }
+  const commitments = outputs.map(output => hexFromBytes(output.commitment));
+  if (new Set(commitments).size !== commitments.length) throw new Error("batch commitments must be distinct");
+  return { root, nullifiers, outputs, auditKeyId, auditKeyEpoch, auditDisclosureTargetPubkey, expiresAtUnix };
+}
+
+export function canonicalBatchTransferPayloadBytesV1(message) {
+  const normalized = validateBatchTransferEffectsV1(message);
+  const chunks = [u32be(1), writeLengthPrefixed(normalized.root, "batch root"), writeByteSlice(normalized.nullifiers, "batch nullifier"), u32be(normalized.outputs.length)];
+  for (const output of normalized.outputs) {
+    chunks.push(
+      writeLengthPrefixed(output.commitment),
+      writeLengthPrefixed(output.ciphertext),
+      writeLengthPrefixed(output.viewTag),
+      u32be(output.userPrivacyPolicy),
+      u32be(output.userDisclosureMode),
+      writeLengthPrefixed(output.userDisclosureDigest),
+      writeLengthPrefixed(output.userDisclosureTargetPubkey),
+      writeLengthPrefixed(output.userDisclosurePayload),
+      writeLengthPrefixed(output.fullDisclosureDigest),
+      writeLengthPrefixed(output.auditDisclosurePayload),
+      writeLengthPrefixed(output.selfViewDisclosurePayload)
+    );
+  }
+  chunks.push(
+    writeLengthPrefixed(utf8Bytes(normalized.auditKeyId), "batch audit key ID"),
+    u64be(normalized.auditKeyEpoch, "batch audit key epoch"),
+    writeLengthPrefixed(normalized.auditDisclosureTargetPubkey),
+    u64be(normalized.expiresAtUnix, "batch expires_at_unix")
+  );
+  return concatBytes(...chunks);
+}
+
+export function computeBatchTransferPayloadDigestV1(message) {
+  const digest = sha256(concatBytes(utf8Bytes(batchTransferPayloadDomainV1), canonicalBatchTransferPayloadBytesV1(message)));
+  return {
+    bytes: digest,
+    hex: hexFromBytes(digest),
+    hi: bytesToBigIntBE(digest.slice(0, 16)),
+    lo: bytesToBigIntBE(digest.slice(16))
+  };
+}
+
+export function canonicalTransferPayloadBytesV1(message) {
+  if (!message || typeof message !== "object") throw new Error("MsgTransfer is required");
+  const root = fieldFromBytes(message.root, "transfer root", { nonZero: true });
+  const nullifiers = message.nullifiers;
+  const commitments = message.newCommitments ?? message.new_commitments;
+  const cipherTexts = message.cipherTexts ?? message.cipher_texts;
+  const viewTags = message.viewTags ?? message.view_tags;
+  if (!Array.isArray(nullifiers) || !Array.isArray(commitments) || !Array.isArray(cipherTexts) || !Array.isArray(viewTags)) {
+    throw new Error("transfer effect vectors are required");
+  }
+  const policy = Number(message.userPrivacyPolicy ?? message.user_privacy_policy ?? 0);
+  const mode = Number(message.userDisclosureMode ?? message.user_disclosure_mode ?? 0);
+  const expiresAtUnix = uint(message.expiresAtUnix ?? message.expires_at_unix ?? 0, 63, "transfer expires_at_unix");
+  if (!Number.isInteger(policy) || policy < 0 || policy > 7 || !Number.isInteger(mode) || mode < 0 || mode > 2 || expiresAtUnix === 0n) {
+    throw new Error("transfer effect has invalid policy, mode, or expiry");
+  }
+  return concatBytes(
+    u32be(1),
+    writeLengthPrefixed(root),
+    writeByteSlice(nullifiers, "transfer nullifier"),
+    writeByteSlice(commitments, "transfer commitment"),
+    writeByteSlice(cipherTexts, "transfer ciphertext"),
+    writeByteSlice(viewTags, "transfer view tag"),
+    u32be(policy),
+    u32be(mode),
+    ...[
+      message.userDisclosureDigest ?? message.user_disclosure_digest,
+      message.userDisclosureTargetPubkey ?? message.user_disclosure_target_pubkey,
+      message.userDisclosurePayload ?? message.user_disclosure_payload,
+      message.auditDisclosureDigest ?? message.audit_disclosure_digest,
+      message.auditDisclosureTargetPubkey ?? message.audit_disclosure_target_pubkey,
+      message.auditDisclosurePayload ?? message.audit_disclosure_payload,
+      message.selfViewDisclosureDigest ?? message.self_view_disclosure_digest,
+      message.selfViewDisclosurePayload ?? message.self_view_disclosure_payload
+    ].map((value, index) => writeLengthPrefixed(optionalBytes(value, `transfer disclosure ${index}`))),
+    u64be(expiresAtUnix, "transfer expires_at_unix")
+  );
+}
+
+export function computeTransferPayloadDigestV1(message) {
+  const digest = sha256(concatBytes(utf8Bytes(transferPayloadDomainV1), canonicalTransferPayloadBytesV1(message)));
+  return { bytes: digest, hex: hexFromBytes(digest), hi: bytesToBigIntBE(digest.slice(0, 16)), lo: bytesToBigIntBE(digest.slice(16)) };
+}
+
+export function computeChainDomainV1(chainId, circuitSetId = activeCircuitSetIdV1) {
+  const chain = String(chainId || "");
+  const circuit = String(circuitSetId || "");
+  if (!chain || !circuit) throw new Error("chain ID and circuit set ID are required");
+  const digest = sha256(concatBytes(
+    utf8Bytes("clairveil.chain-domain.v1"),
+    writeLengthPrefixed(utf8Bytes(chain), "chain ID"),
+    writeLengthPrefixed(utf8Bytes(circuit), "circuit set ID")
+  ));
+  return { bytes: digest, hex: hexFromBytes(digest), hi: bytesToBigIntBE(digest.slice(0, 16)), lo: bytesToBigIntBE(digest.slice(16)) };
+}
+
+export function computeTransferIntentV2({ chainDomain, root, assetId, nullifiers, commitments, userDisclosureDigest, fullDisclosureDigest, payloadDigest, expiresAtUnix } = {}) {
+  if (!chainDomain || !payloadDigest) throw new Error("transfer chain and payload digests are required");
+  if (!Array.isArray(nullifiers) || nullifiers.length !== 2 || !Array.isArray(commitments) || commitments.length !== 2) {
+    throw new Error("transfer intent requires exactly two nullifiers and commitments");
+  }
+  const orderedSet = (domain, values) => mimcHash(hashStringToField(domain), BigInt(values.length), ...values.map((value, index) => field(value, `transfer intent value ${index}`, { nonZero: true })));
+  const expiry = uint(expiresAtUnix, 63, "transfer intent expiry");
+  if (!expiry) throw new Error("transfer intent expiry must be positive");
+  return mimcHash(
+    hashStringToField("CLAIRVEIL_TRANSFER_INTENT_V2"),
+    uint(chainDomain.hi, 128, "transfer chain digest hi"),
+    uint(chainDomain.lo, 128, "transfer chain digest lo"),
+    hashStringToField("CLAIRVEIL_JOINSPLIT_2X2_V2"),
+    field(root, "transfer intent root", { nonZero: true }),
+    2n, 2n,
+    field(assetId, "transfer intent asset ID", { nonZero: true }),
+    orderedSet("CLAIRVEIL_NULLIFIER_SET_V1", nullifiers),
+    orderedSet("CLAIRVEIL_COMMITMENT_SET_V1", commitments),
+    field(userDisclosureDigest ?? 0n, "transfer intent user disclosure digest"),
+    field(fullDisclosureDigest, "transfer intent full disclosure digest", { nonZero: true }),
+    uint(payloadDigest.hi, 128, "transfer payload digest hi"),
+    uint(payloadDigest.lo, 128, "transfer payload digest lo"),
+    expiry
+  );
+}
+
+export function fieldHexV1(value) {
+  return canonicalFieldHex(field(value, "field"));
+}

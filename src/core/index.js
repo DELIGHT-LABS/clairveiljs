@@ -3,6 +3,7 @@ export * from "./disclosure.js";
 export * from "./errors.js";
 export * from "./note.js";
 export * from "../privacy/payload.js";
+export * from "../privacy/protocol-v1.js";
 export * from "../privacy/planner.js";
 export * from "../privacy/prover.js";
 export * from "../privacy/reservation.js";
