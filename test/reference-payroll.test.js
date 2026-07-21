@@ -3,11 +3,16 @@ import assert from "node:assert/strict";
 import {
   MemoryDisclosureKeyRegistry,
   analyzeNotePreparation,
+  assertOneProofPayrollNullifiersUnspent,
+  buildExpectedPayrollEvidence,
   normalizePayrollDisclosurePolicy,
   normalizePayrollInput,
   oneProofPayrollCircuitSetId,
-  planOneProofPayroll
+  planOneProofPayroll,
+  prepareOneProofPayrollOperation
 } from "clairveiljs/reference-payroll";
+import { canonicalFieldBytes, derivePubKeyFromScalar, signNoteHash } from "clairveiljs/core";
+import { computeAssetIdV1, emptyNoteTreeRootsV1 } from "clairveiljs/protocol-v1";
 
 const recipient = "clairs19x5u4mf4l4zqcpvr7d809fh4tjy5j50p2mwgky0nj38jpqpj7svndu3hqshu5e3s8w6pea5p30xek5p9flxjf7f44xh7cnfrlsd84pc7upgh3";
 const key = "11".repeat(32);
@@ -83,5 +88,64 @@ test("reference payroll plans current one-proof batches without using legacy tra
   assert.throws(
     () => planOneProofPayroll(input, [{ note_id: "wrong-owner", owner_key_id: "other", nullifier_lookup_key: "n4", denom: "uclair", amount: "20" }]),
     /preparation is required/
+  );
+});
+
+test("reference payroll prepares one signed batch payload and binds per-item evidence", async () => {
+  const ownerSpend = derivePubKeyFromScalar(17n);
+  const ownerView = derivePubKeyFromScalar(19n);
+  const assetID = computeAssetIdV1("uclair");
+  const inputNote = {
+    receiverSpendPubKeyX: ownerSpend.x, receiverSpendPubKeyY: ownerSpend.y,
+    receiverViewPubKeyX: ownerView.x, receiverViewPubKeyY: ownerView.y,
+    amount: 7n, assetID, randomness: 11n, memo: "treasury"
+  };
+  const input = payroll([{ item_id: "salary-001", employee_id: "employee-001", recipient_address: recipient, amount: "7" }]);
+  const plan = planOneProofPayroll(input, [{
+    note_id: "treasury-7", owner_key_id: "treasury-key", nullifier_lookup_key: "lookup-7", denom: "uclair", amount: "7",
+    note: inputNote,
+    merkle_path: emptyNoteTreeRootsV1(32).slice(0, 32).map(value => value.toString(16).padStart(64, "0")),
+    merkle_path_helper: Array(32).fill(0)
+  }]);
+  const prepared = await prepareOneProofPayrollOperation({
+    operation: plan.operations[0],
+    asset_registry: { canonical_denom: "uclair", asset_id: canonicalFieldBytes(assetID) },
+    creator: "clair1creator",
+    chain_id: "clairveil-test-1",
+    expires_at_unix: 4_102_448_400,
+    audit_key_id: "audit-key-1",
+    audit_key_epoch: 1,
+    audit_disclosure_target_pubkey: derivePubKeyFromScalar(31n),
+    disable_self_view_disclosure: true,
+    output_secrets: {
+      "salary-001": { randomness: 13n, full_disclosure_blinding: 15n }
+    },
+    signer: {
+      signNoteHash: intent => signNoteHash(intent, { spendScalar: 17n, spendPubKey: ownerSpend })
+    }
+  });
+  assert.equal(prepared.payload.circuit_set_id, oneProofPayrollCircuitSetId);
+  assert.equal(prepared.expected_evidence.length, 1);
+  assert.equal(prepared.expected_evidence[0].batch_item_index, 0);
+  assert.equal(prepared.expected_evidence[0].expected_denom, "uclair");
+  assert.deepEqual(buildExpectedPayrollEvidence(plan.operations[0], prepared.payload), prepared.expected_evidence);
+  await assert.doesNotReject(() => assertOneProofPayrollNullifiersUnspent(prepared.payload, async values => new Map(values.map(value => [value, false]))));
+  await assert.rejects(
+    () => assertOneProofPayrollNullifiersUnspent(prepared.payload, async values => new Map(values.map(value => [value, true]))),
+    /spent, missing, or has an invalid status/
+  );
+  await assert.rejects(
+    () => prepareOneProofPayrollOperation({
+      operation: plan.operations[0],
+      asset_registry: { canonical_denom: "uclair", asset_id: new Uint8Array(32).fill(1) },
+      chain_id: "clairveil-test-1",
+      expires_at_unix: 4_102_448_400,
+      audit_key_id: "audit-key-1",
+      audit_key_epoch: 1,
+      audit_disclosure_target_pubkey: derivePubKeyFromScalar(31n),
+      disable_self_view_disclosure: true,
+      signer: { signNoteHash: intent => signNoteHash(intent, { spendScalar: 17n, spendPubKey: ownerSpend }) }
+    }),
+    /AssetRegistryV1 asset_id does not match/
   );
 });

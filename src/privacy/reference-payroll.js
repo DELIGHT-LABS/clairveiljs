@@ -1,5 +1,12 @@
-import { base64FromBytes, utf8Bytes } from "../core/browser-crypto.js";
+import { base64FromBytes, bytesFromBase64, bytesFromHex, hexFromBytes, randomBytes, utf8Bytes } from "../core/browser-crypto.js";
+import { FIELD_MODULUS, bytesToBigIntBE, decodeShieldedAddress } from "../core/crypto.js";
+import {
+  buildPreparedBatchTransferPayload,
+  preparedBatchTransferEffectHex,
+  validatePreparedBatchTransferPayloadEnvelope
+} from "./batch-transfer.js";
 import { privacyPolicyValue, userDisclosureModeValue } from "./payload.js";
+import { computeAssetIdV1, validateNoteV1 } from "./protocol-v1.js";
 import { hashAmount, hashRecipient } from "./reservation.js";
 
 /** Reference Payroll contracts. The one-proof executor is intentionally separate from legacy transfer-batch. */
@@ -488,7 +495,7 @@ function selectOneProofCandidates(available, target) {
   });
 }
 
-function planOneProofSearch(input, available, itemOffset, operationIndex, state) {
+function planOneProofSearch(input, available, itemOffset, operationIndex, state, options) {
   if (itemOffset === input.items.length) return [];
   state.farthest = Math.max(state.farthest, itemOffset);
   if (state.remaining-- <= 0) return null;
@@ -499,9 +506,9 @@ function planOneProofSearch(input, available, itemOffset, operationIndex, state)
     for (const selection of selectOneProofCandidates(available, paymentTotal)) {
       const change = selection.total - paymentTotal;
       if (change > maxUint64 || (paymentCount === oneProofPayrollMaxOutputs && change !== 0n)) continue;
-      const operation = buildOneProofOperationPlan(input, items, selection, paymentTotal, change, operationIndex);
+      const operation = buildOneProofOperationPlan(input, items, selection, paymentTotal, change, operationIndex, options);
       const selectedIDs = new Set(selection.notes.map(note => note.note_id));
-      const remainder = planOneProofSearch(input, available.filter(note => !selectedIDs.has(note.note_id)), itemOffset + paymentCount, operationIndex + 1, state);
+      const remainder = planOneProofSearch(input, available.filter(note => !selectedIDs.has(note.note_id)), itemOffset + paymentCount, operationIndex + 1, state, options);
       if (remainder) return [operation, ...remainder];
     }
   }
@@ -512,7 +519,7 @@ function preferredExpectedDigest(item) {
   return item.expected_disclosure_digest || item.disclosure_policy.expected_audit_disclosure_digest || "";
 }
 
-function buildOneProofOperationPlan(input, items, selection, paymentTotal, change, operationIndex) {
+function buildOneProofOperationPlan(input, items, selection, paymentTotal, change, operationIndex, options = {}) {
   const operationID = payrollBatchOperationID(input, operationIndex);
   const plannedItems = items.map((item, itemIndex) => ({
     company_id: input.company_id,
@@ -524,7 +531,7 @@ function buildOneProofOperationPlan(input, items, selection, paymentTotal, chang
     employee_id: item.employee_id,
     operation_id: operationID,
     recipient_address: item.recipient_address,
-    expected_recipient_hash: hashRecipient(item.recipient_address),
+    expected_recipient_hash: hashRecipient(item.recipient_address, options),
     amount: item.amount,
     expected_amount_hash: hashAmount(input.denom, item.amount),
     denom: input.denom,
@@ -556,7 +563,7 @@ export function planOneProofPayroll(input, treasuryNotes = [], options = {}) {
   if (!Array.isArray(treasuryNotes)) throw new Error("treasury notes must be an array");
   const notes = treasuryNotes.map(normalizeTreasuryNote);
   const state = { remaining: Number(options.search_limit ?? options.searchLimit ?? maxBatchPlanSearch), farthest: 0 };
-  const operations = planOneProofSearch(payroll, availableNotes(payroll.denom, notes), 0, 0, state);
+  const operations = planOneProofSearch(payroll, availableNotes(payroll.denom, notes), 0, 0, state, options);
   if (!operations) {
     const item = payroll.items[Math.min(state.farthest, payroll.items.length - 1)];
     throw new Error(`one-proof payroll preparation is required: item ${item.item_id} cannot be funded by 1..16 current notes`);
@@ -573,4 +580,255 @@ export function planOneProofPayroll(input, treasuryNotes = [], options = {}) {
     created_at: payroll.created_at,
     updated_at: null
   };
+}
+
+function assetIDBytes(value, label) {
+  if (value instanceof Uint8Array) return Uint8Array.from(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+  const encoded = text(value);
+  if (!encoded) throw new Error(`${label} is required`);
+  if (/^[0-9a-f]{64}$/i.test(encoded)) return bytesFromHex(encoded, label);
+  try {
+    return bytesFromBase64(encoded, label);
+  } catch {
+    throw new Error(`${label} must be 32-byte base64 or hex`);
+  }
+}
+
+/** Validate the authoritative AssetRegistryV1 entry before constructing a payroll witness. */
+export function normalizePayrollAssetRegistryEntry(entry, denom) {
+  const raw = entry?.asset ?? entry?.entry ?? entry;
+  if (!raw || typeof raw !== "object") throw new Error("authoritative AssetRegistryV1 entry is required");
+  const canonicalDenom = text(raw.canonical_denom ?? raw.canonicalDenom ?? raw.denom);
+  if (!canonicalDenom || canonicalDenom !== text(denom)) throw new Error("AssetRegistryV1 denom does not match payroll denom");
+  const assetBytes = assetIDBytes(raw.asset_id ?? raw.assetId, "AssetRegistryV1 asset_id");
+  if (assetBytes.length !== 32) throw new Error("AssetRegistryV1 asset_id must be exactly 32 bytes");
+  const assetID = bytesToBigIntBE(assetBytes);
+  if (assetID === 0n || assetID >= FIELD_MODULUS) throw new Error("AssetRegistryV1 asset_id must be a non-zero canonical BN254 field element");
+  if (assetID !== computeAssetIdV1(canonicalDenom)) throw new Error("AssetRegistryV1 asset_id does not match canonical payroll denom");
+  return Object.freeze({ canonical_denom: canonicalDenom, asset_id: assetBytes, asset_id_hex: hexFromBytes(assetBytes), asset_id_field: assetID });
+}
+
+async function resolvePayrollAssetRegistry(assetRegistry, denom) {
+  if (!assetRegistry) throw new Error("an authoritative AssetRegistryV1 resolver is required for one-proof payroll");
+  let response;
+  if (typeof assetRegistry === "function") response = await assetRegistry(denom);
+  else if (typeof assetRegistry.resolveAsset === "function") response = await assetRegistry.resolveAsset(denom);
+  else if (typeof assetRegistry.fetchAssetByDenom === "function") response = await assetRegistry.fetchAssetByDenom(denom);
+  else response = assetRegistry;
+  return normalizePayrollAssetRegistryEntry(response, denom);
+}
+
+function canonicalFieldSecret(value, label, { nonZero = true } = {}) {
+  if (value === undefined || value === null || value === "") {
+    while (true) {
+      const candidate = bytesToBigIntBE(randomBytes(32));
+      if (candidate < FIELD_MODULUS && (!nonZero || candidate !== 0n)) return candidate;
+    }
+  }
+  const encoded = String(value).trim();
+  if (!/^(0|[1-9][0-9]*)$/.test(encoded)) throw new Error(`${label} must be a canonical BN254 field element`);
+  const parsed = BigInt(encoded);
+  if (parsed >= FIELD_MODULUS || (nonZero && parsed === 0n)) throw new Error(`${label} must be a${nonZero ? " non-zero" : ""} canonical BN254 field element`);
+  return parsed;
+}
+
+function secretForOutput(secrets, key, policy) {
+  const source = secrets?.[key] ?? {};
+  if (!source || typeof source !== "object") throw new Error(`payroll output secret ${key} must be an object`);
+  return {
+    randomness: canonicalFieldSecret(source.randomness, `payroll output ${key} randomness`),
+    userDisclosureBlinding: policy === 0 ? 0n : canonicalFieldSecret(source.user_disclosure_blinding ?? source.userDisclosureBlinding, `payroll output ${key} user disclosure blinding`),
+    fullDisclosureBlinding: canonicalFieldSecret(source.full_disclosure_blinding ?? source.fullDisclosureBlinding, `payroll output ${key} full disclosure blinding`),
+    memo: String(source.memo ?? "")
+  };
+}
+
+function preparedInputFromTreasuryNote(note, index, assetID) {
+  const noteValue = validateNoteV1(note.note ?? note);
+  if (noteValue.assetID !== assetID) throw new Error(`payroll input ${index} asset does not match AssetRegistryV1`);
+  if (noteValue.amount !== note.amount) throw new Error(`payroll input ${index} amount does not match treasury inventory`);
+  const merklePath = note.merkle_path ?? note.merklePath;
+  const merklePathHelper = note.merkle_path_helper ?? note.merklePathHelper;
+  if (!Array.isArray(merklePath) || !Array.isArray(merklePathHelper)) throw new Error(`payroll input ${index} requires a same-root Merkle path snapshot`);
+  return { note: noteValue, merklePath, merklePathHelper };
+}
+
+function paymentNote(item, assetID, secret, options) {
+  let recipient;
+  try {
+    recipient = decodeShieldedAddress(item.recipient_address, options);
+  } catch (error) {
+    throw new Error(`payroll item ${item.item_id} recipient must be a valid shielded address: ${error.message}`);
+  }
+  return {
+    receiverSpendPubKeyX: recipient.spendPubKey.x,
+    receiverSpendPubKeyY: recipient.spendPubKey.y,
+    receiverViewPubKeyX: recipient.viewPubKey.x,
+    receiverViewPubKeyY: recipient.viewPubKey.y,
+    amount: item.amount,
+    assetID,
+    randomness: secret.randomness,
+    memo: secret.memo
+  };
+}
+
+function changeNote(inputNote, amount, assetID, secret) {
+  return {
+    receiverSpendPubKeyX: inputNote.receiverSpendPubKeyX,
+    receiverSpendPubKeyY: inputNote.receiverSpendPubKeyY,
+    receiverViewPubKeyX: inputNote.receiverViewPubKeyX,
+    receiverViewPubKeyY: inputNote.receiverViewPubKeyY,
+    amount,
+    assetID,
+    randomness: secret.randomness,
+    memo: secret.memo
+  };
+}
+
+function expectedDigest(value, label) {
+  if (!value) return "";
+  return hexFromBytes(bytesFromBase64(value, label));
+}
+
+function assertExpectedValue(expected, actual, label) {
+  if (expected && expected !== actual) throw new Error(`${label} does not match the final prepared payroll payload`);
+}
+
+/**
+ * Derive per-payment success evidence from a final, signed prepared payload.
+ * Full disclosure is a single commitment shared by audit and self-view envelopes.
+ */
+export function buildExpectedPayrollEvidence(operation, payload, options = {}) {
+  if (!operation || typeof operation !== "object") throw new Error("one-proof payroll operation is required");
+  validatePreparedBatchTransferPayloadEnvelope(payload, options.now_unix == null && options.nowUnix == null ? {} : { nowUnix: options.now_unix ?? options.nowUnix });
+  const items = operation.items;
+  if (!Array.isArray(items) || items.length === 0 || !Array.isArray(payload.outputs) || !Array.isArray(payload.message_outputs)) throw new Error("payroll operation and prepared payload outputs are required");
+  const expectedOutputCount = items.length + (operation.has_change ? 1 : 0);
+  if (payload.outputs.length !== expectedOutputCount || payload.message_outputs.length !== expectedOutputCount) throw new Error("prepared payload output shape does not match one-proof payroll operation");
+  const assetIDHex = (() => {
+    const decimal = String(payload.asset_id ?? "");
+    if (!/^(0|[1-9][0-9]*)$/.test(decimal)) throw new Error("prepared payload asset_id is invalid");
+    const field = BigInt(decimal);
+    if (field === 0n || field >= FIELD_MODULUS) throw new Error("prepared payload asset_id is invalid");
+    return field.toString(16).padStart(64, "0");
+  })();
+  return items.map((item, index) => {
+    const output = payload.outputs[index];
+    const wire = payload.message_outputs[index];
+    if (output?.kind !== "payment" || String(output?.note?.am ?? "") !== item.amount.toString()) throw new Error(`prepared payment output ${index} does not match payroll item ${item.item_id}`);
+    if (Number(output.privacy_policy) !== item.disclosure_policy.user_privacy_policy || Number(output.disclosure_mode) !== item.disclosure_policy.user_disclosure_mode) throw new Error(`prepared payment output ${index} disclosure policy does not match payroll item ${item.item_id}`);
+    const commitment = expectedDigest(wire?.commitment, `payroll output ${index} commitment`);
+    const userDigest = expectedDigest(wire?.user_disclosure_digest, `payroll output ${index} user disclosure digest`);
+    const fullDigest = expectedDigest(wire?.full_disclosure_digest, `payroll output ${index} full disclosure digest`);
+    const recipientHash = hashRecipient(item.recipient_address, options);
+    const amountHash = hashAmount(item.denom, item.amount);
+    assertExpectedValue(item.expected_output_commitment, commitment, `payroll item ${item.item_id} expected output commitment`);
+    assertExpectedValue(item.expected_disclosure_digest, fullDigest, `payroll item ${item.item_id} expected disclosure digest`);
+    assertExpectedValue(item.disclosure_policy.expected_user_disclosure_digest, userDigest, `payroll item ${item.item_id} expected user disclosure digest`);
+    assertExpectedValue(item.disclosure_policy.expected_audit_disclosure_digest, fullDigest, `payroll item ${item.item_id} expected audit disclosure digest`);
+    assertExpectedValue(item.disclosure_policy.expected_self_view_disclosure_digest, fullDigest, `payroll item ${item.item_id} expected self-view disclosure digest`);
+    return Object.freeze({
+      operation_id: operation.operation_id,
+      item_id: item.item_id,
+      employee_id: item.employee_id,
+      batch_item_index: index,
+      role: "payment",
+      expected_output_commitment: commitment,
+      expected_user_disclosure_digest: userDigest,
+      expected_audit_disclosure_digest: fullDigest,
+      expected_self_view_disclosure_digest: fullDigest,
+      expected_recipient_hash: recipientHash,
+      expected_amount_hash: amountHash,
+      expected_denom: item.denom,
+      asset_id_hex: assetIDHex,
+      user_privacy_policy: item.disclosure_policy.user_privacy_policy,
+      user_disclosure_mode: item.disclosure_policy.user_disclosure_mode,
+      audit_key_id: payload.audit_key_id,
+      audit_key_epoch: payload.audit_key_epoch
+    });
+  });
+}
+
+/**
+ * Build the single canonical `privacy-note-v1` prepared payload for one
+ * payroll operation. It accepts only fixed-v1 notes, same-root Merkle paths,
+ * and an authoritative AssetRegistryV1 lookup.
+ */
+export async function prepareOneProofPayrollOperation(input = {}) {
+  if (!input || typeof input !== "object") throw new Error("one-proof payroll preparation input is required");
+  const operation = input.operation;
+  if (!operation || typeof operation !== "object" || !Array.isArray(operation.items) || !Array.isArray(operation.input_notes)) throw new Error("one-proof payroll operation plan is required");
+  if (operation.circuit_set_id && operation.circuit_set_id !== oneProofPayrollCircuitSetId) throw new Error("one-proof payroll operation must use privacy-note-v1");
+  if (operation.items.length < 1 || operation.items.length > oneProofPayrollMaxOutputs || operation.input_notes.length < 1 || operation.input_notes.length > oneProofPayrollMaxInputs) throw new Error("one-proof payroll operation exceeds 16x32 capacity");
+  const denom = text(operation.items[0]?.denom);
+  if (!denom || operation.items.some(item => text(item.denom) !== denom)) throw new Error("one-proof payroll operation requires one canonical denom");
+  const asset = await resolvePayrollAssetRegistry(input.asset_registry ?? input.assetRegistry, denom);
+  const preparedInputs = operation.input_notes.map((note, index) => preparedInputFromTreasuryNote(note, index, asset.asset_id_field));
+  const inputTotal = preparedInputs.reduce((sum, entry) => sum + entry.note.amount, 0n);
+  const paymentTotal = operation.items.reduce((sum, item) => sum + canonicalUint64(item.amount, `payroll item ${item.item_id} amount`, { positive: true }), 0n);
+  const change = inputTotal - paymentTotal;
+  const plannedChange = canonicalUint64(operation.change, "one-proof payroll operation change");
+  const plannedOutputCount = Number(operation.output_count);
+  if (!Number.isSafeInteger(plannedOutputCount) || plannedOutputCount < 1 || plannedOutputCount > oneProofPayrollMaxOutputs) throw new Error("one-proof payroll operation output count is invalid");
+  if (change < 0n || change !== plannedChange || Boolean(change > 0n) !== Boolean(operation.has_change)) throw new Error("one-proof payroll operation totals are inconsistent");
+  const secrets = input.output_secrets ?? input.outputSecrets ?? {};
+  const outputs = operation.items.map(item => {
+    const secret = secretForOutput(secrets, item.item_id, item.disclosure_policy.user_privacy_policy);
+    return {
+      kind: "payment",
+      note: paymentNote(item, asset.asset_id_field, secret, input),
+      privacyPolicy: item.disclosure_policy.user_privacy_policy,
+      disclosureMode: item.disclosure_policy.user_disclosure_mode,
+      ...(item.disclosure_policy.user_disclosure_target_pubkey_hex ? { disclosureTargetPubKey: item.disclosure_policy.user_disclosure_target_pubkey_hex } : {}),
+      userDisclosureBlinding: secret.userDisclosureBlinding,
+      fullDisclosureBlinding: secret.fullDisclosureBlinding
+    };
+  });
+  if (change > 0n) {
+    const secret = secretForOutput(secrets, "change", 0);
+    outputs.push({
+      kind: "change",
+      note: changeNote(preparedInputs[0].note, change, asset.asset_id_field, secret),
+      privacyPolicy: 0,
+      disclosureMode: 0,
+      userDisclosureBlinding: 0n,
+      fullDisclosureBlinding: secret.fullDisclosureBlinding
+    });
+  }
+  if (outputs.length !== plannedOutputCount) throw new Error("one-proof payroll operation output count is inconsistent");
+  const payload = await buildPreparedBatchTransferPayload({
+    creator: input.creator,
+    chainId: input.chain_id ?? input.chainId,
+    expiresAtUnix: input.expires_at_unix ?? input.expiresAtUnix,
+    root: input.root,
+    inputs: preparedInputs,
+    outputs,
+    auditKeyId: input.audit_key_id ?? input.auditKeyId,
+    auditKeyEpoch: input.audit_key_epoch ?? input.auditKeyEpoch,
+    auditDisclosureTargetPubKey: input.audit_disclosure_target_pubkey ?? input.auditDisclosureTargetPubKey,
+    selfViewDisclosureTargetPubKey: input.self_view_disclosure_target_pubkey ?? input.selfViewDisclosureTargetPubKey,
+    disableSelfViewDisclosure: input.disable_self_view_disclosure ?? input.disableSelfViewDisclosure,
+    signer: input.signer
+  });
+  const expectedEvidence = buildExpectedPayrollEvidence(operation, payload, input);
+  const effects = preparedBatchTransferEffectHex(payload);
+  return Object.freeze({ operation, asset_registry_entry: asset, payload, expected_evidence: expectedEvidence, input_nullifier_hexes: effects.nullifier_hexes });
+}
+
+/** Recheck every input nullifier immediately before a one-proof broadcast. */
+export async function assertOneProofPayrollNullifiersUnspent(payload, checkNullifiers) {
+  if (typeof checkNullifiers !== "function") throw new Error("a batch nullifier status reader is required");
+  validatePreparedBatchTransferPayloadEnvelope(payload);
+  const nullifiers = preparedBatchTransferEffectHex(payload).nullifier_hexes;
+  const statuses = await checkNullifiers(nullifiers);
+  const statusFor = nullifier => statuses instanceof Map
+    ? statuses.get(nullifier) ?? statuses.get(`0x${nullifier}`)
+    : statuses?.[nullifier] ?? statuses?.[`0x${nullifier}`];
+  for (const nullifier of nullifiers) {
+    const value = statusFor(nullifier);
+    if (value !== false) throw new Error(`one-proof payroll input nullifier ${nullifier} is spent, missing, or has an invalid status`);
+  }
+  return nullifiers;
 }

@@ -1,4 +1,5 @@
 import type { Hex } from "../core/crypto.js";
+import type { PreparedBatchTransferPayload } from "./batch-transfer.js";
 import type { NoteReservationRecord } from "./reservation.js";
 
 export type PayrollAmount = bigint | number | string;
@@ -244,6 +245,91 @@ export interface PayrollPlan {
   updated_at: string | Date | null;
 }
 
+export interface PayrollAssetRegistryEntryV1 {
+  canonical_denom?: string;
+  canonicalDenom?: string;
+  asset_id?: Uint8Array | string;
+  assetId?: Uint8Array | string;
+}
+
+export interface NormalizedPayrollAssetRegistryEntryV1 {
+  canonical_denom: string;
+  asset_id: Uint8Array;
+  asset_id_hex: Hex;
+  asset_id_field: bigint;
+}
+
+export interface ExpectedPayrollOutputEvidence {
+  operation_id: string;
+  item_id: string;
+  employee_id: string;
+  batch_item_index: number;
+  role: "payment";
+  expected_output_commitment: Hex;
+  expected_user_disclosure_digest: Hex | "";
+  expected_audit_disclosure_digest: Hex;
+  expected_self_view_disclosure_digest: Hex;
+  expected_recipient_hash: Hex;
+  expected_amount_hash: Hex;
+  expected_denom: string;
+  asset_id_hex: Hex;
+  user_privacy_policy: number;
+  user_disclosure_mode: 0 | 1 | 2;
+  audit_key_id: string;
+  audit_key_epoch: number;
+}
+
+export interface OneProofPayrollOutputSecret {
+  randomness?: bigint | number | string;
+  user_disclosure_blinding?: bigint | number | string;
+  userDisclosureBlinding?: bigint | number | string;
+  full_disclosure_blinding?: bigint | number | string;
+  fullDisclosureBlinding?: bigint | number | string;
+  memo?: string;
+}
+
+export interface PrepareOneProofPayrollOperationInput {
+  operation: OneProofPayrollOperationPlan;
+  asset_registry?: PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 } | ((denom: string) => PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 } | Promise<PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }>) | {
+    resolveAsset?(denom: string): PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 } | Promise<PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }>;
+    fetchAssetByDenom?(denom: string): PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 } | Promise<PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }>;
+  };
+  assetRegistry?: PrepareOneProofPayrollOperationInput["asset_registry"];
+  creator?: string;
+  chain_id?: string;
+  chainId?: string;
+  expires_at_unix?: number;
+  expiresAtUnix?: number;
+  root?: Uint8Array | string | bigint | number;
+  audit_key_id?: string;
+  auditKeyId?: string;
+  audit_key_epoch?: number;
+  auditKeyEpoch?: number;
+  audit_disclosure_target_pubkey?: Uint8Array | string | object;
+  auditDisclosureTargetPubKey?: Uint8Array | string | object;
+  self_view_disclosure_target_pubkey?: Uint8Array | string | object;
+  selfViewDisclosureTargetPubKey?: Uint8Array | string | object;
+  disable_self_view_disclosure?: boolean;
+  disableSelfViewDisclosure?: boolean;
+  output_secrets?: Record<string, OneProofPayrollOutputSecret>;
+  outputSecrets?: Record<string, OneProofPayrollOutputSecret>;
+  signer: {
+    signBatchTransfer?(request: object): Promise<Uint8Array> | Uint8Array;
+    signSpendNoteHash?(intent: bigint): Promise<Uint8Array> | Uint8Array;
+    signNoteHash?(intent: bigint): Promise<Uint8Array> | Uint8Array;
+  };
+  shieldedPrefix?: string;
+  prefix?: string;
+}
+
+export interface PreparedOneProofPayrollOperation {
+  operation: OneProofPayrollOperationPlan;
+  asset_registry_entry: NormalizedPayrollAssetRegistryEntryV1;
+  payload: PreparedBatchTransferPayload;
+  expected_evidence: readonly ExpectedPayrollOutputEvidence[];
+  input_nullifier_hexes: string[];
+}
+
 /** Existing reservation record, used unchanged by the Reference Payroll surface. */
 export type NoteReservation = NoteReservationRecord;
 /** The one-proof operation plan is the JS payroll-operation binding. */
@@ -264,3 +350,7 @@ export function validatePayrollInput(input?: PayrollInput, options?: { shieldedP
 export function analyzeNotePreparation(input: PayrollInput, treasuryNotes?: TreasuryNote[], policy?: { max_messages_per_tx?: number; maxMessagesPerTx?: number; shieldedPrefix?: string; prefix?: string }): NotePreparationReport;
 export function payrollBatchOperationID(input: Pick<NormalizedPayrollInput, "company_id" | "payroll_id" | "batch_id" | "attempt">, operationIndex: number): string;
 export function planOneProofPayroll(input: PayrollInput, treasuryNotes?: TreasuryNote[], options?: { search_limit?: number; searchLimit?: number; shieldedPrefix?: string; prefix?: string }): PayrollPlan;
+export function normalizePayrollAssetRegistryEntry(entry: PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }, denom: string): NormalizedPayrollAssetRegistryEntryV1;
+export function buildExpectedPayrollEvidence(operation: OneProofPayrollOperationPlan, payload: PreparedBatchTransferPayload, options?: { now_unix?: number; nowUnix?: number; shieldedPrefix?: string; prefix?: string }): readonly ExpectedPayrollOutputEvidence[];
+export function prepareOneProofPayrollOperation(input: PrepareOneProofPayrollOperationInput): Promise<PreparedOneProofPayrollOperation>;
+export function assertOneProofPayrollNullifiersUnspent(payload: PreparedBatchTransferPayload, checkNullifiers: (nullifiers: string[]) => Promise<Map<string, boolean> | Record<string, boolean>>): Promise<string[]>;

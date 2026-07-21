@@ -53,7 +53,9 @@ import {
   analyzeNotePreparation,
   createDisclosureKeyRegistry,
   planOneProofPayroll,
+  prepareOneProofPayrollOperation,
   type NotePreparationReport,
+  type PreparedOneProofPayrollOperation,
   type PayrollInput,
   type PayrollPlan
 } from "clairveiljs/reference-payroll";
@@ -111,6 +113,17 @@ const payrollRegistry = createDisclosureKeyRegistry([{
   active: true
 }]);
 const payrollRegistryEntry: string = payrollRegistry.lookupDisclosureKey("employee", "employee-a").public_key_hex;
+const preparedPayrollOperation: Promise<PreparedOneProofPayrollOperation> = prepareOneProofPayrollOperation({
+  operation: payrollPlan.operations[0],
+  asset_registry: { canonical_denom: "udemo", asset_id: new Uint8Array(32) },
+  chain_id: "demo-1",
+  expires_at_unix: 4_102_448_400,
+  audit_key_id: "audit-key",
+  audit_key_epoch: 1,
+  audit_disclosure_target_pubkey: new Uint8Array(32),
+  disable_self_view_disclosure: true,
+  signer: { signNoteHash: async () => new Uint8Array(64) }
+});
 const material = derivePrivacyMaterial({
   address: "demo1example",
   pubKeyHex: "02".padEnd(66, "0"),
@@ -1070,6 +1083,7 @@ void {
   payrollPreparation,
   payrollPlan,
   payrollRegistryEntry,
+  preparedPayrollOperation,
   material,
   cosmos,
   publicClient,
