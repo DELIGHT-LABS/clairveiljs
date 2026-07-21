@@ -1,4 +1,8 @@
 export type Uint64CursorInput = number | bigint | string;
+import type {
+  NormalizedAssetRegistryEntryV1,
+  NormalizedAssetRegistryQueryResponseV1
+} from "../privacy/asset-registry.js";
 
 export interface PrivacyEventsQuery {
   afterHeight?: Uint64CursorInput;
@@ -97,6 +101,11 @@ export class ClairveilPublicClient {
   fetchReserve(denom: string): Promise<ReserveResponse>;
   fetchAssetByDenom(denom: string): Promise<object>;
   fetchAssetByID(assetIdHex: string): Promise<object>;
+  queryAssetByDenom(denom: string): Promise<NormalizedAssetRegistryQueryResponseV1>;
+  queryAssetByID(assetIdHex: string): Promise<NormalizedAssetRegistryQueryResponseV1>;
+  resolveAsset(denom: string): Promise<NormalizedAssetRegistryEntryV1>;
+  resolveAssetByDenom(denom: string): Promise<NormalizedAssetRegistryEntryV1>;
+  resolveAssetByID(assetIdHex: string): Promise<NormalizedAssetRegistryEntryV1>;
   fetchCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<object>;
 }
 

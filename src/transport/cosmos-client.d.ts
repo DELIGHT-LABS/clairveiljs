@@ -77,6 +77,10 @@ import type { ScanResult } from "../privacy/scan.js";
 import type { MemoryNoteStore } from "../privacy/note-store.js";
 import type { WalletAdapterLike } from "../wallet/adapter.js";
 import type {
+  NormalizedAssetRegistryEntryV1,
+  NormalizedAssetRegistryQueryResponseV1
+} from "../privacy/asset-registry.js";
+import type {
   MsgBatchTransfer as MsgBatchTransferMessage,
   MsgDeposit as MsgDepositMessage
 } from "../generated/clairveil/privacy/v1/tx.js";
@@ -666,6 +670,11 @@ export class ClairveilJS {
   fetchReserve(denom: string): Promise<ReserveResponse>;
   fetchAssetByDenom(denom: string): Promise<object>;
   fetchAssetByID(assetIdHex: Hex): Promise<object>;
+  queryAssetByDenom(denom: string): Promise<NormalizedAssetRegistryQueryResponseV1>;
+  queryAssetByID(assetIdHex: Hex): Promise<NormalizedAssetRegistryQueryResponseV1>;
+  resolveAsset(denom: string): Promise<NormalizedAssetRegistryEntryV1>;
+  resolveAssetByDenom(denom: string): Promise<NormalizedAssetRegistryEntryV1>;
+  resolveAssetByID(assetIdHex: Hex): Promise<NormalizedAssetRegistryEntryV1>;
   fetchCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<object>;
   lookupMerklePath(commitmentHex: Hex): Promise<object>;
   checkNullifier(nullifierHex: Hex): Promise<object>;

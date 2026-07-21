@@ -1,4 +1,4 @@
-import { base64FromBytes, bytesFromBase64, bytesFromHex, hexFromBytes, randomBytes, utf8Bytes } from "../core/browser-crypto.js";
+import { base64FromBytes, bytesFromBase64, hexFromBytes, randomBytes, utf8Bytes } from "../core/browser-crypto.js";
 import { FIELD_MODULUS, bytesToBigIntBE, decodeShieldedAddress } from "../core/crypto.js";
 import {
   buildPreparedBatchTransferPayload,
@@ -6,8 +6,12 @@ import {
   preparedBatchTransferEffectHex,
   validatePreparedBatchTransferPayloadEnvelope
 } from "./batch-transfer.js";
+import {
+  normalizeAssetRegistryEntryV1,
+  normalizeAssetRegistryQueryResponseV1
+} from "./asset-registry.js";
 import { privacyPolicyValue, userDisclosureModeValue } from "./payload.js";
-import { computeAssetIdV1, computeNoteNullifierV1, fieldHexV1, validateNoteV1 } from "./protocol-v1.js";
+import { computeNoteNullifierV1, fieldHexV1, validateNoteV1 } from "./protocol-v1.js";
 import { hashAmount, hashRecipient } from "./reservation.js";
 
 /** Reference Payroll contracts. The one-proof executor is intentionally separate from legacy transfer-batch. */
@@ -583,40 +587,20 @@ export function planOneProofPayroll(input, treasuryNotes = [], options = {}) {
   };
 }
 
-function assetIDBytes(value, label) {
-  if (value instanceof Uint8Array) return Uint8Array.from(value);
-  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
-  if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
-  const encoded = text(value);
-  if (!encoded) throw new Error(`${label} is required`);
-  if (/^[0-9a-f]{64}$/i.test(encoded)) return bytesFromHex(encoded, label);
-  try {
-    return bytesFromBase64(encoded, label);
-  } catch {
-    throw new Error(`${label} must be 32-byte base64 or hex`);
-  }
-}
-
 /** Validate the authoritative AssetRegistryV1 entry before constructing a payroll witness. */
 export function normalizePayrollAssetRegistryEntry(entry, denom) {
-  const raw = entry?.asset ?? entry?.entry ?? entry;
-  if (!raw || typeof raw !== "object") throw new Error("authoritative AssetRegistryV1 entry is required");
-  const canonicalDenom = text(raw.canonical_denom ?? raw.canonicalDenom ?? raw.denom);
-  if (!canonicalDenom || canonicalDenom !== text(denom)) throw new Error("AssetRegistryV1 denom does not match payroll denom");
-  const assetBytes = assetIDBytes(raw.asset_id ?? raw.assetId, "AssetRegistryV1 asset_id");
-  if (assetBytes.length !== 32) throw new Error("AssetRegistryV1 asset_id must be exactly 32 bytes");
-  const assetID = bytesToBigIntBE(assetBytes);
-  if (assetID === 0n || assetID >= FIELD_MODULUS) throw new Error("AssetRegistryV1 asset_id must be a non-zero canonical BN254 field element");
-  if (assetID !== computeAssetIdV1(canonicalDenom)) throw new Error("AssetRegistryV1 asset_id does not match canonical payroll denom");
-  return Object.freeze({ canonical_denom: canonicalDenom, asset_id: assetBytes, asset_id_hex: hexFromBytes(assetBytes), asset_id_field: assetID });
+  return normalizeAssetRegistryEntryV1(entry, { canonical_denom: denom });
 }
 
 async function resolvePayrollAssetRegistry(assetRegistry, denom) {
   if (!assetRegistry) throw new Error("an authoritative AssetRegistryV1 resolver is required for one-proof payroll");
   let response;
   if (typeof assetRegistry === "function") response = await assetRegistry(denom);
+  else if (typeof assetRegistry.queryAssetByDenom === "function") response = await assetRegistry.queryAssetByDenom(denom);
   else if (typeof assetRegistry.resolveAsset === "function") response = await assetRegistry.resolveAsset(denom);
-  else if (typeof assetRegistry.fetchAssetByDenom === "function") response = await assetRegistry.fetchAssetByDenom(denom);
+  else if (typeof assetRegistry.fetchAssetByDenom === "function") {
+    return normalizeAssetRegistryQueryResponseV1(await assetRegistry.fetchAssetByDenom(denom), { canonical_denom: denom }).asset;
+  }
   else response = assetRegistry;
   return normalizePayrollAssetRegistryEntry(response, denom);
 }

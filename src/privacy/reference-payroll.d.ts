@@ -293,6 +293,7 @@ export interface OneProofPayrollOutputSecret {
 export interface PrepareOneProofPayrollOperationInput {
   operation: OneProofPayrollOperationPlan;
   asset_registry?: PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 } | ((denom: string) => PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 } | Promise<PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }>) | {
+    queryAssetByDenom?(denom: string): PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 } | Promise<PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }>;
     resolveAsset?(denom: string): PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 } | Promise<PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }>;
     fetchAssetByDenom?(denom: string): PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 } | Promise<PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }>;
   };

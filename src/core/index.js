@@ -4,6 +4,7 @@ export * from "./errors.js";
 export * from "./note.js";
 export * from "../privacy/payload.js";
 export * from "../privacy/protocol-v1.js";
+export * from "../privacy/asset-registry.js";
 export * from "../privacy/batch-transfer.js";
 export * from "../privacy/transfer-v5.js";
 export * from "../privacy/reference-payroll.js";

@@ -123,6 +123,10 @@
       "types": "./src/privacy/protocol-v1.d.ts",
       "import": "./src/privacy/protocol-v1.js"
     },
+    "./asset-registry": {
+      "types": "./src/privacy/asset-registry.d.ts",
+      "import": "./src/privacy/asset-registry.js"
+    },
     "./batch-transfer": {
       "types": "./src/privacy/batch-transfer.d.ts",
       "import": "./src/privacy/batch-transfer.js"

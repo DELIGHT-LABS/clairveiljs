@@ -36,6 +36,11 @@ import {
   validateRelayWithdrawPayload
 } from "../privacy/payload.js";
 import {
+  canonicalAssetDenomV1,
+  canonicalAssetIDHexV1,
+  normalizeAssetRegistryQueryResponseV1
+} from "../privacy/asset-registry.js";
+import {
   assertPlanCanBuildTx,
   planTransferBatchNotes,
   planTransferNotes,
@@ -1606,6 +1611,37 @@ export class ClairveilJS {
       `/clairveil/privacy/v1/assets/by_id/${encodeURIComponent(canonicalAssetID)}`,
       { failover: true }
     );
+  }
+
+  /** Fetch and fail-closed validate an AssetRegistryV1 denom lookup. */
+  async queryAssetByDenom(denom) {
+    const canonicalDenom = canonicalAssetDenomV1(denom);
+    return normalizeAssetRegistryQueryResponseV1(
+      await this.fetchAssetByDenom(canonicalDenom),
+      { canonical_denom: canonicalDenom }
+    );
+  }
+
+  /** Fetch and fail-closed validate an AssetRegistryV1 reverse lookup. */
+  async queryAssetByID(assetIdHex) {
+    const canonicalAssetID = canonicalAssetIDHexV1(assetIdHex);
+    return normalizeAssetRegistryQueryResponseV1(
+      await this.fetchAssetByID(canonicalAssetID),
+      { asset_id_hex: canonicalAssetID }
+    );
+  }
+
+  /** Resolver shape consumed by one-proof payroll preparation. */
+  async resolveAsset(denom) {
+    return (await this.queryAssetByDenom(denom)).asset;
+  }
+
+  async resolveAssetByDenom(denom) {
+    return this.resolveAsset(denom);
+  }
+
+  async resolveAssetByID(assetIdHex) {
+    return (await this.queryAssetByID(assetIdHex)).asset;
   }
 
   async fetchCommitmentPathsAtRoot(options = {}) {

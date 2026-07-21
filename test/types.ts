@@ -59,6 +59,11 @@ import {
   type PayrollInput,
   type PayrollPlan
 } from "clairveiljs/reference-payroll";
+import {
+  createAssetRegistryResolverV1,
+  type NormalizedAssetRegistryEntryV1,
+  type NormalizedAssetRegistryQueryResponseV1
+} from "clairveiljs/asset-registry";
 import type { FoundNote } from "clairveiljs/note";
 import {
   createNoteReservationManager,
@@ -177,6 +182,19 @@ const publicClient = createClairveilPublicClient({
   queryTimeoutMs: 30000,
   queryRetry: false
 });
+const assetRegistryResolver = createAssetRegistryResolverV1({
+  fetchAssetByDenom: async () => ({
+    mapping_version: "privacy-asset-registry-v1",
+    asset: { canonical_denom: "udemo", asset_id: new Uint8Array(32) }
+  }),
+  fetchAssetByID: async () => ({
+    mapping_version: "privacy-asset-registry-v1",
+    asset: { canonical_denom: "udemo", asset_id: new Uint8Array(32) }
+  })
+});
+const publicAssetQuery: Promise<NormalizedAssetRegistryQueryResponseV1> = publicClient.queryAssetByDenom("udemo");
+const cosmosAssetQuery: Promise<NormalizedAssetRegistryQueryResponseV1> = cosmos.queryAssetByID("01".repeat(32));
+const resolvedAsset: Promise<NormalizedAssetRegistryEntryV1> = assetRegistryResolver.resolveAsset("udemo");
 const endpointSetOnlyCosmos = createClairveilClient({
   rpc: "http://127.0.0.1:26657",
   restEndpoints: ["http://127.0.0.1:1317", "http://127.0.0.2:1317"],

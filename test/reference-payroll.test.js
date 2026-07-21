@@ -113,9 +113,18 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     merkle_path: emptyNoteTreeRootsV1(32).slice(0, 32).map(value => value.toString(16).padStart(64, "0")),
     merkle_path_helper: Array(32).fill(0)
   }]);
+  const registryCalls = [];
   const prepared = await prepareOneProofPayrollOperation({
     operation: plan.operations[0],
-    asset_registry: { canonical_denom: "uclair", asset_id: canonicalFieldBytes(assetID) },
+    asset_registry: {
+      queryAssetByDenom: async requestedDenom => {
+        registryCalls.push(requestedDenom);
+        return {
+          mapping_version: "privacy-asset-registry-v1",
+          asset: { canonical_denom: "uclair", asset_id: canonicalFieldBytes(assetID) }
+        };
+      }
+    },
     creator: "clair1creator",
     chain_id: "clairveil-test-1",
     expires_at_unix: 4_102_448_400,
@@ -132,6 +141,7 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   });
   assert.equal(prepared.payload.circuit_set_id, oneProofPayrollCircuitSetId);
   assert.equal(prepared.expected_evidence.length, 1);
+  assert.deepEqual(registryCalls, ["uclair"]);
   assert.equal(prepared.expected_evidence[0].batch_item_index, 0);
   assert.equal(prepared.expected_evidence[0].expected_denom, "uclair");
   assert.deepEqual(buildExpectedPayrollEvidence(plan.operations[0], prepared.payload), prepared.expected_evidence);
