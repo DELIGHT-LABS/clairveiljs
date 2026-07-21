@@ -155,6 +155,10 @@
       "types": "./src/privacy/scan.d.ts",
       "import": "./src/privacy/scan.js"
     },
+    "./merkle-path": {
+      "types": "./src/privacy/merkle-path.d.ts",
+      "import": "./src/privacy/merkle-path.js"
+    },
     "./schemas": {
       "types": "./src/core/schemas.d.ts",
       "import": "./src/core/schemas.js"

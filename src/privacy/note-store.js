@@ -198,11 +198,13 @@ function cursorValue(cursor, keys = []) {
 
 function rewindScanState(current, rollbackHeight) {
   const currentCursor = current.scanCursor || {};
+  const privacyScanCursor = currentCursor.source === "privacy_scan" ||
+    currentCursor.next_cursor != null || currentCursor.nextCursor != null;
   const scanEventsCursor =
     currentCursor.source === "scan_events" ||
     currentCursor.next_sequence != null ||
     currentCursor.nextSequence != null;
-  const source = scanEventsCursor ? "scan_events" : "privacy_events";
+  const source = privacyScanCursor ? "privacy_scan" : scanEventsCursor ? "scan_events" : "privacy_events";
   const requestedHeight = uint64CursorBigInt(rollbackHeight, "rollback height");
   const currentScannedHeight = uint64CursorBigInt(current.lastScannedHeight ?? 0, "last scanned height");
   const rewindBoundary = requestedHeight < currentScannedHeight ? requestedHeight : currentScannedHeight;
@@ -216,7 +218,14 @@ function rewindScanState(current, rollbackHeight) {
       : rewindBoundary,
     "rollback resume height"
   );
-  const scanCursor = source === "scan_events"
+  const scanCursor = source === "privacy_scan"
+    ? {
+        source,
+        after: { height: resumeHeight, global_sequence: 0, output_index: 0 },
+        next_cursor: { height: resumeHeight, global_sequence: 0, output_index: 0 },
+        has_more: false
+      }
+    : source === "scan_events"
     ? {
         source,
         after_height: resumeHeight,
@@ -316,10 +325,21 @@ export class MemoryNoteStore {
     const scanCursor = incomingScanCursor ?? rollbackScanState?.scanCursor ?? current.scanCursor ?? null;
     const latest = latestNoteCursor(notes);
     const hasMore = Boolean(scanCursor?.has_more ?? scanCursor?.hasMore);
-    const cursorAfterHeight = cursorValue(scanCursor, ["after_height", "afterHeight"]) ?? 0;
-    const cursorAfterSequence = cursorValue(scanCursor, ["after_sequence", "afterSequence"]) ?? 0;
-    const nextHeight = cursorValue(scanCursor, ["next_height", "nextHeight"]);
-    const nextSequence = cursorValue(scanCursor, ["next_sequence", "nextSequence"]);
+    const typedNextCursor = scanCursor?.source === "privacy_scan"
+      ? (scanCursor.next_cursor ?? scanCursor.nextCursor ?? null)
+      : null;
+    const cursorAfterHeight = typedNextCursor == null
+      ? cursorValue(scanCursor, ["after_height", "afterHeight"]) ?? 0
+      : cursorValue(scanCursor?.after ?? scanCursor?.afterCursor ?? {}, ["height"]) ?? 0;
+    const cursorAfterSequence = typedNextCursor == null
+      ? cursorValue(scanCursor, ["after_sequence", "afterSequence"]) ?? 0
+      : cursorValue(scanCursor?.after ?? scanCursor?.afterCursor ?? {}, ["global_sequence", "globalSequence"]) ?? 0;
+    const nextHeight = typedNextCursor == null
+      ? cursorValue(scanCursor, ["next_height", "nextHeight"])
+      : cursorValue(typedNextCursor, ["height"]);
+    const nextSequence = typedNextCursor == null
+      ? cursorValue(scanCursor, ["next_sequence", "nextSequence"])
+      : cursorValue(typedNextCursor, ["global_sequence", "globalSequence"]);
     const authoritativeHeight = nextHeight ?? cursorAfterHeight;
     const authoritativeSequence = nextSequence ?? cursorAfterSequence;
     const lastScannedHeight = rollbackScanState

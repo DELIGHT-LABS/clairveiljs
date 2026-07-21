@@ -12,6 +12,7 @@ export * from "../privacy/planner.js";
 export * from "../privacy/prover.js";
 export * from "../privacy/reservation.js";
 export * from "../privacy/scan.js";
+export * from "../privacy/merkle-path.js";
 export * from "../privacy/note-store.js";
 export * from "./schemas.js";
 export * from "../wallet/adapter.js";

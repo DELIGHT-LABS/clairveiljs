@@ -1005,7 +1005,7 @@ async function browserDappTypeSmoke() {
 
   const scan = await scanResult;
   const spendableTotal: string = scan.summary.total_spendable;
-  const nextScanAfterHeight: number | string = scan.nextScanOptions.afterHeight;
+  const nextScanAfterHeight: number | string | undefined = scan.nextScanOptions.after?.height ?? scan.nextScanOptions.afterHeight;
   const nullifier = await nullifierResult;
   const nullifierUsed: boolean | undefined = nullifier.used;
   const dappReserve = await dappReserveResult;

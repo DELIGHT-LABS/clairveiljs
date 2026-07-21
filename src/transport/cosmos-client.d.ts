@@ -7,6 +7,7 @@ export * from "../privacy/planner.js";
 export * from "../privacy/prover.js";
 export * from "../privacy/reservation.js";
 export * from "../privacy/scan.js";
+export * from "../privacy/merkle-path.js";
 export * from "../privacy/note-store.js";
 export * from "../core/schemas.js";
 export * from "../wallet/adapter.js";
@@ -74,6 +75,7 @@ import type { TransferBatchPlan, TransferPlan, WithdrawPlan } from "../privacy/p
 import type { ProverAdapter } from "../privacy/prover.js";
 import type { NoteReservationManager, ReservationBatch } from "../privacy/reservation.js";
 import type { ScanResult } from "../privacy/scan.js";
+import type { VerifiedCommitmentPathSnapshot } from "../privacy/merkle-path.js";
 import type { MemoryNoteStore } from "../privacy/note-store.js";
 import type { WalletAdapterLike } from "../wallet/adapter.js";
 import type {
@@ -253,10 +255,17 @@ export interface PrivacyEventsQuery {
 }
 
 export interface PrivacyScanOptions extends PrivacyEventsQuery {
+  after?: PrivacyScanCursorInput;
+  outputLimit?: number;
+  output_limit?: number;
+  eventLimit?: number;
+  event_limit?: number;
+  maxEncodedBytes?: Uint64CursorInput;
+  max_encoded_bytes?: Uint64CursorInput;
   maxPages?: number;
   max_pages?: number;
-  scanSource?: "scan_events" | "privacy_events" | string;
-  scan_source?: "scan_events" | "privacy_events" | string;
+  scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+  scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
 }
 
 export interface PrivacyScanCursorInput {
@@ -306,7 +315,13 @@ type CosmosRelayWithdrawRelayOptions = Omit<RelayWithdrawRelayOptions, "chainNow
 );
 
 export interface PrivacyEventsCursor {
-  source?: "scan_events" | string;
+  source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+  after?: { height?: Uint64CursorValue; globalSequence?: Uint64CursorValue; global_sequence?: Uint64CursorValue; outputIndex?: number; output_index?: number };
+  next_cursor?: { height?: Uint64CursorValue; globalSequence?: Uint64CursorValue; global_sequence?: Uint64CursorValue; outputIndex?: number; output_index?: number };
+  output_limit?: number;
+  event_limit?: number;
+  max_encoded_bytes?: Uint64CursorInput;
+  latest_output_index?: number;
   after_height: Uint64CursorValue;
   after_sequence?: Uint64CursorValue;
   page?: number;
@@ -326,12 +341,16 @@ export interface PrivacyEventsCursor {
 }
 
 export interface PrivacyScanResumeOptions {
-  afterHeight: Uint64CursorValue;
+  after?: { height?: Uint64CursorValue; globalSequence?: Uint64CursorValue; global_sequence?: Uint64CursorValue; outputIndex?: number; output_index?: number };
+  afterHeight?: Uint64CursorValue;
   afterSequence?: Uint64CursorValue;
   page?: number;
   limit: number;
   eventTypes: string[];
-  scanSource?: "scan_events" | "privacy_events" | string;
+  outputLimit?: number;
+  eventLimit?: number | Uint64CursorValue;
+  maxEncodedBytes?: Uint64CursorValue;
+  scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
   maxPages?: number;
   includeFoundNotes?: boolean;
   hasMore: boolean;
@@ -628,11 +647,11 @@ export type PrepareTransferBatchInput = {
   eventTypes?: string[];
   event_types?: string[];
   scan?: PrivacyScanOptions;
-  scanSource?: "scan_events" | "privacy_events" | string;
-  scan_source?: "scan_events" | "privacy_events" | string;
+  scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+  scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
   reservationManager?: NoteReservationManager | null;
   reservation_manager?: NoteReservationManager | null;
-} & BatchOperationEvidenceHashes;
+} & PrivacyScanOptions & BatchOperationEvidenceHashes;
 
 export class ClairveilJS {
   constructor(options: ClairveilClientOptions);
@@ -676,6 +695,10 @@ export class ClairveilJS {
   resolveAssetByDenom(denom: string): Promise<NormalizedAssetRegistryEntryV1>;
   resolveAssetByID(assetIdHex: Hex): Promise<NormalizedAssetRegistryEntryV1>;
   fetchCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<object>;
+  queryCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<VerifiedCommitmentPathSnapshot>;
+  createCommitmentPathSnapshotProvider(options: CommitmentPathsAtRootQuery): Promise<{
+    lookupMerklePath(commitmentHex: Hex): Promise<object>;
+  }>;
   lookupMerklePath(commitmentHex: Hex): Promise<object>;
   checkNullifier(nullifierHex: Hex): Promise<object>;
   checkNullifiers(nullifierHexes: readonly Hex[]): Promise<Map<Hex, boolean>>;
@@ -731,8 +754,8 @@ export class ClairveilJS {
     limit?: number;
     maxPages?: number;
     scan?: PrivacyScanOptions;
-    scanSource?: "scan_events" | "privacy_events" | string;
-    scan_source?: "scan_events" | "privacy_events" | string;
+    scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+    scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
   }): Promise<{ plan: TransferPlan; scan: ScanResult }>;
   planWalletWithdraw(input: {
     wallet?: WalletAdapterLike;
@@ -742,8 +765,8 @@ export class ClairveilJS {
     limit?: number;
     maxPages?: number;
     scan?: PrivacyScanOptions;
-    scanSource?: "scan_events" | "privacy_events" | string;
-    scan_source?: "scan_events" | "privacy_events" | string;
+    scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+    scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
   }): Promise<{ plan: WithdrawPlan; scan: ScanResult }>;
   buildDepositMessage(input: BuildDepositMessageInput): object;
   prepareDeposit(input: PrepareDepositInput): Promise<PreparedDeposit>;
@@ -771,11 +794,11 @@ export class ClairveilJS {
     eventTypes?: string[];
     event_types?: string[];
     scan?: PrivacyScanOptions;
-    scanSource?: "scan_events" | "privacy_events" | string;
-    scan_source?: "scan_events" | "privacy_events" | string;
+    scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+    scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
     reservationManager?: NoteReservationManager | null;
     reservation_manager?: NoteReservationManager | null;
-  } & DirectOperationEvidenceHashes): Promise<PreparedTransfer>;
+  } & PrivacyScanOptions & DirectOperationEvidenceHashes): Promise<PreparedTransfer>;
   prepareTransferBatch(input: PrepareTransferBatchInput): Promise<PreparedTransferBatch>;
   prepareWithdraw(input: {
     wallet?: WalletAdapterLike;
@@ -797,14 +820,14 @@ export class ClairveilJS {
     eventTypes?: string[];
     event_types?: string[];
     scan?: PrivacyScanOptions;
-    scanSource?: "scan_events" | "privacy_events" | string;
-    scan_source?: "scan_events" | "privacy_events" | string;
+    scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+    scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
     expiresAtUnix?: number;
     chainNowUnix?: number;
     chain_now_unix?: number;
     reservationManager?: NoteReservationManager | null;
     reservation_manager?: NoteReservationManager | null;
-  }): Promise<PreparedWithdraw>;
+  } & PrivacyScanOptions): Promise<PreparedWithdraw>;
   prepareRelayWithdraw(input: {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
@@ -824,12 +847,12 @@ export class ClairveilJS {
     eventTypes?: string[];
     event_types?: string[];
     scan?: PrivacyScanOptions;
-    scanSource?: "scan_events" | "privacy_events" | string;
-    scan_source?: "scan_events" | "privacy_events" | string;
+    scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+    scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
     expiresAtUnix?: number;
     reservationManager?: NoteReservationManager | null;
     reservation_manager?: NoteReservationManager | null;
-  } & RelayChainTimeInput): Promise<PreparedRelayWithdraw>;
+  } & PrivacyScanOptions & RelayChainTimeInput): Promise<PreparedRelayWithdraw>;
   createDepositSignDoc(input: Parameters<ClairveilJS["prepareDeposit"]>[0]): Promise<PreparedDeposit>;
   createTransferSignDoc(input: Parameters<ClairveilJS["prepareTransfer"]>[0]): Promise<PreparedTransfer & { status: "ready"; signDoc: SignDocBase64 }>;
   createTransferBatchSignDoc(input: Parameters<ClairveilJS["prepareTransferBatch"]>[0]): Promise<PreparedTransferBatch & { status: "ready"; signDoc: SignDocBase64 }>;

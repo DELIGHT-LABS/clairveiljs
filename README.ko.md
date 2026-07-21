@@ -416,6 +416,24 @@ Reservation은 operation success evidence도 저장할 수 있습니다. Nullifi
 
 Scan migration에서는 최신 nullifier 확인이 명시적으로 `nullifierStatus: "unspent"`인 note만 spendable로 취급하세요. 이전 cache의 `isSpent: false`, 누락·malformed 응답, query 실패는 unverified이므로 다시 검증하기 전에는 planner에서 제외해야 합니다.
 
+## 통합 Privacy Scan과 Merkle Snapshot
+
+Wallet scan의 기본 경로는 Clairveil typed `privacy_scan` (`privacy-scan-v2`)입니다. SDK는 `(height, globalSequence, outputIndex)` 전체 cursor를 저장·재개하고, zero-output withdraw summary까지 포함한 unfiltered scan을 요청합니다. typed page가 malformed이면 fail-closed로 중단하며, typed endpoint가 명시적으로 없을 때만 `scan_events`로 fallback합니다.
+
+One-Proof transfer/withdraw에 여러 input을 사용할 때는 개별 `merkle_path` 응답을 섞지 말고, 하나의 검증된 root/height snapshot에서 path를 받아야 합니다.
+
+```js
+const pathProvider = await clairveil.createCommitmentPathSnapshotProvider({
+  commitmentHexes: selectedNotes.map(note => note.commitment_hex),
+  rootHex: verifiedTreeSnapshot.rootHex,
+  snapshotHeight: verifiedTreeSnapshot.height
+});
+
+const firstPath = await pathProvider.lookupMerklePath(selectedNotes[0].commitment_hex);
+```
+
+SDK는 1–16개의 서로 다른 commitment, 요청한 root/height 일치, 각 depth-32 path의 root 재구성을 모두 검증한 뒤 provider를 반환합니다. 원격 path query는 query provider에게 input note 간 linkage를 노출할 수 있으므로, privacy policy에 맞는 endpoint와 네트워크 경로를 사용하세요.
+
 나중에 `reconcileSpentNotes(...)`를 호출할 때 tx/event evidence를 `operationSuccessEvidence` 또는 `successEvidence`에 넣으면 SDK가 expected evidence와 비교합니다. `operation_status: "Succeeded"`가 되려면 저장된 submitted `txHash` 또는 `txBytesHash`와 실제 tx identity가 일치해야 합니다. `signDocHash`는 보조 mismatch guard일 뿐 단독으로 chain 실행을 증명하지 못하며, `txResult: { code: 0 }`만 있는 경우도 identity가 없어 성공이 될 수 없습니다. Nullifier spent만으로는 충분하지 않습니다. 여러 input을 쓰는 operation은 같은 reconcile 호출에 연결된 모든 input의 spent evidence를 넣어야 합니다. 불완전한 evidence는 연결된 operation 전체를 `ManualReview`로 기록하고, tx identity나 expected output이 명시적으로 상충하면 `ConflictSpent`와 `operation_success_evidence_errors`를 기록합니다. 두 경우 모두 spent input은 `ConfirmedSpent`로 격리되며, 나중에 완전한 evidence가 들어오면 연결된 모든 reservation의 operation outcome을 원자적으로 통일합니다. Reservation을 note inventory lock으로만 쓴다면 `operationSuccessEvidenceRequired`를 켜지 말고, downstream operation DB에서 별도로 성공 판정을 하세요.
 
 ## Handoff Conformance

@@ -17,6 +17,9 @@ export interface StoredFoundNote extends NormalizedFoundNote {
 }
 
 export interface NoteStoreScanCursor {
+  source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+  after?: { height?: number | string; global_sequence?: number | string; globalSequence?: number | string; output_index?: number; outputIndex?: number };
+  next_cursor?: { height?: number | string; global_sequence?: number | string; globalSequence?: number | string; output_index?: number; outputIndex?: number };
   after_height?: number | string;
   after_sequence?: number | string;
   page?: number;

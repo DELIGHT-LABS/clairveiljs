@@ -432,6 +432,22 @@ const nextScan = await clairveil.scanWalletNotes({
 });
 ```
 
+Wallet scans use Clairveil's typed `privacy_scan` (`privacy-scan-v2`) by default. The SDK persists and resumes the complete `(height, globalSequence, outputIndex)` cursor, requests unfiltered summaries so zero-output withdrawals can advance it safely, and fails closed if a typed page is malformed. It falls back to `scan_events` only when the typed endpoint is explicitly unavailable.
+
+For a one-proof transfer or withdraw, fetch all input paths from one verified root/height snapshot rather than mixing individual `merkle_path` responses:
+
+```js
+const pathProvider = await clairveil.createCommitmentPathSnapshotProvider({
+  commitmentHexes: selectedNotes.map(note => note.commitment_hex),
+  rootHex: verifiedTreeSnapshot.rootHex,
+  snapshotHeight: verifiedTreeSnapshot.height
+});
+
+const firstPath = await pathProvider.lookupMerklePath(selectedNotes[0].commitment_hex);
+```
+
+The SDK requires 1–16 distinct commitments, verifies the exact requested root and height, and recomputes every depth-32 path before exposing the provider. A remote path query can reveal which input notes are being linked to the query provider; use a privacy-appropriate endpoint or network path.
+
 ## Transfer
 
 Transfer planning is explicit because notes may need a self-merge before the final transfer.

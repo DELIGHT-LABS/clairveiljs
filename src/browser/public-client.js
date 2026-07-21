@@ -1,5 +1,10 @@
 import { parseNullifierUsage } from "../privacy/scan.js";
 import {
+  createCommitmentPathSnapshotProvider,
+  normalizeCommitmentPathsAtRootRequest,
+  normalizeCommitmentPathsAtRootResponse
+} from "../privacy/merkle-path.js";
+import {
   canonicalAssetDenomV1,
   canonicalAssetIDHexV1,
   normalizeAssetRegistryQueryResponseV1
@@ -454,6 +459,16 @@ export class ClairveilPublicClient {
       headers: { "content-type": "application/json" },
       body: jsonRequestBody(commitmentPathsAtRootRequestBody(options))
     });
+  }
+
+  async queryCommitmentPathsAtRoot(options = {}) {
+    const request = normalizeCommitmentPathsAtRootRequest(options);
+    const response = await this.fetchCommitmentPathsAtRoot(request);
+    return normalizeCommitmentPathsAtRootResponse(response, request);
+  }
+
+  async createCommitmentPathSnapshotProvider(options = {}) {
+    return createCommitmentPathSnapshotProvider(await this.queryCommitmentPathsAtRoot(options));
   }
 }
 

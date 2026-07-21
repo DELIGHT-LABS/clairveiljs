@@ -3,6 +3,7 @@ import type {
   NormalizedAssetRegistryEntryV1,
   NormalizedAssetRegistryQueryResponseV1
 } from "../privacy/asset-registry.js";
+import type { VerifiedCommitmentPathSnapshot } from "../privacy/merkle-path.js";
 
 export interface PrivacyEventsQuery {
   afterHeight?: Uint64CursorInput;
@@ -107,6 +108,10 @@ export class ClairveilPublicClient {
   resolveAssetByDenom(denom: string): Promise<NormalizedAssetRegistryEntryV1>;
   resolveAssetByID(assetIdHex: string): Promise<NormalizedAssetRegistryEntryV1>;
   fetchCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<object>;
+  queryCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<VerifiedCommitmentPathSnapshot>;
+  createCommitmentPathSnapshotProvider(options: CommitmentPathsAtRootQuery): Promise<{
+    lookupMerklePath(commitmentHex: string): Promise<object>;
+  }>;
 }
 
 export function createClairveilPublicClient(options: ClairveilPublicClientOptions): ClairveilPublicClient;

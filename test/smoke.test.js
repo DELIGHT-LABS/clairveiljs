@@ -13,6 +13,9 @@ import {
   buildRelayWithdrawPayload,
   buildRelayWithdrawMsgFromPayload,
   buildWithdrawMsgFromPayload,
+  canonicalFieldBytes,
+  computeNoteCommitmentV1,
+  computeNoteTreeNodeV1,
   computePreparedWithdrawPayloadHash,
   createNote,
   createSpendNoteHashSigner,
@@ -24,6 +27,8 @@ import {
   deriveSpendKeys,
   deriveViewTag,
   deriveViewKeys,
+  encryptDepositNoteV1,
+  fieldHexV1,
   hashStringToField,
   hexFromBytes,
   isVerifiedUnspentFoundNote,
@@ -32,7 +37,9 @@ import {
   ClairveilErrorCode,
   plannerStatusToErrorCode,
   unpackPoint,
-  validatePreparedTransferPayloadMetadata
+  validatePreparedTransferPayloadMetadata,
+  activeCircuitSetIdV1,
+  privacyFixedV1
 } from "clairveiljs/core";
 import {
   createClairveilClient,
@@ -942,8 +949,12 @@ test("browser-dapp scanWalletNotes forwards query options", async () => {
     maxPages: 4,
     afterHeight: 12,
     afterSequence: 34,
+    after: { height: 56, globalSequence: 78, outputIndex: 1 },
     page: 3,
     eventTypes: ["deposit", "shielded_transfer"],
+    outputLimit: 90,
+    eventLimit: 91,
+    maxEncodedBytes: 92,
     noteStore,
     includeFoundNotes: true
   });
@@ -952,8 +963,12 @@ test("browser-dapp scanWalletNotes forwards query options", async () => {
   assert.equal(forwarded.maxPages, 4);
   assert.equal(forwarded.afterHeight, 12);
   assert.equal(forwarded.afterSequence, 34);
+  assert.deepEqual(forwarded.after, { height: 56, globalSequence: 78, outputIndex: 1 });
   assert.equal(forwarded.page, 3);
   assert.deepEqual(forwarded.eventTypes, ["deposit", "shielded_transfer"]);
+  assert.equal(forwarded.outputLimit, 90);
+  assert.equal(forwarded.eventLimit, 91);
+  assert.equal(forwarded.maxEncodedBytes, 92);
   assert.equal(forwarded.noteStore, noteStore);
   assert.equal(forwarded.includeFoundNotes, true);
 });
@@ -1013,7 +1028,8 @@ test("cosmos note scan follows ScanEvents cursor within the requested page budge
   const result = await client.scanNotes({
     rootSeed: new Uint8Array(32),
     limit: 200,
-    maxPages: 2
+    maxPages: 2,
+    scanSource: "scan_events"
   });
 
   assert.deepEqual(requests.map(request => [request.afterHeight, request.afterSequence]), [[0, 0], [1, 1]]);
@@ -1031,7 +1047,8 @@ test("cosmos note scan follows ScanEvents cursor within the requested page budge
   const partial = await client.scanNotes({
     rootSeed: new Uint8Array(32),
     limit: 200,
-    maxPages: 1
+    maxPages: 1,
+    scanSource: "scan_events"
   });
 
   assert.deepEqual(requests.map(request => [request.afterHeight, request.afterSequence]), [[0, 0]]);
@@ -1076,7 +1093,8 @@ test("cosmos ScanEvents preserves uint64 cursors above the safe integer range", 
     rootSeed: new Uint8Array(32),
     afterHeight: height,
     afterSequence: firstSequence,
-    maxPages: 2
+    maxPages: 2,
+    scanSource: "scan_events"
   });
 
   assert.deepEqual(
@@ -1157,7 +1175,8 @@ test("cosmos legacy scan resumes from the returned page without retrying ScanEve
   const first = await client.scanNotes({
     rootSeed: new Uint8Array(32),
     limit: 200,
-    maxPages: 2
+    maxPages: 2,
+    scanSource: "scan_events"
   });
   assert.deepEqual(legacyPages, [1, 2]);
   assert.equal(first.scanCursor.source, "privacy_events");
@@ -1278,7 +1297,8 @@ test("cosmos wallet note store refreshes cached spent statuses", async () => {
       disclosurePubKeyHex: "",
       rootSignatureHash: ""
     },
-    noteStore: store
+    noteStore: store,
+    scanSource: "scan_events"
   });
 
   const loaded = await store.load();
@@ -1362,6 +1382,24 @@ test("cosmos wallet note store resumes cached scan cursors from their next posit
   await client.scanWalletNotes({ material, noteStore: privacyEventsStore });
   assert.equal(requests[2].afterHeight, 50);
   assert.equal(requests[2].page, 2);
+
+  const typedScanStore = new MemoryNoteStore({ owner: material.address });
+  await typedScanStore.mergeScanResult({
+    foundNotes: [],
+    scanCursor: {
+      source: "privacy_scan",
+      after: { height: 80, global_sequence: 4, output_index: 1 },
+      next_cursor: { height: 81, global_sequence: 2, output_index: 0 },
+      has_more: true
+    }
+  });
+  await client.scanWalletNotes({ material, noteStore: typedScanStore });
+  assert.equal(requests[3].scanSource, "privacy_scan");
+  assert.deepEqual(requests[3].after, {
+    height: 81,
+    globalSequence: 2,
+    outputIndex: 0
+  });
 });
 
 test("note store preserves completed ScanEvents next cursor without matching notes", async () => {
@@ -1693,7 +1731,11 @@ test("Cosmos prepare methods forward top-level scan sequence cursors", async () 
       recipient: "clairs1recipient",
       proverAdapter,
       after_height: 20,
-      after_sequence: 21
+      after_sequence: 21,
+      after: { height: 22, globalSequence: 23, outputIndex: 1 },
+      outputLimit: 24,
+      eventLimit: 25,
+      maxEncodedBytes: 26
     }),
     () => client.prepareWithdraw({
       material,
@@ -1722,6 +1764,10 @@ test("Cosmos prepare methods forward top-level scan sequence cursors", async () 
     scans.map(scan => [scan.afterHeight, scan.afterSequence]),
     [[10, 11], [20, 21], [30, 31], [40, 41]]
   );
+  assert.deepEqual(scans[1].after, { height: 22, globalSequence: 23, outputIndex: 1 });
+  assert.equal(scans[1].outputLimit, 24);
+  assert.equal(scans[1].eventLimit, 25);
+  assert.equal(scans[1].maxEncodedBytes, 26);
 });
 
 test("browser-dapp prepare forwards scan options into EVM note scans", async () => {
@@ -4665,6 +4711,235 @@ test("SDK exposes the typed privacy protocol queries and batch sign-doc boundary
   });
   assert.equal(signDocInput.messages[0].typeUrl, MsgBatchTransfer.typeUrl);
   assert.equal(signDocInput.messages[0].value.expiresAtUnix, 4_102_448_400n);
+});
+
+test("unified privacy scan validates a whole cursor page before decrypting and persisting notes", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  const rootSeed = new Uint8Array(32).fill(7);
+  const note = createNote({
+    spendPubKey: CURVE_BASE,
+    viewPubKey: CURVE_BASE,
+    amount: 19n,
+    assetDenom: "uclair",
+    randomness: 71n,
+    memo: "privacy-scan-v2"
+  });
+  const commitment = canonicalFieldBytes(computeNoteCommitmentV1(note));
+  const encryptedNote = encryptDepositNoteV1(note, rootSeed);
+  const txHash = new Uint8Array(32).fill(11);
+  const requests = [];
+  client.fetchPrivacyScan = async request => {
+    requests.push(request);
+    return {
+      scanSchemaVersion: "privacy-scan-v2",
+      summaries: [
+        {
+          height: 10,
+          globalSequence: 1,
+          txHash,
+          eventType: "deposit",
+          outputCount: 1,
+          circuitSetId: activeCircuitSetIdV1,
+          payloadVersion: privacyFixedV1,
+          scanSchemaVersion: "privacy-scan-v2"
+        },
+        {
+          height: 10,
+          globalSequence: 2,
+          txHash: new Uint8Array(32).fill(12),
+          eventType: "withdraw",
+          outputCount: 0,
+          circuitSetId: activeCircuitSetIdV1,
+          payloadVersion: privacyFixedV1,
+          scanSchemaVersion: "privacy-scan-v2"
+        }
+      ],
+      outputs: [{
+        height: 10,
+        globalSequence: 1,
+        outputIndex: 0,
+        commitment,
+        encryptedNote,
+        leafIndexFound: true,
+        leafIndex: 4,
+        txHash,
+        eventType: "deposit",
+        circuitSetId: activeCircuitSetIdV1,
+        payloadVersion: privacyFixedV1,
+        scanSchemaVersion: "privacy-scan-v2"
+      }],
+      nextCursor: { height: 10, globalSequence: 2, outputIndex: 0 },
+      hasMore: false,
+      scannedEventCount: 2
+    };
+  };
+  client.checkNullifiers = async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]));
+
+  const result = await client.scanNotes({
+    rootSeed,
+    after: { height: 9, globalSequence: 99, outputIndex: 2 },
+    outputLimit: 4,
+    eventLimit: 3,
+    maxEncodedBytes: 4096,
+    includeFoundNotes: true
+  });
+
+  assert.deepEqual(requests, [{
+    after: { height: 9, globalSequence: 99, outputIndex: 2 },
+    outputLimit: 4,
+    eventLimit: 3,
+    maxEncodedBytes: 4096,
+    eventTypes: []
+  }]);
+  assert.equal(result.summary.spendable_count, 1);
+  assert.equal(result.foundNotes[0].note.amount, 19n);
+  assert.equal(result.diagnostics.scanned_events, 2);
+  assert.equal(result.scanCursor.source, "privacy_scan");
+  assert.deepEqual(result.nextScanOptions.after, {
+    height: 10,
+    globalSequence: 2,
+    outputIndex: 0
+  });
+  assert.equal(result.nextScanOptions.scanSource, "privacy_scan");
+});
+
+test("unified privacy scan fails closed on malformed pages and only falls back when the endpoint is absent", async () => {
+  const rootSeed = new Uint8Array(32).fill(8);
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  let legacyCalls = 0;
+  client.fetchPrivacyScan = async () => ({ scanSchemaVersion: "privacy-scan-v2" });
+  client.fetchScanEvents = async () => {
+    legacyCalls += 1;
+    return { events: [] };
+  };
+  await assert.rejects(
+    () => client.scanNotes({ rootSeed }),
+    /privacy scan next cursor is required/
+  );
+  assert.equal(legacyCalls, 0);
+
+  const missingEndpoint = new Error("privacy scan unavailable");
+  missingEndpoint.status = 404;
+  client.fetchPrivacyScan = async () => { throw missingEndpoint; };
+  client.fetchScanEvents = async request => {
+    legacyCalls += 1;
+    return {
+      events: [],
+      next_height: request.afterHeight,
+      next_sequence: request.afterSequence,
+      has_more: false,
+      scan_format_version: 1,
+      view_tag_version: 1
+    };
+  };
+  const fallback = await client.scanNotes({ rootSeed });
+  assert.equal(legacyCalls, 1);
+  assert.equal(fallback.scanCursor.source, "scan_events");
+});
+
+test("same-root Merkle path snapshots are batch-verified before use by the prover", async () => {
+  const commitmentHex = fieldHexV1(73n);
+  const siblings = [];
+  const helpers = [];
+  let current = 73n;
+  for (let level = 0; level < 32; level += 1) {
+    const sibling = BigInt(level + 101);
+    const helper = level % 2;
+    siblings.push(fieldHexV1(sibling));
+    helpers.push(helper);
+    current = helper === 0
+      ? computeNoteTreeNodeV1(level, current, sibling)
+      : computeNoteTreeNodeV1(level, sibling, current);
+  }
+  const rootHex = fieldHexV1(current);
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  let request;
+  client.fetchCommitmentPathsAtRoot = async input => {
+    request = input;
+    return {
+      rootHex,
+      snapshotHeight: "22",
+      leafCount: "23",
+      paths: [{
+        commitmentHex,
+        leafIndex: 5,
+        path: siblings,
+        pathHelper: helpers
+      }]
+    };
+  };
+
+  const snapshot = await client.queryCommitmentPathsAtRoot({
+    commitmentHexes: [commitmentHex],
+    rootHex,
+    snapshotHeight: 22
+  });
+  assert.deepEqual(request, {
+    commitmentHexes: [commitmentHex],
+    rootHex,
+    snapshotHeight: 22
+  });
+  assert.equal(snapshot.root_hex, rootHex);
+  const provider = await client.createCommitmentPathSnapshotProvider({
+    commitmentHexes: [commitmentHex],
+    rootHex,
+    snapshotHeight: 22
+  });
+  assert.deepEqual(await provider.lookupMerklePath(commitmentHex), {
+    root: rootHex,
+    path: siblings,
+    path_helper: helpers,
+    leaf_index: 5,
+    snapshot_height: 22
+  });
+
+  const publicClient = createClairveilPublicClient({ rest: "http://127.0.0.1:1317" });
+  publicClient.fetchCommitmentPathsAtRoot = async input => {
+    assert.deepEqual(input, { commitmentHexes: [commitmentHex], rootHex, snapshotHeight: 22 });
+    return {
+      rootHex,
+      snapshotHeight: 22,
+      leafCount: 23,
+      paths: [{
+        commitmentHex,
+        leafIndex: 5,
+        path: siblings,
+        pathHelper: helpers
+      }]
+    };
+  };
+  assert.equal(
+    (await publicClient.queryCommitmentPathsAtRoot({ commitmentHexes: [commitmentHex], rootHex, snapshotHeight: 22 })).paths[0].commitment_hex,
+    commitmentHex
+  );
+
+  client.fetchCommitmentPathsAtRoot = async () => ({
+    rootHex,
+    snapshotHeight: 22,
+    leafCount: 23,
+    paths: [{
+      commitmentHex,
+      leafIndex: 5,
+      path: [...siblings.slice(0, 31), fieldHexV1(1n)],
+      pathHelper: helpers
+    }]
+  });
+  await assert.rejects(
+    () => client.queryCommitmentPathsAtRoot({ commitmentHexes: [commitmentHex], rootHex, snapshotHeight: 22 }),
+    /does not reconstruct/
+  );
 });
 
 test("package metadata is ready for public npm publishing", () => {

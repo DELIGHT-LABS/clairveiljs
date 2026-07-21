@@ -199,12 +199,16 @@ function evmReceiptStatusKind(status) {
 function scanOptionsFromBody(body = {}) {
   const scan = body.scan || {};
   return {
+    after: scan.after ?? body.scanAfter ?? body.scan_after ?? body.after,
     afterHeight: scan.afterHeight ?? scan.after_height ?? body.scanAfterHeight ?? body.scan_after_height ?? body.afterHeight ?? body.after_height,
     afterSequence: scan.afterSequence ?? scan.after_sequence ?? body.scanAfterSequence ?? body.scan_after_sequence ?? body.afterSequence ?? body.after_sequence,
     page: scan.page ?? body.scanPage ?? body.scan_page ?? body.page,
     limit: scan.limit ?? body.scanLimit ?? body.scan_limit ?? body.limit,
     maxPages: scan.maxPages ?? scan.max_pages ?? body.scanMaxPages ?? body.scan_max_pages ?? body.maxPages ?? body.max_pages,
     eventTypes: scan.eventTypes ?? scan.event_types ?? body.eventTypes ?? body.event_types,
+    outputLimit: scan.outputLimit ?? scan.output_limit ?? body.outputLimit ?? body.output_limit,
+    eventLimit: scan.eventLimit ?? scan.event_limit ?? body.eventLimit ?? body.event_limit,
+    maxEncodedBytes: scan.maxEncodedBytes ?? scan.max_encoded_bytes ?? body.maxEncodedBytes ?? body.max_encoded_bytes,
     scanSource: scan.scanSource ?? scan.scan_source ?? body.scanSource ?? body.scan_source
   };
 }
@@ -1357,6 +1361,7 @@ export class ClairveilBrowserClient {
   async scanWalletNotes(body) {
     const material = this.privacyMaterial(body);
     const {
+      after,
       afterHeight,
       after_height,
       afterSequence,
@@ -1367,6 +1372,12 @@ export class ClairveilBrowserClient {
       max_pages,
       eventTypes,
       event_types,
+      outputLimit,
+      output_limit,
+      eventLimit,
+      event_limit,
+      maxEncodedBytes,
+      max_encoded_bytes,
       scanSource,
       scan_source,
       noteStore,
@@ -1375,6 +1386,7 @@ export class ClairveilBrowserClient {
     } = body || {};
     return this.cosmos.scanWalletNotes({
       material,
+      after,
       afterHeight,
       after_height,
       afterSequence,
@@ -1385,6 +1397,12 @@ export class ClairveilBrowserClient {
       max_pages,
       eventTypes,
       event_types,
+      outputLimit,
+      output_limit,
+      eventLimit,
+      event_limit,
+      maxEncodedBytes,
+      max_encoded_bytes,
       scanSource,
       scan_source,
       noteStore: noteStore ?? note_store,

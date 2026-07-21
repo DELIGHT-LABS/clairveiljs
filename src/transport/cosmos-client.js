@@ -53,7 +53,17 @@ import {
   rollbackPlanReservation,
   rollbackPlanReservationPreservingError
 } from "../privacy/reservation.js";
-import { parseNullifierUsage, scanNotes as scanNotesCore } from "../privacy/scan.js";
+import {
+  parseNullifierUsage,
+  processPrivacyScanPageV2,
+  scanNotes as scanNotesCore,
+  validatePrivacyScanPageV2
+} from "../privacy/scan.js";
+import {
+  createCommitmentPathSnapshotProvider,
+  normalizeCommitmentPathsAtRootRequest,
+  normalizeCommitmentPathsAtRootResponse
+} from "../privacy/merkle-path.js";
 import {
   createWalletAdapter,
   derivePrivacyMaterialFromWallet
@@ -88,6 +98,7 @@ function appendReservationCleanupErrors(error, cleanupErrors = []) {
 }
 export * from "../privacy/reservation.js";
 export * from "../privacy/scan.js";
+export * from "../privacy/merkle-path.js";
 export * from "../privacy/note-store.js";
 export * from "../core/schemas.js";
 export * from "../wallet/adapter.js";
@@ -681,6 +692,41 @@ function assertScanEventsVersions(data) {
 
 export function nextPrivacyScanOptions(scanOrCursor = {}, defaults = {}) {
   const cursor = scanOrCursor?.scanCursor || scanOrCursor || {};
+  if (cursor.source === "privacy_scan" || cursor.next_cursor != null || cursor.nextCursor != null) {
+    const hasMore = Boolean(cursor.has_more ?? cursor.hasMore);
+    const nextCursor = cursor.next_cursor ?? cursor.nextCursor ?? cursor.after ?? cursor.afterCursor ?? {
+      height: 0,
+      global_sequence: 0,
+      output_index: 0
+    };
+    const normalized = validatePrivacyScanPageV2({
+      scanSchemaVersion: "privacy-scan-v2",
+      summaries: [],
+      outputs: [],
+      nextCursor,
+      hasMore: false
+    }, { after: nextCursor }).next_cursor;
+    const next = {
+      after: {
+        height: normalized.height,
+        globalSequence: normalized.global_sequence,
+        outputIndex: normalized.output_index
+      },
+      limit: Number(cursor.output_limit ?? cursor.outputLimit ?? defaults.limit ?? 200),
+      outputLimit: Number(cursor.output_limit ?? cursor.outputLimit ?? defaults.outputLimit ?? defaults.output_limit ?? 200),
+      eventLimit: cursor.event_limit ?? cursor.eventLimit ?? defaults.eventLimit ?? defaults.event_limit,
+      maxEncodedBytes: cursor.max_encoded_bytes ?? cursor.maxEncodedBytes ?? defaults.maxEncodedBytes ?? defaults.max_encoded_bytes,
+      eventTypes: [],
+      scanSource: "privacy_scan",
+      hasMore,
+      completed: !hasMore
+    };
+    const maxPages = defaults.maxPages ?? defaults.max_pages;
+    if (maxPages != null) next.maxPages = maxPages;
+    const includeFoundNotes = defaults.includeFoundNotes ?? defaults.include_found_notes;
+    if (includeFoundNotes != null) next.includeFoundNotes = Boolean(includeFoundNotes);
+    return next;
+  }
   if (cursor.source === "scan_events" || cursor.next_sequence != null || cursor.nextSequence != null) {
     const hasMore = Boolean(cursor.has_more ?? cursor.hasMore);
     const next = {
@@ -735,6 +781,7 @@ export function nextPrivacyScanOptions(scanOrCursor = {}, defaults = {}) {
 
 function resolveScanOptions({
   scan,
+  after,
   afterHeight,
   after_height,
   afterSequence,
@@ -745,16 +792,26 @@ function resolveScanOptions({
   max_pages,
   eventTypes,
   event_types,
+  outputLimit,
+  output_limit,
+  eventLimit,
+  event_limit,
+  maxEncodedBytes,
+  max_encoded_bytes,
   scanSource,
   scan_source
 } = {}) {
   return {
+    after: scan?.after ?? after,
     afterHeight: scan?.afterHeight ?? scan?.after_height ?? afterHeight ?? after_height,
     afterSequence: scan?.afterSequence ?? scan?.after_sequence ?? afterSequence ?? after_sequence,
     page: scan?.page ?? page,
     limit: scan?.limit ?? limit,
     maxPages: scan?.maxPages ?? scan?.max_pages ?? maxPages ?? max_pages,
     eventTypes: scan?.eventTypes ?? scan?.event_types ?? eventTypes ?? event_types,
+    outputLimit: scan?.outputLimit ?? scan?.output_limit ?? outputLimit ?? output_limit,
+    eventLimit: scan?.eventLimit ?? scan?.event_limit ?? eventLimit ?? event_limit,
+    maxEncodedBytes: scan?.maxEncodedBytes ?? scan?.max_encoded_bytes ?? maxEncodedBytes ?? max_encoded_bytes,
     scanSource: scan?.scanSource ?? scan?.scan_source ?? scanSource ?? scan_source
   };
 }
@@ -1653,6 +1710,18 @@ export class ClairveilJS {
     });
   }
 
+  /** Fetch, validate, and root-recompute a single same-root Merkle-path snapshot. */
+  async queryCommitmentPathsAtRoot(options = {}) {
+    const request = normalizeCommitmentPathsAtRootRequest(options);
+    const response = await this.fetchCommitmentPathsAtRoot(request);
+    return normalizeCommitmentPathsAtRootResponse(response, request);
+  }
+
+  /** Build a lookupMerklePath provider pinned to one verified root/height snapshot. */
+  async createCommitmentPathSnapshotProvider(options = {}) {
+    return createCommitmentPathSnapshotProvider(await this.queryCommitmentPathsAtRoot(options));
+  }
+
   async checkNullifier(nullifierHex) {
     return this.fetchNullifierJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`);
   }
@@ -1702,6 +1771,7 @@ export class ClairveilJS {
 
   async scanNotes({
     rootSeed,
+    after,
     afterHeight,
     after_height,
     afterSequence,
@@ -1709,16 +1779,132 @@ export class ClairveilJS {
     page = 1,
     limit = 200,
     maxPages = 1,
-    eventTypes = ["deposit", "shielded_transfer"],
+    outputLimit,
+    output_limit,
+    eventLimit,
+    event_limit,
+    maxEncodedBytes,
+    max_encoded_bytes,
+    eventTypes,
     event_types,
     includeFoundNotes = false,
-    scanSource = "scan_events",
+    scanSource = "privacy_scan",
     scan_source
   } = {}) {
-    const resolvedEventTypes = event_types ?? eventTypes;
+    const resolvedEventTypes = event_types ?? eventTypes ?? ["deposit", "shielded_transfer"];
     const pageLimit = Math.max(1, Number(limit || 200));
     const pageBudget = Math.max(1, Number(maxPages || 1));
     const source = scan_source ?? scanSource;
+
+    if (source === "privacy_scan") {
+      if ((event_types ?? eventTypes) != null && (event_types ?? eventTypes).some(value => String(value || "").trim())) {
+        throw new Error("unified privacy scan must not filter event types; zero-output summaries are required for safe cursor advancement");
+      }
+      const legacyHeight = afterHeight ?? after_height;
+      const requestedAfter = after ?? (legacyHeight == null
+        ? { height: 0, globalSequence: 0, outputIndex: 0 }
+        // The legacy cursors cannot prove an exact typed-output position.
+        // Rewind a height and deduplicate locally rather than skipping a
+        // partial typed event during migration.
+        : { height: decrementUint64Cursor(legacyHeight, "unified scan migration height"), globalSequence: 0, outputIndex: 0 });
+      const initialAfter = validatePrivacyScanPageV2({
+        scanSchemaVersion: "privacy-scan-v2",
+        summaries: [],
+        outputs: [],
+        nextCursor: requestedAfter,
+        hasMore: false
+      }, { after: requestedAfter }).next_cursor;
+      let currentAfter = {
+        height: initialAfter.height,
+        globalSequence: initialAfter.global_sequence,
+        outputIndex: initialAfter.output_index
+      };
+      let pagesScanned = 0;
+      let scannedEvents = 0;
+      let hasMore = false;
+      let found = [];
+      try {
+        for (; pagesScanned < pageBudget;) {
+          const request = {
+            after: currentAfter,
+            outputLimit: outputLimit ?? output_limit ?? pageLimit,
+            eventLimit: eventLimit ?? event_limit,
+            maxEncodedBytes: maxEncodedBytes ?? max_encoded_bytes,
+            // Deliberately request every event: zero-output summaries prove
+            // cursor progress across withdraws and filtered wallet outputs.
+            eventTypes: []
+          };
+          const pageResult = validatePrivacyScanPageV2(await this.fetchPrivacyScan(request), request);
+          found.push(...processPrivacyScanPageV2(pageResult, { rootSeed }));
+          currentAfter = {
+            height: pageResult.next_cursor.height,
+            globalSequence: pageResult.next_cursor.global_sequence,
+            outputIndex: pageResult.next_cursor.output_index
+          };
+          scannedEvents += pageResult.scanned_event_count;
+          pagesScanned += 1;
+          hasMore = pageResult.has_more;
+          if (!hasMore) break;
+        }
+      } catch (error) {
+        const canFallback = error?.status === 404 || error?.status === 405 || error?.status === 501 || error?.code === "UNSUPPORTED_PRIVACY_SCAN_VERSION";
+        if (!canFallback) throw error;
+        // Only an absent typed endpoint may fall back. A malformed or failed
+        // privacy-scan-v2 response is terminal because it may contain batch
+        // ciphertexts unavailable from a legacy feed.
+        return this.scanNotes({
+          rootSeed,
+          afterHeight: decrementUint64Cursor(initialAfter.height ?? 0, "unified scan fallback height"),
+          afterSequence: 0,
+          page: 1,
+          limit: pageLimit,
+          maxPages: pageBudget,
+          eventTypes: resolvedEventTypes,
+          includeFoundNotes,
+          scanSource: "scan_events"
+        });
+      }
+      const result = await scanNotesCore({
+        rootSeed,
+        preprocessedFoundNotes: found,
+        checkNullifiers: nullifiers => this.checkNullifiers(nullifiers),
+        checkNullifier: nullifierHex => this.checkNullifier(nullifierHex),
+        includeFoundNotes
+      });
+      const cursor = {
+        source: "privacy_scan",
+        after: initialAfter,
+        output_limit: Number(outputLimit ?? output_limit ?? pageLimit),
+        event_limit: eventLimit ?? event_limit ?? 0,
+        max_encoded_bytes: maxEncodedBytes ?? max_encoded_bytes ?? 0,
+        event_types: [],
+        has_more: hasMore,
+        next_cursor: {
+          height: currentAfter.height,
+          global_sequence: currentAfter.globalSequence,
+          output_index: currentAfter.outputIndex
+        },
+        latest_height: currentAfter.height,
+        latest_sequence: currentAfter.globalSequence,
+        latest_output_index: currentAfter.outputIndex,
+        pages_scanned: pagesScanned,
+        completed: !hasMore
+      };
+      return {
+        ...result,
+        diagnostics: {
+          ...result.diagnostics,
+          scanned_events: scannedEvents,
+          pages_scanned: pagesScanned,
+          max_pages: pageBudget
+        },
+        scanCursor: cursor,
+        nextScanOptions: nextPrivacyScanOptions(cursor, {
+          maxPages: pageBudget,
+          includeFoundNotes
+        })
+      };
+    }
 
     let legacyAfterHeight = afterHeight;
     let legacyAfterHeightAlias = after_height;
@@ -2014,6 +2200,7 @@ export class ClairveilJS {
   async scanWalletNotes({
     wallet,
     material,
+    after,
     limit = 200,
     maxPages = 1,
     max_pages,
@@ -2026,18 +2213,37 @@ export class ClairveilJS {
     page,
     eventTypes,
     event_types,
+    outputLimit,
+    output_limit,
+    eventLimit,
+    event_limit,
+    maxEncodedBytes,
+    max_encoded_bytes,
     scanSource,
     scan_source
   } = {}) {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
+    let resolvedAfter = after;
     let resolvedAfterHeight = afterHeight ?? after_height;
     let resolvedAfterSequence = afterSequence ?? after_sequence;
     let resolvedPage = page;
     let resolvedScanSource = scan_source ?? scanSource;
-    if (resolvedAfterHeight == null && noteStore) {
+    if (resolvedAfter == null && resolvedAfterHeight == null && noteStore) {
       const cached = await noteStore.load();
       const cachedCursor = cached.scanCursor || {};
-      if (cachedCursor.source === "scan_events" || cachedCursor.source === "privacy_events") {
+      if (cachedCursor.source === "privacy_scan") {
+        const next = nextPrivacyScanOptions(cachedCursor, { limit, maxPages });
+        const requestedSource = resolvedScanSource;
+        const sourceChanged = Boolean(requestedSource && requestedSource !== "privacy_scan");
+        if (sourceChanged) {
+          resolvedAfterHeight = decrementUint64Cursor(next.after?.height ?? 0, "scan source switch height");
+          resolvedAfterSequence = 0;
+          resolvedPage = 1;
+        } else {
+          resolvedAfter = next.after;
+          resolvedScanSource = "privacy_scan";
+        }
+      } else if (cachedCursor.source === "scan_events" || cachedCursor.source === "privacy_events") {
         const next = nextPrivacyScanOptions(cachedCursor, { limit, maxPages });
         const requestedSource = resolvedScanSource;
         const sourceChanged = Boolean(requestedSource && requestedSource !== cachedCursor.source);
@@ -2068,6 +2274,7 @@ export class ClairveilJS {
     }
     const scan = await this.scanNotes({
       rootSeed: privacy.rootSeed,
+      after: resolvedAfter,
       limit,
       maxPages: max_pages ?? maxPages,
       afterHeight: resolvedAfterHeight,
@@ -2075,6 +2282,9 @@ export class ClairveilJS {
       page: resolvedPage,
       scanSource: resolvedScanSource,
       eventTypes: event_types ?? eventTypes,
+      outputLimit: output_limit ?? outputLimit,
+      eventLimit: event_limit ?? eventLimit,
+      maxEncodedBytes: max_encoded_bytes ?? maxEncodedBytes,
       includeFoundNotes: true
     });
     if (noteStore) {
@@ -2231,6 +2441,7 @@ export class ClairveilJS {
     denom,
     allowPlanStep = false,
     scan,
+    after,
     afterHeight,
     after_height,
     afterSequence,
@@ -2241,6 +2452,12 @@ export class ClairveilJS {
     max_pages,
     eventTypes,
     event_types,
+    outputLimit,
+    output_limit,
+    eventLimit,
+    event_limit,
+    maxEncodedBytes,
+    max_encoded_bytes,
     scanSource,
     scan_source,
     gasLimit = 8000000,
@@ -2257,6 +2474,7 @@ export class ClairveilJS {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveScanOptions({
       scan,
+      after,
       afterHeight,
       after_height,
       afterSequence,
@@ -2267,6 +2485,12 @@ export class ClairveilJS {
       max_pages,
       eventTypes,
       event_types,
+      outputLimit,
+      output_limit,
+      eventLimit,
+      event_limit,
+      maxEncodedBytes,
+      max_encoded_bytes,
       scanSource,
       scan_source
     });
@@ -2413,6 +2637,7 @@ export class ClairveilJS {
     expected_amount_hashes,
     denom,
     scan,
+    after,
     afterHeight,
     after_height,
     afterSequence,
@@ -2423,6 +2648,12 @@ export class ClairveilJS {
     max_pages,
     eventTypes,
     event_types,
+    outputLimit,
+    output_limit,
+    eventLimit,
+    event_limit,
+    maxEncodedBytes,
+    max_encoded_bytes,
     scanSource,
     scan_source,
     gasLimit = 25000000,
@@ -2442,6 +2673,7 @@ export class ClairveilJS {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveScanOptions({
       scan,
+      after,
       afterHeight,
       after_height,
       afterSequence,
@@ -2452,6 +2684,12 @@ export class ClairveilJS {
       max_pages,
       eventTypes,
       event_types,
+      outputLimit,
+      output_limit,
+      eventLimit,
+      event_limit,
+      maxEncodedBytes,
+      max_encoded_bytes,
       scanSource,
       scan_source
     });
@@ -2595,6 +2833,7 @@ export class ClairveilJS {
     denom,
     assetDenom,
     scan,
+    after,
     afterHeight,
     after_height,
     afterSequence,
@@ -2605,6 +2844,12 @@ export class ClairveilJS {
     max_pages,
     eventTypes,
     event_types,
+    outputLimit,
+    output_limit,
+    eventLimit,
+    event_limit,
+    maxEncodedBytes,
+    max_encoded_bytes,
     scanSource,
     scan_source,
     expiresAtUnix,
@@ -2618,6 +2863,7 @@ export class ClairveilJS {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveScanOptions({
       scan,
+      after,
       afterHeight,
       after_height,
       afterSequence,
@@ -2628,6 +2874,12 @@ export class ClairveilJS {
       max_pages,
       eventTypes,
       event_types,
+      outputLimit,
+      output_limit,
+      eventLimit,
+      event_limit,
+      maxEncodedBytes,
+      max_encoded_bytes,
       scanSource,
       scan_source
     });
@@ -2738,6 +2990,7 @@ export class ClairveilJS {
     denom,
     assetDenom,
     scan,
+    after,
     afterHeight,
     after_height,
     afterSequence,
@@ -2748,6 +3001,12 @@ export class ClairveilJS {
     max_pages,
     eventTypes,
     event_types,
+    outputLimit,
+    output_limit,
+    eventLimit,
+    event_limit,
+    maxEncodedBytes,
+    max_encoded_bytes,
     scanSource,
     scan_source,
     expiresAtUnix,
@@ -2760,6 +3019,7 @@ export class ClairveilJS {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveScanOptions({
       scan,
+      after,
       afterHeight,
       after_height,
       afterSequence,
@@ -2770,6 +3030,12 @@ export class ClairveilJS {
       max_pages,
       eventTypes,
       event_types,
+      outputLimit,
+      output_limit,
+      eventLimit,
+      event_limit,
+      maxEncodedBytes,
+      max_encoded_bytes,
       scanSource,
       scan_source
     });
