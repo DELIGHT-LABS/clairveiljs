@@ -140,6 +140,7 @@ test("conformance helper loads selected handoff fixtures", fixtureTestOptions, a
 });
 
 test("conformance helper default fixtures include the reservation contract", fixtureTestOptions, async () => {
+  assert.ok(defaultConformanceFixtureNames.includes("privacy_batch_transfer_v1_contract.json"));
   assert.ok(defaultConformanceFixtureNames.includes("privacy_note_reservation_contract.json"));
   assert.ok(defaultConformanceFixtureNames.includes("privacy_relay_withdraw_contract.json"));
   const result = await runClairveilConformanceFixtures({ fixtureDir });

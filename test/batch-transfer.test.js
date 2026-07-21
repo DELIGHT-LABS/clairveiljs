@@ -11,6 +11,7 @@ import {
 } from "clairveiljs/batch-transfer";
 import { computeAssetIdV1, emptyNoteTreeRootsV1, unmarshalDisclosurePlaintextV1 } from "clairveiljs/protocol-v1";
 import { createHttpProverAdapter } from "clairveiljs/prover";
+import { fixtureTestOptions, readFixture } from "./helpers.js";
 
 async function batchPayload({ privacyPolicy = 0, disclosureMode = 0 } = {}) {
   const ownerSpend = derivePubKeyFromScalar(17n);
@@ -110,4 +111,22 @@ test("one-proof batch preparation binds public disclosure and rejects post-signa
     () => validatePreparedBatchTransferPayloadEnvelope({ ...payload, audit_key_id: "another-audit-key" }),
     /payload hash mismatch/
   );
+});
+
+test("one-proof batch contract fixture keeps the payroll operation/evidence boundary", fixtureTestOptions, () => {
+  const contract = readFixture("privacy_batch_transfer_v1_contract.json");
+  assert.equal(contract.schema_version, "clairveil.batch-transfer.contract.v1");
+  assert.equal(contract.circuit_set_id, "privacy-note-v1");
+  assert.equal(contract.prover_route, "/v1/proofs/batch-transfer");
+  assert.equal(contract.max_inputs, 16);
+  assert.equal(contract.max_outputs, 32);
+  assert.deepEqual(contract.payroll, {
+    operation_to_proof_job: "one-to-one",
+    operation_to_input_reservations: "one-to-many",
+    operation_to_item_outputs: "one-to-many",
+    batch_and_item_status_separate: true,
+    required_output_evidence: ["output_index", "commitment", "recipient_hash", "amount", "denom_or_asset_id", "user_digest", "full_digest", "audit_key_id", "audit_key_epoch"]
+  });
+  assert.equal(contract.restart_retry.automatic_multi_prover_failover, false);
+  assert.equal(contract.restart_retry.item_success_requires_output_evidence, true);
 });
