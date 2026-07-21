@@ -131,6 +131,10 @@
       "types": "./src/privacy/transfer-v5.d.ts",
       "import": "./src/privacy/transfer-v5.js"
     },
+    "./reference-payroll": {
+      "types": "./src/privacy/reference-payroll.d.ts",
+      "import": "./src/privacy/reference-payroll.js"
+    },
     "./planner": {
       "types": "./src/privacy/planner.d.ts",
       "import": "./src/privacy/planner.js"

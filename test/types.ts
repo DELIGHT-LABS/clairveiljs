@@ -49,6 +49,14 @@ import {
   type SignDocBase64
 } from "clairveiljs/cosmos";
 import { planTransferBatchNotes } from "clairveiljs/planner";
+import {
+  analyzeNotePreparation,
+  createDisclosureKeyRegistry,
+  planOneProofPayroll,
+  type NotePreparationReport,
+  type PayrollInput,
+  type PayrollPlan
+} from "clairveiljs/reference-payroll";
 import type { FoundNote } from "clairveiljs/note";
 import {
   createNoteReservationManager,
@@ -73,6 +81,36 @@ import type { MsgDeposit as GeneratedMsgDepositWithExtension } from "clairveiljs
 
 const rootSeed = new Uint8Array(32);
 const shielded: string = deriveShieldedAddress(rootSeed, { shieldedPrefix: "demos" });
+const payrollInput: PayrollInput = {
+  company_id: "company-a",
+  payroll_id: "payroll-a",
+  batch_id: "batch-a",
+  denom: "udemo",
+  items: [{ item_id: "item-a", employee_id: "employee-a", recipient_address: shielded, amount: "7" }]
+};
+const payrollPreparation: NotePreparationReport = analyzeNotePreparation(payrollInput, [{
+  note_id: "treasury-a",
+  owner_key_id: "owner-a",
+  nullifier_lookup_key: "lookup-a",
+  denom: "udemo",
+  amount: "7"
+}], { shieldedPrefix: "demos" });
+const payrollPlan: PayrollPlan = planOneProofPayroll(payrollInput, [{
+  note_id: "treasury-a",
+  owner_key_id: "owner-a",
+  nullifier_lookup_key: "lookup-a",
+  denom: "udemo",
+  amount: "7"
+}], { shieldedPrefix: "demos" });
+const payrollRegistry = createDisclosureKeyRegistry([{
+  key_id: "employee-key-v1",
+  scope: "employee",
+  subject_id: "employee-a",
+  public_key_hex: "11".repeat(32),
+  version: "v1",
+  active: true
+}]);
+const payrollRegistryEntry: string = payrollRegistry.lookupDisclosureKey("employee", "employee-a").public_key_hex;
 const material = derivePrivacyMaterial({
   address: "demo1example",
   pubKeyHex: "02".padEnd(66, "0"),
@@ -1029,6 +1067,9 @@ async function evmTransactionTypeSmoke() {
 
 void {
   shielded,
+  payrollPreparation,
+  payrollPlan,
+  payrollRegistryEntry,
   material,
   cosmos,
   publicClient,
