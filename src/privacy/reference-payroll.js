@@ -2,11 +2,12 @@ import { base64FromBytes, bytesFromBase64, bytesFromHex, hexFromBytes, randomByt
 import { FIELD_MODULUS, bytesToBigIntBE, decodeShieldedAddress } from "../core/crypto.js";
 import {
   buildPreparedBatchTransferPayload,
+  normalizePreparedBatchTransferProof,
   preparedBatchTransferEffectHex,
   validatePreparedBatchTransferPayloadEnvelope
 } from "./batch-transfer.js";
 import { privacyPolicyValue, userDisclosureModeValue } from "./payload.js";
-import { computeAssetIdV1, validateNoteV1 } from "./protocol-v1.js";
+import { computeAssetIdV1, computeNoteNullifierV1, fieldHexV1, validateNoteV1 } from "./protocol-v1.js";
 import { hashAmount, hashRecipient } from "./reservation.js";
 
 /** Reference Payroll contracts. The one-proof executor is intentionally separate from legacy transfer-batch. */
@@ -831,4 +832,100 @@ export async function assertOneProofPayrollNullifiersUnspent(payload, checkNulli
     if (value !== false) throw new Error(`one-proof payroll input nullifier ${nullifier} is spent, missing, or has an invalid status`);
   }
   return nullifiers;
+}
+
+/**
+ * Adapt one planned payroll operation to the existing CAS/lease reservation
+ * manager. This deliberately reserves all batch inputs under one operation ID.
+ */
+export function reservationPlanForOneProofPayrollOperation(operation) {
+  if (!operation || typeof operation !== "object" || !text(operation.operation_id) || !Array.isArray(operation.input_notes) || !operation.input_notes.length) {
+    throw new Error("one-proof payroll operation with input notes is required for reservation");
+  }
+  const inputs = operation.input_notes.map((treasuryNote, index) => {
+    const note = validateNoteV1(treasuryNote.note ?? treasuryNote);
+    return {
+      note,
+      nullifier: fieldHexV1(computeNoteNullifierV1(note)),
+      note_id: text(treasuryNote.note_id) || `${operation.operation_id}:input:${index}`,
+      tx_hash: text(treasuryNote.tx_hash ?? treasuryNote.txHash),
+      height: treasuryNote.height ?? 0,
+      sequence: treasuryNote.sequence ?? 0,
+      nullifier_status: "unspent"
+    };
+  });
+  return Object.freeze({ selection: { inputs } });
+}
+
+/** Confirm all one-proof input reservations before requesting a signature or proof. */
+export async function reserveOneProofPayrollOperation(reservationManager, operation, { metadata = {} } = {}) {
+  if (!reservationManager || typeof reservationManager.reservePlan !== "function") throw new Error("a NoteReservationManager is required for one-proof payroll reservation");
+  if (!operation || typeof operation !== "object") throw new Error("one-proof payroll operation is required");
+  const ownerKeyID = text(operation.input_notes?.[0]?.owner_key_id ?? operation.input_notes?.[0]?.ownerKeyID);
+  if (!ownerKeyID || operation.input_notes.some(note => text(note.owner_key_id ?? note.ownerKeyID) !== ownerKeyID)) throw new Error("one-proof payroll inputs must have one owner_key_id for reservation");
+  if (text(reservationManager.ownerKeyId) !== ownerKeyID) throw new Error("one-proof payroll reservation manager owner_key_id does not match operation inputs");
+  return reservationManager.reservePlan({
+    plan: reservationPlanForOneProofPayrollOperation(operation),
+    operationId: operation.operation_id,
+    kind: "payroll-one-proof-16x32",
+    metadata: { ...metadata, payroll_operation_id: operation.operation_id, circuit_set_id: oneProofPayrollCircuitSetId }
+  });
+}
+
+/** Invoke exactly one explicitly selected one-proof prover; no automatic prover failover is performed. */
+export async function proveOneProofPayrollOperation(payload, prover, { nowUnix } = {}) {
+  if (!prover || typeof prover.proveBatchTransfer !== "function") throw new Error("one explicit proveBatchTransfer adapter is required");
+  validatePreparedBatchTransferPayloadEnvelope(payload, nowUnix == null ? {} : { nowUnix });
+  const response = await prover.proveBatchTransfer(payload);
+  const proof = response?.proof && typeof response.proof === "object" ? response.proof : response;
+  return normalizePreparedBatchTransferProof(payload, proof, nowUnix == null ? {} : { nowUnix });
+}
+
+function observedEvidenceByIndex(observedOutputs) {
+  if (!Array.isArray(observedOutputs)) throw new Error("observed one-proof payroll outputs must be an array");
+  const observed = new Map();
+  for (const value of observedOutputs) {
+    if (!value || typeof value !== "object") throw new Error("observed one-proof payroll output must be an object");
+    const index = Number(value.batch_item_index ?? value.batchItemIndex ?? value.output_index ?? value.outputIndex);
+    if (!Number.isSafeInteger(index) || index < 0 || observed.has(index)) throw new Error("observed one-proof payroll outputs require unique non-negative output indexes");
+    observed.set(index, {
+      commitment: canonicalDigest(value.commitment ?? value.expected_output_commitment ?? value.expectedOutputCommitment, `observed output ${index} commitment`),
+      user: canonicalDigest(value.user_disclosure_digest ?? value.userDisclosureDigest, `observed output ${index} user disclosure digest`),
+      full: canonicalDigest(value.full_disclosure_digest ?? value.fullDisclosureDigest ?? value.audit_disclosure_digest ?? value.auditDisclosureDigest, `observed output ${index} full disclosure digest`),
+      recipient: canonicalDigest(value.recipient_hash ?? value.recipientHash, `observed output ${index} recipient hash`),
+      amount: canonicalDigest(value.amount_hash ?? value.amountHash, `observed output ${index} amount hash`),
+      denom: text(value.denom ?? value.expected_denom ?? value.expectedDenom)
+    });
+  }
+  return observed;
+}
+
+/**
+ * Reconcile typed output evidence independently from input nullifier state.
+ * A spent input alone can never produce a Succeeded payroll item here.
+ */
+export function reconcileOneProofPayrollEvidence({ expected_evidence, expectedEvidence, observed_outputs, observedOutputs, tx_succeeded, txSucceeded, tx_failed, txFailed } = {}) {
+  const expected = expected_evidence ?? expectedEvidence;
+  if (!Array.isArray(expected) || !expected.length) throw new Error("expected one-proof payroll evidence is required");
+  const succeeded = tx_succeeded ?? txSucceeded;
+  const failed = tx_failed ?? txFailed;
+  if (succeeded === true && failed === true) throw new Error("one-proof payroll transaction cannot be both succeeded and failed");
+  if (succeeded !== true && failed !== true) return expected.map(item => ({ item_id: item.item_id, batch_item_index: item.batch_item_index, status: "Pending", reason: "chain transaction outcome is not yet confirmed" }));
+  if (failed === true) return expected.map(item => ({ item_id: item.item_id, batch_item_index: item.batch_item_index, status: "Failed", reason: "one-proof payroll transaction failed on chain" }));
+  const observed = observedEvidenceByIndex(observed_outputs ?? observedOutputs ?? []);
+  return expected.map(item => {
+    const value = observed.get(item.batch_item_index);
+    if (!value) return { item_id: item.item_id, batch_item_index: item.batch_item_index, status: "ManualReview", reason: "confirmed transaction is missing typed output evidence" };
+    const mismatch = [
+      [item.expected_output_commitment, value.commitment, "commitment"],
+      [item.expected_user_disclosure_digest, value.user, "user disclosure digest"],
+      [item.expected_audit_disclosure_digest, value.full, "full disclosure digest"],
+      [item.expected_recipient_hash, value.recipient, "recipient hash"],
+      [item.expected_amount_hash, value.amount, "amount hash"],
+      [item.expected_denom, value.denom, "denom"]
+    ].find(([needed, actual]) => needed !== actual);
+    return mismatch
+      ? { item_id: item.item_id, batch_item_index: item.batch_item_index, status: "ManualReview", reason: `typed output evidence ${mismatch[2]} does not match` }
+      : { item_id: item.item_id, batch_item_index: item.batch_item_index, status: "Succeeded", reason: "" };
+  });
 }

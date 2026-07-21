@@ -9,10 +9,16 @@ import {
   normalizePayrollInput,
   oneProofPayrollCircuitSetId,
   planOneProofPayroll,
-  prepareOneProofPayrollOperation
+  prepareOneProofPayrollOperation,
+  proveOneProofPayrollOperation,
+  reconcileOneProofPayrollEvidence,
+  reserveOneProofPayrollOperation
 } from "clairveiljs/reference-payroll";
 import { canonicalFieldBytes, derivePubKeyFromScalar, signNoteHash } from "clairveiljs/core";
 import { computeAssetIdV1, emptyNoteTreeRootsV1 } from "clairveiljs/protocol-v1";
+import { base64FromBytes } from "clairveiljs/browser-crypto";
+import { MemoryReservationStore, createNoteReservationManager } from "clairveiljs/reservation";
+import { preparedBatchTransferProofVersion } from "clairveiljs/batch-transfer";
 
 const recipient = "clairs19x5u4mf4l4zqcpvr7d809fh4tjy5j50p2mwgky0nj38jpqpj7svndu3hqshu5e3s8w6pea5p30xek5p9flxjf7f44xh7cnfrlsd84pc7upgh3";
 const key = "11".repeat(32);
@@ -129,6 +135,20 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   assert.equal(prepared.expected_evidence[0].batch_item_index, 0);
   assert.equal(prepared.expected_evidence[0].expected_denom, "uclair");
   assert.deepEqual(buildExpectedPayrollEvidence(plan.operations[0], prepared.payload), prepared.expected_evidence);
+  const reservationManager = createNoteReservationManager({
+    store: new MemoryReservationStore(), ownerKeyId: "treasury-key", indexKey: "private-index"
+  });
+  const reservation = await reserveOneProofPayrollOperation(reservationManager, plan.operations[0]);
+  assert.equal(reservation.reservation_ids.length, 1);
+  await assert.rejects(() => reserveOneProofPayrollOperation(reservationManager, plan.operations[0]), /operation_id has already been used|already reserved/i);
+  const proof = await proveOneProofPayrollOperation(prepared.payload, {
+    proveBatchTransfer: async payload => ({
+      version: preparedBatchTransferProofVersion,
+      request_payload_hash: payload.payload_hash,
+      proof: base64FromBytes(new Uint8Array(164).fill(7))
+    })
+  });
+  assert.equal(proof.request_payload_hash, prepared.payload.payload_hash);
   await assert.doesNotReject(() => assertOneProofPayrollNullifiersUnspent(prepared.payload, async values => new Map(values.map(value => [value, false]))));
   await assert.rejects(
     () => assertOneProofPayrollNullifiersUnspent(prepared.payload, async values => new Map(values.map(value => [value, true]))),
@@ -148,4 +168,16 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     }),
     /AssetRegistryV1 asset_id does not match/
   );
+  const observed = prepared.expected_evidence.map(item => ({
+    output_index: item.batch_item_index,
+    commitment: item.expected_output_commitment,
+    user_disclosure_digest: item.expected_user_disclosure_digest,
+    full_disclosure_digest: item.expected_audit_disclosure_digest,
+    recipient_hash: item.expected_recipient_hash,
+    amount_hash: item.expected_amount_hash,
+    denom: item.expected_denom
+  }));
+  assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence, observed_outputs: observed, tx_succeeded: true })[0].status, "Succeeded");
+  assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence, tx_succeeded: true })[0].status, "ManualReview");
+  assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence })[0].status, "Pending");
 });

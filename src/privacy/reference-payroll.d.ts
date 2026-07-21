@@ -1,5 +1,7 @@
 import type { Hex } from "../core/crypto.js";
 import type { PreparedBatchTransferPayload } from "./batch-transfer.js";
+import type { PreparedBatchTransferProof } from "./batch-transfer.js";
+import type { NoteReservationManager, ReservationBatch, ReservationMetadata } from "./reservation.js";
 import type { NoteReservationRecord } from "./reservation.js";
 
 export type PayrollAmount = bigint | number | string;
@@ -330,6 +332,36 @@ export interface PreparedOneProofPayrollOperation {
   input_nullifier_hexes: string[];
 }
 
+export interface OneProofPayrollReservationPlan {
+  selection: { inputs: Array<{ note: object; nullifier: Hex; note_id: string; tx_hash: string; height: number | string; sequence: number | string; nullifier_status: "unspent" }> };
+}
+
+export interface ObservedPayrollOutputEvidence {
+  batch_item_index?: number;
+  batchItemIndex?: number;
+  output_index?: number;
+  outputIndex?: number;
+  commitment?: string;
+  user_disclosure_digest?: string;
+  userDisclosureDigest?: string;
+  full_disclosure_digest?: string;
+  fullDisclosureDigest?: string;
+  audit_disclosure_digest?: string;
+  auditDisclosureDigest?: string;
+  recipient_hash?: string;
+  recipientHash?: string;
+  amount_hash?: string;
+  amountHash?: string;
+  denom?: string;
+}
+
+export interface ReconciledPayrollItemEvidence {
+  item_id: string;
+  batch_item_index: number;
+  status: "Pending" | "Succeeded" | "Failed" | "ManualReview";
+  reason: string;
+}
+
 /** Existing reservation record, used unchanged by the Reference Payroll surface. */
 export type NoteReservation = NoteReservationRecord;
 /** The one-proof operation plan is the JS payroll-operation binding. */
@@ -354,3 +386,16 @@ export function normalizePayrollAssetRegistryEntry(entry: PayrollAssetRegistryEn
 export function buildExpectedPayrollEvidence(operation: OneProofPayrollOperationPlan, payload: PreparedBatchTransferPayload, options?: { now_unix?: number; nowUnix?: number; shieldedPrefix?: string; prefix?: string }): readonly ExpectedPayrollOutputEvidence[];
 export function prepareOneProofPayrollOperation(input: PrepareOneProofPayrollOperationInput): Promise<PreparedOneProofPayrollOperation>;
 export function assertOneProofPayrollNullifiersUnspent(payload: PreparedBatchTransferPayload, checkNullifiers: (nullifiers: string[]) => Promise<Map<string, boolean> | Record<string, boolean>>): Promise<string[]>;
+export function reservationPlanForOneProofPayrollOperation(operation: OneProofPayrollOperationPlan): OneProofPayrollReservationPlan;
+export function reserveOneProofPayrollOperation(reservationManager: NoteReservationManager, operation: OneProofPayrollOperationPlan, options?: { metadata?: ReservationMetadata }): Promise<ReservationBatch>;
+export function proveOneProofPayrollOperation(payload: PreparedBatchTransferPayload, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options?: { nowUnix?: number }): Promise<PreparedBatchTransferProof & { proof_bytes: Uint8Array }>;
+export function reconcileOneProofPayrollEvidence(input?: {
+  expected_evidence?: readonly ExpectedPayrollOutputEvidence[];
+  expectedEvidence?: readonly ExpectedPayrollOutputEvidence[];
+  observed_outputs?: readonly ObservedPayrollOutputEvidence[];
+  observedOutputs?: readonly ObservedPayrollOutputEvidence[];
+  tx_succeeded?: boolean;
+  txSucceeded?: boolean;
+  tx_failed?: boolean;
+  txFailed?: boolean;
+}): ReconciledPayrollItemEvidence[];
