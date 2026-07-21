@@ -18,6 +18,8 @@ export const notePreparationRecommendationKinds: Readonly<{ AddFunds: "add-funds
 export const oneProofPayrollCircuitSetId: "privacy-note-v1";
 export const oneProofPayrollMaxInputs: 16;
 export const oneProofPayrollMaxOutputs: 32;
+export const oneProofPayrollOperationEvidenceVersion: "payroll-one-proof-operation-evidence-v1";
+export const oneProofPayrollExecutionVersion: "payroll-one-proof-execution-v1";
 
 export interface PayrollDisclosurePolicy {
   user_privacy_policy?: number | string;
@@ -333,6 +335,34 @@ export interface PreparedOneProofPayrollOperation {
   input_nullifier_hexes: string[];
 }
 
+export interface OneProofPayrollOperationEvidence {
+  version: typeof oneProofPayrollOperationEvidenceVersion;
+  operation_id: string;
+  circuit_set_id: typeof oneProofPayrollCircuitSetId;
+  payload_hash: Hex;
+  input_nullifier_hexes: readonly Hex[];
+  expected_evidence: readonly ExpectedPayrollOutputEvidence[];
+  proof_payload_hash?: Hex;
+  proof_hash?: Hex;
+}
+
+export interface ProvenOneProofPayrollOperation {
+  version: typeof oneProofPayrollExecutionVersion;
+  operation: OneProofPayrollOperationPlan;
+  payload: PreparedBatchTransferPayload;
+  proof: PreparedBatchTransferProof & { proof_bytes: Uint8Array };
+  message: object;
+  operation_evidence: OneProofPayrollOperationEvidence;
+  input_nullifier_hexes: readonly Hex[];
+}
+
+export interface ReconciledOneProofPayrollOperationEvidence {
+  operation_id: string;
+  status: "Pending" | "Succeeded" | "Failed" | "ManualReview";
+  input_nullifiers: readonly { nullifier: Hex; spent: boolean }[];
+  items: ReconciledPayrollItemEvidence[];
+}
+
 export interface OneProofPayrollReservationPlan {
   selection: { inputs: Array<{ note: object; nullifier: Hex; note_id: string; tx_hash: string; height: number | string; sequence: number | string; nullifier_status: "unspent" }> };
 }
@@ -390,6 +420,32 @@ export function assertOneProofPayrollNullifiersUnspent(payload: PreparedBatchTra
 export function reservationPlanForOneProofPayrollOperation(operation: OneProofPayrollOperationPlan): OneProofPayrollReservationPlan;
 export function reserveOneProofPayrollOperation(reservationManager: NoteReservationManager, operation: OneProofPayrollOperationPlan, options?: { metadata?: ReservationMetadata }): Promise<ReservationBatch>;
 export function proveOneProofPayrollOperation(payload: PreparedBatchTransferPayload, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options?: { nowUnix?: number }): Promise<PreparedBatchTransferProof & { proof_bytes: Uint8Array }>;
+export function buildOneProofPayrollOperationEvidence(prepared: PreparedOneProofPayrollOperation, options?: { proof?: PreparedBatchTransferProof; nowUnix?: number }): OneProofPayrollOperationEvidence;
+export function validateOneProofPayrollOperationEvidence(evidence: OneProofPayrollOperationEvidence, prepared: PreparedOneProofPayrollOperation, options?: { nowUnix?: number }): true;
+export function provePreparedOneProofPayrollOperation(prepared: PreparedOneProofPayrollOperation, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options: {
+  creator?: string;
+  checkNullifiers: (nullifiers: string[]) => Promise<Map<string, boolean> | Record<string, boolean>>;
+  nowUnix?: number;
+}): Promise<ProvenOneProofPayrollOperation>;
+export function createOneProofPayrollBatchSignDoc(execution: ProvenOneProofPayrollOperation, input: {
+  cosmosClient: { createBatchTransferSignDoc(input: { signer?: string; pubKeyHex?: string; gasLimit?: number; message: object; memo?: string }): Promise<object> };
+  signer?: string;
+  pubKeyHex?: string;
+  gasLimit?: number;
+  memo?: string;
+  nowUnix?: number;
+}): Promise<{ operation_evidence: OneProofPayrollOperationEvidence; message: object; sign_doc: object }>;
+export function reconcileOneProofPayrollOperationEvidence(input: {
+  prepared: PreparedOneProofPayrollOperation;
+  operation_evidence: OneProofPayrollOperationEvidence;
+  checkNullifiers: (nullifiers: string[]) => Promise<Map<string, boolean> | Record<string, boolean>>;
+  tx_succeeded?: boolean;
+  txSucceeded?: boolean;
+  tx_failed?: boolean;
+  txFailed?: boolean;
+  observed_outputs?: readonly ObservedPayrollOutputEvidence[];
+  observedOutputs?: readonly ObservedPayrollOutputEvidence[];
+}): Promise<ReconciledOneProofPayrollOperationEvidence>;
 export function reconcileOneProofPayrollEvidence(input?: {
   expected_evidence?: readonly ExpectedPayrollOutputEvidence[];
   expectedEvidence?: readonly ExpectedPayrollOutputEvidence[];

@@ -5,14 +5,19 @@ import {
   analyzeNotePreparation,
   assertOneProofPayrollNullifiersUnspent,
   buildExpectedPayrollEvidence,
+  buildOneProofPayrollOperationEvidence,
+  createOneProofPayrollBatchSignDoc,
   normalizePayrollDisclosurePolicy,
   normalizePayrollInput,
   oneProofPayrollCircuitSetId,
   planOneProofPayroll,
   prepareOneProofPayrollOperation,
+  provePreparedOneProofPayrollOperation,
   proveOneProofPayrollOperation,
+  reconcileOneProofPayrollOperationEvidence,
   reconcileOneProofPayrollEvidence,
-  reserveOneProofPayrollOperation
+  reserveOneProofPayrollOperation,
+  validateOneProofPayrollOperationEvidence
 } from "clairveiljs/reference-payroll";
 import { canonicalFieldBytes, derivePubKeyFromScalar, signNoteHash } from "clairveiljs/core";
 import { computeAssetIdV1, emptyNoteTreeRootsV1 } from "clairveiljs/protocol-v1";
@@ -164,6 +169,63 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     () => assertOneProofPayrollNullifiersUnspent(prepared.payload, async values => new Map(values.map(value => [value, true]))),
     /spent, missing, or has an invalid status/
   );
+  const proofCalls = [];
+  const execution = await provePreparedOneProofPayrollOperation(prepared, {
+    proveBatchTransfer: async payload => ({
+      version: preparedBatchTransferProofVersion,
+      request_payload_hash: payload.payload_hash,
+      proof: base64FromBytes(new Uint8Array(164).fill(9))
+    })
+  }, {
+    creator: "clair1creator",
+    nowUnix: 1_700_000_000,
+    checkNullifiers: async values => {
+      proofCalls.push([...values]);
+      return new Map(values.map(value => [value, false]));
+    }
+  });
+  assert.equal(proofCalls.length, 2);
+  assert.equal(execution.message.creator, "clair1creator");
+  assert.equal(execution.operation_evidence.payload_hash, prepared.payload.payload_hash);
+  assert.match(execution.operation_evidence.proof_hash, /^[0-9a-f]{64}$/);
+  assert.doesNotThrow(() => validateOneProofPayrollOperationEvidence(execution.operation_evidence, prepared));
+  assert.throws(
+    () => validateOneProofPayrollOperationEvidence({ ...execution.operation_evidence, payload_hash: "00".repeat(32) }, prepared),
+    /payload hash does not match/
+  );
+  assert.deepEqual(buildOneProofPayrollOperationEvidence(prepared).expected_evidence, prepared.expected_evidence);
+  const signDoc = await createOneProofPayrollBatchSignDoc(execution, {
+    cosmosClient: {
+      createBatchTransferSignDoc: async input => ({ messageCreator: input.message.creator, signer: input.signer })
+    },
+    signer: "clair1creator",
+    pubKeyHex: "02".repeat(33),
+    gasLimit: 25000000
+  });
+  assert.equal(signDoc.sign_doc.messageCreator, "clair1creator");
+  const operationReconciliation = await reconcileOneProofPayrollOperationEvidence({
+    prepared,
+    operation_evidence: execution.operation_evidence,
+    tx_succeeded: true,
+    observed_outputs: prepared.expected_evidence.map(item => ({
+      output_index: item.batch_item_index,
+      commitment: item.expected_output_commitment,
+      user_disclosure_digest: item.expected_user_disclosure_digest,
+      full_disclosure_digest: item.expected_audit_disclosure_digest,
+      recipient_hash: item.expected_recipient_hash,
+      amount_hash: item.expected_amount_hash,
+      denom: item.expected_denom
+    })),
+    checkNullifiers: async values => new Map(values.map(value => [value, true]))
+  });
+  assert.equal(operationReconciliation.status, "Succeeded");
+  const inconsistentSuccess = await reconcileOneProofPayrollOperationEvidence({
+    prepared,
+    operation_evidence: execution.operation_evidence,
+    tx_succeeded: true,
+    checkNullifiers: async values => new Map(values.map(value => [value, false]))
+  });
+  assert.equal(inconsistentSuccess.status, "ManualReview");
   await assert.rejects(
     () => prepareOneProofPayrollOperation({
       operation: plan.operations[0],

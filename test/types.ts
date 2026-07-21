@@ -51,11 +51,17 @@ import {
 import { planTransferBatchNotes } from "clairveiljs/planner";
 import {
   analyzeNotePreparation,
+  buildOneProofPayrollOperationEvidence,
+  createOneProofPayrollBatchSignDoc,
   createDisclosureKeyRegistry,
   planOneProofPayroll,
   prepareOneProofPayrollOperation,
+  provePreparedOneProofPayrollOperation,
+  reconcileOneProofPayrollOperationEvidence,
   type NotePreparationReport,
+  type OneProofPayrollOperationEvidence,
   type PreparedOneProofPayrollOperation,
+  type ProvenOneProofPayrollOperation,
   type PayrollInput,
   type PayrollPlan
 } from "clairveiljs/reference-payroll";
@@ -129,6 +135,35 @@ const preparedPayrollOperation: Promise<PreparedOneProofPayrollOperation> = prep
   disable_self_view_disclosure: true,
   signer: { signNoteHash: async () => new Uint8Array(64) }
 });
+async function provePayrollOperationTypes(): Promise<void> {
+  const prepared = await preparedPayrollOperation;
+  const operationEvidence: OneProofPayrollOperationEvidence = buildOneProofPayrollOperationEvidence(prepared);
+  const proven: ProvenOneProofPayrollOperation = await provePreparedOneProofPayrollOperation(prepared, {
+    proveBatchTransfer: async payload => ({
+      version: "batch-transfer-proof-v1",
+      request_payload_hash: payload.payload_hash,
+      proof: "AA=="
+    })
+  }, {
+    creator: "demo1example",
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]))
+  });
+  await createOneProofPayrollBatchSignDoc(proven, {
+    cosmosClient: {
+      createBatchTransferSignDoc: async input => input
+    },
+    signer: "demo1example",
+    pubKeyHex: "02".padEnd(66, "0"),
+    gasLimit: 1
+  });
+  await reconcileOneProofPayrollOperationEvidence({
+    prepared,
+    operation_evidence: operationEvidence,
+    tx_failed: true,
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]))
+  });
+}
+void provePayrollOperationTypes;
 const material = derivePrivacyMaterial({
   address: "demo1example",
   pubKeyHex: "02".padEnd(66, "0"),

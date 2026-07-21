@@ -1,7 +1,8 @@
-import { base64FromBytes, bytesFromBase64, hexFromBytes, randomBytes, utf8Bytes } from "../core/browser-crypto.js";
+import { base64FromBytes, bytesFromBase64, hexFromBytes, randomBytes, sha256Hex, utf8Bytes } from "../core/browser-crypto.js";
 import { FIELD_MODULUS, bytesToBigIntBE, decodeShieldedAddress } from "../core/crypto.js";
 import {
   buildPreparedBatchTransferPayload,
+  buildMsgBatchTransferFromPrepared,
   normalizePreparedBatchTransferProof,
   preparedBatchTransferEffectHex,
   validatePreparedBatchTransferPayloadEnvelope
@@ -47,6 +48,8 @@ export const notePreparationRecommendationKinds = Object.freeze({
 export const oneProofPayrollCircuitSetId = "privacy-note-v1";
 export const oneProofPayrollMaxInputs = 16;
 export const oneProofPayrollMaxOutputs = 32;
+export const oneProofPayrollOperationEvidenceVersion = "payroll-one-proof-operation-evidence-v1";
+export const oneProofPayrollExecutionVersion = "payroll-one-proof-execution-v1";
 
 const disclosureScopeSet = new Set(payrollDisclosureScopes);
 const disclosureModeName = new Map([
@@ -863,6 +866,283 @@ export async function proveOneProofPayrollOperation(payload, prover, { nowUnix }
   const response = await prover.proveBatchTransfer(payload);
   const proof = response?.proof && typeof response.proof === "object" ? response.proof : response;
   return normalizePreparedBatchTransferProof(payload, proof, nowUnix == null ? {} : { nowUnix });
+}
+
+function sameEvidence(expected, actual) {
+  const fields = [
+    "operation_id", "item_id", "employee_id", "batch_item_index", "role",
+    "expected_output_commitment", "expected_user_disclosure_digest",
+    "expected_audit_disclosure_digest", "expected_self_view_disclosure_digest",
+    "expected_recipient_hash", "expected_amount_hash", "expected_denom",
+    "asset_id_hex", "user_privacy_policy", "user_disclosure_mode",
+    "audit_key_id", "audit_key_epoch"
+  ];
+  return fields.every(field => String(expected?.[field] ?? "") === String(actual?.[field] ?? ""));
+}
+
+function expectedPayrollEvidenceForPreparedOperation(prepared, { nowUnix } = {}) {
+  if (!prepared || typeof prepared !== "object") throw new Error("prepared one-proof payroll operation is required");
+  const operation = prepared.operation;
+  const payload = prepared.payload;
+  if (!operation || !payload) throw new Error("prepared one-proof payroll operation requires operation and payload");
+  validatePreparedBatchTransferPayloadEnvelope(payload, nowUnix == null ? {} : { nowUnix });
+  if (operation.circuit_set_id !== oneProofPayrollCircuitSetId || payload.circuit_set_id !== oneProofPayrollCircuitSetId) {
+    throw new Error("prepared one-proof payroll operation circuit identity is invalid");
+  }
+  if (!text(operation.operation_id)) throw new Error("prepared one-proof payroll operation ID is required");
+  const expected = buildExpectedPayrollEvidence(operation, payload, nowUnix == null ? {} : { now_unix: nowUnix });
+  if (!Array.isArray(prepared.expected_evidence) || prepared.expected_evidence.length !== expected.length ||
+      expected.some((entry, index) => !sameEvidence(entry, prepared.expected_evidence[index]))) {
+    throw new Error("prepared one-proof payroll expected evidence does not match the final payload");
+  }
+  const effects = preparedBatchTransferEffectHex(payload);
+  if (prepared.input_nullifier_hexes !== undefined && (
+    !Array.isArray(prepared.input_nullifier_hexes) ||
+    prepared.input_nullifier_hexes.length !== effects.nullifier_hexes.length ||
+    prepared.input_nullifier_hexes.some((value, index) => canonicalDigest(value, "prepared input nullifier") !== effects.nullifier_hexes[index])
+  )) {
+    throw new Error("prepared one-proof payroll input nullifiers do not match the final payload");
+  }
+  return { operation, payload, expected, effects };
+}
+
+/**
+ * Materialize the non-secret evidence that binds one payroll operation to its
+ * signed batch payload. This is safe to persist only with the product's normal
+ * handling for employee IDs and recipient/amount hashes; it never contains a
+ * prover witness or an unencrypted note secret.
+ */
+export function buildOneProofPayrollOperationEvidence(prepared, { proof, nowUnix } = {}) {
+  const normalized = expectedPayrollEvidenceForPreparedOperation(prepared, { nowUnix });
+  let normalizedProof = null;
+  if (proof !== undefined && proof !== null) {
+    normalizedProof = normalizePreparedBatchTransferProof(normalized.payload, proof, nowUnix == null ? {} : { nowUnix });
+  }
+  const evidence = {
+    version: oneProofPayrollOperationEvidenceVersion,
+    operation_id: normalized.operation.operation_id,
+    circuit_set_id: oneProofPayrollCircuitSetId,
+    payload_hash: normalized.payload.payload_hash,
+    input_nullifier_hexes: Object.freeze([...normalized.effects.nullifier_hexes]),
+    expected_evidence: Object.freeze(normalized.expected.map(item => Object.freeze({ ...item }))),
+    ...(normalizedProof ? {
+      proof_payload_hash: normalizedProof.request_payload_hash,
+      proof_hash: sha256Hex(normalizedProof.proof_bytes)
+    } : {})
+  };
+  return Object.freeze(evidence);
+}
+
+/** Validate an operation evidence artifact against the exact prepared payload. */
+export function validateOneProofPayrollOperationEvidence(evidence, prepared, { nowUnix } = {}) {
+  if (!evidence || typeof evidence !== "object") throw new Error("one-proof payroll operation evidence is required");
+  if (evidence.version !== oneProofPayrollOperationEvidenceVersion) {
+    throw new Error(`unsupported one-proof payroll operation evidence version ${JSON.stringify(evidence.version)}`);
+  }
+  const normalized = expectedPayrollEvidenceForPreparedOperation(prepared, { nowUnix });
+  if (text(evidence.operation_id) !== normalized.operation.operation_id || evidence.circuit_set_id !== oneProofPayrollCircuitSetId) {
+    throw new Error("one-proof payroll operation evidence identity does not match the prepared operation");
+  }
+  if (canonicalDigest(evidence.payload_hash, "one-proof payroll payload hash") !== normalized.payload.payload_hash) {
+    throw new Error("one-proof payroll operation evidence payload hash does not match the prepared payload");
+  }
+  if (!Array.isArray(evidence.input_nullifier_hexes) || evidence.input_nullifier_hexes.length !== normalized.effects.nullifier_hexes.length ||
+      evidence.input_nullifier_hexes.some((value, index) => canonicalDigest(value, "one-proof payroll evidence nullifier") !== normalized.effects.nullifier_hexes[index])) {
+    throw new Error("one-proof payroll operation evidence nullifiers do not match the prepared payload");
+  }
+  if (!Array.isArray(evidence.expected_evidence) || evidence.expected_evidence.length !== normalized.expected.length ||
+      normalized.expected.some((entry, index) => !sameEvidence(entry, evidence.expected_evidence[index]))) {
+    throw new Error("one-proof payroll operation evidence outputs do not match the prepared payload");
+  }
+  const proofPayloadHash = evidence.proof_payload_hash;
+  const proofHash = evidence.proof_hash;
+  if ((proofPayloadHash === undefined) !== (proofHash === undefined)) {
+    throw new Error("one-proof payroll proof evidence must include both proof payload hash and proof hash");
+  }
+  if (proofPayloadHash !== undefined) {
+    if (canonicalDigest(proofPayloadHash, "one-proof payroll proof payload hash") !== normalized.payload.payload_hash ||
+        !canonicalDigest(proofHash, "one-proof payroll proof hash")) {
+      throw new Error("one-proof payroll proof evidence is invalid");
+    }
+  }
+  return true;
+}
+
+/**
+ * Prove one fully prepared payroll operation with exactly one selected batch
+ * prover. Input nullifiers are checked immediately before and after proving,
+ * so the result is safe to hand to the signing/broadcast boundary only if the
+ * same inputs remain unspent.
+ */
+export async function provePreparedOneProofPayrollOperation(prepared, prover, {
+  creator,
+  checkNullifiers,
+  nowUnix
+} = {}) {
+  if (typeof checkNullifiers !== "function") {
+    throw new Error("a batch nullifier status reader is required before one-proof payroll proving");
+  }
+  const resolvedNowUnix = nowUnix ?? Math.floor(Date.now() / 1000);
+  const normalized = expectedPayrollEvidenceForPreparedOperation(prepared, { nowUnix: resolvedNowUnix });
+  await assertOneProofPayrollNullifiersUnspent(normalized.payload, checkNullifiers);
+  const proof = await proveOneProofPayrollOperation(normalized.payload, prover, { nowUnix: resolvedNowUnix });
+  await assertOneProofPayrollNullifiersUnspent(normalized.payload, checkNullifiers);
+  const preparedCreator = text(normalized.payload.creator);
+  const sender = text(creator ?? preparedCreator);
+  if (!preparedCreator || !sender) throw new Error("one-proof payroll batch transfer creator must be fixed during payload preparation");
+  if (sender !== preparedCreator) throw new Error("one-proof payroll batch transfer creator does not match the prepared payload");
+  const message = buildMsgBatchTransferFromPrepared(normalized.payload, proof, { creator: sender, nowUnix: resolvedNowUnix });
+  const operationEvidence = buildOneProofPayrollOperationEvidence(prepared, { proof, nowUnix: resolvedNowUnix });
+  return Object.freeze({
+    version: oneProofPayrollExecutionVersion,
+    operation: normalized.operation,
+    payload: normalized.payload,
+    proof,
+    message,
+    operation_evidence: operationEvidence,
+    input_nullifier_hexes: Object.freeze([...normalized.effects.nullifier_hexes])
+  });
+}
+
+/** Build a Cosmos direct sign-doc from a proven one-proof payroll operation. */
+export async function createOneProofPayrollBatchSignDoc(execution, {
+  cosmosClient,
+  signer,
+  pubKeyHex,
+  gasLimit,
+  memo,
+  nowUnix
+} = {}) {
+  if (!execution || typeof execution !== "object" || execution.version !== oneProofPayrollExecutionVersion) {
+    throw new Error("proven one-proof payroll execution is required");
+  }
+  if (!cosmosClient || typeof cosmosClient.createBatchTransferSignDoc !== "function") {
+    throw new Error("a Cosmos client with createBatchTransferSignDoc is required");
+  }
+  const resolvedNowUnix = nowUnix ?? Math.floor(Date.now() / 1000);
+  validateOneProofPayrollOperationEvidence(execution.operation_evidence, {
+    operation: execution.operation,
+    payload: execution.payload,
+    expected_evidence: execution.operation_evidence.expected_evidence,
+    input_nullifier_hexes: execution.input_nullifier_hexes
+  }, { nowUnix: resolvedNowUnix });
+  const proof = normalizePreparedBatchTransferProof(execution.payload, execution.proof, { nowUnix: resolvedNowUnix });
+  if (execution.operation_evidence.proof_payload_hash !== proof.request_payload_hash ||
+      execution.operation_evidence.proof_hash !== sha256Hex(proof.proof_bytes)) {
+    throw new Error("one-proof payroll execution proof does not match its operation evidence");
+  }
+  const preparedCreator = text(execution.payload.creator);
+  if (!preparedCreator || text(execution.message?.creator) !== preparedCreator) {
+    throw new Error("one-proof payroll execution creator does not match the prepared payload");
+  }
+  const message = buildMsgBatchTransferFromPrepared(execution.payload, execution.proof, {
+    creator: preparedCreator,
+    nowUnix: resolvedNowUnix
+  });
+  const signDoc = await cosmosClient.createBatchTransferSignDoc({
+    signer,
+    pubKeyHex,
+    gasLimit,
+    message,
+    ...(memo === undefined ? {} : { memo })
+  });
+  return Object.freeze({
+    operation_evidence: execution.operation_evidence,
+    message,
+    sign_doc: signDoc
+  });
+}
+
+function normalizedNullifierStatuses(nullifiers, statuses) {
+  const values = new Map();
+  const add = (raw, used) => {
+    const nullifier = canonicalDigest(raw, "one-proof payroll nullifier status key");
+    if (typeof used !== "boolean") throw new Error(`one-proof payroll nullifier ${nullifier} has an invalid status`);
+    if (values.has(nullifier) && values.get(nullifier) !== used) {
+      throw new Error(`one-proof payroll nullifier ${nullifier} has conflicting statuses`);
+    }
+    values.set(nullifier, used);
+  };
+  if (statuses instanceof Map) {
+    for (const [nullifier, used] of statuses) add(nullifier, used);
+  } else if (statuses && typeof statuses === "object" && !Array.isArray(statuses)) {
+    for (const [nullifier, used] of Object.entries(statuses)) add(nullifier, used);
+  } else {
+    throw new Error("one-proof payroll nullifier status response must be a Map or object");
+  }
+  return nullifiers.map(nullifier => {
+    if (!values.has(nullifier)) throw new Error(`one-proof payroll nullifier status is missing ${nullifier}`);
+    return Object.freeze({ nullifier, spent: values.get(nullifier) });
+  });
+}
+
+/**
+ * Reconcile a prepared one-proof operation with explicit chain outcome,
+ * complete input-nullifier state, and typed per-output evidence. No branch
+ * can mark an item successful from a spent nullifier alone.
+ */
+export async function reconcileOneProofPayrollOperationEvidence({
+  prepared,
+  operation_evidence,
+  checkNullifiers,
+  tx_succeeded,
+  txSucceeded,
+  tx_failed,
+  txFailed,
+  observed_outputs,
+  observedOutputs
+} = {}) {
+  if (typeof checkNullifiers !== "function") throw new Error("a batch nullifier status reader is required for one-proof payroll reconciliation");
+  validateOneProofPayrollOperationEvidence(operation_evidence, prepared);
+  const succeeded = tx_succeeded ?? txSucceeded;
+  const failed = tx_failed ?? txFailed;
+  if (succeeded !== undefined && typeof succeeded !== "boolean") throw new Error("one-proof payroll tx_succeeded must be a boolean");
+  if (failed !== undefined && typeof failed !== "boolean") throw new Error("one-proof payroll tx_failed must be a boolean");
+  if (succeeded === true && failed === true) throw new Error("one-proof payroll transaction cannot be both succeeded and failed");
+  const nullifiers = operation_evidence.input_nullifier_hexes;
+  const inputNullifiers = normalizedNullifierStatuses(nullifiers, await checkNullifiers(nullifiers));
+  const anySpent = inputNullifiers.some(entry => entry.spent);
+  const allSpent = inputNullifiers.every(entry => entry.spent);
+  let items;
+  let status;
+  if (succeeded !== true && failed !== true) {
+    status = anySpent ? "ManualReview" : "Pending";
+    items = operation_evidence.expected_evidence.map(item => ({
+      item_id: item.item_id,
+      batch_item_index: item.batch_item_index,
+      status,
+      reason: anySpent
+        ? "input nullifier is spent without a confirmed one-proof payroll transaction"
+        : "chain transaction outcome is not yet confirmed"
+    }));
+  } else if (failed === true && !anySpent) {
+    status = "Failed";
+    items = reconcileOneProofPayrollEvidence({ expected_evidence: operation_evidence.expected_evidence, tx_failed: true });
+  } else if (failed === true || !allSpent) {
+    status = "ManualReview";
+    const reason = failed === true
+      ? "failed one-proof payroll transaction has spent input evidence"
+      : "confirmed one-proof payroll transaction has unspent input evidence";
+    items = operation_evidence.expected_evidence.map(item => ({
+      item_id: item.item_id,
+      batch_item_index: item.batch_item_index,
+      status,
+      reason
+    }));
+  } else {
+    items = reconcileOneProofPayrollEvidence({
+      expected_evidence: operation_evidence.expected_evidence,
+      observed_outputs: observed_outputs ?? observedOutputs ?? [],
+      tx_succeeded: true
+    });
+    status = items.every(item => item.status === "Succeeded") ? "Succeeded" : "ManualReview";
+  }
+  return Object.freeze({
+    operation_id: operation_evidence.operation_id,
+    status,
+    input_nullifiers: inputNullifiers,
+    items
+  });
 }
 
 function observedEvidenceByIndex(observedOutputs) {
