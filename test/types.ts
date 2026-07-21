@@ -53,6 +53,8 @@ import {
   analyzeNotePreparation,
   buildOneProofPayrollOperationEvidence,
   createOneProofPayrollBatchSignDoc,
+  markOneProofPayrollReservationBroadcastAttempting,
+  markOneProofPayrollReservationSubmitted,
   createDisclosureKeyRegistry,
   planOneProofPayroll,
   prepareOneProofPayrollOperation,
@@ -60,6 +62,7 @@ import {
   reconcileOneProofPayrollOperationEvidence,
   type NotePreparationReport,
   type OneProofPayrollOperationEvidence,
+  type OneProofPayrollReservationBatch,
   type PreparedOneProofPayrollOperation,
   type ProvenOneProofPayrollOperation,
   type PayrollInput,
@@ -161,6 +164,22 @@ async function provePayrollOperationTypes(): Promise<void> {
     operation_evidence: operationEvidence,
     tx_failed: true,
     checkNullifiers: async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]))
+  });
+  const reservationBatch = {} as OneProofPayrollReservationBatch;
+  await markOneProofPayrollReservationBroadcastAttempting(reservationManager, reservationBatch, proven, {
+    txBytesHash: "ab".repeat(32),
+    reason: "cosmos_broadcast_tx_sync"
+  });
+  // @ts-expect-error A broadcast attempt needs a transaction or tx-bytes identity.
+  await markOneProofPayrollReservationBroadcastAttempting(reservationManager, reservationBatch, proven, {
+    signDocHash: "sign-doc-only"
+  });
+  await markOneProofPayrollReservationSubmitted(reservationManager, reservationBatch, proven, {
+    txHash: "TX-HASH"
+  });
+  // @ts-expect-error Submission must retain a durable transaction or tx-bytes identity.
+  await markOneProofPayrollReservationSubmitted(reservationManager, reservationBatch, proven, {
+    signDocHash: "sign-doc-only"
   });
 }
 void provePayrollOperationTypes;

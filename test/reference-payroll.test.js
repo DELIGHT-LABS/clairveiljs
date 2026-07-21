@@ -7,13 +7,18 @@ import {
   buildExpectedPayrollEvidence,
   buildOneProofPayrollOperationEvidence,
   createOneProofPayrollBatchSignDoc,
+  markOneProofPayrollReservationBroadcastAttempting,
+  markOneProofPayrollReservationProofReady,
+  markOneProofPayrollReservationSubmitted,
   normalizePayrollDisclosurePolicy,
   normalizePayrollInput,
   oneProofPayrollCircuitSetId,
   planOneProofPayroll,
+  prepareOneProofPayrollReservation,
   prepareOneProofPayrollOperation,
   provePreparedOneProofPayrollOperation,
   proveOneProofPayrollOperation,
+  reconcileOneProofPayrollReservation,
   reconcileOneProofPayrollOperationEvidence,
   reconcileOneProofPayrollEvidence,
   reserveOneProofPayrollOperation,
@@ -157,8 +162,9 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   const reservationManager = createNoteReservationManager({
     store: new MemoryReservationStore(), ownerKeyId: "treasury-key", indexKey: "private-index"
   });
-  const reservation = await reserveOneProofPayrollOperation(reservationManager, plan.operations[0]);
+  const reservation = await prepareOneProofPayrollReservation(reservationManager, prepared);
   assert.equal(reservation.reservation_ids.length, 1);
+  assert.equal(reservation.reservations[0].status, "Proving");
   await assert.rejects(() => reserveOneProofPayrollOperation(reservationManager, plan.operations[0]), /operation_id has already been used|already reserved/i);
   const proof = await proveOneProofPayrollOperation(prepared.payload, {
     proveBatchTransfer: async payload => ({
@@ -193,6 +199,22 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   assert.equal(execution.operation_evidence.payload_hash, prepared.payload.payload_hash);
   assert.match(execution.operation_evidence.proof_hash, /^[0-9a-f]{64}$/);
   assert.doesNotThrow(() => validateOneProofPayrollOperationEvidence(execution.operation_evidence, prepared));
+  const proofReadyReservations = await markOneProofPayrollReservationProofReady(reservationManager, reservation, execution);
+  assert.equal(proofReadyReservations[0].status, "ProofReady");
+  await assert.rejects(
+    () => markOneProofPayrollReservationSubmitted(reservationManager, reservation, execution, { txHash: "PAYROLL-SUCCESS" }),
+    /durable payload-bound broadcast attempt/
+  );
+  const broadcastingReservations = await markOneProofPayrollReservationBroadcastAttempting(reservationManager, reservation, execution, {
+    txHash: "PAYROLL-SUCCESS"
+  });
+  assert.equal(broadcastingReservations[0].broadcast_in_flight, true);
+  await assert.rejects(
+    () => markOneProofPayrollReservationBroadcastAttempting(reservationManager, reservation, execution, { txHash: "PAYROLL-OTHER" }),
+    /does not match the durable broadcast attempt/
+  );
+  const submittedReservations = await markOneProofPayrollReservationSubmitted(reservationManager, reservation, execution, { txHash: "PAYROLL-SUCCESS" });
+  assert.equal(submittedReservations[0].status, "Submitted");
   assert.throws(
     () => validateOneProofPayrollOperationEvidence({ ...execution.operation_evidence, payload_hash: "00".repeat(32) }, prepared),
     /payload hash does not match/
@@ -207,22 +229,76 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     gasLimit: 25000000
   });
   assert.equal(signDoc.sign_doc.messageCreator, "clair1creator");
+  const observed = prepared.expected_evidence.map(item => ({
+    output_index: item.batch_item_index,
+    commitment: item.expected_output_commitment,
+    user_disclosure_digest: item.expected_user_disclosure_digest,
+    full_disclosure_digest: item.expected_audit_disclosure_digest,
+    recipient_hash: item.expected_recipient_hash,
+    amount_hash: item.expected_amount_hash,
+    denom: item.expected_denom
+  }));
   const operationReconciliation = await reconcileOneProofPayrollOperationEvidence({
     prepared,
     operation_evidence: execution.operation_evidence,
     tx_succeeded: true,
-    observed_outputs: prepared.expected_evidence.map(item => ({
-      output_index: item.batch_item_index,
-      commitment: item.expected_output_commitment,
-      user_disclosure_digest: item.expected_user_disclosure_digest,
-      full_disclosure_digest: item.expected_audit_disclosure_digest,
-      recipient_hash: item.expected_recipient_hash,
-      amount_hash: item.expected_amount_hash,
-      denom: item.expected_denom
-    })),
+    observed_outputs: observed,
     checkNullifiers: async values => new Map(values.map(value => [value, true]))
   });
   assert.equal(operationReconciliation.status, "Succeeded");
+  const reservationReconciliation = await reconcileOneProofPayrollReservation({
+    reservationManager,
+    reservationBatch: reservation,
+    prepared,
+    operationEvidence: execution.operation_evidence,
+    txSucceeded: true,
+    observedOutputs: observed,
+    checkNullifiers: async values => new Map(values.map(value => [value, true]))
+  });
+  assert.equal(reservationReconciliation.reservation_action, "ConfirmedSpent");
+  assert.equal(reservationReconciliation.reservations[0].status, "ConfirmedSpent");
+  assert.equal((await reconcileOneProofPayrollReservation({
+    reservationManager,
+    reservationBatch: reservation,
+    prepared,
+    operationEvidence: execution.operation_evidence,
+    txSucceeded: true,
+    observedOutputs: observed,
+    checkNullifiers: async values => new Map(values.map(value => [value, true]))
+  })).reservation_action, "ConfirmedSpent");
+  const submittedReservationFor = async txHash => {
+    const manager = createNoteReservationManager({
+      store: new MemoryReservationStore(), ownerKeyId: "treasury-key", indexKey: "private-index"
+    });
+    const batch = await prepareOneProofPayrollReservation(manager, prepared);
+    await markOneProofPayrollReservationProofReady(manager, batch, execution);
+    await markOneProofPayrollReservationBroadcastAttempting(manager, batch, execution, { txHash });
+    await markOneProofPayrollReservationSubmitted(manager, batch, execution, { txHash });
+    return { manager, batch };
+  };
+  const failedReservation = await submittedReservationFor("PAYROLL-FAILED");
+  const failedReconciliation = await reconcileOneProofPayrollReservation({
+    reservationManager: failedReservation.manager,
+    reservationBatch: failedReservation.batch,
+    prepared,
+    operationEvidence: execution.operation_evidence,
+    txFailed: true,
+    checkNullifiers: async values => new Map(values.map(value => [value, false]))
+  });
+  assert.equal(failedReconciliation.reservation_action, "ReplanRequired");
+  assert.equal(failedReconciliation.reservations[0].status, "ReplanRequired");
+  const ambiguousReservation = await submittedReservationFor("PAYROLL-AMBIGUOUS");
+  const ambiguousReconciliation = await reconcileOneProofPayrollReservation({
+    reservationManager: ambiguousReservation.manager,
+    reservationBatch: ambiguousReservation.batch,
+    prepared,
+    operationEvidence: execution.operation_evidence,
+    txSucceeded: true,
+    observedOutputs: [],
+    checkNullifiers: async values => new Map(values.map(value => [value, true]))
+  });
+  assert.equal(ambiguousReconciliation.reservation_action, "ManualReview");
+  assert.equal(ambiguousReconciliation.reservations[0].status, "ManualReview");
   const inconsistentSuccess = await reconcileOneProofPayrollOperationEvidence({
     prepared,
     operation_evidence: execution.operation_evidence,
@@ -244,15 +320,6 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     }),
     /AssetRegistryV1 asset_id does not match/
   );
-  const observed = prepared.expected_evidence.map(item => ({
-    output_index: item.batch_item_index,
-    commitment: item.expected_output_commitment,
-    user_disclosure_digest: item.expected_user_disclosure_digest,
-    full_disclosure_digest: item.expected_audit_disclosure_digest,
-    recipient_hash: item.expected_recipient_hash,
-    amount_hash: item.expected_amount_hash,
-    denom: item.expected_denom
-  }));
   assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence, observed_outputs: observed, tx_succeeded: true })[0].status, "Succeeded");
   assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence, tx_succeeded: true })[0].status, "ManualReview");
   assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence })[0].status, "Pending");

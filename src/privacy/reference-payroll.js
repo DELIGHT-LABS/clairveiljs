@@ -860,6 +860,256 @@ export async function reserveOneProofPayrollOperation(reservationManager, operat
   });
 }
 
+function frozenReservationBatch(batch, reservations) {
+  return Object.freeze({
+    ...batch,
+    reservation_ids: Object.freeze([...(batch.reservation_ids || [])]),
+    reservations: Object.freeze([...(reservations || [])])
+  });
+}
+
+async function payrollReservationSet(reservationManager, prepared, reservationBatch) {
+  if (!reservationManager || typeof reservationManager.getReservation !== "function" || typeof reservationManager.lookupKeyForNote !== "function") {
+    throw new Error("a NoteReservationManager with reservation lookup support is required");
+  }
+  const normalized = expectedPayrollEvidenceForPreparedOperation(prepared);
+  const reservationIDs = [...(reservationBatch?.reservation_ids || [])].map(value => text(value));
+  if (!reservationIDs.length || reservationIDs.some(id => !id) || new Set(reservationIDs).size !== reservationIDs.length) {
+    throw new Error("one-proof payroll reservation batch requires unique reservation IDs");
+  }
+  if (text(reservationBatch?.operation_id) !== normalized.operation.operation_id) {
+    throw new Error("one-proof payroll reservation batch operation ID does not match the prepared operation");
+  }
+  if (reservationIDs.length !== normalized.operation.input_notes.length) {
+    throw new Error("one-proof payroll reservation batch input count does not match the prepared operation");
+  }
+  const reservations = await Promise.all(reservationIDs.map(id => reservationManager.getReservation(id)));
+  if (reservations.some(reservation => text(reservation.operation_id) !== normalized.operation.operation_id)) {
+    throw new Error("one-proof payroll reservation does not belong to the prepared operation");
+  }
+  // Derive lookup keys through the same adapter used at reservation time. The
+  // adapter pins the canonical nullifier alongside the note; using the raw
+  // treasury note here can select a different nullifier identity.
+  const reservationPlan = reservationPlanForOneProofPayrollOperation(normalized.operation);
+  const expectedLookupKeys = await Promise.all(reservationPlan.selection.inputs.map(input =>
+    reservationManager.lookupKeyForNote(input)
+  ));
+  const actualLookupKeys = reservations.map(reservation => text(reservation.nullifier_lookup_key));
+  if (new Set(expectedLookupKeys).size !== expectedLookupKeys.length ||
+      new Set(actualLookupKeys).size !== actualLookupKeys.length ||
+      expectedLookupKeys.some(key => !actualLookupKeys.includes(key))) {
+    throw new Error("one-proof payroll reservation inputs do not match the prepared operation");
+  }
+  return { normalized, reservationIDs, reservations };
+}
+
+function reservationStatusesAre(reservations, ...statuses) {
+  return reservations.length > 0 && reservations.every(reservation => statuses.includes(String(reservation.status)));
+}
+
+function payrollReservationMetadata(operationEvidence, metadata = {}) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error("one-proof payroll reservation metadata must be an object");
+  }
+  return {
+    ...metadata,
+    payroll_operation_id: operationEvidence.operation_id,
+    payroll_circuit_set_id: operationEvidence.circuit_set_id,
+    payroll_payload_hash: operationEvidence.payload_hash,
+    ...(operationEvidence.proof_hash ? { payroll_proof_hash: operationEvidence.proof_hash } : {})
+  };
+}
+
+function consistentPayrollBroadcastIdentity(label, values) {
+  const normalized = values
+    .filter(value => value !== undefined && value !== null)
+    .map(value => text(value));
+  if (new Set(normalized).size > 1) {
+    throw new Error(`one-proof payroll ${label} aliases must match`);
+  }
+  return normalized[0] || "";
+}
+
+function payrollBroadcastIdentity({
+  tx_hash,
+  txHash,
+  tx_bytes_hash,
+  txBytesHash,
+  sign_doc_hash,
+  signDocHash
+} = {}) {
+  return {
+    txHash: consistentPayrollBroadcastIdentity("transaction hash", [tx_hash, txHash]),
+    txBytesHash: consistentPayrollBroadcastIdentity("transaction bytes hash", [tx_bytes_hash, txBytesHash]),
+    signDocHash: consistentPayrollBroadcastIdentity("sign-doc hash", [sign_doc_hash, signDocHash])
+  };
+}
+
+function assertPayrollBroadcastIdentityMatches(reservations, identity) {
+  const fields = [
+    ["txHash", "submitted_tx_hash"],
+    ["txBytesHash", "tx_bytes_hash"],
+    ["signDocHash", "sign_doc_hash"]
+  ];
+  for (const [identityField, reservationField] of fields) {
+    const stored = [...new Set(reservations.map(reservation => text(reservation[reservationField])).filter(Boolean))];
+    if (stored.length > 1) {
+      throw new Error(`one-proof payroll reservations have conflicting ${reservationField}`);
+    }
+    if (identity[identityField] && stored.length && identity[identityField] !== stored[0]) {
+      throw new Error(`one-proof payroll ${identityField} does not match the durable broadcast attempt`);
+    }
+  }
+}
+
+/** Reserve and immediately lease-claim an exact one-proof payroll input set before proving. */
+export async function prepareOneProofPayrollReservation(reservationManager, prepared, { metadata = {} } = {}) {
+  const normalized = expectedPayrollEvidenceForPreparedOperation(prepared);
+  const operationEvidence = buildOneProofPayrollOperationEvidence(prepared);
+  const batch = await reserveOneProofPayrollOperation(reservationManager, normalized.operation, {
+    metadata: payrollReservationMetadata(operationEvidence, metadata)
+  });
+  try {
+    const reservations = await reservationManager.markProving(batch.reservation_ids, {
+      leaseToken: batch.lease_token
+    });
+    return frozenReservationBatch(batch, reservations);
+  } catch (error) {
+    try {
+      await reservationManager.releaseReservedOrProving(batch.reservation_ids, {
+        leaseToken: batch.lease_token
+      });
+    } catch {
+      try {
+        await reservationManager.markManualReview(batch.reservation_ids, {
+          error: error?.message || "one-proof payroll reservation claim failed",
+          metadata: { reconcile_reason: "payroll_reservation_claim_failed" }
+        });
+      } catch {
+        // Preserve the original claim failure; manual recovery remains available from the reservation store.
+      }
+    }
+    throw error;
+  }
+}
+
+function preparedFromPayrollExecution(execution) {
+  if (!execution || typeof execution !== "object" || execution.version !== oneProofPayrollExecutionVersion) {
+    throw new Error("proven one-proof payroll execution is required");
+  }
+  const prepared = {
+    operation: execution.operation,
+    payload: execution.payload,
+    expected_evidence: execution.operation_evidence?.expected_evidence,
+    input_nullifier_hexes: execution.input_nullifier_hexes
+  };
+  validateOneProofPayrollOperationEvidence(execution.operation_evidence, prepared);
+  const proof = normalizePreparedBatchTransferProof(execution.payload, execution.proof);
+  if (execution.operation_evidence.proof_payload_hash !== proof.request_payload_hash ||
+      execution.operation_evidence.proof_hash !== sha256Hex(proof.proof_bytes)) {
+    throw new Error("one-proof payroll execution proof does not match its operation evidence");
+  }
+  return { prepared, proof };
+}
+
+/** Bind a proven one-proof payroll execution to its claimed reservations before broadcast. */
+export async function markOneProofPayrollReservationProofReady(reservationManager, reservationBatch, execution, { metadata = {} } = {}) {
+  const { prepared } = preparedFromPayrollExecution(execution);
+  const reservationSet = await payrollReservationSet(reservationManager, prepared, reservationBatch);
+  const evidence = execution.operation_evidence;
+  if (reservationStatusesAre(reservationSet.reservations, "ProofReady")) {
+    if (reservationSet.reservations.some(reservation =>
+      text(reservation.payload_hash) !== evidence.payload_hash ||
+      text(reservation.metadata?.payroll_proof_hash) !== text(evidence.proof_hash)
+    )) {
+      throw new Error("one-proof payroll ProofReady reservation evidence does not match the execution");
+    }
+    return Object.freeze([...reservationSet.reservations]);
+  }
+  if (!reservationStatusesAre(reservationSet.reservations, "Proving")) {
+    throw new Error("one-proof payroll reservations must all be Proving before they become ProofReady");
+  }
+  return Object.freeze(await reservationManager.markProofReady(reservationSet.reservationIDs, {
+    leaseToken: reservationBatch.lease_token,
+    payloadHash: evidence.payload_hash,
+    metadata: payrollReservationMetadata(evidence, metadata)
+  }));
+}
+
+/**
+ * Durably record crossing the external broadcast boundary before sending a
+ * payroll transaction. Call this immediately before the wallet/RPC broadcast,
+ * then call markOneProofPayrollReservationSubmitted with its outcome.
+ */
+export async function markOneProofPayrollReservationBroadcastAttempting(reservationManager, reservationBatch, execution, {
+  tx_hash,
+  txHash,
+  tx_bytes_hash,
+  txBytesHash,
+  sign_doc_hash,
+  signDocHash,
+  reason,
+  metadata = {}
+} = {}) {
+  if (!reservationManager || typeof reservationManager.markBroadcastAttempting !== "function") {
+    throw new Error("a NoteReservationManager with broadcast-attempt support is required");
+  }
+  const broadcastIdentity = payrollBroadcastIdentity({ tx_hash, txHash, tx_bytes_hash, txBytesHash, sign_doc_hash, signDocHash });
+  const { prepared } = preparedFromPayrollExecution(execution);
+  const reservationSet = await payrollReservationSet(reservationManager, prepared, reservationBatch);
+  const evidence = execution.operation_evidence;
+  if (reservationSet.reservations.some(reservation => text(reservation.payload_hash) !== evidence.payload_hash)) {
+    throw new Error("one-proof payroll reservations must be payload-bound before broadcast");
+  }
+  assertPayrollBroadcastIdentityMatches(reservationSet.reservations, broadcastIdentity);
+  const hasAttempt = reservationStatusesAre(reservationSet.reservations, "ProofReady") && reservationSet.reservations.every(reservation =>
+    reservation.broadcast_in_flight === true && Number(reservation.broadcast_attempt_count || 0) >= 1
+  );
+  if (hasAttempt) return Object.freeze([...reservationSet.reservations]);
+  if (!reservationStatusesAre(reservationSet.reservations, "ProofReady") ||
+      reservationSet.reservations.some(reservation => reservation.broadcast_in_flight || Number(reservation.broadcast_attempt_count || 0) !== 0)) {
+    throw new Error("one-proof payroll reservations require one clean ProofReady state before a broadcast attempt");
+  }
+  return Object.freeze(await reservationManager.markBroadcastAttempting(reservationSet.reservationIDs, {
+    leaseToken: reservationBatch.lease_token,
+    ...broadcastIdentity,
+    reason,
+    metadata: payrollReservationMetadata(evidence, metadata)
+  }));
+}
+
+/** Persist one broadcast attempt for a proven one-proof payroll execution. */
+export async function markOneProofPayrollReservationSubmitted(reservationManager, reservationBatch, execution, {
+  tx_hash,
+  txHash,
+  tx_bytes_hash,
+  txBytesHash,
+  sign_doc_hash,
+  signDocHash
+} = {}) {
+  if (!reservationManager || typeof reservationManager.markSubmitted !== "function") {
+    throw new Error("a NoteReservationManager with submitted-state support is required");
+  }
+  const broadcastIdentity = payrollBroadcastIdentity({ tx_hash, txHash, tx_bytes_hash, txBytesHash, sign_doc_hash, signDocHash });
+  const { prepared } = preparedFromPayrollExecution(execution);
+  const reservationSet = await payrollReservationSet(reservationManager, prepared, reservationBatch);
+  const evidence = execution.operation_evidence;
+  assertPayrollBroadcastIdentityMatches(reservationSet.reservations, broadcastIdentity);
+  if (reservationStatusesAre(reservationSet.reservations, "Submitted")) return Object.freeze([...reservationSet.reservations]);
+  if (!reservationStatusesAre(reservationSet.reservations, "ProofReady") ||
+      reservationSet.reservations.some(reservation =>
+        text(reservation.payload_hash) !== evidence.payload_hash ||
+        reservation.broadcast_in_flight !== true ||
+        Number(reservation.broadcast_attempt_count || 0) < 1
+      )) {
+    throw new Error("one-proof payroll reservations need a durable payload-bound broadcast attempt before submission");
+  }
+  return Object.freeze(await reservationManager.markSubmitted(reservationSet.reservationIDs, {
+    leaseToken: reservationBatch.lease_token,
+    ...broadcastIdentity
+  }));
+}
+
 /** Invoke exactly one explicitly selected one-proof prover; no automatic prover failover is performed. */
 export async function proveOneProofPayrollOperation(payload, prover, { nowUnix } = {}) {
   if (!prover || typeof prover.proveBatchTransfer !== "function") throw new Error("one explicit proveBatchTransfer adapter is required");
@@ -1144,6 +1394,129 @@ export async function reconcileOneProofPayrollOperationEvidence({
     input_nullifiers: inputNullifiers,
     items
   });
+}
+
+function reconciliationReason(reconciliation) {
+  return reconciliation.items.find(item => item.reason)?.reason || `one-proof payroll reconciliation is ${reconciliation.status}`;
+}
+
+async function markPayrollReservationsManualReview(reservationManager, reservationSet, reservationBatch, operationEvidence, reconciliation) {
+  if (reservationStatusesAre(reservationSet.reservations, "ManualReview")) {
+    return { action: "ManualReview", reservations: reservationSet.reservations };
+  }
+  if (reservationSet.reservations.some(reservation => String(reservation.status) === "ConfirmedSpent")) {
+    return { action: "ManualReviewRequired", reservations: reservationSet.reservations };
+  }
+  const reservations = await reservationManager.markManualReview(reservationSet.reservationIDs, {
+    leaseToken: reservationBatch.lease_token,
+    error: reconciliationReason(reconciliation),
+    metadata: payrollReservationMetadata(operationEvidence, {
+      reconcile_reason: "payroll_operation_evidence_manual_review",
+      payroll_reconciliation_status: reconciliation.status
+    })
+  });
+  return { action: "ManualReview", reservations };
+}
+
+/**
+ * Reconcile chain evidence and transition the exact payroll reservation set.
+ * Successful inputs are confirmed spent only after typed output evidence matches;
+ * any ambiguous or conflicting result keeps the reservation unavailable for review.
+ */
+export async function reconcileOneProofPayrollReservation({
+  reservation_manager,
+  reservationManager,
+  reservation_batch,
+  reservationBatch,
+  prepared,
+  operation_evidence,
+  operationEvidence,
+  check_nullifiers,
+  checkNullifiers,
+  tx_succeeded,
+  txSucceeded,
+  tx_failed,
+  txFailed,
+  observed_outputs,
+  observedOutputs
+} = {}) {
+  const manager = reservation_manager ?? reservationManager;
+  const batch = reservation_batch ?? reservationBatch;
+  const evidence = operation_evidence ?? operationEvidence;
+  if (!manager || typeof manager.reconcileSpentNotes !== "function" || typeof manager.markReplanRequired !== "function" || typeof manager.markManualReview !== "function") {
+    throw new Error("a NoteReservationManager with reconciliation support is required");
+  }
+  const reconciliation = await reconcileOneProofPayrollOperationEvidence({
+    prepared,
+    operation_evidence: evidence,
+    checkNullifiers: check_nullifiers ?? checkNullifiers,
+    tx_succeeded,
+    txSucceeded,
+    tx_failed,
+    txFailed,
+    observed_outputs,
+    observedOutputs
+  });
+  const reservationSet = await payrollReservationSet(manager, prepared, batch);
+  if (reconciliation.status === "Pending") {
+    return Object.freeze({
+      reconciliation,
+      reservation_action: "None",
+      reservations: Object.freeze([...reservationSet.reservations])
+    });
+  }
+  if (reconciliation.status === "Succeeded") {
+    if (reservationStatusesAre(reservationSet.reservations, "ConfirmedSpent")) {
+      return Object.freeze({
+        reconciliation,
+        reservation_action: "ConfirmedSpent",
+        reservations: Object.freeze([...reservationSet.reservations])
+      });
+    }
+    if (!reservationStatusesAre(reservationSet.reservations, "Submitted", "Unknown")) {
+      const manual = await markPayrollReservationsManualReview(manager, reservationSet, batch, evidence, reconciliation);
+      return Object.freeze({ reconciliation, reservation_action: manual.action, reservations: Object.freeze([...manual.reservations]) });
+    }
+    const spentInputs = reservationPlanForOneProofPayrollOperation(reservationSet.normalized.operation)
+      .selection.inputs.map(input => ({ ...input, spent: true }));
+    const reconciled = await manager.reconcileSpentNotes(spentInputs);
+    const confirmed = await payrollReservationSet(manager, prepared, batch);
+    if (!reservationStatusesAre(confirmed.reservations, "ConfirmedSpent")) {
+      throw new Error("one-proof payroll spent reconciliation did not confirm the exact reservation set");
+    }
+    return Object.freeze({
+      reconciliation,
+      reservation_action: "ConfirmedSpent",
+      reservations: Object.freeze(reconciled.length ? [...reconciled] : [...confirmed.reservations])
+    });
+  }
+  if (reconciliation.status === "Failed" && reservationStatusesAre(reservationSet.reservations, "ReplanRequired")) {
+    return Object.freeze({
+      reconciliation,
+      reservation_action: "ReplanRequired",
+      reservations: Object.freeze([...reservationSet.reservations])
+    });
+  }
+  const failedFromStatus = reservationStatusesAre(reservationSet.reservations, "Submitted")
+    ? "Submitted"
+    : reservationStatusesAre(reservationSet.reservations, "Unknown")
+      ? "Unknown"
+      : "";
+  if (reconciliation.status === "Failed" && failedFromStatus) {
+    const reservations = await manager.markReplanRequired(reservationSet.reservationIDs, {
+      fromStatus: failedFromStatus,
+      leaseToken: batch.lease_token,
+      nullifierUnspentConfirmed: true,
+      txAbsentOrFailedConfirmed: true,
+      metadata: payrollReservationMetadata(evidence, {
+        reconcile_reason: "payroll_transaction_failed_unspent",
+        payroll_reconciliation_status: reconciliation.status
+      })
+    });
+    return Object.freeze({ reconciliation, reservation_action: "ReplanRequired", reservations: Object.freeze([...reservations]) });
+  }
+  const manual = await markPayrollReservationsManualReview(manager, reservationSet, batch, evidence, reconciliation);
+  return Object.freeze({ reconciliation, reservation_action: manual.action, reservations: Object.freeze([...manual.reservations]) });
 }
 
 function observedEvidenceByIndex(observedOutputs) {

@@ -363,6 +363,46 @@ export interface ReconciledOneProofPayrollOperationEvidence {
   items: ReconciledPayrollItemEvidence[];
 }
 
+export type OneProofPayrollReservationAction = "None" | "ConfirmedSpent" | "ReplanRequired" | "ManualReview" | "ManualReviewRequired";
+
+export interface OneProofPayrollReservationBatch extends ReservationBatch {
+  operation_id: string;
+  reservation_ids: string[];
+  reservations: NoteReservationRecord[];
+}
+
+export interface ReconciledOneProofPayrollReservation {
+  reconciliation: ReconciledOneProofPayrollOperationEvidence;
+  reservation_action: OneProofPayrollReservationAction;
+  reservations: readonly NoteReservationRecord[];
+}
+
+export interface OneProofPayrollBroadcastIdentity {
+  tx_hash?: string;
+  txHash?: string;
+  tx_bytes_hash?: string;
+  txBytesHash?: string;
+  sign_doc_hash?: string;
+  signDocHash?: string;
+}
+
+export type OneProofPayrollBroadcastAttempt = OneProofPayrollBroadcastIdentity & {
+  reason?: string;
+  metadata?: ReservationMetadata;
+} & (
+  | { tx_hash: string }
+  | { txHash: string }
+  | { tx_bytes_hash: string }
+  | { txBytesHash: string }
+);
+
+export type OneProofPayrollSubmittedBroadcast = OneProofPayrollBroadcastIdentity & (
+  | { tx_hash: string }
+  | { txHash: string }
+  | { tx_bytes_hash: string }
+  | { txBytesHash: string }
+);
+
 export interface OneProofPayrollReservationPlan {
   selection: { inputs: Array<{ note: object; nullifier: Hex; note_id: string; tx_hash: string; height: number | string; sequence: number | string; nullifier_status: "unspent" }> };
 }
@@ -419,6 +459,7 @@ export function prepareOneProofPayrollOperation(input: PrepareOneProofPayrollOpe
 export function assertOneProofPayrollNullifiersUnspent(payload: PreparedBatchTransferPayload, checkNullifiers: (nullifiers: string[]) => Promise<Map<string, boolean> | Record<string, boolean>>): Promise<string[]>;
 export function reservationPlanForOneProofPayrollOperation(operation: OneProofPayrollOperationPlan): OneProofPayrollReservationPlan;
 export function reserveOneProofPayrollOperation(reservationManager: NoteReservationManager, operation: OneProofPayrollOperationPlan, options?: { metadata?: ReservationMetadata }): Promise<ReservationBatch>;
+export function prepareOneProofPayrollReservation(reservationManager: NoteReservationManager, prepared: PreparedOneProofPayrollOperation, options?: { metadata?: ReservationMetadata }): Promise<OneProofPayrollReservationBatch>;
 export function proveOneProofPayrollOperation(payload: PreparedBatchTransferPayload, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options?: { nowUnix?: number }): Promise<PreparedBatchTransferProof & { proof_bytes: Uint8Array }>;
 export function buildOneProofPayrollOperationEvidence(prepared: PreparedOneProofPayrollOperation, options?: { proof?: PreparedBatchTransferProof; nowUnix?: number }): OneProofPayrollOperationEvidence;
 export function validateOneProofPayrollOperationEvidence(evidence: OneProofPayrollOperationEvidence, prepared: PreparedOneProofPayrollOperation, options?: { nowUnix?: number }): true;
@@ -435,6 +476,9 @@ export function createOneProofPayrollBatchSignDoc(execution: ProvenOneProofPayro
   memo?: string;
   nowUnix?: number;
 }): Promise<{ operation_evidence: OneProofPayrollOperationEvidence; message: object; sign_doc: object }>;
+export function markOneProofPayrollReservationProofReady(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, options?: { metadata?: ReservationMetadata }): Promise<readonly NoteReservationRecord[]>;
+export function markOneProofPayrollReservationBroadcastAttempting(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, input?: OneProofPayrollBroadcastAttempt): Promise<readonly NoteReservationRecord[]>;
+export function markOneProofPayrollReservationSubmitted(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, input: OneProofPayrollSubmittedBroadcast): Promise<readonly NoteReservationRecord[]>;
 export function reconcileOneProofPayrollOperationEvidence(input: {
   prepared: PreparedOneProofPayrollOperation;
   operation_evidence: OneProofPayrollOperationEvidence;
@@ -446,6 +490,23 @@ export function reconcileOneProofPayrollOperationEvidence(input: {
   observed_outputs?: readonly ObservedPayrollOutputEvidence[];
   observedOutputs?: readonly ObservedPayrollOutputEvidence[];
 }): Promise<ReconciledOneProofPayrollOperationEvidence>;
+export function reconcileOneProofPayrollReservation(input: {
+  reservation_manager?: NoteReservationManager;
+  reservationManager?: NoteReservationManager;
+  reservation_batch?: OneProofPayrollReservationBatch;
+  reservationBatch?: OneProofPayrollReservationBatch;
+  prepared: PreparedOneProofPayrollOperation;
+  operation_evidence?: OneProofPayrollOperationEvidence;
+  operationEvidence?: OneProofPayrollOperationEvidence;
+  check_nullifiers?: (nullifiers: string[]) => Promise<Map<string, boolean> | Record<string, boolean>>;
+  checkNullifiers?: (nullifiers: string[]) => Promise<Map<string, boolean> | Record<string, boolean>>;
+  tx_succeeded?: boolean;
+  txSucceeded?: boolean;
+  tx_failed?: boolean;
+  txFailed?: boolean;
+  observed_outputs?: readonly ObservedPayrollOutputEvidence[];
+  observedOutputs?: readonly ObservedPayrollOutputEvidence[];
+}): Promise<ReconciledOneProofPayrollReservation>;
 export function reconcileOneProofPayrollEvidence(input?: {
   expected_evidence?: readonly ExpectedPayrollOutputEvidence[];
   expectedEvidence?: readonly ExpectedPayrollOutputEvidence[];
