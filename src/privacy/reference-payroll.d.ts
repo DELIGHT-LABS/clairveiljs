@@ -72,7 +72,7 @@ export interface PayrollItemInput {
 export interface PayrollInput {
   company_id?: string;
   payroll_id?: string;
-  batch_id?: string;
+  batch_id: string;
   denom: string;
   attempt?: number;
   default_disclosure_policy?: PayrollDisclosurePolicy;

@@ -96,6 +96,10 @@ test("reference payroll plans current one-proof batches without using legacy tra
 
   const normalized = normalizePayrollInput(input);
   assert.equal(normalized.items[0].amount, 20n);
+  const missingBatchID = payroll();
+  delete missingBatchID.batch_id;
+  assert.throws(() => normalizePayrollInput(missingBatchID), /payroll batch_id is required/);
+  assert.throws(() => normalizePayrollInput({ ...payroll(), batch_id: " " }), /payroll batch_id is required/);
   assert.throws(
     () => planOneProofPayroll(input, [{ note_id: "wrong-owner", owner_key_id: "other", nullifier_lookup_key: "n4", denom: "uclair", amount: "20" }]),
     /preparation is required/

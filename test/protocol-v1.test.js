@@ -25,7 +25,9 @@ import {
   encryptNoteForTransferV1,
   encryptedEnvelopeKindV1,
   marshalDisclosurePlaintextV1,
+  marshalNotePlaintextV1,
   unmarshalDisclosurePlaintextV1,
+  unmarshalNotePlaintextV1,
   wrapEncryptedEnvelopeV1
 } from "clairveiljs/protocol-v1";
 
@@ -53,6 +55,8 @@ test("privacy-fixed-v1 note primitives match the Clairveil main golden vector", 
     computeAssetIdV1("uclair").toString(16).padStart(64, "0"),
     "238d5f23e4d918d40b0982ce3aef16a75c4d1760193d1c3b30b9f5df681903ca"
   );
+  assert.throws(() => computeAssetIdV1(" uclair "), /surrounding whitespace/);
+  assert.throws(() => computeAssetIdV1("u"), /canonical asset denom is invalid/);
   assert.equal(
     computeNoteCommitmentV1(note).toString(16).padStart(64, "0"),
     "023aab554dcb995210888fa4e28c3d718568c1de0623578c690a2b6ca9d3610a"
@@ -74,6 +78,11 @@ test("privacy-fixed-v1 note primitives match the Clairveil main golden vector", 
   assert.equal(encrypted.ciphertext.length, 430);
   assert.equal(encrypted.viewTag.length, 2);
   assert.deepEqual(decryptTransferNoteV1(encrypted.ciphertext, 19n), note);
+
+  const malformedMemo = marshalNotePlaintextV1(note);
+  malformedMemo[222] = 0xc3;
+  malformedMemo[223] = 0x28;
+  assert.throws(() => unmarshalNotePlaintextV1(malformedMemo), /memo must be valid UTF-8/);
 });
 
 test("batch canonical payload excludes creator and proof while binding every effect", () => {

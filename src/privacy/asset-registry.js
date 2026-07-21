@@ -1,6 +1,9 @@
 import { bytesFromBase64, bytesFromHex, hexFromBytes } from "../core/browser-crypto.js";
 import { FIELD_MODULUS, bytesToBigIntBE } from "../core/crypto.js";
+import { canonicalAssetDenomV1 } from "./asset-denom.js";
 import { computeAssetIdV1 } from "./protocol-v1.js";
+
+export { canonicalAssetDenomV1 } from "./asset-denom.js";
 
 /** The only AssetRegistryV1 response version accepted by the privacy-note-v1 SDK. */
 export const assetRegistryVersionV1 = "privacy-asset-registry-v1";
@@ -39,16 +42,6 @@ function entryAssetIDValue(source, label) {
     throw new Error(`${label} aliases disagree`);
   }
   return first;
-}
-
-/** Canonical Cosmos denom accepted by AssetRegistryV1 queries. */
-export function canonicalAssetDenomV1(denom) {
-  if (typeof denom !== "string") throw new Error("canonical asset denom must be a string");
-  if (denom !== denom.trim()) throw new Error("canonical asset denom must not include surrounding whitespace");
-  if (!/^[a-zA-Z][a-zA-Z0-9/:._-]{2,127}$/.test(denom)) {
-    throw new Error("canonical asset denom is invalid");
-  }
-  return denom;
 }
 
 /** Canonical 32-byte lowercase asset-ID hex used by the reverse registry query. */

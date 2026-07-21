@@ -21,6 +21,7 @@ import {
   utf8Bytes,
   utf8String
 } from "../core/browser-crypto.js";
+import { canonicalAssetDenomV1 } from "./asset-denom.js";
 
 export const privacyFixedV1 = "privacy-fixed-v1";
 export const activeCircuitSetIdV1 = "privacy-note-v1";
@@ -139,7 +140,8 @@ function pointFromCoordinates(x, y, label) {
 
 function validUtf8(bytesValue) {
   try {
-    return utf8String(bytesValue).length >= 0;
+    new TextDecoder("utf-8", { fatal: true }).decode(bytesValue);
+    return true;
   } catch {
     return false;
   }
@@ -174,10 +176,7 @@ export function domainFieldV1(label) {
 }
 
 export function computeAssetIdV1(denom) {
-  const canonicalDenom = String(denom || "").trim();
-  if (!/^[a-zA-Z][a-zA-Z0-9/:._-]*$/.test(canonicalDenom)) {
-    throw new Error("canonical asset denom is required");
-  }
+  const canonicalDenom = canonicalAssetDenomV1(denom);
   const encoded = utf8Bytes(canonicalDenom);
   return bytesToBigIntBE(sha256(concatBytes(
     utf8Bytes("clairveil.asset-id.v1"),

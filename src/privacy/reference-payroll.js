@@ -257,6 +257,7 @@ export function normalizePayrollInput(input = {}, options = {}) {
   };
   if (!normalized.company_id) throw new Error("payroll company_id is required");
   if (!normalized.payroll_id) throw new Error("payroll payroll_id is required");
+  if (!normalized.batch_id) throw new Error("payroll batch_id is required");
   if (!normalized.denom) throw new Error("payroll denom is required");
   hashAmount(normalized.denom, 0n);
   if (!Number.isSafeInteger(normalized.attempt) || normalized.attempt < 0) throw new Error("payroll attempt must be a non-negative safe integer");
