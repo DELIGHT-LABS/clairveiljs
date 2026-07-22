@@ -138,6 +138,34 @@ test("reference payroll plans current one-proof batches without using legacy tra
   );
 });
 
+test("reference payroll plans every representative one-proof batch shape", () => {
+  const shapes = [
+    { id: "one-input-one-payment", inputs: [7], payments: [7], inputCount: 1, outputCount: 1 },
+    { id: "three-input-four-output", inputs: [4, 5, 7], payments: [4, 5, 6], inputCount: 3, outputCount: 4 },
+    { id: "thirty-one-payments-plus-change", inputs: Array(16).fill(100), payments: Array(31).fill(50), inputCount: 16, outputCount: 32 },
+    { id: "exact-thirty-two-payments", inputs: Array(16).fill(64), payments: Array(32).fill(32), inputCount: 16, outputCount: 32 },
+    { id: "explicit-zero-padding", inputs: [5], payments: [5], inputCount: 1, outputCount: 32, outputMode: "exact-32", paddingCount: 31 }
+  ];
+  for (const shape of shapes) {
+    const plan = planOneProofPayroll(payroll(shape.payments.map((amount, index) => ({
+      item_id: `${shape.id}-${index}`,
+      employee_id: `${shape.id}-employee-${index}`,
+      recipient_address: recipient,
+      amount: String(amount)
+    }))), shape.inputs.map((amount, index) => ({
+      note_id: `${shape.id}-note-${index}`,
+      owner_key_id: "treasury-key",
+      nullifier_lookup_key: `${shape.id}-lookup-${index}`,
+      denom: "uclair",
+      amount: String(amount)
+    })), { outputMode: shape.outputMode ?? "compact" });
+    assert.equal(plan.operations.length, 1, shape.id);
+    assert.equal(plan.operations[0].input_notes.length, shape.inputCount, shape.id);
+    assert.equal(plan.operations[0].output_count, shape.outputCount, shape.id);
+    assert.equal(plan.operations[0].padding_count, shape.paddingCount ?? 0, shape.id);
+  }
+});
+
 test("reference payroll prepares one signed batch payload and binds per-item evidence", async () => {
   const ownerSpend = derivePubKeyFromScalar(17n);
   const ownerView = derivePubKeyFromScalar(19n);

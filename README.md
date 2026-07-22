@@ -179,7 +179,9 @@ CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs 
 npm run test:e2e:local
 ```
 
-`CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT` and `CLAIRVEIL_E2E_ONE_PROOF_PAYROLL_AMOUNT` override the one-proof input/payment. The recipient is intentionally the E2E wallet so the test can independently decrypt and validate typed output evidence. The default snapshot height is the fresh input deposit's output height; if concurrent activity advances the tree, set the exact pair `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX` and `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT` from that node's verified snapshot.
+`CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT` and `CLAIRVEIL_E2E_ONE_PROOF_PAYROLL_AMOUNT` override the default 1/1 input/payment. The recipient is intentionally the E2E wallet so the test can independently decrypt and validate typed output evidence. The default snapshot height is the newest fresh input deposit's output height; if concurrent activity advances the tree, set the exact pair `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX` and `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT` from that node's verified snapshot.
+
+Set `CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE` to run an actual selected localnet shape: `one-input-one-payment` (default), `three-input-four-output`, `thirty-one-payments-plus-change`, `exact-thirty-two-payments`, or `explicit-zero-padding`. The large 16/32 variants make 16 deposits and may need a higher `CLAIRVEIL_E2E_ONE_PROOF_BATCH_TIMEOUT_MS` than the 30-minute default, depending on local prover hardware.
 
 `planOneProofPayroll(input, notes, { outputMode: "exact-32" })` is available when an operation must explicitly fill all 32 batch output slots. It preserves payment/change ordering and appends zero-value `padding` notes; the strict Go fixture conformance suite creates and serializes all five representative 1/1, 3/4, 16/32 (31+change), exact-32, and explicit-padding shapes.
 
