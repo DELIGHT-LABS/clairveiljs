@@ -1027,6 +1027,7 @@ export class ClairveilEvmClient {
         shieldedPrefix: this.shieldedPrefix,
         transferDenom: input.transferDenom ?? input.denom ?? this.defaultDenom,
         ...input,
+        chainId: input.chainId ?? this.chainId,
         checkNullifiers: input.checkNullifiers,
         disableSelfViewDisclosure: input.disableSelfViewDisclosure ?? true
       });
@@ -1045,6 +1046,7 @@ export class ClairveilEvmClient {
       shieldedPrefix: this.shieldedPrefix,
       transferDenom: input.transferDenom ?? input.denom ?? this.defaultDenom,
       ...input,
+      chainId: input.chainId ?? this.chainId,
       disableSelfViewDisclosure: input.disableSelfViewDisclosure ?? true
     });
   }

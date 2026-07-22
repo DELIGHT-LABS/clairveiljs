@@ -1,6 +1,7 @@
 import { fromBech32 } from "@cosmjs/encoding";
 import {
   bytesFromHex,
+  bytesToBigIntBE,
   canonicalFieldHex,
   defaultAccountPrefix,
   decodeCanonicalFieldHex,

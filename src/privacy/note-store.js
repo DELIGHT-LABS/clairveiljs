@@ -8,7 +8,7 @@ import {
 import {
   canonicalFieldHex
 } from "../core/crypto.js";
-import { computeAssetIdV1 } from "./protocol-v1.js";
+import { computeAssetIdV1, computeNoteCommitmentV1 } from "./protocol-v1.js";
 
 const maxUint64 = (1n << 64n) - 1n;
 
@@ -50,6 +50,16 @@ function bigintToString(value) {
   return typeof value === "bigint" ? value.toString() : String(value ?? "0");
 }
 
+function commitmentHexForStorage(note) {
+  try {
+    return canonicalFieldHex(computeNoteCommitmentV1(note));
+  } catch {
+    // Retain cache migration support for snapshots created before the fixed
+    // V1 point validation contract.  Newly scanned notes always take V1.
+    return computeNoteCommitmentHex(note);
+  }
+}
+
 export function serializeFoundNote(foundLike) {
   const found = normalizeFoundNote(foundLike);
   const assetIdHex = String(
@@ -81,7 +91,7 @@ export function serializeFoundNote(foundLike) {
     commitment_hex: String(
       foundLike?.commitment_hex ??
       foundLike?.commitmentHex ??
-      computeNoteCommitmentHex(found.note)
+      commitmentHexForStorage(found.note)
     ).toLowerCase(),
     nullifier_hex: String((foundLike?.nullifier_hex ?? found.nullifier) || "").toLowerCase(),
     amount: bigintToString(found.note.amount),

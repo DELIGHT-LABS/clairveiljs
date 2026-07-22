@@ -498,9 +498,13 @@ export async function buildPreparedTransferV5Payload({
   let selfViewPayloadHex = "";
   if (!disableSelfViewDisclosure) {
     const targetHex = String(selfViewDisclosureTargetPubKeyHex ?? "").trim() || (rootSeed ? deriveDisclosureKeys(rootSeed).pubKeyHex : "");
-    if (!targetHex) throw new Error("self-view disclosure target public key or rootSeed is required");
-    selfViewDigestHex = canonicalFieldHex(fullDigest);
-    selfViewPayloadHex = plaintextHex(encryptDisclosureV1(fullDisclosure, unpackPointHex(pointHex(targetHex, "transfer self-view disclosure target public key")), encryptedEnvelopeKindV1.selfViewDisclosure));
+    // Hardware/external spend signers may deliberately supply no view key.
+    // Keep their transfer valid, while emitting self-view disclosure whenever
+    // the caller provides a target or locally-held root seed.
+    if (targetHex) {
+      selfViewDigestHex = canonicalFieldHex(fullDigest);
+      selfViewPayloadHex = plaintextHex(encryptDisclosureV1(fullDisclosure, unpackPointHex(pointHex(targetHex, "transfer self-view disclosure target public key")), encryptedEnvelopeKindV1.selfViewDisclosure));
+    }
   }
 
   const cipherOutputs = outputNotes.map((note, index) => encryptNoteForTransferV1(note, canonicalFieldHex(outputCommitments[index]), index));

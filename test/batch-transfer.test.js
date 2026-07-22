@@ -45,7 +45,7 @@ async function batchPayload({ privacyPolicy = 0, disclosureMode = 0 } = {}) {
     auditKeyId: "audit-key-1",
     auditKeyEpoch: 1,
     auditDisclosureTargetPubKey: derivePubKeyFromScalar(31n),
-    disableSelfViewDisclosure: true,
+    selfViewDisclosureTargetPubKey: derivePubKeyFromScalar(47n),
     signer: {
       signNoteHash: intent => signNoteHash(intent, { spendScalar: 17n, spendPubKey: ownerSpend })
     }
@@ -113,11 +113,16 @@ test("one-proof batch preparation binds public disclosure and rejects post-signa
   );
 });
 
-test("one-proof batch contract fixture keeps the payroll operation/evidence boundary", fixtureTestOptions, () => {
-  const contract = readFixture("privacy_batch_transfer_v1_contract.json");
-  assert.equal(contract.schema_version, "clairveil.batch-transfer.contract.v1");
+test("Session 3B fixture defines the one-proof batch boundary and representative E2E", fixtureTestOptions, async () => {
+  const contract = readFixture("privacy_batch_transfer_session3b_contract.json");
+  assert.equal(contract.schema_version, "clairveil.batch-transfer.session3b.v1");
+  assert.equal(contract.payload_version, "batch-transfer-payload-v1");
+  assert.equal(contract.proof_version, "batch-transfer-proof-v1");
   assert.equal(contract.circuit_set_id, "privacy-note-v1");
+  assert.equal(contract.circuit_id, "batch-joinsplit-16x32-v1");
   assert.equal(contract.prover_route, "/v1/proofs/batch-transfer");
+  assert.equal(contract.request_version, "v1");
+  assert.equal(contract.response_version, "v1");
   assert.equal(contract.max_inputs, 16);
   assert.equal(contract.max_outputs, 32);
   assert.deepEqual(contract.payroll, {
@@ -127,6 +132,46 @@ test("one-proof batch contract fixture keeps the payroll operation/evidence boun
     batch_and_item_status_separate: true,
     required_output_evidence: ["output_index", "commitment", "recipient_hash", "amount", "denom_or_asset_id", "user_digest", "full_digest", "audit_key_id", "audit_key_epoch"]
   });
+  assert.deepEqual(contract.scan, {
+    cursor_order: ["height", "global_sequence", "output_index"],
+    typed_query_required: true,
+    abci_fallback_after_typed_failure: false,
+    safe_mode_decrypts_view_tag_mismatch: true,
+    commitment_recomputation_required: true
+  });
   assert.equal(contract.restart_retry.automatic_multi_prover_failover, false);
   assert.equal(contract.restart_retry.item_success_requires_output_evidence, true);
+
+  for (const vector of contract.cases) {
+    const inputTotal = vector.input_amounts.reduce((sum, amount) => sum + BigInt(amount), 0n);
+    const paymentTotal = vector.payment_amounts.reduce((sum, amount) => sum + BigInt(amount), 0n);
+    assert.ok(vector.input_amounts.length >= 1 && vector.input_amounts.length <= contract.max_inputs, vector.id);
+    assert.ok(vector.expected_output_roles.length >= 1 && vector.expected_output_roles.length <= contract.max_outputs, vector.id);
+    assert.equal(vector.expected_output_roles.length, vector.disclosure_modes.length, vector.id);
+    assert.ok(paymentTotal <= inputTotal, vector.id);
+    assert.deepEqual(
+      vector.expected_output_roles.filter(role => role === "payment"),
+      Array(vector.payment_amounts.length).fill("payment"),
+      vector.id
+    );
+    assert.ok(vector.expected_output_roles.every((role, index) =>
+      role === "payment" || (role === "change" && index === vector.payment_amounts.length) ||
+      (role === "padding" && index >= vector.payment_amounts.length)
+    ), vector.id);
+    assert.ok(vector.disclosure_modes.every(mode => ["none", "public", "recipient-encrypted"].includes(mode)), vector.id);
+  }
+
+  const first = contract.cases.find(vector => vector.id === "one-input-one-payment");
+  const payload = await batchPayload();
+  const proof = {
+    version: preparedBatchTransferProofVersion,
+    request_payload_hash: payload.payload_hash,
+    proof: base64FromBytes(new Uint8Array(164).fill(7)),
+    circuit_set_id: contract.circuit_set_id
+  };
+  const message = buildMsgBatchTransferFromPrepared(payload, proof, { nowUnix: 1_700_000_000 });
+  assert.equal(message.nullifiers.length, first.input_amounts.length);
+  assert.equal(message.outputs.length, first.expected_output_roles.length);
+  assert.equal(message.outputs[0].selfViewDisclosurePayload.length, 472);
+  assert.deepEqual(JSON.parse(serializeBatchTransferProofRequest(payload)).version, contract.request_version);
 });

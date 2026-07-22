@@ -28,6 +28,11 @@ import {
   sha256,
   utf8Bytes
 } from "./browser-crypto.js";
+import {
+  computeAssetIdV1,
+  computeNoteCommitmentV1,
+  encryptDepositNoteV1
+} from "../privacy/protocol-v1.js";
 
 export const defaultAssetDenom = "uclair";
 
@@ -139,7 +144,7 @@ export function createNote({ spendPubKey, viewPubKey, amount, assetDenom = defau
     receiverViewPubKeyX: pointCoordinate(viewPubKey, "x"),
     receiverViewPubKeyY: pointCoordinate(viewPubKey, "y"),
     amount: coerceBigInt(amount, "note amount"),
-    assetID: optionalBigInt(assetId, hashStringToField(assetDenom), "asset id"),
+    assetID: optionalBigInt(assetId, computeAssetIdV1(assetDenom), "asset id"),
     randomness: optionalBigInt(randomness, randomScalar({ allowZero: true }), "note randomness"),
     memo: String(memo || "")
   };
@@ -444,8 +449,8 @@ export function buildDepositMaterial({ creator, rootSeed, shieldedAddress, amoun
       assetDenom: coin.denom,
       memo
     });
-  const noteCommitment = computeNoteCommitmentBytes(note);
-  const encryptedNote = encryptNoteWithRootSeed(note, rootSeed);
+  const noteCommitment = canonicalFieldBytes(computeNoteCommitmentV1(note));
+  const encryptedNote = encryptDepositNoteV1(note, Uint8Array.from(rootSeed));
   return {
     creator: String(creator || ""),
     amount: coin.raw,

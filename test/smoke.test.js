@@ -91,6 +91,7 @@ import {
 } from "clairveiljs/reservation";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const validV2ProofHex = `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}`;
 
 async function readyBroadcastReservation(suffix = "01", options = {}) {
   const store = new MemoryReservationStore();
@@ -825,36 +826,17 @@ test("cosmos deposit preparation forwards custom memo", async () => {
   assert.equal(capturedMemo, "custom deposit memo");
 });
 
-test("prepared transfer payload shape accepts v2 self-view fields", () => {
-  const payload = {
-    version: "v2",
-    creator: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
-    root_hex: "00".repeat(32),
-    asset_id_hex: "01".repeat(32),
-    inputs: [{}, {}],
-    outputs: [{}, {}],
-    cipher_text_hexes: ["aa", "bb"],
-    audit_disclosure_digest_hex: "02".repeat(32),
-    audit_disclosure_target_pubkey_hex: "03".repeat(32),
-    self_view_disclosure_digest_hex: "04".repeat(32),
-    self_view_disclosure_payload_hex: "abcd",
-    payload_hash: "05".repeat(32)
-  };
-
-  assert.equal(assertPreparedTransferPayloadShape(payload), payload);
+test("prepared transfer payload shape rejects pre-0.2 transfer payloads", () => {
   assert.throws(
-    () => assertPreparedTransferPayloadShape({
-      ...payload,
-      version: "v1"
-    }),
-    /self_view_disclosure_\* fields require version v2 or v3/
+    () => assertPreparedTransferPayloadShape({ version: "v2" }),
+    /prepared transfer payload.version must be v5/
   );
 });
 
 test("prepared transfer metadata rejects legacy payload versions before proving", () => {
   assert.throws(
     () => validatePreparedTransferPayloadMetadata({ version: "v2" }),
-    /legacy transfer payload version "v2" does not include required view tags/
+    /unsupported transfer payload version "v2" \(expected "v5"\)/
   );
 });
 
@@ -3628,7 +3610,7 @@ test("reserved Cosmos broadcasts reject sign docs changed after ProofReady", asy
 
 test("relay broadcasts recheck authoritative chain time before external submission", async () => {
   const cosmosPayload = {
-    version: "v1",
+    version: "v2",
     proof_hex: "01",
     root_hex: "08".repeat(32),
     nullifier_hex: "09".repeat(32),
@@ -3816,7 +3798,7 @@ test("relay broadcasts recheck authoritative chain time before external submissi
 
 test("custom EVM withdraw encoders retain the relay validation marker", async () => {
   const payload = {
-    version: "v1",
+    version: "v2",
     proof_hex: "01",
     root_hex: "08".repeat(32),
     nullifier_hex: "09".repeat(32),
@@ -3852,7 +3834,7 @@ test("custom EVM withdraw encoders retain the relay validation marker", async ()
 
 test("reserved EVM broadcasts validate authoritative reservation records", async () => {
   const payload = {
-    version: "v1",
+    version: "v2",
     proof_hex: "01",
     root_hex: "08".repeat(32),
     nullifier_hex: "0c".repeat(32),
@@ -3956,7 +3938,7 @@ test("reserved EVM broadcasts validate authoritative reservation records", async
 
 test("reserved EVM broadcasts preserve frozen wallet errors when bookkeeping also fails", async () => {
   const payload = {
-    version: "v1",
+    version: "v2",
     proof_hex: "01",
     root_hex: "08".repeat(32),
     nullifier_hex: "0e".repeat(32),
@@ -4451,7 +4433,10 @@ test("scan_events fallback rewinds a mid-block cursor for legacy scans", async (
     afterSequence: 5,
     page: 9,
     limit: 10,
-    maxPages: 1
+    maxPages: 1,
+    // Exercise the scan_events -> privacy_events migration path directly;
+    // privacy_scan is the default and has its own absent-endpoint fallback.
+    scanSource: "scan_events"
   });
 
   assert.deepEqual(legacyRequests, [{
@@ -4979,7 +4964,7 @@ test("custom shielded prefix works in standalone package", () => {
 
 test("withdraw message omits legacy output-note fields", () => {
   const payload = {
-    version: "v1",
+    version: "v2",
     proof_hex: "aa",
     root_hex: "01".repeat(32),
     nullifier_hex: "02".repeat(32),
@@ -5013,7 +4998,7 @@ test("withdraw message omits legacy output-note fields", () => {
 
 test("relay withdraw message uses relayer as creator and payload recipient as recipient", () => {
   const payload = {
-    version: "v1",
+    version: "v2",
     proof_hex: "40".repeat(96),
     root_hex: "00".repeat(31) + "01",
     nullifier_hex: "02".repeat(32),
@@ -5074,22 +5059,20 @@ test("relay withdraw message uses relayer as creator and payload recipient as re
 });
 
 test("withdraw prover payload rejects invalid expiry before proof handoff", async () => {
-  const note = {
-    receiverSpendPubKeyX: 1n,
-    receiverSpendPubKeyY: 2n,
-    receiverViewPubKeyX: 3n,
-    receiverViewPubKeyY: 4n,
+  const rootSeed = new Uint8Array(32).fill(1);
+  const note = createNote({
+    spendPubKey: deriveSpendKeys(rootSeed).pubKey,
+    viewPubKey: deriveViewKeys(rootSeed).pubKey,
     amount: 1n,
-    assetID: hashStringToField("uclair"),
     randomness: 5n,
     memo: "expiry"
-  };
+  });
   const baseInput = {
     notes: [{ note, isSpent: false, nullifierStatus: "unspent" }],
     amount: "1uclair",
     recipient: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
     chainId: "clairveil-local-1",
-    rootSeed: new Uint8Array(32).fill(1),
+    rootSeed,
     merklePathProvider: {
       async lookupMerklePath() {
         return { root: "01".padStart(64, "0"), path: [], path_helper: [] };
@@ -5114,23 +5097,21 @@ test("withdraw prover payload rejects invalid expiry before proof handoff", asyn
 });
 
 test("relay withdraw keeps authoritative chain time through proof finalization", async () => {
-  const note = {
-    receiverSpendPubKeyX: 1n,
-    receiverSpendPubKeyY: 2n,
-    receiverViewPubKeyX: 3n,
-    receiverViewPubKeyY: 4n,
+  const rootSeed = new Uint8Array(32).fill(1);
+  const note = createNote({
+    spendPubKey: deriveSpendKeys(rootSeed).pubKey,
+    viewPubKey: deriveViewKeys(rootSeed).pubKey,
     amount: 1n,
-    assetID: hashStringToField("uclair"),
     randomness: 6n,
-    memo: "chain-time",
-  };
+    memo: "chain-time"
+  });
   const input = {
     notes: [{ note, isSpent: false, nullifierStatus: "unspent" }],
     amount: "1uclair",
     recipient: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
     chainId: "clairveil-local-1",
     expiresAtUnix: 2_000,
-    rootSeed: new Uint8Array(32).fill(1),
+    rootSeed,
     merklePathProvider: {
       async lookupMerklePath() {
         return { root: "01".padStart(64, "0"), path: [], path_helper: [] };
@@ -5141,9 +5122,9 @@ test("relay withdraw keeps authoritative chain time through proof finalization",
     proverAdapter: {
       async proveWithdraw({ payload }) {
         return {
-          version: "v1",
+          version: "v2",
           payload_hash: payload.payload_hash,
-          proof_hex: "01",
+          proof_hex: validV2ProofHex,
         };
       },
     },
@@ -5197,6 +5178,7 @@ test("prepared transfer payload skips self-view disclosure when signer material 
   ];
   const payload = await buildPreparedTransferPayload({
     creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    chainId: "clairveil-local-1",
     inputs,
     recipient: recipientMaterial.shieldedAddress,
     amount: "1uclair",
@@ -5415,7 +5397,7 @@ test("EVM client verifies nullifiers in direct transfer and withdraw preparation
     proverAdapter: {
       async proveTransfer({ payload }) {
         assert.equal(checkedBatches.length, 1);
-        return { version: "v1", payload_hash: payload.payload_hash, proof_hex: "01" };
+        return { version: "v2", payload_hash: payload.payload_hash, proof_hex: validV2ProofHex };
       }
     }
   });
@@ -5431,7 +5413,7 @@ test("EVM client verifies nullifiers in direct transfer and withdraw preparation
     proverAdapter: {
       async proveWithdraw({ payload }) {
         assert.equal(checkedBatches.length, 2);
-        return { version: "v1", payload_hash: payload.payload_hash, proof_hex: "01" };
+        return { version: "v2", payload_hash: payload.payload_hash, proof_hex: validV2ProofHex };
       }
     }
   });
@@ -5457,7 +5439,7 @@ test("EVM client wraps prepared relay withdraw payloads into withdraw transactio
     amount: "1udemo",
     recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
     chain_id: "demo-1",
-    version: "v1",
+    version: "v2",
     expires_at_unix: 4102448400
   };
   payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
@@ -5521,7 +5503,7 @@ test("EVM client requires an expected chain id for relay withdraw payload transa
     amount: "1udemo",
     recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
     chain_id: "demo-1",
-    version: "v1",
+    version: "v2",
     expires_at_unix: 4102448400
   };
   payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
@@ -5553,7 +5535,7 @@ test("EVM withdraw transaction rejects payload and evmRecipient mismatches", asy
     amount: "1udemo",
     recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
     chain_id: "demo-1",
-    version: "v1",
+    version: "v2",
     expires_at_unix: 4102448400
   };
   payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
@@ -5582,7 +5564,7 @@ test("EVM withdraw transaction validates relay payload chain id and message reci
     amount: "1udemo",
     recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
     chain_id: "other-chain",
-    version: "v1",
+    version: "v2",
     expires_at_unix: 4102448400
   };
   payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
@@ -5642,13 +5624,13 @@ test("browser-dapp prepareRelayWithdraw returns an EVM transaction for EVM profi
       amount: input.amount,
       recipient: input.recipient,
       chain_id: "demo-1",
-      version: "v1",
+      version: "v2",
       expires_at_unix: 4102448400
     };
     payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
     const built = {
       payload,
-      proof: { version: "v1", payload_hash: payload.payload_hash, proof_hex: "01" },
+      proof: { version: "v2", payload_hash: payload.payload_hash, proof_hex: "01" },
       proverPayload: { payload_hash: payload.payload_hash },
       selectedNote: { nullifier: "09".repeat(32) }
     };
@@ -5742,7 +5724,7 @@ test("browser-dapp EVM relay withdraw build failure replans the durable ProofRea
     amount: "1udemo",
     recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
     chain_id: "demo-1",
-    version: "v1",
+    version: "v2",
     expires_at_unix: 4102448400
   };
   payload.payload_hash = computePreparedWithdrawPayloadHash(payload);
@@ -5757,7 +5739,7 @@ test("browser-dapp EVM relay withdraw build failure replans the durable ProofRea
       status: "ready",
       plan: { status: "final_withdraw_ready", canBuildTx: true },
       payload,
-      proof: { version: "v1", payload_hash: payload.payload_hash, proof_hex: "01" },
+      proof: { version: "v2", payload_hash: payload.payload_hash, proof_hex: "01" },
       proverPayload: { payload_hash: payload.payload_hash },
       selectedNote,
       reservation: batch,
