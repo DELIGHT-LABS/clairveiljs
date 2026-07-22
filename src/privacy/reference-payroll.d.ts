@@ -3,6 +3,7 @@ import type { PreparedBatchTransferPayload } from "./batch-transfer.js";
 import type { PreparedBatchTransferProof } from "./batch-transfer.js";
 import type { NoteReservationManager, ReservationBatch, ReservationMetadata } from "./reservation.js";
 import type { NoteReservationRecord } from "./reservation.js";
+import type { CircuitConfigV1, ValidatedCircuitConfigV1 } from "./circuit-config.js";
 
 export type PayrollAmount = bigint | number | string;
 export type PayrollDisclosureScope = "employee" | "company" | "auditor" | "external";
@@ -300,6 +301,23 @@ export interface PrepareOneProofPayrollOperationInput {
     fetchAssetByDenom?(denom: string): PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 } | Promise<PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }>;
   };
   assetRegistry?: PrepareOneProofPayrollOperationInput["asset_registry"];
+  /** Preferred source: a Cosmos client that atomically pins circuit and asset consensus state. */
+  protocol_preflight?: {
+    assertProtocolPreflight(denom: string): Promise<{
+      circuit_config?: CircuitConfigV1 | object;
+      circuitConfig?: CircuitConfigV1 | object;
+      asset: PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 };
+    }>;
+  };
+  protocolPreflight?: PrepareOneProofPayrollOperationInput["protocol_preflight"];
+  /** Required when protocol_preflight/cosmosClient is not supplied; raw cached configs are not accepted. */
+  circuit_config?: (() => CircuitConfigV1 | object | Promise<CircuitConfigV1 | object>) | {
+    assertCircuitConfig?(): CircuitConfigV1 | object | Promise<CircuitConfigV1 | object>;
+    fetchCircuitConfig?(): CircuitConfigV1 | object | Promise<CircuitConfigV1 | object>;
+  };
+  circuitConfig?: PrepareOneProofPayrollOperationInput["circuit_config"];
+  cosmos_client?: PrepareOneProofPayrollOperationInput["protocol_preflight"] & PrepareOneProofPayrollOperationInput["circuit_config"];
+  cosmosClient?: PrepareOneProofPayrollOperationInput["cosmos_client"];
   creator?: string;
   chain_id?: string;
   chainId?: string;
@@ -329,6 +347,7 @@ export interface PrepareOneProofPayrollOperationInput {
 
 export interface PreparedOneProofPayrollOperation {
   operation: OneProofPayrollOperationPlan;
+  circuit_config: ValidatedCircuitConfigV1;
   asset_registry_entry: NormalizedPayrollAssetRegistryEntryV1;
   payload: PreparedBatchTransferPayload;
   expected_evidence: readonly ExpectedPayrollOutputEvidence[];

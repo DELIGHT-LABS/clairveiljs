@@ -11,6 +11,7 @@ import {
   normalizeAssetRegistryEntryV1,
   normalizeAssetRegistryQueryResponseV1
 } from "./asset-registry.js";
+import { validateCircuitConfigV1 } from "./circuit-config.js";
 import { privacyPolicyValue, userDisclosureModeValue } from "./payload.js";
 import { computeNoteNullifierV1, fieldHexV1, validateNoteV1 } from "./protocol-v1.js";
 import { hashAmount, hashRecipient } from "./reservation.js";
@@ -609,6 +610,41 @@ async function resolvePayrollAssetRegistry(assetRegistry, denom) {
   return normalizePayrollAssetRegistryEntry(response, denom);
 }
 
+/** Resolve the live consensus CircuitConfig before creating a payroll witness. */
+async function resolvePayrollCircuitConfig(circuitConfig) {
+  if (!circuitConfig) throw new Error("an authoritative CircuitConfig resolver is required for one-proof payroll");
+  let response;
+  if (typeof circuitConfig === "function") response = await circuitConfig();
+  else if (typeof circuitConfig.assertCircuitConfig === "function") response = await circuitConfig.assertCircuitConfig();
+  else if (typeof circuitConfig.fetchCircuitConfig === "function") response = await circuitConfig.fetchCircuitConfig();
+  else throw new Error("an authoritative CircuitConfig resolver is required for one-proof payroll");
+  return validateCircuitConfigV1(response);
+}
+
+/**
+ * Bind the active consensus circuit identity and denom mapping before output
+ * secrets are generated or the one-proof intent reaches the owner signer.
+ */
+async function resolvePayrollProtocolPreflight(input, denom) {
+  const assetRegistry = input.asset_registry ?? input.assetRegistry;
+  const preflight = input.protocol_preflight ?? input.protocolPreflight ?? input.cosmos_client ?? input.cosmosClient
+    ?? (typeof assetRegistry?.assertProtocolPreflight === "function" ? assetRegistry : null);
+  if (preflight && typeof preflight.assertProtocolPreflight === "function") {
+    const response = await preflight.assertProtocolPreflight(denom);
+    if (!response || typeof response !== "object") throw new Error("one-proof payroll protocol preflight response is required");
+    return Object.freeze({
+      circuit_config: validateCircuitConfigV1(response.circuit_config ?? response.circuitConfig),
+      asset: normalizePayrollAssetRegistryEntry(response.asset, denom)
+    });
+  }
+  const circuitConfig = input.circuit_config ?? input.circuitConfig ?? input.cosmos_client ?? input.cosmosClient;
+  const [validatedCircuitConfig, asset] = await Promise.all([
+    resolvePayrollCircuitConfig(circuitConfig),
+    resolvePayrollAssetRegistry(assetRegistry, denom)
+  ]);
+  return Object.freeze({ circuit_config: validatedCircuitConfig, asset });
+}
+
 function canonicalFieldSecret(value, label, { nonZero = true } = {}) {
   if (value === undefined || value === null || value === "") {
     while (true) {
@@ -753,7 +789,9 @@ export async function prepareOneProofPayrollOperation(input = {}) {
   if (operation.items.length < 1 || operation.items.length > oneProofPayrollMaxOutputs || operation.input_notes.length < 1 || operation.input_notes.length > oneProofPayrollMaxInputs) throw new Error("one-proof payroll operation exceeds 16x32 capacity");
   const denom = text(operation.items[0]?.denom);
   if (!denom || operation.items.some(item => text(item.denom) !== denom)) throw new Error("one-proof payroll operation requires one canonical denom");
-  const asset = await resolvePayrollAssetRegistry(input.asset_registry ?? input.assetRegistry, denom);
+  // This must happen before any witness secret is generated or signed.
+  const preflight = await resolvePayrollProtocolPreflight(input, denom);
+  const asset = preflight.asset;
   const preparedInputs = operation.input_notes.map((note, index) => preparedInputFromTreasuryNote(note, index, asset.asset_id_field));
   const inputTotal = preparedInputs.reduce((sum, entry) => sum + entry.note.amount, 0n);
   const paymentTotal = operation.items.reduce((sum, item) => sum + canonicalUint64(item.amount, `payroll item ${item.item_id} amount`, { positive: true }), 0n);
@@ -803,7 +841,14 @@ export async function prepareOneProofPayrollOperation(input = {}) {
   });
   const expectedEvidence = buildExpectedPayrollEvidence(operation, payload, input);
   const effects = preparedBatchTransferEffectHex(payload);
-  return Object.freeze({ operation, asset_registry_entry: asset, payload, expected_evidence: expectedEvidence, input_nullifier_hexes: effects.nullifier_hexes });
+  return Object.freeze({
+    operation,
+    circuit_config: preflight.circuit_config,
+    asset_registry_entry: asset,
+    payload,
+    expected_evidence: expectedEvidence,
+    input_nullifier_hexes: effects.nullifier_hexes
+  });
 }
 
 /** Recheck every input nullifier immediately before a one-proof broadcast. */

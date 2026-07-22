@@ -30,6 +30,7 @@ import { computeAssetIdV1, emptyNoteTreeRootsV1 } from "clairveiljs/protocol-v1"
 import { base64FromBytes } from "clairveiljs/browser-crypto";
 import { MemoryReservationStore, createNoteReservationManager } from "clairveiljs/reservation";
 import { preparedBatchTransferProofVersion } from "clairveiljs/batch-transfer";
+import { privacyNoteV1CircuitOrder, privacyNoteV1PublicInputSchemaSHA256 } from "clairveiljs/circuit-config";
 
 const recipient = "clairs19x5u4mf4l4zqcpvr7d809fh4tjy5j50p2mwgky0nj38jpqpj7svndu3hqshu5e3s8w6pea5p30xek5p9flxjf7f44xh7cnfrlsd84pc7upgh3";
 const key = "11".repeat(32);
@@ -42,6 +43,23 @@ function payroll(items = [{ item_id: "salary-001", employee_id: "employee-001", 
     denom: "uclair",
     default_disclosure_policy: { user_privacy_policy: "all-private", user_disclosure_mode: "none" },
     items
+  };
+}
+
+function circuitConfig() {
+  const keyHashes = ["a", "b", "c", "d"].map(letter => letter.repeat(64));
+  const circuits = privacyNoteV1CircuitOrder.map((circuitId, index) => ({
+    circuit_id: circuitId,
+    verifying_key_sha256: keyHashes[index],
+    public_input_schema_sha256: privacyNoteV1PublicInputSchemaSHA256[circuitId]
+  }));
+  return {
+    schema_version: "v1",
+    active_set_id: "privacy-note-v1",
+    curve: "BN254",
+    checksum_source: "consensus",
+    circuit_set_identity: { schema_version: "v1", circuit_set_id: "privacy-note-v1", curve: "BN254", circuits },
+    artifacts: circuits.map(circuit => ({ circuit_id: circuit.circuit_id, artifact_type: "verifying_key", sha256: circuit.verifying_key_sha256 }))
   };
 }
 
@@ -129,6 +147,7 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     merkle_path_helper: Array(32).fill(0)
   }]);
   const registryCalls = [];
+  let circuitConfigCalls = 0;
   const prepared = await prepareOneProofPayrollOperation({
     operation: plan.operations[0],
     asset_registry: {
@@ -138,6 +157,12 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
           mapping_version: "privacy-asset-registry-v1",
           asset: { canonical_denom: "uclair", asset_id: canonicalFieldBytes(assetID) }
         };
+      }
+    },
+    circuit_config: {
+      assertCircuitConfig: async () => {
+        circuitConfigCalls += 1;
+        return circuitConfig();
       }
     },
     creator: "clair1creator",
@@ -155,8 +180,10 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     }
   });
   assert.equal(prepared.payload.circuit_set_id, oneProofPayrollCircuitSetId);
+  assert.equal(prepared.circuit_config.active_set_id, oneProofPayrollCircuitSetId);
   assert.equal(prepared.expected_evidence.length, 1);
   assert.deepEqual(registryCalls, ["uclair"]);
+  assert.equal(circuitConfigCalls, 1);
   assert.equal(prepared.expected_evidence[0].batch_item_index, 0);
   assert.equal(prepared.expected_evidence[0].expected_denom, "uclair");
   assert.deepEqual(buildExpectedPayrollEvidence(plan.operations[0], prepared.payload), prepared.expected_evidence);
@@ -340,6 +367,7 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     () => prepareOneProofPayrollOperation({
       operation: plan.operations[0],
       asset_registry: { canonical_denom: "uclair", asset_id: new Uint8Array(32).fill(1) },
+      circuit_config: { assertCircuitConfig: async () => circuitConfig() },
       chain_id: "clairveil-test-1",
       expires_at_unix: 4_102_448_400,
       audit_key_id: "audit-key-1",
@@ -349,6 +377,20 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
       signer: { signBatchTransfer: request => signNoteHash(request.expectedIntent, { spendScalar: 17n, spendPubKey: ownerSpend }) }
     }),
     /AssetRegistryV1 asset_id does not match/
+  );
+  await assert.rejects(
+    () => prepareOneProofPayrollOperation({
+      operation: plan.operations[0],
+      asset_registry: { canonical_denom: "uclair", asset_id: canonicalFieldBytes(assetID) },
+      chain_id: "clairveil-test-1",
+      expires_at_unix: 4_102_448_400,
+      audit_key_id: "audit-key-1",
+      audit_key_epoch: 1,
+      audit_disclosure_target_pubkey: derivePubKeyFromScalar(31n),
+      disable_self_view_disclosure: true,
+      signer: { signBatchTransfer: request => signNoteHash(request.expectedIntent, { spendScalar: 17n, spendPubKey: ownerSpend }) }
+    }),
+    /authoritative CircuitConfig resolver is required/
   );
   assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence, observed_outputs: observed, tx_succeeded: true })[0].status, "Succeeded");
   assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence, tx_succeeded: true })[0].status, "ManualReview");
