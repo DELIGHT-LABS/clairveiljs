@@ -358,6 +358,13 @@ function scanCanonicalField(value, label, { nonZero = false } = {}) {
   return { bytes: canonical, hex, field };
 }
 
+function scanNonZeroHash(value, label) {
+  const raw = value instanceof Uint8Array ? value : scanBytes(value, label);
+  if (raw.length !== 32) throw new Error(`${label} must be exactly 32 bytes`);
+  if (raw.every(byte => byte === 0)) throw new Error(`${label} must be non-zero`);
+  return raw;
+}
+
 function scanCursor(value, label = "privacy scan cursor", { required = true } = {}) {
   if (value == null) {
     if (required) throw new Error(`${label} is required`);
@@ -476,7 +483,7 @@ function scanSummary(input, index) {
     if (outputCount < 1 || outputCount > 32 || nullifiers.length < 1 || nullifiers.length > 16) {
       throw new Error(`privacy scan summary ${index} has invalid batch counts`);
     }
-    scanCanonicalField(effectId, `privacy scan summary ${index} effect ID`, { nonZero: true });
+    scanNonZeroHash(effectId, `privacy scan summary ${index} effect ID`);
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(auditKeyId) ||
         scanUint64(auditKeyEpoch, `privacy scan summary ${index} audit key epoch`) === 0n ||
         auditTargetPubkey.length !== 32) {

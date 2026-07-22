@@ -1673,9 +1673,9 @@ export class ClairveilJS {
   }
 
   async getAccountInfo(address) {
-    const data = await this.fetchJson(`/cosmos/auth/v1beta1/account_info/${address}`, { failover: true });
-    const info = data.info;
-    if (!info?.account_number || info.sequence == null) {
+    const data = await this.fetchJson(`/cosmos/auth/v1beta1/accounts/${address}`, { failover: true });
+    const info = data.account ?? data.info;
+    if (info?.account_number == null || info.sequence == null) {
       throw new Error("account not found on-chain; fund it first");
     }
     return {
@@ -3497,7 +3497,7 @@ export class ClairveilJS {
         1n,
         "",
         normalizedTxHash,
-        { shieldedPrefix: this.shieldedPrefix }
+        { shieldedPrefix: this.shieldedPrefix, assetDenom: this.defaultDenom }
       );
     }
     const signerPubKeyHex = pubKeyHex ?? pub_key_hex;
@@ -3516,7 +3516,7 @@ export class ClairveilJS {
       material.disclosureScalar,
       material.disclosurePubKeyHex,
       normalizedTxHash,
-      { shieldedPrefix: this.shieldedPrefix }
+      { shieldedPrefix: this.shieldedPrefix, assetDenom: this.defaultDenom }
     );
   }
 
@@ -3545,7 +3545,7 @@ export class ClairveilJS {
         event,
         directScalar != null ? directScalar : disclosureScalarFromHex(directScalarHex),
         normalizedTxHash,
-        { shieldedPrefix: this.shieldedPrefix }
+        { shieldedPrefix: this.shieldedPrefix, assetDenom: this.defaultDenom }
       );
     }
     const signerPubKeyHex = pubKeyHex ?? pub_key_hex;
@@ -3563,7 +3563,7 @@ export class ClairveilJS {
       event,
       material.disclosureScalar,
       normalizedTxHash,
-      { shieldedPrefix: this.shieldedPrefix }
+      { shieldedPrefix: this.shieldedPrefix, assetDenom: this.defaultDenom }
     );
   }
 
@@ -3574,7 +3574,7 @@ export class ClairveilJS {
       event,
       disclosureScalarFromHex(disclosurePrivKeyHex ?? disclosure_privkey_hex),
       normalizedTxHash,
-      { shieldedPrefix: this.shieldedPrefix }
+      { shieldedPrefix: this.shieldedPrefix, assetDenom: this.defaultDenom }
     );
   }
 
@@ -3612,7 +3612,7 @@ export class ClairveilJS {
     const common = {
       txHash: txHash ?? tx_hash,
       shieldedPrefix: this.shieldedPrefix,
-      assetDenom: assetDenom ?? asset_denom ?? ""
+      assetDenom: assetDenom ?? asset_denom ?? this.defaultDenom
     };
     if (isPublic) return decodeBatchUserDisclosureFromScanOutput(selectedOutput, common);
 
@@ -3667,7 +3667,7 @@ export class ClairveilJS {
     const common = {
       txHash: txHash ?? tx_hash,
       shieldedPrefix: this.shieldedPrefix,
-      assetDenom: assetDenom ?? asset_denom ?? ""
+      assetDenom: assetDenom ?? asset_denom ?? this.defaultDenom
     };
     const directScalar = disclosureScalar ?? disclosure_scalar;
     const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
@@ -3714,7 +3714,7 @@ export class ClairveilJS {
     return decodeBatchAuditDisclosureFromScanOutput(selectedOutput, {
       txHash: txHash ?? tx_hash,
       shieldedPrefix: this.shieldedPrefix,
-      assetDenom: assetDenom ?? asset_denom ?? "",
+      assetDenom: assetDenom ?? asset_denom ?? this.defaultDenom,
       disclosureScalar: directScalar != null
         ? directScalar
         : disclosureScalarFromHex(directScalarHex ?? disclosurePrivKeyHex ?? disclosure_privkey_hex)

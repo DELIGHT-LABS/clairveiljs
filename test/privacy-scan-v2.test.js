@@ -217,6 +217,17 @@ test("typed privacy scan rejects mixed batch self-view records and terminal outp
   );
 });
 
+test("typed privacy scan accepts SHA-256 batch effect IDs outside the BN254 field", () => {
+  const batch = validBatchPage();
+  const effectId = new Uint8Array(32).fill(0xff);
+  effectId[31] = 1;
+  assert.doesNotThrow(() => validatePrivacyScanPageV2({
+    ...batch,
+    summaries: [{ ...batch.summaries[0], effectId }],
+    outputs: batch.outputs.map(output => ({ ...output, effectId }))
+  }));
+});
+
 test("typed privacy scan validation state binds batch self-view disclosure across cursor pages", () => {
   const batch = validBatchPage();
   const firstPage = {

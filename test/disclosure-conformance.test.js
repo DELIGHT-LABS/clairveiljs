@@ -154,5 +154,8 @@ test("Cosmos client decodes self-view disclosure through the high-level API", fi
     disclosureScalar: 89n
   });
 
-  assert.deepEqual(compactReport(report), expectedDisclosure(flow.transfer.self_view_disclosure));
+  assert.deepEqual(compactReport(report), {
+    ...expectedDisclosure(flow.transfer.self_view_disclosure),
+    asset_denom: "uclair"
+  });
 });

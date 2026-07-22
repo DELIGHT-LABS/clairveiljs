@@ -13,7 +13,9 @@ import {
 } from "clairveiljs/wallet-adapter";
 import {
   createSpendNoteHashSigner,
-  encodeShieldedAddress
+  encodeShieldedAddress,
+  computeNoteCommitmentV1,
+  fieldHexV1
 } from "clairveiljs/core";
 import {
   planOneProofPayroll,
@@ -371,7 +373,7 @@ async function typedBatchOutputsForTransaction(client, txHash, commitmentHexes, 
           const found = processPrivacyScanPageV2(scanned, { rootSeed: material.rootSeed });
           for (const output of matchingOutputs) {
             const commitment = hexFromBytes(output.commitment).toLowerCase();
-            const note = found.find(candidate => String(candidate.commitment_hex || "").toLowerCase() === commitment);
+            const note = found.find(candidate => fieldHexV1(computeNoteCommitmentV1(candidate.note)) === commitment);
             if (!note) throw new Error("typed batch output did not decrypt for the configured E2E wallet");
             foundByCommitment.set(commitment, { output, found: note });
             remaining.delete(commitment);
@@ -686,15 +688,17 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
     const snapshotHeight = inputNotes.reduce((latestHeight, note) =>
       BigInt(note.height) > BigInt(latestHeight) ? String(note.height) : latestHeight,
     String(inputNotes[0].height));
+    const inputCommitmentHexes = inputNotes.map(note => fieldHexV1(computeNoteCommitmentV1(note.note)));
     const pathProvider = await createCurrentRootPathProvider(
       client,
-      inputNotes.map(note => note.commitment_hex),
+      inputCommitmentHexes,
       snapshotHeight
     );
-    const treasuryNotes = await Promise.all(inputNotes.map(async inputNote => {
-      const path = await pathProvider.lookupMerklePath(inputNote.commitment_hex);
+    const treasuryNotes = await Promise.all(inputNotes.map(async (inputNote, index) => {
+      const commitmentHex = inputCommitmentHexes[index];
+      const path = await pathProvider.lookupMerklePath(commitmentHex);
       return {
-        note_id: inputNote.commitment_hex,
+        note_id: commitmentHex,
         owner_key_id: material.address,
         nullifier_lookup_key: inputNote.nullifier,
         nullifier_lookup_key_id: "e2e",
@@ -771,7 +775,7 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
         ? { self_view_disclosure_target_pubkey: material.disclosurePubKeyHex }
         : { disable_self_view_disclosure: true }),
       signer: {
-        signBatchTransfer: request => noteHashSigner.signNoteHash(request.expected_intent)
+        signBatchTransfer: request => noteHashSigner.signNoteHash(request.expectedIntent)
       }
     });
     assert.deepEqual(
@@ -876,6 +880,7 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       operation_evidence: execution.operation_evidence,
       checkNullifiers: values => client.checkNullifiers(values),
       tx_succeeded: true,
+      tx_hash: batchTxHash,
       observed_outputs: observedOutputs
     });
     assert.equal(reconciliation.reconciliation.status, "Succeeded");
