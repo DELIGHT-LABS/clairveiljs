@@ -17,6 +17,7 @@ import {
   computeNoteTreeNodeV1,
   emptyNoteTreeRootsV1,
   fieldHexV1,
+  marshalDisclosurePlaintextV1,
   privacyFixedV1,
   unmarshalDisclosurePlaintextV1
 } from "clairveiljs/protocol-v1";
@@ -249,6 +250,22 @@ test("one-proof batch preparation binds public disclosure and rejects post-signa
   assert.equal(disclosure.policy, 7);
   assert.equal(disclosure.disclosedFieldBitmap, 7);
   assert.notEqual(output.user_disclosure_digest, "");
+  const tamperedPlaintext = marshalDisclosurePlaintextV1({
+    ...disclosure,
+    amount: disclosure.amount + 1n
+  });
+  const tamperedPayload = {
+    ...payload,
+    message_outputs: payload.message_outputs.map((candidate, index) => index === 0
+      ? { ...candidate, user_disclosure_payload: base64FromBytes(tamperedPlaintext) }
+      : candidate)
+  };
+  // The effect parser runs before the outer payload hash check, so this
+  // exercises the signer-side plaintext-to-digest invariant directly.
+  assert.throws(
+    () => validatePreparedBatchTransferPayloadEnvelope(tamperedPayload),
+    /public disclosure digest does not match plaintext/
+  );
   assert.throws(
     () => validatePreparedBatchTransferPayloadEnvelope({ ...payload, audit_key_id: "another-audit-key" }),
     /payload hash mismatch/

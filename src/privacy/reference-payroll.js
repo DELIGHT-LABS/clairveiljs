@@ -1082,6 +1082,7 @@ function preparedFromPayrollExecution(execution) {
   }
   const prepared = {
     operation: execution.operation,
+    circuit_config: execution.circuit_config,
     payload: execution.payload,
     expected_evidence: execution.operation_evidence?.expected_evidence,
     input_nullifier_hexes: execution.input_nullifier_hexes
@@ -1224,6 +1225,7 @@ function expectedPayrollEvidenceForPreparedOperation(prepared, { nowUnix } = {})
   const operation = prepared.operation;
   const payload = prepared.payload;
   if (!operation || !payload) throw new Error("prepared one-proof payroll operation requires operation and payload");
+  const circuitConfig = validateCircuitConfigV1(prepared.circuit_config);
   validatePreparedBatchTransferPayloadEnvelope(payload, nowUnix == null ? {} : { nowUnix });
   if (operation.circuit_set_id !== oneProofPayrollCircuitSetId || payload.circuit_set_id !== oneProofPayrollCircuitSetId) {
     throw new Error("prepared one-proof payroll operation circuit identity is invalid");
@@ -1242,7 +1244,7 @@ function expectedPayrollEvidenceForPreparedOperation(prepared, { nowUnix } = {})
   )) {
     throw new Error("prepared one-proof payroll input nullifiers do not match the final payload");
   }
-  return { operation, payload, expected, effects };
+  return { operation, payload, expected, effects, circuitConfig };
 }
 
 /**
@@ -1718,6 +1720,7 @@ export async function provePreparedOneProofPayrollOperation(prepared, prover, {
   return Object.freeze({
     version: oneProofPayrollExecutionVersion,
     operation: normalized.operation,
+    circuit_config: normalized.circuitConfig,
     payload: normalized.payload,
     proof,
     message,
@@ -1744,6 +1747,7 @@ export async function createOneProofPayrollBatchSignDoc(execution, {
   const resolvedNowUnix = nowUnix ?? Math.floor(Date.now() / 1000);
   validateOneProofPayrollOperationEvidence(execution.operation_evidence, {
     operation: execution.operation,
+    circuit_config: execution.circuit_config,
     payload: execution.payload,
     expected_evidence: execution.operation_evidence.expected_evidence,
     input_nullifier_hexes: execution.input_nullifier_hexes
@@ -1763,11 +1767,13 @@ export async function createOneProofPayrollBatchSignDoc(execution, {
     creator: messageCreator,
     nowUnix: resolvedNowUnix
   });
+  const circuitConfig = validateCircuitConfigV1(execution.circuit_config);
   const signDoc = await cosmosClient.createBatchTransferSignDoc({
     signer,
     pubKeyHex,
     gasLimit,
     message,
+    expectedCircuitIdentity: circuitConfig.circuit_set_identity,
     ...(memo === undefined ? {} : { memo })
   });
   return Object.freeze({

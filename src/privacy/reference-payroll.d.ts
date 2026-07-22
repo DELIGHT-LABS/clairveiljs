@@ -374,6 +374,7 @@ export type OneProofPayrollOperationEvidenceHash = Hex;
 export interface ProvenOneProofPayrollOperation {
   version: typeof oneProofPayrollExecutionVersion;
   operation: OneProofPayrollOperationPlan;
+  circuit_config: ValidatedCircuitConfigV1;
   payload: PreparedBatchTransferPayload;
   proof: PreparedBatchTransferProof & { proof_bytes: Uint8Array };
   message: object;
@@ -580,7 +581,7 @@ export function provePreparedOneProofPayrollOperation(prepared: PreparedOneProof
   nowUnix?: number;
 }): Promise<ProvenOneProofPayrollOperation>;
 export function createOneProofPayrollBatchSignDoc(execution: ProvenOneProofPayrollOperation, input: {
-  cosmosClient: { createBatchTransferSignDoc(input: { signer?: string; pubKeyHex?: string; gasLimit?: number; message: object; memo?: string }): Promise<object> };
+  cosmosClient: { createBatchTransferSignDoc(input: { signer?: string; pubKeyHex?: string; gasLimit?: number; message: object; memo?: string; expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<object> };
   signer?: string;
   pubKeyHex?: string;
   gasLimit?: number;

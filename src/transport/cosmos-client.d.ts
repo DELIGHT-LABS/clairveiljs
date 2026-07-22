@@ -343,15 +343,15 @@ export interface PrivacyEventsCursor {
   event_limit?: number;
   max_encoded_bytes?: Uint64CursorInput;
   latest_output_index?: number;
-  after_height: Uint64CursorValue;
+  after_height?: Uint64CursorValue;
   after_sequence?: Uint64CursorValue;
   page?: number;
-  limit: number;
+  limit?: number;
   event_types: string[];
   has_more: boolean;
   latest_height: Uint64CursorValue;
   latest_sequence?: Uint64CursorValue;
-  latest_tx_hash: Hex | "";
+  latest_tx_hash?: Hex | "";
   next_height?: Uint64CursorValue;
   next_sequence?: Uint64CursorValue;
   next_page?: number;
@@ -710,8 +710,8 @@ export class ClairveilJS {
   fetchDisclosureConfig(): Promise<object>;
   queryAuditConfig(): Promise<import("../privacy/network-config.js").ValidatedAuditConfigV1>;
   queryDisclosureConfig(): Promise<import("../privacy/network-config.js").ValidatedDisclosureConfigV1>;
-  fetchCircuitConfig(): Promise<ValidatedCircuitConfigV1>;
-  assertCircuitConfig(): Promise<ValidatedCircuitConfigV1>;
+  fetchCircuitConfig(options?: { expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<ValidatedCircuitConfigV1>;
+  assertCircuitConfig(options?: { expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<ValidatedCircuitConfigV1>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
   queryReserve(denom: string): Promise<import("../privacy/network-config.js").ValidatedReserveResponseV1>;
   fetchAssetByDenom(denom: string): Promise<object>;
@@ -896,6 +896,7 @@ export class ClairveilJS {
     gasLimit: number | bigint;
     message: MsgBatchTransferMessage;
     memo?: string;
+    expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"];
   }): Promise<SignDocBase64>;
   createWithdrawSignDoc(input: Parameters<ClairveilJS["prepareWithdraw"]>[0]): Promise<PreparedWithdrawReady>;
   createRelayWithdrawPayload(input: Parameters<ClairveilJS["prepareRelayWithdraw"]>[0]): Promise<PreparedRelayWithdraw & { status: "ready"; payload: PreparedWithdrawPayload }>;

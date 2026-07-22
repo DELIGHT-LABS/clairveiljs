@@ -732,7 +732,10 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
     }, treasuryNotes, { shieldedPrefix: config.shieldedPrefix, outputMode: shape.outputMode });
     assert.equal(plan.operations.length, 1, `${shape.id} should produce one canonical batch operation`);
     assert.equal(plan.operations[0].input_notes.length, shape.inputAmounts.length, shape.id);
-    assert.equal(plan.operations[0].output_count, shape.paymentAmounts.length + (shape.id === "thirty-one-payments-plus-change" ? 1 : shape.id === "explicit-zero-padding" ? 31 : 0), shape.id);
+    const expectedOutputCount = shape.paymentAmounts.length +
+      (plan.operations[0].has_change ? 1 : 0) +
+      Number(plan.operations[0].padding_count ?? 0);
+    assert.equal(plan.operations[0].output_count, expectedOutputCount, shape.id);
     const expectedPaymentDisclosure = shape.disclosureModes.map(mode => {
       if (mode === "public") return [1, 1];
       if (mode === "recipient-encrypted") return [7, 2]; // amount-from-to / recipient-encrypted

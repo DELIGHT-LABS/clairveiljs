@@ -51,6 +51,64 @@ export const joinSplitOwnerIntentSigningRequestV1Version = "joinsplit-owner-inte
 
 const maxShieldedAmount = (1n << 64n) - 1n;
 
+const transferPrivacyPolicies = Object.freeze({
+  "all-private": 0,
+  amount: 1,
+  to: 2,
+  "amount-to": 3,
+  from: 4,
+  "amount-from": 5,
+  "from-to": 6,
+  "to-from": 6,
+  "amount-from-to": 7,
+  "amount-to-from": 7
+});
+
+const transferDisclosureModes = Object.freeze({
+  none: 0,
+  public: 1,
+  "recipient-encrypted": 2,
+  USER_DISCLOSURE_MODE_NONE: 0,
+  USER_DISCLOSURE_MODE_PUBLIC: 1,
+  USER_DISCLOSURE_MODE_RECIPIENT_ENCRYPTED: 2
+});
+
+function normalizeTransferPrivacyPolicy(value) {
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value < 0 || value > 7) throw new Error("transfer user privacy policy must be in 0..7");
+    return value;
+  }
+  if (typeof value === "bigint") {
+    if (value < 0n || value > 7n) throw new Error("transfer user privacy policy must be in 0..7");
+    return Number(value);
+  }
+  const text = String(value ?? "all-private").trim() || "all-private";
+  if (Object.prototype.hasOwnProperty.call(transferPrivacyPolicies, text)) return transferPrivacyPolicies[text];
+  if (/^[0-7]$/.test(text)) return Number(text);
+  throw new Error("transfer user privacy policy must be in 0..7");
+}
+
+function normalizeTransferDisclosureMode(value, policy) {
+  let mode;
+  if (typeof value === "number") mode = value;
+  else if (typeof value === "bigint") mode = Number(value);
+  else {
+    const text = String(value ?? (policy === 0 ? "none" : "recipient-encrypted")).trim() || (policy === 0 ? "none" : "recipient-encrypted");
+    mode = Object.prototype.hasOwnProperty.call(transferDisclosureModes, text)
+      ? transferDisclosureModes[text]
+      : /^[0-2]$/.test(text) ? Number(text) : NaN;
+  }
+  if (!Number.isInteger(mode) || mode < 0 || mode > 2) {
+    throw new Error(policy === 0 ? "all-private transfer must use disclosure mode NONE" : "disclosed transfer must use public or recipient-encrypted disclosure mode");
+  }
+  if (policy === 0) {
+    if (mode !== 0) throw new Error("all-private transfer must use disclosure mode NONE");
+    return 0;
+  }
+  if (mode !== 1 && mode !== 2) throw new Error("disclosed transfer must use public or recipient-encrypted disclosure mode");
+  return mode;
+}
+
 function randomNonZeroField(excluded = new Set()) {
   while (true) {
     const candidate = bytesToBigIntBE(randomBytes(32));
@@ -337,6 +395,25 @@ function validateDisclosures(payload, policy, mode, outputs) {
       const plaintext = unmarshalDisclosurePlaintextV1(bytesFromHex(userPayload, "public transfer disclosure"));
       if (plaintext.plane !== 1 || plaintext.outputIndex !== 0 || plaintext.policy !== policy || plaintext.commitment !== BigInt(`0x${outputs[0].commitment_hex}`)) {
         throw new Error("public transfer disclosure metadata does not match recipient output");
+      }
+      const plaintextDigest = computeTransferUserDisclosureDigestV2({
+        policy: plaintext.policy,
+        outputIndex: plaintext.outputIndex,
+        commitment: plaintext.commitment,
+        amount: plaintext.amount,
+        assetID: plaintext.assetID,
+        fromSpendPubKeyX: plaintext.senderSpendKeyX,
+        fromSpendPubKeyY: plaintext.senderSpendKeyY,
+        fromViewPubKeyX: plaintext.senderViewKeyX,
+        fromViewPubKeyY: plaintext.senderViewKeyY,
+        toSpendPubKeyX: plaintext.recipientSpendKeyX,
+        toSpendPubKeyY: plaintext.recipientSpendKeyY,
+        toViewPubKeyX: plaintext.recipientViewKeyX,
+        toViewPubKeyY: plaintext.recipientViewKeyY,
+        disclosureBlinding: plaintext.disclosureBlinding
+      });
+      if (canonicalFieldHex(plaintextDigest) !== userDigest) {
+        throw new Error("public transfer disclosure digest does not match plaintext");
       }
     } else {
       pointHex(userTarget, "transfer user disclosure target public key");
@@ -713,11 +790,8 @@ export async function buildPreparedTransferV5Payload({
   }
   if (preparedInputs[0].nullifier_hex === preparedInputs[1].nullifier_hex) throw new Error("transfer input nullifiers must be distinct");
 
-  const policy = Number(userPrivacyPolicy);
-  if (!Number.isInteger(policy) || policy < 0 || policy > 7) throw new Error("transfer user privacy policy must be in 0..7");
-  const mode = policy === 0
-    ? 0
-    : Number(userDisclosureMode ?? 2);
+  const policy = normalizeTransferPrivacyPolicy(userPrivacyPolicy);
+  const mode = normalizeTransferDisclosureMode(userDisclosureMode, policy);
   if (policy === 0 && mode !== 0) throw new Error("all-private transfer must use disclosure mode NONE");
   if (policy !== 0 && mode !== 1 && mode !== 2) throw new Error("disclosed transfer must use public or recipient-encrypted disclosure mode");
 

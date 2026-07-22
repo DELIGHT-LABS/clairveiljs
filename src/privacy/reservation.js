@@ -2790,6 +2790,10 @@ export class IndexedDbReservationStore extends MemoryReservationStore {
   }
 
   async load() {
+    return this.#load();
+  }
+
+  async #load({ migrationLocked = false } = {}) {
     const db = await this.db();
     const tx = db.transaction("states", "readonly");
     const value = await requestToPromise(tx.objectStore("states").get(this.namespace));
@@ -2803,8 +2807,13 @@ export class IndexedDbReservationStore extends MemoryReservationStore {
     }
     const normalized = normalizeState(decoded);
     // Make the fresh-genesis reset durable as well as behavioral.  A later
-    // tab must never be able to decode and revive a legacy active lease.
+    // tab must never be able to decode and revive a legacy active lease. The
+    // reset must use the same cross-tab lock as mutations; otherwise a stale
+    // reader can overwrite a reservation written by another tab.
     if (!isCurrentReservationState(decoded)) {
+      if (!migrationLocked) {
+        return this.withMutationLock(() => this.#load({ migrationLocked: true }));
+      }
       await this.#writeState(normalized);
     }
     return normalized;
@@ -2827,7 +2836,7 @@ export class IndexedDbReservationStore extends MemoryReservationStore {
 
   async mutate(mutator) {
     return this.withMutationLock(async () => {
-      const state = await this.load();
+      const state = await this.#load({ migrationLocked: true });
       const result = await mutator(state);
       await this.#writeState(state);
       return result;

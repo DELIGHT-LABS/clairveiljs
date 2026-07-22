@@ -1076,6 +1076,37 @@ test("cosmos note scan follows ScanEvents cursor within the requested page budge
   );
 });
 
+test("filtered scans retain the legacy ScanEvents default until privacy_scan is explicit", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  const requests = [];
+  client.fetchPrivacyScan = async () => {
+    throw new Error("privacy_scan must not receive a legacy event filter");
+  };
+  client.fetchScanEvents = async request => {
+    requests.push(request);
+    return {
+      events: [],
+      next_height: request.afterHeight,
+      next_sequence: request.afterSequence,
+      limit: request.limit,
+      has_more: false,
+      scan_format_version: 1,
+      view_tag_version: 1
+    };
+  };
+
+  const result = await client.scanNotes({
+    rootSeed: new Uint8Array(32),
+    eventTypes: ["deposit"]
+  });
+  assert.equal(result.scanCursor.source, "scan_events");
+  assert.deepEqual(requests[0].eventTypes, ["deposit"]);
+});
+
 test("cosmos ScanEvents preserves uint64 cursors above the safe integer range", async () => {
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",

@@ -13,6 +13,8 @@ import { createNote } from "clairveiljs/note";
 import {
   computeAssetIdV1,
   encryptedEnvelopeKindV1,
+  marshalDisclosurePlaintextV1,
+  unmarshalDisclosurePlaintextV1,
   wrapEncryptedEnvelopeV1
 } from "clairveiljs/protocol-v1";
 import {
@@ -152,6 +154,34 @@ test("standard transfer builder emits the Clairveil 0.2 V5 fixed-envelope contra
   assert.equal(payload.self_view_disclosure_payload_hex.length, 944);
   assert.equal(payload.owner_signature_hex.length, 128);
   assert.equal(validatePreparedTransferV5PayloadMetadata(payload), true);
+
+  const selectivePayload = await buildPreparedTransferPayload({
+    creator: "clair1creator",
+    chainId: "clairveil-test-1",
+    chainNowUnix: 1_700_000_000,
+    inputs,
+    recipient: encodeShieldedAddress(recipientSpend, recipientView, { prefix: "clairs" }),
+    amount: "7uclair",
+    rootSeed,
+    merklePathProvider: () => ({ root: field(1n), path: [], path_helper: [] }),
+    auditDisclosureTargetPubKeyHex: Buffer.from(packPoint(audit)).toString("hex"),
+    userPrivacyPolicy: "amount-from-to",
+    userDisclosureMode: "public"
+  });
+  assert.equal(selectivePayload.user_privacy_policy, 7);
+  assert.equal(selectivePayload.user_disclosure_mode, 1);
+  const disclosure = unmarshalDisclosurePlaintextV1(Buffer.from(selectivePayload.user_disclosure_payload_hex, "hex"));
+  const tampered = {
+    ...selectivePayload,
+    user_disclosure_payload_hex: Buffer.from(marshalDisclosurePlaintextV1({
+      ...disclosure,
+      amount: disclosure.amount + 1n
+    })).toString("hex")
+  };
+  assert.throws(
+    () => validatePreparedTransferV5PayloadMetadata(tampered),
+    /public transfer disclosure digest does not match plaintext/
+  );
 });
 
 test("external transfer signer receives a validated full JoinSplit request before callback", async () => {

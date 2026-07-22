@@ -326,15 +326,20 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     /payload hash does not match/
   );
   assert.deepEqual(buildOneProofPayrollOperationEvidence(prepared).expected_evidence, prepared.expected_evidence);
+  let expectedCircuitIdentity;
   const signDoc = await createOneProofPayrollBatchSignDoc(execution, {
     cosmosClient: {
-      createBatchTransferSignDoc: async input => ({ messageCreator: input.message.creator, signer: input.signer })
+      createBatchTransferSignDoc: async input => {
+        expectedCircuitIdentity = input.expectedCircuitIdentity;
+        return { messageCreator: input.message.creator, signer: input.signer };
+      }
     },
     signer: "clair1relayer",
     pubKeyHex: "02".repeat(33),
     gasLimit: 25000000
   });
   assert.equal(signDoc.sign_doc.messageCreator, "clair1relayer");
+  assert.deepEqual(expectedCircuitIdentity, prepared.circuit_config.circuit_set_identity);
   await assert.rejects(
     () => createOneProofPayrollBatchSignDoc(execution, {
       cosmosClient: { createBatchTransferSignDoc: async () => ({}) },

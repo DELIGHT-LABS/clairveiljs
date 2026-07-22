@@ -1756,16 +1756,16 @@ export class ClairveilJS {
     return normalizeDisclosureConfigV1(await this.fetchDisclosureConfig());
   }
 
-  async fetchCircuitConfig() {
+  async fetchCircuitConfig({ expectedCircuitIdentity } = {}) {
     return validateCircuitConfigV1(
       await this.fetchJson("/clairveil/privacy/v1/circuit_config", { failover: true }),
-      { expectedCircuitIdentity: this.expectedCircuitIdentity || undefined }
+      { expectedCircuitIdentity: expectedCircuitIdentity ?? this.expectedCircuitIdentity ?? undefined }
     );
   }
 
   /** Fetch and fail-closed validate the consensus identity used by every proof circuit. */
-  async assertCircuitConfig() {
-    return this.fetchCircuitConfig();
+  async assertCircuitConfig(options) {
+    return this.fetchCircuitConfig(options);
   }
 
   async fetchReserve(denom) {
@@ -1952,13 +1952,21 @@ export class ClairveilJS {
     eventTypes,
     event_types,
     includeFoundNotes = false,
-    scanSource = "privacy_scan",
+    scanSource,
     scan_source
   } = {}) {
-    const resolvedEventTypes = event_types ?? eventTypes ?? ["deposit", "shielded_transfer"];
+    const requestedEventTypes = event_types ?? eventTypes;
+    const resolvedEventTypes = requestedEventTypes ?? ["deposit", "shielded_transfer"];
     const pageLimit = Math.max(1, Number(limit || 200));
     const pageBudget = Math.max(1, Number(maxPages || 1));
-    const source = scan_source ?? scanSource;
+    // `privacy_scan` intentionally rejects event filters so its cursor proves
+    // progress across zero-output events. Preserve the prior filtered
+    // ScanEvents contract unless the caller explicitly selected a source.
+    const source = scan_source ?? scanSource ?? (
+      Array.isArray(requestedEventTypes) && requestedEventTypes.some(value => String(value || "").trim())
+        ? "scan_events"
+        : "privacy_scan"
+    );
 
     if (source === "privacy_scan") {
       if ((event_types ?? eventTypes) != null && (event_types ?? eventTypes).some(value => String(value || "").trim())) {
@@ -3306,11 +3314,11 @@ export class ClairveilJS {
     return result;
   }
 
-  async createBatchTransferSignDoc({ signer, pubKeyHex, gasLimit, message, memo = "Clairveil batch veiled transfer" } = {}) {
+  async createBatchTransferSignDoc({ signer, pubKeyHex, gasLimit, message, memo = "Clairveil batch veiled transfer", expectedCircuitIdentity } = {}) {
     if (!message || typeof message !== "object") {
       throw new Error("MsgBatchTransfer message is required");
     }
-    await this.assertCircuitConfig();
+    await this.assertCircuitConfig({ expectedCircuitIdentity });
     return this.buildDirectSignDoc({
       signer,
       pubKeyHex,

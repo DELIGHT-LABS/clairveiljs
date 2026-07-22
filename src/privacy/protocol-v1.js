@@ -840,6 +840,30 @@ function normalizeBatchOutput(output, index) {
       if (normalized.userDisclosureTargetPubkey.length || normalized.userDisclosurePayload.length !== disclosurePlaintextV1Size) {
         throw new Error(`batch output ${index} public disclosure must use fixed plaintext`);
       }
+      const plaintext = unmarshalDisclosurePlaintextV1(normalized.userDisclosurePayload);
+      if (plaintext.plane !== 1 || plaintext.outputIndex !== index || plaintext.policy !== policy || plaintext.commitment !== bytesToBigIntBE(normalized.commitment)) {
+        throw new Error(`batch output ${index} public disclosure metadata does not match output`);
+      }
+      const digest = computeBatchUserDisclosureDigestV1({
+        outputIndex: plaintext.outputIndex,
+        commitment: plaintext.commitment,
+        policy: plaintext.policy,
+        disclosedFieldBitmap: plaintext.disclosedFieldBitmap,
+        selectedAmount: plaintext.amount,
+        selectedFromSpendKeyX: plaintext.senderSpendKeyX,
+        selectedFromSpendKeyY: plaintext.senderSpendKeyY,
+        selectedFromViewKeyX: plaintext.senderViewKeyX,
+        selectedFromViewKeyY: plaintext.senderViewKeyY,
+        selectedToSpendKeyX: plaintext.recipientSpendKeyX,
+        selectedToSpendKeyY: plaintext.recipientSpendKeyY,
+        selectedToViewKeyX: plaintext.recipientViewKeyX,
+        selectedToViewKeyY: plaintext.recipientViewKeyY,
+        assetID: plaintext.assetID,
+        userDisclosureBlinding: plaintext.disclosureBlinding
+      });
+      if (!equalBytes(canonicalFieldBytes(digest), normalized.userDisclosureDigest)) {
+        throw new Error(`batch output ${index} public disclosure digest does not match plaintext`);
+      }
     } else {
       if (normalized.userDisclosureTargetPubkey.length !== 32 || !normalized.userDisclosurePayload.length) throw new Error(`batch output ${index} encrypted disclosure is incomplete`);
       try {
