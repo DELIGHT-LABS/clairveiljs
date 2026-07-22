@@ -82,6 +82,7 @@ import {
 import { summarizeSpendableNotesByDenom } from "clairveiljs/payload";
 import {
   deserializeFoundNote,
+  privacyNoteCacheStateVersionV1,
   serializeFoundNote
 } from "../src/privacy/note-store.js";
 import {
@@ -574,6 +575,33 @@ test("found-note persistence preserves only literal boolean spent evidence", () 
   assert.equal(restoredSpent.spent, true);
   assert.equal(restoredSpent.isSpent, true);
   assert.equal(restoredSpent.nullifierStatus, "spent");
+});
+
+test("note store clears pre-v0.2 cache state instead of migrating old notes or cursors", async () => {
+  const note = createNote({
+    spendPubKey: CURVE_BASE,
+    viewPubKey: CURVE_BASE,
+    amount: 5n,
+    assetDenom: "uclair",
+    randomness: 45n
+  });
+  const legacy = new MemoryNoteStore({
+    owner: "clair1fresh-genesis",
+    state: {
+      version: "v1",
+      owner: "clair1fresh-genesis",
+      lastScannedHeight: 99,
+      scanCursor: { source: "privacy_scan", next_cursor: { height: 99, global_sequence: 7, output_index: 3 } },
+      notes: [serializeFoundNote({ note, nullifier: "45".repeat(32), height: 99 })]
+    }
+  });
+  const cleared = await legacy.load();
+  assert.equal(cleared.version, privacyNoteCacheStateVersionV1);
+  assert.equal(cleared.circuit_set_id, "privacy-note-v1");
+  assert.equal(cleared.payload_version, "privacy-fixed-v1");
+  assert.deepEqual(cleared.notes, []);
+  assert.equal(cleared.lastScannedHeight, 0);
+  assert.equal(cleared.scanCursor, null);
 });
 
 test("browser-dapp deposit proof provider reuses the proven deposit material", async () => {
@@ -1226,10 +1254,10 @@ test("cosmos wallet note store refreshes cached spent statuses", async () => {
         nullifierStatus: "unspent",
         nullifier,
         note: {
-          receiverSpendPubKeyX: 1n,
-          receiverSpendPubKeyY: 2n,
-          receiverViewPubKeyX: 3n,
-          receiverViewPubKeyY: 4n,
+          receiverSpendPubKeyX: CURVE_BASE.x,
+          receiverSpendPubKeyY: CURVE_BASE.y,
+          receiverViewPubKeyX: CURVE_BASE.x,
+          receiverViewPubKeyY: CURVE_BASE.y,
           amount: 10n,
           assetID: hashStringToField("uclair"),
           randomness: 11n,
@@ -1243,10 +1271,10 @@ test("cosmos wallet note store refreshes cached spent statuses", async () => {
         nullifierStatus: "unspent",
         nullifier: missingBatchNullifier,
         note: {
-          receiverSpendPubKeyX: 1n,
-          receiverSpendPubKeyY: 2n,
-          receiverViewPubKeyX: 3n,
-          receiverViewPubKeyY: 4n,
+          receiverSpendPubKeyX: CURVE_BASE.x,
+          receiverSpendPubKeyY: CURVE_BASE.y,
+          receiverViewPubKeyX: CURVE_BASE.x,
+          receiverViewPubKeyY: CURVE_BASE.y,
           amount: 11n,
           assetID: hashStringToField("uclair"),
           randomness: 12n,
@@ -1451,10 +1479,10 @@ test("note store merge honors an explicit genesis rollback boundary", async () =
         nullifierStatus: "unspent",
         nullifier: "04".padStart(64, "0"),
         note: {
-          receiverSpendPubKeyX: 1n,
-          receiverSpendPubKeyY: 2n,
-          receiverViewPubKeyX: 3n,
-          receiverViewPubKeyY: 4n,
+          receiverSpendPubKeyX: CURVE_BASE.x,
+          receiverSpendPubKeyY: CURVE_BASE.y,
+          receiverViewPubKeyX: CURVE_BASE.x,
+          receiverViewPubKeyY: CURVE_BASE.y,
           amount: 1n,
           assetID: hashStringToField("uclair"),
           randomness: 14n,
@@ -1496,10 +1524,10 @@ test("note store discards notes at the rollback boundary before re-scanning it",
       nullifierStatus: "unspent",
       nullifier: "03".padStart(64, "0"),
       note: {
-        receiverSpendPubKeyX: 1n,
-        receiverSpendPubKeyY: 2n,
-        receiverViewPubKeyX: 3n,
-        receiverViewPubKeyY: 4n,
+        receiverSpendPubKeyX: CURVE_BASE.x,
+        receiverSpendPubKeyY: CURVE_BASE.y,
+        receiverViewPubKeyX: CURVE_BASE.x,
+        receiverViewPubKeyY: CURVE_BASE.y,
         amount: 1n,
         assetID: hashStringToField("uclair"),
         randomness: 13n,
@@ -1567,10 +1595,10 @@ test("note store rollback preserves uint64 heights above the safe integer range"
     nullifierStatus: "unspent",
     nullifier: suffix.padStart(64, "0"),
     note: {
-      receiverSpendPubKeyX: 1n,
-      receiverSpendPubKeyY: 2n,
-      receiverViewPubKeyX: 3n,
-      receiverViewPubKeyY: 4n,
+      receiverSpendPubKeyX: CURVE_BASE.x,
+      receiverSpendPubKeyY: CURVE_BASE.y,
+      receiverViewPubKeyX: CURVE_BASE.x,
+      receiverViewPubKeyY: CURVE_BASE.y,
       amount: 1n,
       assetID: hashStringToField("uclair"),
       randomness: BigInt(suffix),
@@ -1634,10 +1662,10 @@ test("cached spent notes are rechecked and restored when a reorg makes them unsp
       nullifierStatus: "spent",
       nullifier,
       note: {
-        receiverSpendPubKeyX: 1n,
-        receiverSpendPubKeyY: 2n,
-        receiverViewPubKeyX: 3n,
-        receiverViewPubKeyY: 4n,
+        receiverSpendPubKeyX: CURVE_BASE.x,
+        receiverSpendPubKeyY: CURVE_BASE.y,
+        receiverViewPubKeyX: CURVE_BASE.x,
+        receiverViewPubKeyY: CURVE_BASE.y,
         amount: 1n,
         assetID: hashStringToField("uclair"),
         randomness: 14n,
@@ -1664,10 +1692,10 @@ test("memory note store normalizes nullifier status keys before applying them", 
       nullifierStatus: "unspent",
       nullifier,
       note: {
-        receiverSpendPubKeyX: 1n,
-        receiverSpendPubKeyY: 2n,
-        receiverViewPubKeyX: 3n,
-        receiverViewPubKeyY: 4n,
+        receiverSpendPubKeyX: CURVE_BASE.x,
+        receiverSpendPubKeyY: CURVE_BASE.y,
+        receiverViewPubKeyX: CURVE_BASE.x,
+        receiverViewPubKeyY: CURVE_BASE.y,
         amount: 1n,
         assetID: hashStringToField("uclair"),
         randomness: 15n,

@@ -1,5 +1,4 @@
 import {
-  computeNoteCommitmentHex,
   defaultAssetDenom,
   normalizeFoundNote,
   noteSpendPubKeyHex,
@@ -8,9 +7,22 @@ import {
 import {
   canonicalFieldHex
 } from "../core/crypto.js";
-import { computeAssetIdV1, computeNoteCommitmentV1 } from "./protocol-v1.js";
+import {
+  activeCircuitSetIdV1,
+  computeAssetIdV1,
+  computeNoteCommitmentV1,
+  privacyFixedV1,
+  validateNoteV1
+} from "./protocol-v1.js";
 
 const maxUint64 = (1n << 64n) - 1n;
+
+/** Cache identity for the incompatible privacy-note-v1 fresh-genesis boundary. */
+export const privacyNoteCacheStateVersionV1 = "privacy-note-v1-cache-v1";
+export const privacyNoteCacheIdentityV1 = Object.freeze({
+  circuit_set_id: activeCircuitSetIdV1,
+  payload_version: privacyFixedV1
+});
 
 function uint64CursorBigInt(value, label) {
   if (typeof value === "number") {
@@ -51,22 +63,28 @@ function bigintToString(value) {
 }
 
 function commitmentHexForStorage(note) {
-  try {
-    return canonicalFieldHex(computeNoteCommitmentV1(note));
-  } catch {
-    // Retain cache migration support for snapshots created before the fixed
-    // V1 point validation contract.  Newly scanned notes always take V1.
-    return computeNoteCommitmentHex(note);
-  }
+  return canonicalFieldHex(computeNoteCommitmentV1(validateNoteV1(note)));
+}
+
+function assertOptionalDerivedHex(value, expected, label) {
+  const supplied = String(value ?? "").trim().toLowerCase();
+  if (supplied && supplied !== expected) throw new Error(`${label} does not match NoteV1`);
+  return expected;
 }
 
 export function serializeFoundNote(foundLike) {
   const found = normalizeFoundNote(foundLike);
-  const assetIdHex = String(
-    foundLike?.asset_id_hex ??
-    foundLike?.assetIdHex ??
-    canonicalFieldHex(found.note.assetID)
-  ).toLowerCase();
+  const note = validateNoteV1(found.note);
+  const commitmentHex = assertOptionalDerivedHex(
+    foundLike?.commitment_hex ?? foundLike?.commitmentHex,
+    commitmentHexForStorage(note),
+    "stored note commitment"
+  );
+  const assetIdHex = assertOptionalDerivedHex(
+    foundLike?.asset_id_hex ?? foundLike?.assetIdHex,
+    canonicalFieldHex(note.assetID),
+    "stored note asset_id_hex"
+  );
   const defaultAssetIdHex = canonicalFieldHex(computeAssetIdV1(defaultAssetDenom)).toLowerCase();
   const assetDenom = String(
     foundLike?.asset_denom ??
@@ -79,39 +97,23 @@ export function serializeFoundNote(foundLike) {
 
   return {
     note: {
-      receiverSpendPubKeyX: bigintToString(found.note.receiverSpendPubKeyX),
-      receiverSpendPubKeyY: bigintToString(found.note.receiverSpendPubKeyY),
-      receiverViewPubKeyX: bigintToString(found.note.receiverViewPubKeyX),
-      receiverViewPubKeyY: bigintToString(found.note.receiverViewPubKeyY),
-      amount: bigintToString(found.note.amount),
-      assetID: bigintToString(found.note.assetID),
-      randomness: bigintToString(found.note.randomness),
-      memo: found.note.memo || ""
+      receiverSpendPubKeyX: bigintToString(note.receiverSpendPubKeyX),
+      receiverSpendPubKeyY: bigintToString(note.receiverSpendPubKeyY),
+      receiverViewPubKeyX: bigintToString(note.receiverViewPubKeyX),
+      receiverViewPubKeyY: bigintToString(note.receiverViewPubKeyY),
+      amount: bigintToString(note.amount),
+      assetID: bigintToString(note.assetID),
+      randomness: bigintToString(note.randomness),
+      memo: note.memo || ""
     },
-    commitment_hex: String(
-      foundLike?.commitment_hex ??
-      foundLike?.commitmentHex ??
-      commitmentHexForStorage(found.note)
-    ).toLowerCase(),
+    commitment_hex: commitmentHex,
     nullifier_hex: String((foundLike?.nullifier_hex ?? found.nullifier) || "").toLowerCase(),
-    amount: bigintToString(found.note.amount),
+    amount: bigintToString(note.amount),
     asset_denom: assetDenom,
     asset_id_hex: assetIdHex,
-    randomness_hex: String(
-      foundLike?.randomness_hex ??
-      foundLike?.randomnessHex ??
-      canonicalFieldHex(found.note.randomness)
-    ).toLowerCase(),
-    spend_pubkey_hex: String(
-      foundLike?.spend_pubkey_hex ??
-      foundLike?.spendPubKeyHex ??
-      noteSpendPubKeyHex(found.note)
-    ).toLowerCase(),
-    view_pubkey_hex: String(
-      foundLike?.view_pubkey_hex ??
-      foundLike?.viewPubKeyHex ??
-      noteViewPubKeyHex(found.note)
-    ).toLowerCase(),
+    randomness_hex: assertOptionalDerivedHex(foundLike?.randomness_hex ?? foundLike?.randomnessHex, canonicalFieldHex(note.randomness), "stored note randomness_hex"),
+    spend_pubkey_hex: assertOptionalDerivedHex(foundLike?.spend_pubkey_hex ?? foundLike?.spendPubKeyHex, noteSpendPubKeyHex(note).toLowerCase(), "stored note spend_pubkey_hex"),
+    view_pubkey_hex: assertOptionalDerivedHex(foundLike?.view_pubkey_hex ?? foundLike?.viewPubKeyHex, noteViewPubKeyHex(note).toLowerCase(), "stored note view_pubkey_hex"),
     nullifier: String(found.nullifier || "").toLowerCase(),
     isSpent: spent,
     nullifier_status: found.nullifierStatus,
@@ -125,30 +127,40 @@ export function serializeFoundNote(foundLike) {
 }
 
 export function deserializeFoundNote(serialized) {
+  if (!serialized || typeof serialized !== "object" || !serialized.note || typeof serialized.note !== "object") {
+    throw new Error("stored NoteV1 is required");
+  }
+  const note = validateNoteV1({
+    ...serialized.note,
+    receiverSpendPubKeyX: BigInt(serialized.note.receiverSpendPubKeyX),
+    receiverSpendPubKeyY: BigInt(serialized.note.receiverSpendPubKeyY),
+    receiverViewPubKeyX: BigInt(serialized.note.receiverViewPubKeyX),
+    receiverViewPubKeyY: BigInt(serialized.note.receiverViewPubKeyY),
+    amount: BigInt(serialized.note.amount),
+    assetID: BigInt(serialized.note.assetID),
+    randomness: BigInt(serialized.note.randomness)
+  });
   const found = normalizeFoundNote({
     ...serialized,
-    note: {
-      ...serialized.note,
-      receiverSpendPubKeyX: BigInt(serialized.note.receiverSpendPubKeyX),
-      receiverSpendPubKeyY: BigInt(serialized.note.receiverSpendPubKeyY),
-      receiverViewPubKeyX: BigInt(serialized.note.receiverViewPubKeyX),
-      receiverViewPubKeyY: BigInt(serialized.note.receiverViewPubKeyY),
-      amount: BigInt(serialized.note.amount),
-      assetID: BigInt(serialized.note.assetID),
-      randomness: BigInt(serialized.note.randomness)
-    }
+    note
   });
+  const commitmentHex = assertOptionalDerivedHex(serialized.commitment_hex, commitmentHexForStorage(note), "stored note commitment");
+  const assetIdHex = assertOptionalDerivedHex(serialized.asset_id_hex, canonicalFieldHex(note.assetID), "stored note asset_id_hex");
+  const randomnessHex = assertOptionalDerivedHex(serialized.randomness_hex, canonicalFieldHex(note.randomness), "stored note randomness_hex");
+  const spendPubkeyHex = assertOptionalDerivedHex(serialized.spend_pubkey_hex, noteSpendPubKeyHex(note).toLowerCase(), "stored note spend_pubkey_hex");
+  const viewPubkeyHex = assertOptionalDerivedHex(serialized.view_pubkey_hex, noteViewPubKeyHex(note).toLowerCase(), "stored note view_pubkey_hex");
   const spent = serialized.spent === true || found.isSpent === true;
   return {
     ...found,
-    commitment_hex: String(serialized.commitment_hex || "").toLowerCase(),
+    note,
+    commitment_hex: commitmentHex,
     nullifier_hex: String(serialized.nullifier_hex || found.nullifier || "").toLowerCase(),
-    amount: String(serialized.amount ?? found.note.amount.toString()),
+    amount: String(serialized.amount ?? note.amount.toString()),
     asset_denom: String(serialized.asset_denom || ""),
-    asset_id_hex: String(serialized.asset_id_hex || canonicalFieldHex(found.note.assetID)).toLowerCase(),
-    randomness_hex: String(serialized.randomness_hex || canonicalFieldHex(found.note.randomness)).toLowerCase(),
-    spend_pubkey_hex: String(serialized.spend_pubkey_hex || noteSpendPubKeyHex(found.note)).toLowerCase(),
-    view_pubkey_hex: String(serialized.view_pubkey_hex || noteViewPubKeyHex(found.note)).toLowerCase(),
+    asset_id_hex: assetIdHex,
+    randomness_hex: randomnessHex,
+    spend_pubkey_hex: spendPubkeyHex,
+    view_pubkey_hex: viewPubkeyHex,
     tx_hash: String(serialized.tx_hash || found.txHash || "").toUpperCase(),
     sequence: found.sequence,
     spent,
@@ -167,7 +179,9 @@ function noteKey(foundLike) {
 
 function emptyState(owner = "") {
   return {
-    version: "v1",
+    version: privacyNoteCacheStateVersionV1,
+    circuit_set_id: privacyNoteCacheIdentityV1.circuit_set_id,
+    payload_version: privacyNoteCacheIdentityV1.payload_version,
     owner,
     lastScannedHeight: 0,
     lastScannedSequence: 0,
@@ -176,6 +190,30 @@ function emptyState(owner = "") {
     scanCursor: null,
     updatedAt: "",
     notes: []
+  };
+}
+
+function isCurrentPrivacyNoteCacheState(state) {
+  return Boolean(state && typeof state === "object" && !Array.isArray(state)) &&
+    state.version === privacyNoteCacheStateVersionV1 &&
+    state.circuit_set_id === privacyNoteCacheIdentityV1.circuit_set_id &&
+    state.payload_version === privacyNoteCacheIdentityV1.payload_version;
+}
+
+/**
+ * v0.2.0 has no note-cache migration path. Discard every incompatible cache
+ * rather than attempting a legacy decode that could revive old commitments,
+ * cursors, or circuit assumptions.
+ */
+function freshGenesisCacheState(state, owner = "") {
+  const resolvedOwner = String(owner || state?.owner || "");
+  if (!isCurrentPrivacyNoteCacheState(state)) return emptyState(resolvedOwner);
+  return {
+    ...emptyState(resolvedOwner),
+    ...state,
+    version: privacyNoteCacheStateVersionV1,
+    circuit_set_id: privacyNoteCacheIdentityV1.circuit_set_id,
+    payload_version: privacyNoteCacheIdentityV1.payload_version
   };
 }
 
@@ -256,7 +294,7 @@ function rewindScanState(current, rollbackHeight) {
 
 export class MemoryNoteStore {
   constructor({ owner = "", state } = {}) {
-    this.state = state || emptyState(owner);
+    this.state = freshGenesisCacheState(state, owner);
   }
 
   async load() {
@@ -267,11 +305,15 @@ export class MemoryNoteStore {
   }
 
   async save(state) {
+    const candidate = {
+      ...this.state,
+      ...(state || {}),
+      owner: state?.owner || this.state.owner
+    };
     const normalized = {
-      ...emptyState(state?.owner || this.state.owner),
-      ...state,
+      ...freshGenesisCacheState(candidate, candidate.owner),
       updatedAt: new Date().toISOString(),
-      notes: (state?.notes || []).map(serializeFoundNote)
+      notes: (candidate.notes || []).map(serializeFoundNote)
     };
     this.state = normalized;
     return this.load();
@@ -475,9 +517,20 @@ export class LocalStorageNoteStore extends MemoryNoteStore {
       throw new Error("LocalStorageNoteStore stores privacy-sensitive notes in plaintext; pass allowPlaintext: true only for demos/tests");
     }
     const raw = storage.getItem(key);
-    super({ owner, state: raw ? JSON.parse(raw) : emptyState(owner) });
+    let parsed = null;
+    let discarded = false;
+    if (raw) {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        discarded = true;
+      }
+      if (!isCurrentPrivacyNoteCacheState(parsed)) discarded = true;
+    }
+    super({ owner, state: discarded ? emptyState(owner) : (parsed || emptyState(owner)) });
     this.storage = storage;
     this.key = key;
+    if (discarded) this.storage.setItem(this.key, JSON.stringify(this.state));
   }
 
   async save(state) {

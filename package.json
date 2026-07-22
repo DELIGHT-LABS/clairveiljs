@@ -1,6 +1,6 @@
 {
   "name": "clairveiljs",
-  "version": "0.1.10",
+  "version": "0.2.0",
   "description": "Clairveil JavaScript SDK for privacy core, Cosmos transport, EVM transport, wallet, note, transfer, withdraw, disclosure, and prover flows.",
   "type": "module",
   "license": "Apache-2.0",

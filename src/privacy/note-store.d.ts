@@ -35,6 +35,9 @@ export interface NoteStoreScanCursor {
 }
 
 export interface NoteStoreState {
+  version: typeof privacyNoteCacheStateVersionV1;
+  circuit_set_id: "privacy-note-v1";
+  payload_version: "privacy-fixed-v1";
   owner?: string;
   notes: StoredFoundNote[];
   lastScannedHeight?: number | string;
@@ -44,6 +47,9 @@ export interface NoteStoreState {
   scanCursor?: NoteStoreScanCursor | null;
   [key: string]: unknown;
 }
+
+export const privacyNoteCacheStateVersionV1: "privacy-note-v1-cache-v1";
+export const privacyNoteCacheIdentityV1: Readonly<{ circuit_set_id: "privacy-note-v1"; payload_version: "privacy-fixed-v1" }>;
 
 export function serializeFoundNote(foundLike: FoundNote | object): object;
 export function deserializeFoundNote(serialized: object): StoredFoundNote;
