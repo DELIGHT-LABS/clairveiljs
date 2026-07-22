@@ -32,7 +32,126 @@ function normalizeBaseURL(baseURL) {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`unsupported prover URL protocol ${url.protocol}`);
   }
+  if (url.protocol === "http:" && !isLoopbackProverHost(url.hostname)) {
+    throw new Error(`prover transport requires HTTPS for non-loopback endpoint ${JSON.stringify(url.host)}`);
+  }
   return url;
+}
+
+function isLoopbackProverHost(hostname) {
+  const normalized = String(hostname || "").replace(/^\[|\]$/g, "").toLowerCase();
+  return normalized === "localhost" || normalized === "::1" || normalized === "127.0.0.1";
+}
+
+/**
+ * JSON.parse silently overwrites duplicate object keys. The Go prover
+ * transport rejects those keys, unknown fields, and trailing JSON values, so
+ * responses need a small strict parser before their semantic validation.
+ */
+function parseStrictJSON(source) {
+  const text = String(source);
+  let index = 0;
+  const error = message => {
+    throw new Error(`${message} at byte ${index}`);
+  };
+  const whitespace = () => {
+    while (index < text.length && " \n\r\t".includes(text[index])) index += 1;
+  };
+  const string = () => {
+    const start = index;
+    if (text[index] !== "\"") error("expected JSON string");
+    index += 1;
+    while (index < text.length) {
+      const character = text[index];
+      if (character === "\"") {
+        index += 1;
+        try {
+          return JSON.parse(text.slice(start, index));
+        } catch {
+          error("invalid JSON string");
+        }
+      }
+      if (character === "\\") {
+        index += 1;
+        const escape = text[index];
+        if (!'"\\/bfnrtu'.includes(escape || "")) error("invalid JSON string escape");
+        if (escape === "u") {
+          const hex = text.slice(index + 1, index + 5);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) error("invalid JSON unicode escape");
+          index += 4;
+        }
+      } else if (character.codePointAt(0) <= 0x1f) {
+        error("invalid JSON control character");
+      }
+      index += 1;
+    }
+    error("unterminated JSON string");
+  };
+  const value = () => {
+    whitespace();
+    const character = text[index];
+    if (character === "{") {
+      index += 1;
+      whitespace();
+      const object = Object.create(null);
+      const keys = new Set();
+      if (text[index] === "}") {
+        index += 1;
+        return object;
+      }
+      while (true) {
+        whitespace();
+        const key = string();
+        if (keys.has(key)) error(`duplicate JSON object key ${JSON.stringify(key)}`);
+        keys.add(key);
+        whitespace();
+        if (text[index] !== ":") error("expected JSON object colon");
+        index += 1;
+        object[key] = value();
+        whitespace();
+        if (text[index] === "}") {
+          index += 1;
+          return object;
+        }
+        if (text[index] !== ",") error("expected JSON object comma");
+        index += 1;
+      }
+    }
+    if (character === "[") {
+      index += 1;
+      whitespace();
+      const array = [];
+      if (text[index] === "]") {
+        index += 1;
+        return array;
+      }
+      while (true) {
+        array.push(value());
+        whitespace();
+        if (text[index] === "]") {
+          index += 1;
+          return array;
+        }
+        if (text[index] !== ",") error("expected JSON array comma");
+        index += 1;
+      }
+    }
+    if (character === "\"") return string();
+    for (const [literal, result] of [["true", true], ["false", false], ["null", null]]) {
+      if (text.startsWith(literal, index)) {
+        index += literal.length;
+        return result;
+      }
+    }
+    const number = text.slice(index).match(/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/);
+    if (!number) error("expected JSON value");
+    index += number[0].length;
+    return Number(number[0]);
+  };
+  const parsed = value();
+  whitespace();
+  if (index !== text.length) error("multiple JSON values are not allowed");
+  return parsed;
 }
 
 async function postJSON({ baseURL, path, body, serializedBody, bearerToken, timeoutMs, fetchImpl }) {
@@ -49,6 +168,7 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
       method: "POST",
       headers,
       body: serializedBody ?? JSON.stringify(body),
+      redirect: "error",
       signal: controller.signal
     });
     const text = await response.text();
@@ -56,7 +176,7 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
       throw new Error(`prover request failed with status ${response.status}: ${text}`);
     }
     try {
-      return JSON.parse(text);
+      return parseStrictJSON(text);
     } catch (error) {
       throw new Error(`prover response was not JSON: ${error.message}`);
     }
@@ -77,9 +197,17 @@ function assertResponseObject(value, label) {
   return value;
 }
 
+function assertOnlyResponseFields(value, label, fields) {
+  assertResponseObject(value, label);
+  const allowed = new Set(fields);
+  const unknown = Object.keys(value).filter(key => !allowed.has(key));
+  if (unknown.length) throw new Error(`${label} contains unknown JSON field ${JSON.stringify(unknown[0])}`);
+  return value;
+}
+
 function normalizeProofShape(proof, kind, expectedVersion) {
   const label = `${kind} proof response.proof`;
-  assertResponseObject(proof, label);
+  assertOnlyResponseFields(proof, label, ["version", "payload_hash", "proof_hex"]);
   if (proof.version !== expectedVersion) {
     throw new Error(`${label}.version must be ${expectedVersion}`);
   }
@@ -96,7 +224,7 @@ function normalizeProofShape(proof, kind, expectedVersion) {
 
 function normalizeProofResponseShape(response, kind, expectedResponseVersion, expectedProofVersion) {
   const label = `${kind} proof response`;
-  assertResponseObject(response, label);
+  assertOnlyResponseFields(response, label, ["version", "proof"]);
   if (response.version !== expectedResponseVersion) {
     throw new Error(`${label}.version must be ${expectedResponseVersion}`);
   }
@@ -138,10 +266,13 @@ function unwrapWithdrawProof(request, response) {
 
 function unwrapBatchTransferProof(request, response) {
   const label = "batch transfer proof response";
-  assertResponseObject(response, label);
+  assertOnlyResponseFields(response, label, ["version", "proof"]);
   if (response.version !== batchTransferProofResponseVersion) {
     throw new Error(`${label}.version must be ${batchTransferProofResponseVersion}`);
   }
+  assertOnlyResponseFields(response.proof, `${label}.proof`, [
+    "version", "request_payload_hash", "proof", "circuit_set_id", "artifact_checksum"
+  ]);
   return {
     ...response,
     proof: normalizePreparedBatchTransferProof(request.payload, response.proof, {

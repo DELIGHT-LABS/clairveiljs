@@ -61,7 +61,7 @@ test("HTTP prover adapter follows the Go route and version contract", fixtureTes
 test("HTTP prover adapter rejects proof payload hash mismatch", fixtureTestOptions, async () => {
   const examples = readFixture("privacy_prover_example_bundle.json");
   const adapter = createHttpProverAdapter({
-    baseURL: "http://prover.example",
+    baseURL: "http://127.0.0.1",
     fetchImpl: async url => {
       if (url.pathname.endsWith("/withdraw")) {
         return jsonResponse({
@@ -120,7 +120,7 @@ test("HTTP prover adapter rejects malformed proof response shapes", fixtureTestO
     ]
   ]) {
     const adapter = createHttpProverAdapter({
-      baseURL: "http://prover.example",
+      baseURL: "http://127.0.0.1",
       fetchImpl: async () => jsonResponse(body)
     });
     await assert.rejects(
@@ -134,7 +134,7 @@ test("HTTP prover adapter aborts on timeout", fixtureTestOptions, async () => {
   const examples = readFixture("privacy_prover_example_bundle.json");
   let sawAbort = false;
   const adapter = createHttpProverAdapter({
-    baseURL: "http://prover.example",
+    baseURL: "http://127.0.0.1",
     timeoutMs: 5,
     fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
       init.signal.addEventListener("abort", () => {
@@ -155,7 +155,7 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
   const examples = readFixture("privacy_prover_example_bundle.json");
 
   const nonJson = createHttpProverAdapter({
-    baseURL: "http://prover.example",
+    baseURL: "http://127.0.0.1",
     fetchImpl: async () => new Response("not-json", { status: 200 })
   });
   await assert.rejects(
@@ -164,11 +164,54 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
   );
 
   const unavailable = createHttpProverAdapter({
-    baseURL: "http://prover.example",
+    baseURL: "http://127.0.0.1",
     fetchImpl: async () => new Response("down", { status: 503 })
   });
   await assert.rejects(
     () => unavailable.proveWithdraw(examples.withdraw.request),
     error => error?.code === ClairveilErrorCode.PROVER_UNAVAILABLE && /status 503/.test(error.message)
   );
+});
+
+test("HTTP prover adapter requires HTTPS remotely, denies redirects, and strict-parses responses", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  assert.throws(
+    () => createHttpProverAdapter({ baseURL: "http://prover.example" }),
+    /requires HTTPS for non-loopback/
+  );
+
+  const fetchOptions = [];
+  const adapter = createHttpProverAdapter({
+    baseURL: "https://prover.example",
+    fetchImpl: async (_url, init) => {
+      fetchOptions.push(init.redirect);
+      return jsonResponse(examples.transfer.response);
+    }
+  });
+  await adapter.proveTransfer(examples.transfer.request);
+  assert.deepEqual(fetchOptions, ["error"]);
+
+  for (const [body, pattern] of [
+    [
+      `{"version":"v2","proof":${JSON.stringify(examples.transfer.response.proof)},"unexpected":true}`,
+      /unknown JSON field/
+    ],
+    [
+      `{"version":"v2","version":"v2","proof":${JSON.stringify(examples.transfer.response.proof)}}`,
+      /duplicate JSON object key/
+    ],
+    [
+      `${JSON.stringify(examples.transfer.response)} {}`,
+      /multiple JSON values are not allowed/
+    ]
+  ]) {
+    const strictAdapter = createHttpProverAdapter({
+      baseURL: "http://127.0.0.1",
+      fetchImpl: async () => new Response(body, { status: 200 })
+    });
+    await assert.rejects(
+      () => strictAdapter.proveTransfer(examples.transfer.request),
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED && pattern.test(error.message)
+    );
+  }
 });
