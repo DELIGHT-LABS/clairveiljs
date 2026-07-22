@@ -533,16 +533,18 @@ test("local Clairveil node endpoints respond", {
   const client = createClient(config);
 
   try {
-    const [events, treeState, auditConfig, reserve] = await Promise.all([
+    const [events, treeState, auditConfig, disclosureConfig, reserve] = await Promise.all([
       client.fetchPrivacyEvents({ limit: 1 }),
       client.fetchTreeState(),
-      client.fetchAuditConfig(),
-      client.fetchReserve(config.denom)
+      client.queryAuditConfig(),
+      client.queryDisclosureConfig(),
+      client.queryReserve(config.denom)
     ]);
 
     assert.ok(Array.isArray(events.events), "privacy events response should include events");
     assert.equal(typeof treeState, "object", "tree state should be an object");
     assert.equal(typeof auditConfig, "object", "audit config should be an object");
+    assert.equal(disclosureConfig.audit_disclosure_required, true, "disclosure config should require audit disclosure");
     assert.equal(reserve.denom, config.denom, "reserve response should echo denom");
   } finally {
     await client.disconnect();
@@ -579,6 +581,7 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
     assert.match(material.shieldedAddress, new RegExp(`^${config.shieldedPrefix}1`));
 
     await prepareDepositAndBroadcast(client, wallet, material, config.depositAmount, config, depositProofProvider);
+    assert.equal((await client.queryReserve(config.denom)).invariant_holds, true, "reserve invariant should hold after deposit");
 
     const depositScan = await scanWallet(client, wallet, material, config);
     assert.ok(
@@ -632,6 +635,7 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
     assert.equal(withdraw.status, "ready", withdraw.plan?.message || "withdraw should be ready");
 
     await broadcastPrepared(client, wallet, withdraw, "withdraw", config, { relayWithdraw: true });
+    assert.equal((await client.queryReserve(config.denom)).invariant_holds, true, "reserve invariant should hold after withdraw");
   } finally {
     await client.disconnect();
   }
