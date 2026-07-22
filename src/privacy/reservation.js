@@ -542,6 +542,7 @@ function normalizeReservation(input = {}) {
     height: normalizedUint64Value(input.height ?? 0, "reservation height"),
     sequence: normalizedUint64Value(input.sequence ?? 0, "reservation sequence"),
     payload_hash: String(input.payload_hash || input.payloadHash || ""),
+    expected_operation_evidence_hash: String(input.expected_operation_evidence_hash || input.expectedOperationEvidenceHash || ""),
     expected_output_commitment: String(input.expected_output_commitment || input.expectedOutputCommitment || ""),
     expected_disclosure_digest: String(input.expected_disclosure_digest || input.expectedDisclosureDigest || ""),
     expected_recipient_hash: String(input.expected_recipient_hash || input.expectedRecipientHash || ""),
@@ -607,6 +608,7 @@ function assertInitialReservationRecord(reservation, { allowManagedClaimTokenHas
     reservation.lease_until ||
     reservation.last_heartbeat_at ||
     reservation.payload_hash ||
+    reservation.expected_operation_evidence_hash ||
     reservation.expected_output_commitment ||
     reservation.expected_disclosure_digest ||
     reservation.expected_recipient_hash ||
@@ -836,6 +838,7 @@ const normalizedWriteOnceIdentityFields = new Set([
 ]);
 
 const operationSuccessPredicateFields = [
+  ["expected_operation_evidence_hash", "expectedOperationEvidenceHash"],
   ["expected_output_commitment", "expectedOutputCommitment"],
   ["expected_disclosure_digest", "expectedDisclosureDigest"],
   ["expected_recipient_hash", "expectedRecipientHash"],
@@ -1931,6 +1934,10 @@ function operationSuccessEvidence(input = {}) {
     "outputCommitment", "output_commitment", "outputCommitmentHex",
     "output_commitment_hex", "commitmentHex", "commitment_hex"
   ];
+  const operationEvidenceHashKeys = [
+    "operationEvidenceHash", "operation_evidence_hash",
+    "expectedOperationEvidenceHash", "expected_operation_evidence_hash"
+  ];
   const disclosureDigestKeys = [
     "expectedDisclosureDigest", "expected_disclosure_digest",
     "auditDisclosureDigest", "audit_disclosure_digest",
@@ -1958,6 +1965,7 @@ function operationSuccessEvidence(input = {}) {
   ];
   const aliasErrors = [];
   for (const [field, keys, options] of [
+    ["expected_operation_evidence_hash", operationEvidenceHashKeys, { caseInsensitive: true }],
     ["expected_output_commitment", outputCommitmentKeys, { caseInsensitive: true }],
     ["expected_disclosure_digest", disclosureDigestKeys, { caseInsensitive: true }],
     ["expected_recipient_hash", recipientHashKeys, { caseInsensitive: true }],
@@ -1981,6 +1989,7 @@ function operationSuccessEvidence(input = {}) {
     signDocHashes,
     txResult,
     txResults,
+    operationEvidenceHash: aliasValue(operationEvidenceHashKeys),
     outputCommitment: aliasValue(outputCommitmentKeys),
     disclosureDigest: aliasValue(disclosureDigestKeys),
     recipientHash: aliasValue(recipientHashKeys),
@@ -2000,6 +2009,7 @@ function operationSuccessEvidence(input = {}) {
 function expectedOperationSuccessEvidence(reservation = {}) {
   const batchItemIndex = normalizedBatchItemIndex(reservation.batch_item_index);
   return {
+    operationEvidenceHash: String(reservation.expected_operation_evidence_hash || ""),
     outputCommitment: String(reservation.expected_output_commitment || ""),
     disclosureDigest: String(reservation.expected_disclosure_digest || ""),
     recipientHash: String(reservation.expected_recipient_hash || ""),
@@ -2160,20 +2170,24 @@ function evaluateOperationSuccessEvidence(reservation = {}, actualInput = {}) {
       errors.push(`${field} mismatch`);
     }
   };
-  check("expected_output_commitment", expected.outputCommitment, actual.outputCommitment, { caseInsensitive: true });
-  check("expected_disclosure_digest", expected.disclosureDigest, actual.disclosureDigest, { caseInsensitive: true });
-  check("expected_recipient_hash", expected.recipientHash, actual.recipientHash, { caseInsensitive: true });
-  if (expected.amount) check("expected_amount", expected.amount, actual.amount);
-  check("expected_amount_hash", expected.amountHash, actual.amountHash, { caseInsensitive: true });
-  check("expected_denom", expected.denom, actual.denom);
-  if (expected.batchItemIndexKnown && !actual.batchItemIndexProvided) {
-    errors.push("batch_item_index missing");
-  } else if (expected.batchItemIndexKnown && !actual.batchItemIndexValid) {
-    errors.push("batch_item_index invalid");
-  } else if (expected.batchItemIndexKnown && !actual.batchItemIndexKnown) {
-    errors.push("batch_item_index missing");
-  } else if (expected.batchItemIndexKnown && expected.batchItemIndex !== actual.batchItemIndex) {
-    errors.push("batch_item_index mismatch");
+  if (expected.operationEvidenceHash) {
+    check("expected_operation_evidence_hash", expected.operationEvidenceHash, actual.operationEvidenceHash, { caseInsensitive: true });
+  } else {
+    check("expected_output_commitment", expected.outputCommitment, actual.outputCommitment, { caseInsensitive: true });
+    check("expected_disclosure_digest", expected.disclosureDigest, actual.disclosureDigest, { caseInsensitive: true });
+    check("expected_recipient_hash", expected.recipientHash, actual.recipientHash, { caseInsensitive: true });
+    if (expected.amount) check("expected_amount", expected.amount, actual.amount);
+    check("expected_amount_hash", expected.amountHash, actual.amountHash, { caseInsensitive: true });
+    check("expected_denom", expected.denom, actual.denom);
+    if (expected.batchItemIndexKnown && !actual.batchItemIndexProvided) {
+      errors.push("batch_item_index missing");
+    } else if (expected.batchItemIndexKnown && !actual.batchItemIndexValid) {
+      errors.push("batch_item_index invalid");
+    } else if (expected.batchItemIndexKnown && !actual.batchItemIndexKnown) {
+      errors.push("batch_item_index missing");
+    } else if (expected.batchItemIndexKnown && expected.batchItemIndex !== actual.batchItemIndex) {
+      errors.push("batch_item_index mismatch");
+    }
   }
   return {
     evaluated: true,
@@ -2233,6 +2247,7 @@ function proofReadyTransitionPatch(metadata = {}) {
   return {
     lease_token: metadata.leaseToken || metadata.lease_token || "",
     payload_hash: metadata.payloadHash || metadata.payload_hash || "",
+    expected_operation_evidence_hash: evidence.operationEvidenceHash,
     sign_doc_hash: metadata.signDocHash || metadata.sign_doc_hash || "",
     tx_bytes_hash: metadata.txBytesHash || metadata.tx_bytes_hash || "",
     expected_output_commitment: evidence.outputCommitment,

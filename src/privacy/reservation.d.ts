@@ -61,6 +61,7 @@ export interface NoteReservationRecord {
   height: number | string;
   sequence: number | string;
   payload_hash: string;
+  expected_operation_evidence_hash: string;
   expected_output_commitment: string;
   expected_disclosure_digest: string;
   expected_recipient_hash: string;
@@ -105,6 +106,7 @@ export type InitialNoteReservationRecord = Omit<Partial<NoteReservationRecord>,
   | "lease_until"
   | "last_heartbeat_at"
   | "payload_hash"
+  | "expected_operation_evidence_hash"
   | "expected_output_commitment"
   | "expected_disclosure_digest"
   | "expected_recipient_hash"
@@ -127,6 +129,8 @@ export type InitialNoteReservationRecord = Omit<Partial<NoteReservationRecord>,
   last_heartbeat_at?: never;
   payload_hash?: never;
   payloadHash?: never;
+  expected_operation_evidence_hash?: never;
+  expectedOperationEvidenceHash?: never;
   expected_output_commitment?: never;
   expectedOutputCommitment?: never;
   expected_disclosure_digest?: never;
@@ -363,6 +367,10 @@ export interface ReservationProvingMetadata {
 export interface ReservationOperationSuccessEvidenceMetadata {
   operationSuccessEvidenceRequired?: boolean;
   operation_success_evidence_required?: boolean;
+  operationEvidenceHash?: string;
+  operation_evidence_hash?: string;
+  expectedOperationEvidenceHash?: string;
+  expected_operation_evidence_hash?: string;
   txHash?: string;
   tx_hash?: string;
   txhash?: string;

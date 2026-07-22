@@ -346,6 +346,9 @@ export interface OneProofPayrollOperationEvidence {
   proof_hash?: Hex;
 }
 
+/** SHA-256 binding for the full persisted payroll success predicate. */
+export type OneProofPayrollOperationEvidenceHash = Hex;
+
 export interface ProvenOneProofPayrollOperation {
   version: typeof oneProofPayrollExecutionVersion;
   operation: OneProofPayrollOperationPlan;
@@ -426,6 +429,17 @@ export interface ObservedPayrollOutputEvidence {
   denom?: string;
 }
 
+export interface OneProofPayrollReconciliationTxEvidence {
+  tx_hash?: string;
+  txHash?: string;
+  tx_bytes_hash?: string;
+  txBytesHash?: string;
+  sign_doc_hash?: string;
+  signDocHash?: string;
+  tx_result?: object;
+  txResult?: object;
+}
+
 export interface ReconciledPayrollItemEvidence {
   item_id: string;
   batch_item_index: number;
@@ -462,6 +476,7 @@ export function reserveOneProofPayrollOperation(reservationManager: NoteReservat
 export function prepareOneProofPayrollReservation(reservationManager: NoteReservationManager, prepared: PreparedOneProofPayrollOperation, options?: { metadata?: ReservationMetadata }): Promise<OneProofPayrollReservationBatch>;
 export function proveOneProofPayrollOperation(payload: PreparedBatchTransferPayload, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options?: { nowUnix?: number }): Promise<PreparedBatchTransferProof & { proof_bytes: Uint8Array }>;
 export function buildOneProofPayrollOperationEvidence(prepared: PreparedOneProofPayrollOperation, options?: { proof?: PreparedBatchTransferProof; nowUnix?: number }): OneProofPayrollOperationEvidence;
+export function oneProofPayrollOperationEvidenceHash(evidence: OneProofPayrollOperationEvidence): OneProofPayrollOperationEvidenceHash;
 export function validateOneProofPayrollOperationEvidence(evidence: OneProofPayrollOperationEvidence, prepared: PreparedOneProofPayrollOperation, options?: { nowUnix?: number }): true;
 export function provePreparedOneProofPayrollOperation(prepared: PreparedOneProofPayrollOperation, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options: {
   creator?: string;
@@ -490,7 +505,7 @@ export function reconcileOneProofPayrollOperationEvidence(input: {
   observed_outputs?: readonly ObservedPayrollOutputEvidence[];
   observedOutputs?: readonly ObservedPayrollOutputEvidence[];
 }): Promise<ReconciledOneProofPayrollOperationEvidence>;
-export function reconcileOneProofPayrollReservation(input: {
+export function reconcileOneProofPayrollReservation(input: OneProofPayrollReconciliationTxEvidence & {
   reservation_manager?: NoteReservationManager;
   reservationManager?: NoteReservationManager;
   reservation_batch?: OneProofPayrollReservationBatch;

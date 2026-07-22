@@ -1017,10 +1017,13 @@ export async function markOneProofPayrollReservationProofReady(reservationManage
   const { prepared } = preparedFromPayrollExecution(execution);
   const reservationSet = await payrollReservationSet(reservationManager, prepared, reservationBatch);
   const evidence = execution.operation_evidence;
+  const operationEvidenceHash = oneProofPayrollOperationEvidenceHash(evidence);
   if (reservationStatusesAre(reservationSet.reservations, "ProofReady")) {
     if (reservationSet.reservations.some(reservation =>
       text(reservation.payload_hash) !== evidence.payload_hash ||
-      text(reservation.metadata?.payroll_proof_hash) !== text(evidence.proof_hash)
+      text(reservation.metadata?.payroll_proof_hash) !== text(evidence.proof_hash) ||
+      text(reservation.expected_operation_evidence_hash) !== operationEvidenceHash ||
+      reservation.metadata?.operation_success_evidence_required !== true
     )) {
       throw new Error("one-proof payroll ProofReady reservation evidence does not match the execution");
     }
@@ -1032,6 +1035,8 @@ export async function markOneProofPayrollReservationProofReady(reservationManage
   return Object.freeze(await reservationManager.markProofReady(reservationSet.reservationIDs, {
     leaseToken: reservationBatch.lease_token,
     payloadHash: evidence.payload_hash,
+    expectedOperationEvidenceHash: operationEvidenceHash,
+    operationSuccessEvidenceRequired: true,
     metadata: payrollReservationMetadata(evidence, metadata)
   }));
 }
@@ -1182,6 +1187,78 @@ export function buildOneProofPayrollOperationEvidence(prepared, { proof, nowUnix
     } : {})
   };
   return Object.freeze(evidence);
+}
+
+/**
+ * Stable digest for the complete one-proof payroll success predicate. It pins
+ * every expected payment output to the exact signed payload so all input-note
+ * reservations can share one operation-level reconciliation predicate.
+ */
+export function oneProofPayrollOperationEvidenceHash(evidence) {
+  if (!evidence || typeof evidence !== "object" || evidence.version !== oneProofPayrollOperationEvidenceVersion) {
+    throw new Error("one-proof payroll operation evidence is required for its reconciliation hash");
+  }
+  const operationID = text(evidence.operation_id);
+  if (!operationID || evidence.circuit_set_id !== oneProofPayrollCircuitSetId) {
+    throw new Error("one-proof payroll operation evidence identity is invalid for its reconciliation hash");
+  }
+  const inputNullifiers = evidence.input_nullifier_hexes;
+  const expected = evidence.expected_evidence;
+  if (!Array.isArray(inputNullifiers) || !inputNullifiers.length || !Array.isArray(expected) || !expected.length) {
+    throw new Error("one-proof payroll operation evidence inputs and outputs are required for its reconciliation hash");
+  }
+  if ((evidence.proof_payload_hash === undefined) !== (evidence.proof_hash === undefined)) {
+    throw new Error("one-proof payroll operation evidence proof hash pair is incomplete");
+  }
+  const canonical = {
+    version: oneProofPayrollOperationEvidenceVersion,
+    operation_id: operationID,
+    circuit_set_id: oneProofPayrollCircuitSetId,
+    payload_hash: canonicalDigest(evidence.payload_hash, "one-proof payroll evidence payload hash"),
+    input_nullifier_hexes: inputNullifiers.map(value => canonicalDigest(value, "one-proof payroll evidence nullifier")),
+    expected_evidence: expected.map((item, index) => {
+      if (!item || typeof item !== "object") throw new Error(`one-proof payroll expected evidence ${index} is invalid`);
+      const batchItemIndex = Number(item.batch_item_index);
+      if (!Number.isSafeInteger(batchItemIndex) || batchItemIndex < 0) {
+        throw new Error(`one-proof payroll expected evidence ${index} batch item index is invalid`);
+      }
+      return {
+        operation_id: text(item.operation_id),
+        item_id: text(item.item_id),
+        employee_id: text(item.employee_id),
+        batch_item_index: batchItemIndex,
+        role: text(item.role),
+        expected_output_commitment: canonicalDigest(item.expected_output_commitment, `one-proof payroll expected evidence ${index} commitment`),
+        expected_user_disclosure_digest: canonicalDigest(item.expected_user_disclosure_digest, `one-proof payroll expected evidence ${index} user disclosure digest`),
+        expected_audit_disclosure_digest: canonicalDigest(item.expected_audit_disclosure_digest, `one-proof payroll expected evidence ${index} audit disclosure digest`),
+        expected_self_view_disclosure_digest: canonicalDigest(item.expected_self_view_disclosure_digest, `one-proof payroll expected evidence ${index} self-view disclosure digest`),
+        expected_recipient_hash: canonicalDigest(item.expected_recipient_hash, `one-proof payroll expected evidence ${index} recipient hash`),
+        expected_amount_hash: canonicalDigest(item.expected_amount_hash, `one-proof payroll expected evidence ${index} amount hash`),
+        expected_denom: text(item.expected_denom),
+        asset_id_hex: canonicalDigest(item.asset_id_hex, `one-proof payroll expected evidence ${index} asset ID`),
+        user_privacy_policy: Number(item.user_privacy_policy),
+        user_disclosure_mode: Number(item.user_disclosure_mode),
+        audit_key_id: text(item.audit_key_id),
+        audit_key_epoch: Number(item.audit_key_epoch)
+      };
+    }),
+    ...(evidence.proof_payload_hash === undefined ? {} : {
+      proof_payload_hash: canonicalDigest(evidence.proof_payload_hash, "one-proof payroll evidence proof payload hash"),
+      proof_hash: canonicalDigest(evidence.proof_hash, "one-proof payroll evidence proof hash")
+    })
+  };
+  const expectedIndexes = new Set(canonical.expected_evidence.map(item => item.batch_item_index));
+  if (!canonical.payload_hash || expectedIndexes.size !== canonical.expected_evidence.length || canonical.expected_evidence.some(item =>
+    item.operation_id !== operationID || !item.item_id || item.role !== "payment" ||
+    !item.expected_output_commitment || !item.expected_audit_disclosure_digest ||
+    !item.expected_recipient_hash || !item.expected_amount_hash || !item.expected_denom ||
+    !item.asset_id_hex || !Number.isSafeInteger(item.user_privacy_policy) ||
+    !Number.isSafeInteger(item.user_disclosure_mode) || !item.audit_key_id ||
+    !Number.isSafeInteger(item.audit_key_epoch) || item.audit_key_epoch < 0
+  )) {
+    throw new Error("one-proof payroll operation evidence is incomplete for its reconciliation hash");
+  }
+  return sha256Hex(utf8Bytes(JSON.stringify(canonical)));
 }
 
 /** Validate an operation evidence artifact against the exact prepared payload. */
@@ -1418,6 +1495,43 @@ async function markPayrollReservationsManualReview(reservationManager, reservati
   return { action: "ManualReview", reservations };
 }
 
+function payrollReconciliationSuccessEvidence(operationEvidence, {
+  tx_hash,
+  txHash,
+  tx_bytes_hash,
+  txBytesHash,
+  sign_doc_hash,
+  signDocHash,
+  tx_result,
+  txResult
+} = {}) {
+  if (tx_result !== undefined && txResult !== undefined && JSON.stringify(tx_result) !== JSON.stringify(txResult)) {
+    throw new Error("one-proof payroll reconciliation tx result aliases must match");
+  }
+  const identity = payrollBroadcastIdentity({ tx_hash, txHash, tx_bytes_hash, txBytesHash, sign_doc_hash, signDocHash });
+  return {
+    ...identity,
+    ...(tx_result ?? txResult ? { txResult: tx_result ?? txResult } : {}),
+    operationEvidenceHash: oneProofPayrollOperationEvidenceHash(operationEvidence)
+  };
+}
+
+function manualReviewFromPersistedPayrollConflict(reconciliation, reservations) {
+  const errors = [...new Set(reservations.flatMap(reservation =>
+    Array.isArray(reservation.metadata?.operation_success_evidence_errors)
+      ? reservation.metadata.operation_success_evidence_errors
+      : []
+  ))];
+  const reason = errors.length
+    ? `persisted payroll operation evidence conflict: ${errors.join(", ")}`
+    : "persisted payroll operation evidence did not confirm the one-proof payroll operation";
+  return Object.freeze({
+    ...reconciliation,
+    status: "ManualReview",
+    items: reconciliation.items.map(item => ({ ...item, status: "ManualReview", reason }))
+  });
+}
+
 /**
  * Reconcile chain evidence and transition the exact payroll reservation set.
  * Successful inputs are confirmed spent only after typed output evidence matches;
@@ -1438,7 +1552,15 @@ export async function reconcileOneProofPayrollReservation({
   tx_failed,
   txFailed,
   observed_outputs,
-  observedOutputs
+  observedOutputs,
+  tx_hash,
+  txHash,
+  tx_bytes_hash,
+  txBytesHash,
+  sign_doc_hash,
+  signDocHash,
+  tx_result,
+  txResult
 } = {}) {
   const manager = reservation_manager ?? reservationManager;
   const batch = reservation_batch ?? reservationBatch;
@@ -1466,28 +1588,31 @@ export async function reconcileOneProofPayrollReservation({
     });
   }
   if (reconciliation.status === "Succeeded") {
-    if (reservationStatusesAre(reservationSet.reservations, "ConfirmedSpent")) {
-      return Object.freeze({
-        reconciliation,
-        reservation_action: "ConfirmedSpent",
-        reservations: Object.freeze([...reservationSet.reservations])
-      });
-    }
-    if (!reservationStatusesAre(reservationSet.reservations, "Submitted", "Unknown")) {
+    if (!reservationStatusesAre(reservationSet.reservations, "Submitted", "Unknown", "ConfirmedSpent")) {
       const manual = await markPayrollReservationsManualReview(manager, reservationSet, batch, evidence, reconciliation);
       return Object.freeze({ reconciliation, reservation_action: manual.action, reservations: Object.freeze([...manual.reservations]) });
     }
+    const operationSuccessEvidence = payrollReconciliationSuccessEvidence(evidence, {
+      tx_hash, txHash, tx_bytes_hash, txBytesHash, sign_doc_hash, signDocHash, tx_result, txResult
+    });
     const spentInputs = reservationPlanForOneProofPayrollOperation(reservationSet.normalized.operation)
-      .selection.inputs.map(input => ({ ...input, spent: true }));
+      .selection.inputs.map(input => ({ ...input, spent: true, operationSuccessEvidence }));
     const reconciled = await manager.reconcileSpentNotes(spentInputs);
     const confirmed = await payrollReservationSet(manager, prepared, batch);
-    if (!reservationStatusesAre(confirmed.reservations, "ConfirmedSpent")) {
-      throw new Error("one-proof payroll spent reconciliation did not confirm the exact reservation set");
+    if (reservationStatusesAre(confirmed.reservations, "ConfirmedSpent") && confirmed.reservations.every(reservation =>
+      reservation.metadata?.operation_status === "Succeeded" &&
+      reservation.metadata?.operation_success_evidence_matches === true
+    )) {
+      return Object.freeze({
+        reconciliation,
+        reservation_action: "ConfirmedSpent",
+        reservations: Object.freeze(reconciled.length ? [...reconciled] : [...confirmed.reservations])
+      });
     }
     return Object.freeze({
-      reconciliation,
-      reservation_action: "ConfirmedSpent",
-      reservations: Object.freeze(reconciled.length ? [...reconciled] : [...confirmed.reservations])
+      reconciliation: manualReviewFromPersistedPayrollConflict(reconciliation, confirmed.reservations),
+      reservation_action: "ManualReviewRequired",
+      reservations: Object.freeze([...confirmed.reservations])
     });
   }
   if (reconciliation.status === "Failed" && reservationStatusesAre(reservationSet.reservations, "ReplanRequired")) {

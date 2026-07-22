@@ -53,6 +53,7 @@ import {
   analyzeNotePreparation,
   buildOneProofPayrollOperationEvidence,
   createOneProofPayrollBatchSignDoc,
+  oneProofPayrollOperationEvidenceHash,
   markOneProofPayrollReservationBroadcastAttempting,
   markOneProofPayrollReservationSubmitted,
   createDisclosureKeyRegistry,
@@ -141,6 +142,7 @@ const preparedPayrollOperation: Promise<PreparedOneProofPayrollOperation> = prep
 async function provePayrollOperationTypes(): Promise<void> {
   const prepared = await preparedPayrollOperation;
   const operationEvidence: OneProofPayrollOperationEvidence = buildOneProofPayrollOperationEvidence(prepared);
+  const operationEvidenceHash: string = oneProofPayrollOperationEvidenceHash(operationEvidence);
   const proven: ProvenOneProofPayrollOperation = await provePreparedOneProofPayrollOperation(prepared, {
     proveBatchTransfer: async payload => ({
       version: "batch-transfer-proof-v1",
@@ -181,6 +183,7 @@ async function provePayrollOperationTypes(): Promise<void> {
   await markOneProofPayrollReservationSubmitted(reservationManager, reservationBatch, proven, {
     signDocHash: "sign-doc-only"
   });
+  void operationEvidenceHash;
 }
 void provePayrollOperationTypes;
 const material = derivePrivacyMaterial({

@@ -13,6 +13,7 @@ import {
   normalizePayrollDisclosurePolicy,
   normalizePayrollInput,
   oneProofPayrollCircuitSetId,
+  oneProofPayrollOperationEvidenceHash,
   planOneProofPayroll,
   prepareOneProofPayrollReservation,
   prepareOneProofPayrollOperation,
@@ -199,8 +200,20 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   assert.equal(execution.operation_evidence.payload_hash, prepared.payload.payload_hash);
   assert.match(execution.operation_evidence.proof_hash, /^[0-9a-f]{64}$/);
   assert.doesNotThrow(() => validateOneProofPayrollOperationEvidence(execution.operation_evidence, prepared));
+  assert.notEqual(
+    oneProofPayrollOperationEvidenceHash(execution.operation_evidence),
+    oneProofPayrollOperationEvidenceHash({
+      ...execution.operation_evidence,
+      expected_evidence: execution.operation_evidence.expected_evidence.map(item => ({
+        ...item,
+        expected_amount_hash: "00".repeat(32)
+      }))
+    })
+  );
   const proofReadyReservations = await markOneProofPayrollReservationProofReady(reservationManager, reservation, execution);
   assert.equal(proofReadyReservations[0].status, "ProofReady");
+  assert.equal(proofReadyReservations[0].metadata.operation_success_evidence_required, true);
+  assert.equal(proofReadyReservations[0].expected_operation_evidence_hash, oneProofPayrollOperationEvidenceHash(execution.operation_evidence));
   await assert.rejects(
     () => markOneProofPayrollReservationSubmitted(reservationManager, reservation, execution, { txHash: "PAYROLL-SUCCESS" }),
     /durable payload-bound broadcast attempt/
@@ -252,6 +265,7 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     prepared,
     operationEvidence: execution.operation_evidence,
     txSucceeded: true,
+    txHash: "PAYROLL-SUCCESS",
     observedOutputs: observed,
     checkNullifiers: async values => new Map(values.map(value => [value, true]))
   });
@@ -263,6 +277,7 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     prepared,
     operationEvidence: execution.operation_evidence,
     txSucceeded: true,
+    txHash: "PAYROLL-SUCCESS",
     observedOutputs: observed,
     checkNullifiers: async values => new Map(values.map(value => [value, true]))
   })).reservation_action, "ConfirmedSpent");
@@ -287,6 +302,21 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   });
   assert.equal(failedReconciliation.reservation_action, "ReplanRequired");
   assert.equal(failedReconciliation.reservations[0].status, "ReplanRequired");
+  const conflictingReservation = await submittedReservationFor("PAYROLL-CONFLICT");
+  const conflictingReconciliation = await reconcileOneProofPayrollReservation({
+    reservationManager: conflictingReservation.manager,
+    reservationBatch: conflictingReservation.batch,
+    prepared,
+    operationEvidence: execution.operation_evidence,
+    txSucceeded: true,
+    txHash: "PAYROLL-OTHER",
+    observedOutputs: observed,
+    checkNullifiers: async values => new Map(values.map(value => [value, true]))
+  });
+  assert.equal(conflictingReconciliation.reconciliation.status, "ManualReview");
+  assert.equal(conflictingReconciliation.reservation_action, "ManualReviewRequired");
+  assert.equal(conflictingReconciliation.reservations[0].status, "ConfirmedSpent");
+  assert.equal(conflictingReconciliation.reservations[0].metadata.operation_status, "ConflictSpent");
   const ambiguousReservation = await submittedReservationFor("PAYROLL-AMBIGUOUS");
   const ambiguousReconciliation = await reconcileOneProofPayrollReservation({
     reservationManager: ambiguousReservation.manager,
