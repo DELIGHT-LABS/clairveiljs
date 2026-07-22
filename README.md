@@ -119,7 +119,7 @@ npm run test:conformance:required
 
 `prepublishOnly` runs the strict conformance command.
 
-These tests verify root seed/key/address derivation, browser signer adapter behavior, note scan results, prepared transfer and withdraw payload hashes, prover HTTP contract behavior, disclosure decoding, and relay withdraw message handoff behavior against the Go-generated fixtures.
+These tests verify root seed/key/address derivation, note primitives and disclosure-blinding rules, browser signer adapter behavior, note scan results, prepared transfer and one-proof batch payload/prover contracts, withdraw payload hashes, disclosure decoding, and relay withdraw message handoff behavior against the Go-generated fixtures.
 
 Downstream packages can reuse the same fixture loading policy:
 
@@ -140,7 +140,7 @@ if (!result.skipped) {
 
 The handoff e2e item is intentionally not part of `prepublishOnly`. Running a Clairveil node and prover is the chain repository's responsibility; this package only proves that the published SDK surface can attach to those services and execute the full wallet flow.
 
-Current local e2e scope is deposit, wallet note scan, shielded transfer, disclosure decode, direct withdraw, and an opt-in one-proof payroll batch. Relay withdraw payload/signDoc construction is covered by SDK tests and Go conformance fixtures; full relayer service e2e depends on the product's relayer transport and deployment.
+Current local e2e scope is deposit, wallet note scan, shielded transfer, disclosure decode, direct withdraw, and an opt-in one-proof payroll batch with its reservation lifecycle. Relay withdraw payload/signDoc construction is covered by SDK tests and Go conformance fixtures; full relayer service e2e depends on the product's relayer transport and deployment.
 
 Run the optional smoke/e2e command with a local Clairveil node:
 
@@ -168,7 +168,7 @@ The full flow performs:
 - public user disclosure decode
 - direct withdraw
 
-To run the actual one-proof batch contract as well, opt in separately. It creates a deposit input, obtains a verified same-root Merkle snapshot, prepares and proves one `MsgBatchTransfer`, broadcasts it, then reconciles the result against the typed `privacy_scan` output and input nullifier state.
+To run the actual one-proof batch contract as well, opt in separately. It creates a deposit input, obtains a verified same-root Merkle snapshot, reserves/claims the input, prepares and proves one `MsgBatchTransfer`, records the broadcast attempt, and reconciles typed `privacy_scan` output plus nullifier evidence into `ConfirmedSpent`.
 
 ```bash
 CLAIRVEIL_E2E_LOCAL=1 \
@@ -180,6 +180,8 @@ npm run test:e2e:local
 ```
 
 `CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT` and `CLAIRVEIL_E2E_ONE_PROOF_PAYROLL_AMOUNT` override the one-proof input/payment. The recipient is intentionally the E2E wallet so the test can independently decrypt and validate typed output evidence. The default snapshot height is the fresh input deposit's output height; if concurrent activity advances the tree, set the exact pair `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX` and `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT` from that node's verified snapshot.
+
+`planOneProofPayroll(input, notes, { outputMode: "exact-32" })` is available when an operation must explicitly fill all 32 batch output slots. It preserves payment/change ordering and appends zero-value `padding` notes; the strict Go fixture conformance suite creates and serializes all five representative 1/1, 3/4, 16/32 (31+change), exact-32, and explicit-padding shapes.
 
 It uses these defaults, all overrideable through environment variables:
 

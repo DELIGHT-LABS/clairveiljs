@@ -18,11 +18,17 @@ import {
 import {
   planOneProofPayroll,
   prepareOneProofPayrollOperation,
+  prepareOneProofPayrollReservation,
   provePreparedOneProofPayrollOperation,
   createOneProofPayrollBatchSignDoc,
-  reconcileOneProofPayrollOperationEvidence
+  markOneProofPayrollReservationProofReady,
+  markOneProofPayrollReservationBroadcastAttempting,
+  markOneProofPayrollReservationSubmitted,
+  reconcileOneProofPayrollReservation
 } from "clairveiljs/reference-payroll";
 import {
+  MemoryReservationStore,
+  createNoteReservationManager,
   hashAmount,
   hashRecipient
 } from "clairveiljs/reservation";
@@ -584,11 +590,27 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
         signBatchTransfer: request => noteHashSigner.signNoteHash(request.expected_intent)
       }
     });
+    const reservationManager = createNoteReservationManager({
+      store: new MemoryReservationStore(),
+      ownerKeyId: material.address,
+      indexKey: material.rootSeed
+    });
+    const reservationBatch = await prepareOneProofPayrollReservation(reservationManager, prepared, {
+      metadata: { e2e: "one-proof-payroll" }
+    });
+    assert.equal(reservationBatch.reservations.length, 1);
+    assert.equal(reservationBatch.reservations[0].status, "Proving");
     const execution = await provePreparedOneProofPayrollOperation(prepared, proverAdapter, {
       creator: material.address,
       checkNullifiers: values => client.checkNullifiers(values),
       nowUnix: latest.timeUnix
     });
+    const proofReadyReservations = await markOneProofPayrollReservationProofReady(
+      reservationManager,
+      reservationBatch,
+      execution
+    );
+    assert.equal(proofReadyReservations[0].status, "ProofReady");
     const signDoc = await createOneProofPayrollBatchSignDoc(execution, {
       cosmosClient: client,
       signer: material.address,
@@ -596,12 +618,26 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       gasLimit: config.oneProofBatchGasLimit,
       nowUnix: latest.timeUnix
     });
+    const broadcastingReservations = await markOneProofPayrollReservationBroadcastAttempting(
+      reservationManager,
+      reservationBatch,
+      execution,
+      { metadata: { e2e: "one-proof-payroll" } }
+    );
+    assert.equal(broadcastingReservations[0].broadcast_in_flight, true);
     const result = await client.signDirectAndBroadcast({
       wallet,
       signDoc: signDoc.sign_doc,
       waitOptions: config.waitOptions
     });
     const batchTxHash = assertBroadcastOk(result, "one-proof payroll batch");
+    const submittedReservations = await markOneProofPayrollReservationSubmitted(
+      reservationManager,
+      reservationBatch,
+      execution,
+      { txHash: batchTxHash }
+    );
+    assert.equal(submittedReservations[0].status, "Submitted");
     const expected = execution.operation_evidence.expected_evidence[0];
     const typed = await typedBatchOutputForTransaction(
       client,
@@ -617,7 +653,9 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       x: typed.found.note.receiverViewPubKeyX,
       y: typed.found.note.receiverViewPubKeyY
     }, { prefix: config.shieldedPrefix });
-    const reconciliation = await reconcileOneProofPayrollOperationEvidence({
+    const reconciliation = await reconcileOneProofPayrollReservation({
+      reservationManager,
+      reservationBatch,
       prepared,
       operation_evidence: execution.operation_evidence,
       checkNullifiers: values => client.checkNullifiers(values),
@@ -634,8 +672,10 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
         denom: config.denom
       }]
     });
-    assert.equal(reconciliation.status, "Succeeded");
-    assert.equal(reconciliation.items[0].status, "Succeeded");
+    assert.equal(reconciliation.reconciliation.status, "Succeeded");
+    assert.equal(reconciliation.reconciliation.items[0].status, "Succeeded");
+    assert.equal(reconciliation.reservation_action, "ConfirmedSpent");
+    assert.equal(reconciliation.reservations[0].status, "ConfirmedSpent");
   } finally {
     await client.disconnect();
   }

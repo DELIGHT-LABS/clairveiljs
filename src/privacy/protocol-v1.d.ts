@@ -62,6 +62,7 @@ export function computeBatchUserDisclosureVectorRootV1(count: number | bigint, p
 export function computeBatchUserDisclosureDigestV1(input: object): bigint;
 export function computeBatchFullDisclosureDigestV1(input: object): bigint;
 export function computeBatchTransferIntentV1(input: object): bigint;
+export function computeBatchEffectIdV1(input: object): Hex;
 export function wrapEncryptedEnvelopeV1(kind: number, ciphertext: Uint8Array | Hex): Uint8Array;
 export function unwrapEncryptedEnvelopeV1(value: Uint8Array | Hex, expectedKind?: number): Uint8Array;
 export function encryptNoteForTransferV1(note: NoteV1, outputCommitment: Uint8Array | Hex, outputIndex: number): { ciphertext: Uint8Array; viewTag: Uint8Array };

@@ -11,44 +11,125 @@ import {
   validateBatchTransferSigningRequestV1,
   validatePreparedBatchTransferPayloadEnvelope
 } from "clairveiljs/batch-transfer";
-import { computeAssetIdV1, emptyNoteTreeRootsV1, unmarshalDisclosurePlaintextV1 } from "clairveiljs/protocol-v1";
+import {
+  computeAssetIdV1,
+  computeNoteCommitmentV1,
+  computeNoteTreeNodeV1,
+  emptyNoteTreeRootsV1,
+  fieldHexV1,
+  unmarshalDisclosurePlaintextV1
+} from "clairveiljs/protocol-v1";
 import { createHttpProverAdapter } from "clairveiljs/prover";
 import { batchTransferConformanceFixtureName } from "clairveiljs/conformance";
 import { fixtureTestOptions, readFixture } from "./helpers.js";
 
-async function batchPayload({ privacyPolicy = 0, disclosureMode = 0 } = {}) {
+function batchMerklePaths(notes) {
+  const emptyRoots = emptyNoteTreeRootsV1(32);
+  const paths = notes.map(() => []);
+  const helpers = notes.map(() => []);
+  let layer = notes.map(computeNoteCommitmentV1);
+  for (let level = 0; level < 32; level += 1) {
+    for (let inputIndex = 0; inputIndex < notes.length; inputIndex += 1) {
+      const nodeIndex = inputIndex >> level;
+      const siblingIndex = nodeIndex ^ 1;
+      paths[inputIndex].push(fieldHexV1(layer[siblingIndex] ?? emptyRoots[level]));
+      helpers[inputIndex].push(nodeIndex & 1);
+    }
+    const next = [];
+    for (let index = 0; index < layer.length; index += 2) {
+      next.push(computeNoteTreeNodeV1(level, layer[index], layer[index + 1] ?? emptyRoots[level]));
+    }
+    layer = next;
+  }
+  return { paths, helpers, root: fieldHexV1(layer[0]) };
+}
+
+function disclosurePolicyForMode(mode, fallbackPolicy, fallbackMode) {
+  if (!mode) return { privacyPolicy: fallbackPolicy, disclosureMode: fallbackMode };
+  if (mode === "none") return { privacyPolicy: 0, disclosureMode: 0 };
+  if (mode === "public") return { privacyPolicy: 1, disclosureMode: 1 };
+  if (mode === "recipient-encrypted") return { privacyPolicy: 1, disclosureMode: 2 };
+  throw new Error(`unsupported fixture disclosure mode ${mode}`);
+}
+
+async function batchPayload({
+  privacyPolicy = 0,
+  disclosureMode = 0,
+  inputAmounts = [7],
+  paymentAmounts = [7],
+  disclosureModes = [],
+  outputRoles = [],
+  selfViewEnabled = true
+} = {}) {
   const ownerSpend = derivePubKeyFromScalar(17n);
   const ownerView = derivePubKeyFromScalar(19n);
-  const recipientSpend = derivePubKeyFromScalar(23n);
-  const recipientView = derivePubKeyFromScalar(29n);
   const assetID = computeAssetIdV1("uclair");
-  const inputNote = {
+  const inputs = inputAmounts.map((amount, index) => ({
     receiverSpendPubKeyX: ownerSpend.x, receiverSpendPubKeyY: ownerSpend.y,
     receiverViewPubKeyX: ownerView.x, receiverViewPubKeyY: ownerView.y,
-    amount: 7n, assetID, randomness: 11n, memo: "input"
-  };
-  const outputNote = {
-    receiverSpendPubKeyX: recipientSpend.x, receiverSpendPubKeyY: recipientSpend.y,
-    receiverViewPubKeyX: recipientView.x, receiverViewPubKeyY: recipientView.y,
-    amount: 7n, assetID, randomness: 13n, memo: "payment"
-  };
+    amount: BigInt(amount), assetID, randomness: BigInt(11 + index), memo: `input-${index}`
+  }));
+  const merkle = batchMerklePaths(inputs);
+  const inputTotal = inputs.reduce((sum, note) => sum + note.amount, 0n);
+  const paymentTotal = paymentAmounts.reduce((sum, amount) => sum + BigInt(amount), 0n);
+  if (paymentTotal > inputTotal) throw new Error("fixture batch payments exceed inputs");
+  const outputs = paymentAmounts.map((amount, index) => {
+    const recipientSpend = derivePubKeyFromScalar(BigInt(23 + index * 2));
+    const recipientView = derivePubKeyFromScalar(BigInt(29 + index * 2));
+    const { privacyPolicy: outputPolicy, disclosureMode: outputMode } = disclosurePolicyForMode(
+      disclosureModes[index], privacyPolicy, disclosureMode
+    );
+    return {
+      kind: "payment",
+      note: {
+        receiverSpendPubKeyX: recipientSpend.x, receiverSpendPubKeyY: recipientSpend.y,
+        receiverViewPubKeyX: recipientView.x, receiverViewPubKeyY: recipientView.y,
+        amount: BigInt(amount), assetID, randomness: BigInt(101 + index), memo: `payment-${index}`
+      },
+      privacyPolicy: outputPolicy,
+      disclosureMode: outputMode,
+      ...(outputMode === 2 ? { disclosureTargetPubKey: derivePubKeyFromScalar(BigInt(401 + index)) } : {}),
+      userDisclosureBlinding: outputPolicy ? BigInt(2001 + index) : 0n,
+      fullDisclosureBlinding: BigInt(1001 + index)
+    };
+  });
+  const change = inputTotal - paymentTotal;
+  if (change > 0n) {
+    const index = outputs.length;
+    outputs.push({
+      kind: "change",
+      note: {
+        receiverSpendPubKeyX: ownerSpend.x, receiverSpendPubKeyY: ownerSpend.y,
+        receiverViewPubKeyX: ownerView.x, receiverViewPubKeyY: ownerView.y,
+        amount: change, assetID, randomness: BigInt(101 + index), memo: "change"
+      },
+      privacyPolicy: 0, disclosureMode: 0, userDisclosureBlinding: 0n, fullDisclosureBlinding: BigInt(1001 + index)
+    });
+  }
+  const paddingCount = outputRoles.filter(role => role === "padding").length;
+  for (let index = 0; index < paddingCount; index += 1) {
+    const outputIndex = outputs.length;
+    outputs.push({
+      kind: "padding",
+      note: {
+        receiverSpendPubKeyX: ownerSpend.x, receiverSpendPubKeyY: ownerSpend.y,
+        receiverViewPubKeyX: ownerView.x, receiverViewPubKeyY: ownerView.y,
+        amount: 0n, assetID, randomness: BigInt(101 + outputIndex), memo: `padding-${index}`
+      },
+      privacyPolicy: 0, disclosureMode: 0, userDisclosureBlinding: 0n, fullDisclosureBlinding: BigInt(1001 + outputIndex)
+    });
+  }
   return buildPreparedBatchTransferPayload({
     creator: "clair1creator",
     chainId: "clairveil-test-1",
     expiresAtUnix: 4_102_448_400,
-    inputs: [{
-      note: inputNote,
-      merklePath: emptyNoteTreeRootsV1(32).slice(0, 32).map(value => value.toString(16).padStart(64, "0")),
-      merklePathHelper: Array(32).fill(0)
-    }],
-    outputs: [{
-      kind: "payment", note: outputNote, privacyPolicy, disclosureMode,
-      userDisclosureBlinding: privacyPolicy ? 21n : 0n, fullDisclosureBlinding: 15n
-    }],
+    root: merkle.root,
+    inputs: inputs.map((note, index) => ({ note, merklePath: merkle.paths[index], merklePathHelper: merkle.helpers[index] })),
+    outputs,
     auditKeyId: "audit-key-1",
     auditKeyEpoch: 1,
     auditDisclosureTargetPubKey: derivePubKeyFromScalar(31n),
-    selfViewDisclosureTargetPubKey: derivePubKeyFromScalar(47n),
+    ...(selfViewEnabled ? { selfViewDisclosureTargetPubKey: derivePubKeyFromScalar(47n) } : { disableSelfViewDisclosure: true }),
     signer: {
       signBatchTransfer: request => signNoteHash(request.expectedIntent, { spendScalar: 17n, spendPubKey: ownerSpend })
     }
@@ -219,17 +300,29 @@ test("one-proof batch fixture defines the batch boundary and representative E2E"
     assert.ok(vector.disclosure_modes.every(mode => ["none", "public", "recipient-encrypted"].includes(mode)), vector.id);
   }
 
-  const first = contract.cases.find(vector => vector.id === "one-input-one-payment");
-  const payload = await batchPayload();
-  const proof = {
-    version: preparedBatchTransferProofVersion,
-    request_payload_hash: payload.payload_hash,
-    proof: base64FromBytes(new Uint8Array(164).fill(7)),
-    circuit_set_id: contract.circuit_set_id
-  };
-  const message = buildMsgBatchTransferFromPrepared(payload, proof, { nowUnix: 1_700_000_000 });
-  assert.equal(message.nullifiers.length, first.input_amounts.length);
-  assert.equal(message.outputs.length, first.expected_output_roles.length);
-  assert.equal(message.outputs[0].selfViewDisclosurePayload.length, 472);
-  assert.deepEqual(JSON.parse(serializeBatchTransferProofRequest(payload)).version, contract.request_version);
+  for (const vector of contract.cases) {
+    const payload = await batchPayload({
+      inputAmounts: vector.input_amounts,
+      paymentAmounts: vector.payment_amounts,
+      disclosureModes: vector.disclosure_modes,
+      outputRoles: vector.expected_output_roles,
+      selfViewEnabled: vector.self_view_disclosure === "enabled"
+    });
+    const proof = {
+      version: preparedBatchTransferProofVersion,
+      request_payload_hash: payload.payload_hash,
+      proof: base64FromBytes(new Uint8Array(164).fill(7)),
+      circuit_set_id: contract.circuit_set_id
+    };
+    const message = buildMsgBatchTransferFromPrepared(payload, proof, { nowUnix: 1_700_000_000 });
+    assert.equal(message.nullifiers.length, vector.input_amounts.length, vector.id);
+    assert.equal(message.outputs.length, vector.expected_output_roles.length, vector.id);
+    assert.deepEqual(payload.outputs.map(output => output.kind), vector.expected_output_roles, vector.id);
+    assert.equal(
+      message.outputs.every(output => output.selfViewDisclosurePayload.length === (vector.self_view_disclosure === "enabled" ? 472 : 0)),
+      true,
+      vector.id
+    );
+    assert.equal(JSON.parse(serializeBatchTransferProofRequest(payload)).version, contract.request_version, vector.id);
+  }
 });

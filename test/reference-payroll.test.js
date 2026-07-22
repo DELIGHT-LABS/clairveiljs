@@ -118,6 +118,14 @@ test("reference payroll plans current one-proof batches without using legacy tra
   assert.equal(plan.operations[0].items[0].batch_item_index, 0);
   assert.match(plan.operations[0].operation_id, /one-proof-16x32$/);
 
+  const paddedPlan = planOneProofPayroll(input, [
+    { note_id: "treasury-20", owner_key_id: "treasury-key", nullifier_lookup_key: "n1", denom: "uclair", amount: "20" },
+    { note_id: "treasury-30", owner_key_id: "treasury-key", nullifier_lookup_key: "n2", denom: "uclair", amount: "30" }
+  ], { outputMode: "exact-32" });
+  assert.equal(paddedPlan.operations[0].output_mode, "exact-32");
+  assert.equal(paddedPlan.operations[0].padding_count, 30);
+  assert.equal(paddedPlan.operations[0].output_count, 32);
+
   const normalized = normalizePayrollInput(input);
   assert.equal(normalized.items[0].amount, 20n);
   const missingBatchID = payroll();
@@ -187,6 +195,24 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   assert.equal(prepared.expected_evidence[0].batch_item_index, 0);
   assert.equal(prepared.expected_evidence[0].expected_denom, "uclair");
   assert.deepEqual(buildExpectedPayrollEvidence(plan.operations[0], prepared.payload), prepared.expected_evidence);
+  const paddedPlan = planOneProofPayroll(input, [{
+    note_id: "treasury-7", owner_key_id: "treasury-key", nullifier_lookup_key: "lookup-7", denom: "uclair", amount: "7",
+    note: inputNote,
+    merkle_path: emptyNoteTreeRootsV1(32).slice(0, 32).map(value => value.toString(16).padStart(64, "0")),
+    merkle_path_helper: Array(32).fill(0)
+  }], { outputMode: "exact-32" });
+  const paddedPrepared = await prepareOneProofPayrollOperation({
+    operation: paddedPlan.operations[0],
+    asset_registry: { queryAssetByDenom: async () => ({ mapping_version: "privacy-asset-registry-v1", asset: { canonical_denom: "uclair", asset_id: canonicalFieldBytes(assetID) } }) },
+    circuit_config: { assertCircuitConfig: async () => circuitConfig() },
+    creator: "clair1creator", chain_id: "clairveil-test-1", expires_at_unix: 4_102_448_400,
+    audit_key_id: "audit-key-1", audit_key_epoch: 1, audit_disclosure_target_pubkey: derivePubKeyFromScalar(31n),
+    disable_self_view_disclosure: true,
+    signer: { signBatchTransfer: request => signNoteHash(request.expectedIntent, { spendScalar: 17n, spendPubKey: ownerSpend }) }
+  });
+  assert.equal(paddedPrepared.payload.outputs.length, 32);
+  assert.deepEqual(paddedPrepared.payload.outputs.map(output => output.kind), ["payment", ...Array(31).fill("padding")]);
+  assert.equal(paddedPrepared.expected_evidence.length, 1);
   const reservationManager = createNoteReservationManager({
     store: new MemoryReservationStore(), ownerKeyId: "treasury-key", indexKey: "private-index"
   });

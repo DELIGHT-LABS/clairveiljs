@@ -66,6 +66,12 @@ const maxBatchPlanSearch = 20000;
 const maxInputCandidateSearch = 4096;
 const maxInputCandidates = 64;
 
+function oneProofOutputMode(options = {}) {
+  const mode = text(options.output_mode ?? options.outputMode ?? "compact").toLowerCase();
+  if (mode === "compact" || mode === "exact-32") return mode;
+  throw new Error("one-proof payroll output mode must be compact or exact-32");
+}
+
 function text(value) {
   return String(value ?? "").trim();
 }
@@ -510,12 +516,15 @@ function planOneProofSearch(input, available, itemOffset, operationIndex, state,
   state.farthest = Math.max(state.farthest, itemOffset);
   if (state.remaining-- <= 0) return null;
   const maxPayments = Math.min(oneProofPayrollMaxOutputs, input.items.length - itemOffset);
+  const outputMode = oneProofOutputMode(options);
   for (let paymentCount = maxPayments; paymentCount >= 1; paymentCount -= 1) {
     const items = input.items.slice(itemOffset, itemOffset + paymentCount);
     const paymentTotal = items.reduce((sum, item) => sum + item.amount, 0n);
     for (const selection of selectOneProofCandidates(available, paymentTotal)) {
       const change = selection.total - paymentTotal;
       if (change > maxUint64 || (paymentCount === oneProofPayrollMaxOutputs && change !== 0n)) continue;
+      const compactOutputCount = paymentCount + (change > 0n ? 1 : 0);
+      if (compactOutputCount > oneProofPayrollMaxOutputs) continue;
       const operation = buildOneProofOperationPlan(input, items, selection, paymentTotal, change, operationIndex, options);
       const selectedIDs = new Set(selection.notes.map(note => note.note_id));
       const remainder = planOneProofSearch(input, available.filter(note => !selectedIDs.has(note.note_id)), itemOffset + paymentCount, operationIndex + 1, state, options);
@@ -554,6 +563,9 @@ function buildOneProofOperationPlan(input, items, selection, paymentTotal, chang
     retry_count: 0,
     batch_item_index: itemIndex
   }));
+  const outputMode = oneProofOutputMode(options);
+  const compactOutputCount = items.length + (change > 0n ? 1 : 0);
+  const paddingCount = outputMode === "exact-32" ? oneProofPayrollMaxOutputs - compactOutputCount : 0;
   return {
     operation_id: operationID,
     circuit_set_id: oneProofPayrollCircuitSetId,
@@ -562,8 +574,10 @@ function buildOneProofOperationPlan(input, items, selection, paymentTotal, chang
     input_total: selection.total,
     payment_total: paymentTotal,
     change,
-    output_count: items.length + (change > 0n ? 1 : 0),
-    has_change: change > 0n
+    output_count: compactOutputCount + paddingCount,
+    has_change: change > 0n,
+    output_mode: outputMode,
+    padding_count: paddingCount
   };
 }
 
@@ -730,7 +744,7 @@ export function buildExpectedPayrollEvidence(operation, payload, options = {}) {
   validatePreparedBatchTransferPayloadEnvelope(payload, options.now_unix == null && options.nowUnix == null ? {} : { nowUnix: options.now_unix ?? options.nowUnix });
   const items = operation.items;
   if (!Array.isArray(items) || items.length === 0 || !Array.isArray(payload.outputs) || !Array.isArray(payload.message_outputs)) throw new Error("payroll operation and prepared payload outputs are required");
-  const expectedOutputCount = items.length + (operation.has_change ? 1 : 0);
+  const expectedOutputCount = items.length + (operation.has_change ? 1 : 0) + Number(operation.padding_count ?? 0);
   if (payload.outputs.length !== expectedOutputCount || payload.message_outputs.length !== expectedOutputCount) throw new Error("prepared payload output shape does not match one-proof payroll operation");
   const assetIDHex = (() => {
     const decimal = String(payload.asset_id ?? "");
@@ -798,8 +812,15 @@ export async function prepareOneProofPayrollOperation(input = {}) {
   const change = inputTotal - paymentTotal;
   const plannedChange = canonicalUint64(operation.change, "one-proof payroll operation change");
   const plannedOutputCount = Number(operation.output_count);
+  const outputMode = text(operation.output_mode ?? operation.outputMode ?? "compact").toLowerCase();
+  const paddingCount = Number(operation.padding_count ?? operation.paddingCount ?? 0);
   if (!Number.isSafeInteger(plannedOutputCount) || plannedOutputCount < 1 || plannedOutputCount > oneProofPayrollMaxOutputs) throw new Error("one-proof payroll operation output count is invalid");
+  if (!["compact", "exact-32"].includes(outputMode) || !Number.isSafeInteger(paddingCount) || paddingCount < 0) throw new Error("one-proof payroll operation output mode is invalid");
   if (change < 0n || change !== plannedChange || Boolean(change > 0n) !== Boolean(operation.has_change)) throw new Error("one-proof payroll operation totals are inconsistent");
+  const compactOutputCount = operation.items.length + (change > 0n ? 1 : 0);
+  if (plannedOutputCount !== compactOutputCount + paddingCount || (outputMode === "compact" && paddingCount !== 0) || (outputMode === "exact-32" && plannedOutputCount !== oneProofPayrollMaxOutputs)) {
+    throw new Error("one-proof payroll operation output shape is inconsistent");
+  }
   const secrets = input.output_secrets ?? input.outputSecrets ?? {};
   const outputs = operation.items.map(item => {
     const secret = secretForOutput(secrets, item.item_id, item.disclosure_policy.user_privacy_policy);
@@ -818,6 +839,17 @@ export async function prepareOneProofPayrollOperation(input = {}) {
     outputs.push({
       kind: "change",
       note: changeNote(preparedInputs[0].note, change, asset.asset_id_field, secret),
+      privacyPolicy: 0,
+      disclosureMode: 0,
+      userDisclosureBlinding: 0n,
+      fullDisclosureBlinding: secret.fullDisclosureBlinding
+    });
+  }
+  for (let index = 0; index < paddingCount; index += 1) {
+    const secret = secretForOutput(secrets, `padding:${index}`, 0);
+    outputs.push({
+      kind: "padding",
+      note: changeNote(preparedInputs[0].note, 0n, asset.asset_id_field, secret),
       privacyPolicy: 0,
       disclosureMode: 0,
       userDisclosureBlinding: 0n,

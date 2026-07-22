@@ -22,6 +22,8 @@ export const defaultConformanceFixtureNames = Object.freeze([
   "privacy_prover_http_api_contract.json",
   "privacy_send_capable_reference_flow.json",
   "privacy_batch_joinsplit_v1_contract.json",
+  "privacy_note_v1_contract.json",
+  "privacy_disclosure_blinding_v1_contract.json",
   batchTransferConformanceFixtureName,
   "privacy_note_reservation_contract.json",
   "privacy_relay_withdraw_contract.json"

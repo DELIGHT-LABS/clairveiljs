@@ -8,6 +8,18 @@ export const transferV5ProofRequestVersion: "v2";
 export const transferV5ProofResponseVersion: "v2";
 export const joinSplitOwnerIntentSigningRequestV1Version: "joinsplit-owner-intent-signing-request-v1";
 
+export interface DisclosureBlindingSeparationInputV1 {
+  enabled?: boolean;
+  privacyPolicy?: number;
+  privacy_policy?: number;
+  outputRandomness?: bigint | number | string;
+  output_randomness?: bigint | number | string;
+  userDisclosureBlinding?: bigint | number | string;
+  user_disclosure_blinding?: bigint | number | string;
+  fullDisclosureBlinding?: bigint | number | string;
+  full_disclosure_blinding?: bigint | number | string;
+}
+
 export interface PreparedTransferV5Input {
   amount: string;
   randomness_hex: Hex;
@@ -105,3 +117,4 @@ export function validatePreparedTransferV5PayloadMetadata(payload: PreparedTrans
 export function validatePreparedTransferV5PayloadAt(payload: PreparedTransferV5Payload, nowUnix?: number): true;
 export function validatePreparedTransferV5Proof(payload: PreparedTransferV5Payload, proof: PreparedTransferV5Proof, options?: { nowUnix?: number }): true;
 export function buildTransferV5MsgFromPayloadAndProof(payload: PreparedTransferV5Payload, proof: PreparedTransferV5Proof, options?: { nowUnix?: number }): MsgTransfer;
+export function validateDisclosureBlindingSeparationV1(input?: DisclosureBlindingSeparationInputV1): true;

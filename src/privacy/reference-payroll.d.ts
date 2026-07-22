@@ -235,6 +235,9 @@ export interface OneProofPayrollOperationPlan {
   change: bigint;
   output_count: number;
   has_change: boolean;
+  /** compact emits only payments/change; exact-32 fills remaining output slots with zero-value padding notes. */
+  output_mode?: "compact" | "exact-32";
+  padding_count?: number;
 }
 
 export interface PayrollPlan {
@@ -485,7 +488,7 @@ export function normalizePayrollInput(input?: PayrollInput, options?: { shielded
 export function validatePayrollInput(input?: PayrollInput, options?: { shieldedPrefix?: string; prefix?: string }): true;
 export function analyzeNotePreparation(input: PayrollInput, treasuryNotes?: TreasuryNote[], policy?: { max_messages_per_tx?: number; maxMessagesPerTx?: number; shieldedPrefix?: string; prefix?: string }): NotePreparationReport;
 export function payrollBatchOperationID(input: Pick<NormalizedPayrollInput, "company_id" | "payroll_id" | "batch_id" | "attempt">, operationIndex: number): string;
-export function planOneProofPayroll(input: PayrollInput, treasuryNotes?: TreasuryNote[], options?: { search_limit?: number; searchLimit?: number; shieldedPrefix?: string; prefix?: string }): PayrollPlan;
+export function planOneProofPayroll(input: PayrollInput, treasuryNotes?: TreasuryNote[], options?: { search_limit?: number; searchLimit?: number; output_mode?: "compact" | "exact-32"; outputMode?: "compact" | "exact-32"; shieldedPrefix?: string; prefix?: string }): PayrollPlan;
 export function normalizePayrollAssetRegistryEntry(entry: PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }, denom: string): NormalizedPayrollAssetRegistryEntryV1;
 export function buildExpectedPayrollEvidence(operation: OneProofPayrollOperationPlan, payload: PreparedBatchTransferPayload, options?: { now_unix?: number; nowUnix?: number; shieldedPrefix?: string; prefix?: string }): readonly ExpectedPayrollOutputEvidence[];
 export function prepareOneProofPayrollOperation(input: PrepareOneProofPayrollOperationInput): Promise<PreparedOneProofPayrollOperation>;

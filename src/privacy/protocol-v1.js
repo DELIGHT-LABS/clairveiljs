@@ -661,6 +661,41 @@ export function computeBatchTransferIntentV1(input = {}) {
   );
 }
 
+/**
+ * Compute the proof-independent BatchTransfer event/evidence identifier.
+ * Unlike the owner intent, this deliberately excludes asset ID, creator, and
+ * proof bytes so downstream reconciliation can bind to the public effect.
+ */
+export function computeBatchEffectIdV1(input = {}) {
+  const inputCount = Number(uint(input.inputCount ?? input.input_count ?? 0, 32, "batch input count"));
+  const outputCount = Number(uint(input.outputCount ?? input.output_count ?? 0, 32, "batch output count"));
+  validateBatchJoinSplitCountsV1(inputCount, outputCount);
+  const chainDomain = input.chainDomain || {};
+  const payloadDigest = input.payloadDigest || {};
+  const chainHi = requireBatchField({ ...input, chainDomainHi: input.chainDomainHi ?? chainDomain.hi }, ["chainDomainHi", "chain_domain_hi"], "batch chain domain hi");
+  const chainLo = requireBatchField({ ...input, chainDomainLo: input.chainDomainLo ?? chainDomain.lo }, ["chainDomainLo", "chain_domain_lo"], "batch chain domain lo");
+  const merkleRoot = requireBatchField(input, ["merkleRoot", "merkle_root", "root"], "batch merkle root");
+  const nullifierRoot = requireBatchField(input, ["nullifierRoot", "nullifier_root"], "batch nullifier root");
+  const commitmentRoot = requireBatchField(input, ["commitmentRoot", "commitment_root"], "batch commitment root");
+  const userRoot = requireBatchField(input, ["userDisclosureRoot", "user_disclosure_root"], "batch user disclosure root");
+  const fullRoot = requireBatchField(input, ["fullDisclosureRoot", "full_disclosure_root"], "batch full disclosure root");
+  const digestHi = requireBatchField({ ...input, payloadDigestHi: input.payloadDigestHi ?? payloadDigest.hi }, ["payloadDigestHi", "payload_digest_hi"], "batch payload digest hi");
+  const digestLo = requireBatchField({ ...input, payloadDigestLo: input.payloadDigestLo ?? payloadDigest.lo }, ["payloadDigestLo", "payload_digest_lo"], "batch payload digest lo");
+  for (const [value, label] of [[chainHi, "chain domain hi"], [chainLo, "chain domain lo"], [digestHi, "payload digest hi"], [digestLo, "payload digest lo"]]) {
+    if (value >= (1n << 128n)) throw new Error(`batch ${label} must be an unsigned 128-bit integer`);
+  }
+  const expiresAtUnix = uint(input.expiresAtUnix ?? input.expires_at_unix ?? 0, 64, "batch expires_at_unix");
+  if (expiresAtUnix === 0n) throw new Error("batch expires_at_unix must be positive");
+  return hexFromBytes(sha256(concatBytes(
+    utf8Bytes("clairveil.batch-effect.v1"),
+    canonicalFieldBytes(chainHi), canonicalFieldBytes(chainLo), canonicalFieldBytes(merkleRoot),
+    u32be(inputCount), u32be(outputCount),
+    canonicalFieldBytes(nullifierRoot), canonicalFieldBytes(commitmentRoot),
+    canonicalFieldBytes(userRoot), canonicalFieldBytes(fullRoot),
+    canonicalFieldBytes(digestHi), canonicalFieldBytes(digestLo), u64be(expiresAtUnix, "batch expires_at_unix")
+  )));
+}
+
 export function wrapEncryptedEnvelopeV1(kind, ciphertext) {
   const raw = bytes(ciphertext, "encrypted envelope ciphertext");
   if (raw.length !== envelopeCiphertextSize(kind)) {

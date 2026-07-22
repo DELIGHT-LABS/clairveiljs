@@ -236,6 +236,80 @@ function normalizeV5Output(output, index) {
   };
 }
 
+function disclosureBlindingError(code, field, detail) {
+  const error = new Error(`${code}: ${detail}`);
+  error.code = code;
+  error.field = field;
+  return error;
+}
+
+function disclosureBlindingField(value, field) {
+  let parsed;
+  try {
+    const text = typeof value === "bigint" ? value.toString() : String(value ?? "");
+    if (!/^(0|[1-9][0-9]*)$/.test(text)) throw new Error("not canonical");
+    parsed = BigInt(text);
+  } catch {
+    throw disclosureBlindingError("DBS_NON_CANONICAL_FIELD", field, `${field} must be a canonical field decimal`);
+  }
+  if (parsed >= FIELD_MODULUS) {
+    throw disclosureBlindingError("DBS_NON_CANONICAL_FIELD", field, `${field} is outside the scalar field`);
+  }
+  return parsed;
+}
+
+/**
+ * Validates the v0.2 disclosure-blinding separation contract independently of
+ * a transfer payload. This lets callers fail closed before serializing a
+ * payload and preserves the fixture's machine-readable error codes.
+ */
+export function validateDisclosureBlindingSeparationV1(input = {}) {
+  const enabled = input.enabled ?? true;
+  if (typeof enabled !== "boolean") {
+    throw disclosureBlindingError("DBS_DISABLED_SENTINEL", "enabled", "enabled must be a boolean");
+  }
+  const policyValue = input.privacyPolicy ?? input.privacy_policy;
+  const privacyPolicy = Number(policyValue);
+  if (!Number.isInteger(privacyPolicy) || privacyPolicy < 0 || privacyPolicy > 7) {
+    throw disclosureBlindingError("DBS_INVALID_POLICY", "privacy_policy", "privacy policy must be in [0, 7]");
+  }
+
+  const outputRandomness = disclosureBlindingField(
+    input.outputRandomness ?? input.output_randomness,
+    "output_randomness"
+  );
+  const userDisclosureBlinding = disclosureBlindingField(
+    input.userDisclosureBlinding ?? input.user_disclosure_blinding,
+    "user_disclosure_blinding"
+  );
+  const fullDisclosureBlinding = disclosureBlindingField(
+    input.fullDisclosureBlinding ?? input.full_disclosure_blinding,
+    "full_disclosure_blinding"
+  );
+
+  if (!enabled) {
+    if (privacyPolicy !== 0) throw disclosureBlindingError("DBS_DISABLED_SENTINEL", "privacy_policy", "disabled disclosure must use policy 0");
+    if (outputRandomness !== 0n) throw disclosureBlindingError("DBS_DISABLED_SENTINEL", "output_randomness", "disabled disclosure requires zero output randomness");
+    if (userDisclosureBlinding !== 0n) throw disclosureBlindingError("DBS_DISABLED_SENTINEL", "user_disclosure_blinding", "disabled disclosure requires zero user blinding");
+    if (fullDisclosureBlinding !== 0n) throw disclosureBlindingError("DBS_DISABLED_SENTINEL", "full_disclosure_blinding", "disabled disclosure requires zero full blinding");
+    return true;
+  }
+
+  if (privacyPolicy === 0) {
+    if (userDisclosureBlinding !== 0n) throw disclosureBlindingError("DBS_ALL_PRIVATE_USER_SENTINEL", "user_disclosure_blinding", "all-private disclosure requires the zero user blinding sentinel");
+    if (fullDisclosureBlinding === 0n) throw disclosureBlindingError("DBS_FULL_BLINDING_REQUIRED", "full_disclosure_blinding", "enabled disclosure requires a non-zero full blinding");
+    if (fullDisclosureBlinding === outputRandomness) throw disclosureBlindingError("DBS_FULL_RANDOMNESS_REUSE", "full_disclosure_blinding", "full disclosure blinding must differ from output randomness");
+    return true;
+  }
+
+  if (userDisclosureBlinding === 0n) throw disclosureBlindingError("DBS_USER_BLINDING_REQUIRED", "user_disclosure_blinding", "disclosed output requires a non-zero user blinding");
+  if (fullDisclosureBlinding === 0n) throw disclosureBlindingError("DBS_FULL_BLINDING_REQUIRED", "full_disclosure_blinding", "enabled disclosure requires a non-zero full blinding");
+  if (userDisclosureBlinding === outputRandomness) throw disclosureBlindingError("DBS_USER_RANDOMNESS_REUSE", "user_disclosure_blinding", "user disclosure blinding must differ from output randomness");
+  if (fullDisclosureBlinding === outputRandomness) throw disclosureBlindingError("DBS_FULL_RANDOMNESS_REUSE", "full_disclosure_blinding", "full disclosure blinding must differ from output randomness");
+  if (fullDisclosureBlinding === userDisclosureBlinding) throw disclosureBlindingError("DBS_USER_FULL_BLINDING_REUSE", "full_disclosure_blinding", "user and full disclosure blindings must differ");
+  return true;
+}
+
 function validateDisclosureBlindings(payload, policy, outputs) {
   const outputRandomness = BigInt(`0x${outputs[0].randomness_hex}`);
   const full = BigInt(`0x${fieldHex(payload.full_disclosure_blinding_hex, "transfer full disclosure blinding", { nonZero: true })}`);
