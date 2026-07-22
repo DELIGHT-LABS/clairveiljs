@@ -11,6 +11,7 @@ import {
 } from "clairveiljs/batch-transfer";
 import { computeAssetIdV1, emptyNoteTreeRootsV1, unmarshalDisclosurePlaintextV1 } from "clairveiljs/protocol-v1";
 import { createHttpProverAdapter } from "clairveiljs/prover";
+import { batchTransferConformanceFixtureName } from "clairveiljs/conformance";
 import { fixtureTestOptions, readFixture } from "./helpers.js";
 
 async function batchPayload({ privacyPolicy = 0, disclosureMode = 0 } = {}) {
@@ -113,9 +114,12 @@ test("one-proof batch preparation binds public disclosure and rejects post-signa
   );
 });
 
-test("Session 3B fixture defines the one-proof batch boundary and representative E2E", fixtureTestOptions, async () => {
-  const contract = readFixture("privacy_batch_transfer_session3b_contract.json");
-  assert.equal(contract.schema_version, "clairveil.batch-transfer.session3b.v1");
+test("one-proof batch fixture defines the batch boundary and representative E2E", fixtureTestOptions, async () => {
+  const contract = readFixture(batchTransferConformanceFixtureName);
+  assert.ok([
+    "clairveil.batch-transfer.contract.v1",
+    "clairveil.batch-transfer.session3b.v1"
+  ].includes(contract.schema_version));
   assert.equal(contract.payload_version, "batch-transfer-payload-v1");
   assert.equal(contract.proof_version, "batch-transfer-proof-v1");
   assert.equal(contract.circuit_set_id, "privacy-note-v1");

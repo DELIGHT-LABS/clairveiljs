@@ -60,6 +60,7 @@ import {
 } from "clairveiljs/reservation";
 import { runClairveilConformanceFixtures } from "clairveiljs/conformance";
 import {
+  batchTransferConformanceFixtureName,
   conformanceFixtureRelativePath,
   defaultConformanceFixtureDir,
   defaultConformanceFixtureNames,
@@ -143,22 +144,28 @@ test("conformance helper loads selected handoff fixtures", fixtureTestOptions, a
 
 test("conformance helper default fixtures include the reservation contract", fixtureTestOptions, async () => {
   assert.ok(defaultConformanceFixtureNames.includes("privacy_batch_joinsplit_v1_contract.json"));
-  assert.ok(defaultConformanceFixtureNames.includes("privacy_batch_transfer_session3b_contract.json"));
+  assert.ok(defaultConformanceFixtureNames.includes(batchTransferConformanceFixtureName));
   assert.ok(defaultConformanceFixtureNames.includes("privacy_note_reservation_contract.json"));
   assert.ok(defaultConformanceFixtureNames.includes("privacy_relay_withdraw_contract.json"));
   const result = await runClairveilConformanceFixtures({ fixtureDir });
   const contract = result.fixtures["privacy_note_reservation_contract.json"];
-  assert.equal(contract.version, 1);
-  assert.deepEqual(
-    contract.lease_transition_preconditions.token_required_for,
-    [
-      ["Reserved", "Proving"],
-      ["Proving", "ProofReady"],
-      ["ProofReady", "Submitted"],
-      ["ProofReady", "Unknown"]
-    ]
+  // v0.2.0 published the original reservation contract. Current Clairveil
+  // main keeps the same replayed safety rules while advancing its fixture
+  // revision.
+  assert.ok([1, 3].includes(contract.version));
+  const leaseTransitions = contract.lease_transition_preconditions.token_required_for;
+  for (const transition of [
+    ["Reserved", "Proving"],
+    ["Proving", "ProofReady"],
+    ["ProofReady", "Submitted"],
+    ["ProofReady", "Unknown"]
+  ]) {
+    assert.ok(leaseTransitions.some(actual => actual[0] === transition[0] && actual[1] === transition[1]));
+  }
+  assert.ok(
+    contract.success_evidence_required.includes("tx_hash_or_tx_result") ||
+    contract.success_evidence_required.includes("matching_persisted_tx_identity")
   );
-  assert.ok(contract.success_evidence_required.includes("tx_hash_or_tx_result"));
   assert.ok(contract.success_evidence_required.includes("expected_recipient_hash"));
   assert.ok(contract.success_evidence_required.includes("expected_amount_hash"));
   assert.equal(contract.batch_reserve.atomic, true);

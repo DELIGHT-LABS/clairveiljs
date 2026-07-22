@@ -5,6 +5,13 @@ import { fileURLToPath } from "node:url";
 export const conformanceFixtureRelativePath = "x/privacy/client/sdk/conformance/testdata";
 export const defaultConformanceFixtureDir = `../clairveil/${conformanceFixtureRelativePath}`;
 
+/**
+ * Clairveil v0.2.0 called the one-proof fixture "session3b". Current main
+ * intentionally removed session terminology while retaining the wire contract.
+ */
+export const batchTransferConformanceFixtureName = "privacy_batch_transfer_v1_contract.json";
+export const legacyBatchTransferConformanceFixtureName = "privacy_batch_transfer_session3b_contract.json";
+
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
 export const defaultConformanceFixtureNames = Object.freeze([
@@ -15,10 +22,25 @@ export const defaultConformanceFixtureNames = Object.freeze([
   "privacy_prover_http_api_contract.json",
   "privacy_send_capable_reference_flow.json",
   "privacy_batch_joinsplit_v1_contract.json",
-  "privacy_batch_transfer_session3b_contract.json",
+  batchTransferConformanceFixtureName,
   "privacy_note_reservation_contract.json",
   "privacy_relay_withdraw_contract.json"
 ]);
+
+function fixtureNameCandidates(name) {
+  if (name === batchTransferConformanceFixtureName) {
+    return [batchTransferConformanceFixtureName, legacyBatchTransferConformanceFixtureName];
+  }
+  if (name === legacyBatchTransferConformanceFixtureName) {
+    return [legacyBatchTransferConformanceFixtureName, batchTransferConformanceFixtureName];
+  }
+  return [name];
+}
+
+function resolveConformanceFixturePath(fixtureDir, name) {
+  const candidate = fixtureNameCandidates(name).find(entry => existsSync(join(fixtureDir, entry)));
+  return join(fixtureDir, candidate || name);
+}
 
 export function suggestClairveilConformanceFixtureDirs({ cwd = process.cwd() } = {}) {
   return [
@@ -53,7 +75,7 @@ export function readClairveilConformanceFixture(name, options = {}) {
   if (!existsSync(fixtureDir)) {
     throw new Error(clairveilConformanceFixtureSkipReason({ ...options, fixtureDir }));
   }
-  return JSON.parse(readFileSync(join(fixtureDir, name), "utf8"));
+  return JSON.parse(readFileSync(resolveConformanceFixturePath(fixtureDir, name), "utf8"));
 }
 
 export function loadClairveilConformanceFixtures(options = {}) {
