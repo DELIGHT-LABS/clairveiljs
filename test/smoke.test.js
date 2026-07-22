@@ -585,6 +585,7 @@ test("browser-dapp deposit proof provider reuses the proven deposit material", a
     shieldedPrefix: "clairs",
     denom: "uclair"
   });
+  client.cosmos.assertProtocolPreflight = async () => ({});
   let providerCommitmentHex = "";
   let capturedMessage = null;
   client.cosmos.buildDirectSignDoc = async ({ messages }) => {
@@ -802,6 +803,7 @@ test("cosmos deposit preparation forwards custom memo", async () => {
     shieldedPrefix: "clairs",
     defaultDenom: "uclair"
   });
+  cosmosClient.assertProtocolPreflight = async () => ({});
   let capturedMemo = "";
   cosmosClient.buildDirectSignDoc = async ({ memo }) => {
     capturedMemo = memo;
@@ -1997,6 +1999,7 @@ test("cosmos prepareTransfer returns its artifact with reconciliation warning af
     shieldedPrefix: "clairs",
     defaultDenom: "uclair"
   });
+  client.assertProtocolPreflight = async () => ({});
   client.scanNotes = async () => heartbeatTestScanResult();
   client.fetchAuditConfig = async () => ({ audit_master_pubkey_hex: "aa".repeat(32) });
   client.buildTransferMessage = async () => heartbeatTestBuiltTransfer();
@@ -2082,6 +2085,7 @@ test("cosmos prepareWithdraw works without a reservation manager and forwards ch
     shieldedPrefix: "clairs",
     defaultDenom: "uclair"
   });
+  client.assertProtocolPreflight = async () => ({});
   client.scanNotes = async () => heartbeatTestScanResult();
   let capturedChainNowUnix = null;
   client.buildWithdrawMessage = async input => {
@@ -2470,6 +2474,7 @@ test("cosmos prepareTransferBatch accepts reservation_manager and builds one sig
     shieldedPrefix: "clairs",
     defaultDenom: "uclair"
   });
+  client.assertProtocolPreflight = async () => ({});
   const note = (amount, randomness, height) => ({
     note: createNote({
       spendPubKey: CURVE_BASE,
@@ -2790,6 +2795,7 @@ test("cosmos prepareTransferBatch keeps ProofReady transitions atomic across eve
     shieldedPrefix: "clairs",
     defaultDenom: "uclair"
   });
+  client.assertProtocolPreflight = async () => ({});
   const note = (amount, randomness, height) => ({
     note: createNote({
       spendPubKey: CURVE_BASE,
@@ -4681,6 +4687,7 @@ test("SDK exposes the typed privacy protocol queries and batch sign-doc boundary
   });
 
   let signDocInput;
+  client.assertCircuitConfig = async () => ({});
   client.buildDirectSignDoc = async input => {
     signDocInput = input;
     return { bodyBytes: "", authInfoBytes: "", chainId: "clairveil-local-3", accountNumber: "0" };

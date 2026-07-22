@@ -701,6 +701,7 @@ export class ClairveilJS {
   resolveAsset(denom: string): Promise<NormalizedAssetRegistryEntryV1>;
   resolveAssetByDenom(denom: string): Promise<NormalizedAssetRegistryEntryV1>;
   resolveAssetByID(assetIdHex: Hex): Promise<NormalizedAssetRegistryEntryV1>;
+  assertProtocolPreflight(denom: string): Promise<{ circuit_config: ValidatedCircuitConfigV1; asset: NormalizedAssetRegistryEntryV1 }>;
   fetchCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<object>;
   queryCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<VerifiedCommitmentPathSnapshot>;
   createCommitmentPathSnapshotProvider(options: CommitmentPathsAtRootQuery): Promise<{

@@ -7,6 +7,7 @@ import {
   validateExpectedCircuitIdentityV1
 } from "clairveiljs/circuit-config";
 import { createClairveilClient } from "clairveiljs/cosmos-client";
+import { computeAssetIdV1 } from "clairveiljs/protocol-v1";
 
 function circuitConfig() {
   const keyHashes = ["a", "b", "c", "d"].map(letter => letter.repeat(64));
@@ -77,4 +78,25 @@ test("Cosmos CircuitConfig query returns only validated consensus identity", asy
   };
   const validated = await client.assertCircuitConfig();
   assert.equal(validated.checksum_source, "consensus");
+});
+
+test("protocol preflight binds the consensus circuit identity and authoritative AssetRegistry entry", async () => {
+  const response = circuitConfig();
+  const assetID = computeAssetIdV1("uclair").toString(16).padStart(64, "0");
+  const client = createClairveilClient({
+    rpc: "http://rpc.example",
+    rest: "http://rest.example",
+    chainId: "clairveil-test-1"
+  });
+  client.fetchJson = async path => {
+    if (path === "/clairveil/privacy/v1/circuit_config") return response;
+    assert.equal(path, "/clairveil/privacy/v1/assets/by_denom/uclair");
+    return {
+      mapping_version: "privacy-asset-registry-v1",
+      asset: { canonical_denom: "uclair", asset_id: assetID }
+    };
+  };
+  const preflight = await client.assertProtocolPreflight("uclair");
+  assert.equal(preflight.circuit_config.circuit_set_identity.circuits.length, 4);
+  assert.equal(preflight.asset.asset_id_hex, assetID);
 });

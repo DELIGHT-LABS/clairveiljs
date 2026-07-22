@@ -1717,6 +1717,19 @@ export class ClairveilJS {
     return (await this.queryAssetByID(assetIdHex)).asset;
   }
 
+  /**
+   * Fail closed before a proof is requested: the active consensus circuit set
+   * and the authoritative denom/asset mapping must agree with this SDK.
+   */
+  async assertProtocolPreflight(denom) {
+    const canonicalDenom = canonicalAssetDenomV1(denom);
+    const [circuitConfig, asset] = await Promise.all([
+      this.assertCircuitConfig(),
+      this.resolveAsset(canonicalDenom)
+    ]);
+    return Object.freeze({ circuit_config: circuitConfig, asset });
+  }
+
   async fetchCommitmentPathsAtRoot(options = {}) {
     return this.fetchJson("/clairveil/privacy/v1/commitment_paths_at_root", {
       method: "POST",
@@ -2418,6 +2431,7 @@ export class ClairveilJS {
       proof,
       proofHex: proofHex ?? proof_hex
     });
+    await this.assertProtocolPreflight(assetDenom ?? denom ?? this.defaultDenom);
     const signDoc = await this.buildDirectSignDoc({
       signer: privacy.address,
       pubKeyHex: privacy.pubKeyHex,
@@ -2540,6 +2554,7 @@ export class ClairveilJS {
       };
     }
     assertPlanCanBuildTx(plan);
+    await this.assertProtocolPreflight(denom ?? this.defaultDenom);
 
     const auditPubKeyHex = auditDisclosureTargetPubKeyHex
       || (await this.fetchAuditConfig()).audit_master_pubkey_hex;
@@ -2731,6 +2746,7 @@ export class ClairveilJS {
       };
     }
     assertPlanCanBuildTx(plan);
+    await this.assertProtocolPreflight(denom ?? this.defaultDenom);
 
     const auditPubKeyHex = auditDisclosureTargetPubKeyHex
       || (await this.fetchAuditConfig()).audit_master_pubkey_hex;
@@ -2921,6 +2937,7 @@ export class ClairveilJS {
       };
     }
     assertPlanCanBuildTx(plan);
+    await this.assertProtocolPreflight(assetDenom ?? denom ?? this.defaultDenom);
 
     let reservationBatch = null;
     try {
@@ -3077,6 +3094,7 @@ export class ClairveilJS {
       };
     }
     assertPlanCanBuildTx(plan);
+    await this.assertProtocolPreflight(assetDenom ?? denom ?? this.defaultDenom);
 
     let reservationBatch = null;
     try {
@@ -3145,6 +3163,7 @@ export class ClairveilJS {
     if (!message || typeof message !== "object") {
       throw new Error("MsgBatchTransfer message is required");
     }
+    await this.assertCircuitConfig();
     return this.buildDirectSignDoc({
       signer,
       pubKeyHex,
