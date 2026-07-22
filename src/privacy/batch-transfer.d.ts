@@ -54,6 +54,66 @@ export interface PreparedBatchTransferPayload {
   payload_hash: string;
 }
 
+export interface BatchTransferSigningInputV1 {
+  note: NoteV1;
+  commitment: Uint8Array;
+  nullifier: Uint8Array;
+  spendPubKey: Uint8Array;
+  viewPubKey: Uint8Array;
+  amount: bigint;
+  assetID: bigint;
+  randomness: bigint;
+}
+
+export interface BatchTransferSigningOutputV1 {
+  kind: "payment" | "change" | "padding";
+  note: NoteV1;
+  commitment: Uint8Array;
+  recipientSpendPubKey: Uint8Array;
+  recipientViewPubKey: Uint8Array;
+  amount: bigint;
+  assetID: bigint;
+  randomness: bigint;
+  privacyPolicy: number;
+  disclosureMode: number;
+  userDisclosureBlinding: bigint;
+  fullDisclosureBlinding: bigint;
+  wireOutput: Record<string, unknown>;
+}
+
+export interface BatchTransferSigningRequestV1 {
+  version: typeof preparedBatchTransferPayloadVersion;
+  circuitSetId: typeof batchTransferCircuitSetId;
+  chainId: string;
+  expiresAtUnix: number;
+  orderedInputs: readonly BatchTransferSigningInputV1[];
+  orderedInputNullifiers: readonly Uint8Array[];
+  orderedOutputs: readonly BatchTransferSigningOutputV1[];
+  ownerSpendPubKey: Uint8Array;
+  ownerViewPubKey: Uint8Array;
+  root: Uint8Array;
+  assetID: bigint;
+  inputTotal: bigint;
+  auditKeyId: string;
+  auditKeyEpoch: number;
+  auditDisclosureTargetPubKey: Uint8Array;
+  selfViewEnabled: boolean;
+  nullifierRoot: bigint;
+  commitmentRoot: bigint;
+  userDisclosureRoot: bigint;
+  fullDisclosureRoot: bigint;
+  canonicalPayload: Uint8Array;
+  payloadDigestHi: bigint;
+  payloadDigestLo: bigint;
+  expectedIntent: bigint;
+  canonicalEffect: Record<string, unknown>;
+  message: Record<string, unknown>;
+}
+
+export interface BatchTransferSignerV1 {
+  signBatchTransfer(request: BatchTransferSigningRequestV1): Promise<Uint8Array> | Uint8Array;
+}
+
 export interface BuildPreparedBatchTransferInput {
   creator?: string;
   chainId?: string;
@@ -85,11 +145,7 @@ export interface BuildPreparedBatchTransferInput {
   selfViewDisclosureTargetPubKey?: Point | Uint8Array | string;
   self_view_disclosure_target_pubkey?: Point | Uint8Array | string;
   disableSelfViewDisclosure?: boolean;
-  signer: {
-    signBatchTransfer?(request: { version: string; circuitSetId: string; chainId: string; expiresAtUnix: number; canonicalPayload: Uint8Array; expectedIntent: bigint; message: object }): Promise<Uint8Array> | Uint8Array;
-    signSpendNoteHash?(intent: bigint): Promise<Uint8Array> | Uint8Array;
-    signNoteHash?(intent: bigint): Promise<Uint8Array> | Uint8Array;
-  };
+  signer: BatchTransferSignerV1;
 }
 
 export interface PreparedBatchTransferProof {
@@ -105,6 +161,8 @@ export function validatePreparedBatchTransferPayloadEnvelope(payload: PreparedBa
 export function computePreparedBatchTransferPayloadHash(payload: PreparedBatchTransferPayload): string;
 export function serializePreparedBatchTransferPayload(payload: PreparedBatchTransferPayload): string;
 export function serializeBatchTransferProofRequest(payload: PreparedBatchTransferPayload): string;
+export function validateBatchTransferSigningRequestV1(request: BatchTransferSigningRequestV1): { expected_intent: bigint };
+export function signValidatedBatchTransferIntentV1(signer: BatchTransferSignerV1, request: BatchTransferSigningRequestV1, options?: { allowLegacyNoteHashSigner?: false }): Promise<Uint8Array>;
 export function buildPreparedBatchTransferPayload(input: BuildPreparedBatchTransferInput): Promise<PreparedBatchTransferPayload>;
 export function normalizePreparedBatchTransferProof(payload: PreparedBatchTransferPayload, proof: PreparedBatchTransferProof, options?: { nowUnix?: number }): PreparedBatchTransferProof & { proof_bytes: Uint8Array };
 export function buildMsgBatchTransferFromPrepared(payload: PreparedBatchTransferPayload, proof: PreparedBatchTransferProof, options?: { creator?: string; nowUnix?: number }): MsgBatchTransfer;

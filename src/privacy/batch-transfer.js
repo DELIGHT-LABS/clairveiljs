@@ -135,6 +135,64 @@ function fixedFieldBytes(value) {
   return output;
 }
 
+function sameBytes(left, right) {
+  const a = Uint8Array.from(left ?? []);
+  const b = Uint8Array.from(right ?? []);
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function frozenBytes(value) {
+  return Uint8Array.from(value ?? []);
+}
+
+function signingNote(note) {
+  const normalized = validateNoteV1(note);
+  return Object.freeze({
+    receiverSpendPubKeyX: normalized.receiverSpendPubKeyX,
+    receiverSpendPubKeyY: normalized.receiverSpendPubKeyY,
+    receiverViewPubKeyX: normalized.receiverViewPubKeyX,
+    receiverViewPubKeyY: normalized.receiverViewPubKeyY,
+    amount: normalized.amount,
+    assetID: normalized.assetID,
+    randomness: normalized.randomness,
+    memo: normalized.memo
+  });
+}
+
+function notePointBytes(note, kind) {
+  const normalized = validateNoteV1(note);
+  return frozenBytes(packPoint(kind === "spend"
+    ? { x: normalized.receiverSpendPubKeyX, y: normalized.receiverSpendPubKeyY }
+    : { x: normalized.receiverViewPubKeyX, y: normalized.receiverViewPubKeyY }));
+}
+
+function cloneBatchWireOutput(output) {
+  return Object.freeze({
+    commitment: frozenBytes(output.commitment),
+    ciphertext: frozenBytes(output.ciphertext),
+    viewTag: frozenBytes(output.viewTag),
+    userPrivacyPolicy: Number(output.userPrivacyPolicy),
+    userDisclosureMode: Number(output.userDisclosureMode),
+    userDisclosureDigest: frozenBytes(output.userDisclosureDigest),
+    userDisclosureTargetPubkey: frozenBytes(output.userDisclosureTargetPubkey),
+    userDisclosurePayload: frozenBytes(output.userDisclosurePayload),
+    fullDisclosureDigest: frozenBytes(output.fullDisclosureDigest),
+    auditDisclosurePayload: frozenBytes(output.auditDisclosurePayload),
+    selfViewDisclosurePayload: frozenBytes(output.selfViewDisclosurePayload)
+  });
+}
+
+function sameBatchWireOutput(left, right) {
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  return Number(left.userPrivacyPolicy) === Number(right.userPrivacyPolicy) &&
+    Number(left.userDisclosureMode) === Number(right.userDisclosureMode) &&
+    [
+      "commitment", "ciphertext", "viewTag", "userDisclosureDigest",
+      "userDisclosureTargetPubkey", "userDisclosurePayload", "fullDisclosureDigest",
+      "auditDisclosurePayload", "selfViewDisclosurePayload"
+    ].every(field => sameBytes(left[field], right[field]));
+}
+
 function decimalField(value, label, options) {
   return canonicalField(value, label, options).toString();
 }
@@ -543,15 +601,177 @@ export function serializeBatchTransferProofRequest(payload) {
   return goObject([["version", goString(batchTransferProofRequestVersion)], ["payload", serializePreparedBatchTransferPayloadJson(payload)]]);
 }
 
-async function resolveBatchTransferSignature(signer, request) {
+function structuredFieldBytes(value, label, options) {
+  return canonicalFieldBytes(value, label, options).bytes;
+}
+
+function structuredBatchEffect(request) {
+  const effect = request?.canonicalEffect ?? request?.message;
+  if (!effect || typeof effect !== "object") throw new Error("batch transfer structured canonical effect is required");
+  if (request?.canonicalEffect && request?.message) {
+    if (!sameBytes(canonicalBatchTransferPayloadBytesV1(request.canonicalEffect), canonicalBatchTransferPayloadBytesV1(request.message))) {
+      throw new Error("batch transfer structured canonical effect aliases disagree");
+    }
+  }
+  if (String(effect.creator ?? "") !== "" || byteValue(effect.proof ?? new Uint8Array(), "batch transfer structured effect proof").length !== 0) {
+    throw new Error("batch transfer structured canonical effect must exclude creator and proof");
+  }
+  return effect;
+}
+
+function structuredPointBytes(value, label) {
+  return pointValue(value, label).bytes;
+}
+
+function structuredInput(entry, index, ownerSpend, ownerView, assetID, expectedNullifier) {
+  if (!entry || typeof entry !== "object") throw new Error(`batch transfer structured input ${index} is required`);
+  const note = signingNote(entry.note);
+  const commitment = fixedFieldBytes(computeNoteCommitmentV1(note));
+  const nullifier = fixedFieldBytes(computeNoteNullifierV1(note));
+  if (!sameBytes(structuredFieldBytes(entry.commitment, `batch transfer structured input ${index} commitment`), commitment) ||
+      !sameBytes(byteValue(entry.nullifier, `batch transfer structured input ${index} nullifier`), nullifier) ||
+      !sameBytes(expectedNullifier, nullifier)) {
+    throw new Error(`batch transfer structured input ${index} does not match the final effect nullifier`);
+  }
+  if (!sameBytes(structuredPointBytes(entry.spendPubKey, `batch transfer structured input ${index} spend public key`), ownerSpend) ||
+      !sameBytes(structuredPointBytes(entry.viewPubKey, `batch transfer structured input ${index} view public key`), ownerView) ||
+      !sameBytes(notePointBytes(note, "spend"), ownerSpend) || !sameBytes(notePointBytes(note, "view"), ownerView) ||
+      canonicalField(entry.amount, `batch transfer structured input ${index} amount`) !== note.amount ||
+      canonicalField(entry.assetID, `batch transfer structured input ${index} asset ID`, { nonZero: true }) !== assetID ||
+      note.assetID !== assetID || canonicalField(entry.randomness, `batch transfer structured input ${index} randomness`) !== note.randomness) {
+    throw new Error(`batch transfer structured input ${index} owner/amount/asset projection is invalid`);
+  }
+  return { note, nullifier };
+}
+
+function structuredOutput(entry, index, owner, assetID, effectOutput) {
+  if (!entry || typeof entry !== "object") throw new Error(`batch transfer structured output ${index} is required`);
+  const note = signingNote(entry.note);
+  const kind = String(entry.kind ?? "");
+  const privacyPolicy = Number(entry.privacyPolicy);
+  const disclosureMode = Number(entry.disclosureMode);
+  if (!["payment", "change", "padding"].includes(kind) || !Number.isInteger(privacyPolicy) || privacyPolicy < 0 || privacyPolicy > 7 || !Number.isInteger(disclosureMode) || disclosureMode < 0 || disclosureMode > 2) {
+    throw new Error(`batch transfer structured output ${index} metadata is invalid`);
+  }
+  const commitment = fixedFieldBytes(computeNoteCommitmentV1(note));
+  if (note.assetID !== assetID || !sameBytes(structuredFieldBytes(entry.commitment, `batch transfer structured output ${index} commitment`), commitment) || !sameBytes(commitment, effectOutput.commitment)) {
+    throw new Error(`batch transfer structured output ${index} commitment or asset does not match the final effect`);
+  }
+  if (!sameBytes(structuredPointBytes(entry.recipientSpendPubKey, `batch transfer structured output ${index} spend public key`), notePointBytes(note, "spend")) ||
+      !sameBytes(structuredPointBytes(entry.recipientViewPubKey, `batch transfer structured output ${index} view public key`), notePointBytes(note, "view")) ||
+      canonicalField(entry.amount, `batch transfer structured output ${index} amount`) !== note.amount ||
+      canonicalField(entry.assetID, `batch transfer structured output ${index} asset ID`, { nonZero: true }) !== assetID ||
+      canonicalField(entry.randomness, `batch transfer structured output ${index} randomness`) !== note.randomness) {
+    throw new Error(`batch transfer structured output ${index} NoteV1 projection is invalid`);
+  }
+  const userDisclosureBlinding = canonicalField(entry.userDisclosureBlinding, `batch transfer structured output ${index} user disclosure blinding`, { nonZero: privacyPolicy !== 0 });
+  const fullDisclosureBlinding = canonicalField(entry.fullDisclosureBlinding, `batch transfer structured output ${index} full disclosure blinding`, { nonZero: true });
+  if ((privacyPolicy === 0 && userDisclosureBlinding !== 0n) || privacyPolicy !== effectOutput.userPrivacyPolicy || disclosureMode !== effectOutput.userDisclosureMode || !sameBatchWireOutput(entry.wireOutput, effectOutput)) {
+    throw new Error(`batch transfer structured output ${index} does not match the final effect`);
+  }
+  const output = { kind, note, privacyPolicy, disclosureMode, userDisclosureBlinding, fullDisclosureBlinding, commitment: bytesToBigIntBE(commitment) };
+  const user = disclosureForOutput(output, owner, index, false);
+  const full = disclosureForOutput(output, owner, index, true);
+  if ((privacyPolicy === 0 && effectOutput.userDisclosureDigest.length !== 0) ||
+      (privacyPolicy !== 0 && !sameBytes(fixedFieldBytes(user.digest), effectOutput.userDisclosureDigest)) ||
+      !sameBytes(fixedFieldBytes(full.digest), effectOutput.fullDisclosureDigest)) {
+    throw new Error(`batch transfer structured output ${index} disclosure digest does not match the final effect`);
+  }
+  return output;
+}
+
+/** Recompute every one-proof batch signing field before releasing an owner signature. */
+export function validateBatchTransferSigningRequestV1(request) {
+  if (!request || typeof request !== "object") throw new Error("batch transfer signing request is required");
+  if (request.version !== preparedBatchTransferPayloadVersion || request.circuitSetId !== batchTransferCircuitSetId) throw new Error("unsupported batch transfer signing request version or circuit");
+  const chainId = String(request.chainId ?? "").trim();
+  if (!chainId) throw new Error("batch transfer structured chain ID is required");
+  const expiresAtUnix = safePositiveInteger(request.expiresAtUnix, "batch transfer structured expiry");
+  const effect = structuredBatchEffect(request);
+  const normalizedEffect = validateBatchTransferEffectsV1(effect);
+  if (Number(normalizedEffect.expiresAtUnix) !== expiresAtUnix) throw new Error("batch transfer structured effect expiry mismatch");
+  const root = structuredFieldBytes(request.root, "batch transfer structured root", { nonZero: true });
+  if (!sameBytes(root, normalizedEffect.root)) throw new Error("batch transfer structured effect root mismatch");
+  if (!sameBytes(byteValue(request.canonicalPayload, "batch transfer structured canonical payload"), canonicalBatchTransferPayloadBytesV1(effect))) {
+    throw new Error("batch transfer structured canonical payload does not match the final effect");
+  }
+  if (!Array.isArray(request.orderedInputs) || !Array.isArray(request.orderedInputNullifiers) || request.orderedInputs.length < 1 || request.orderedInputs.length > 16 || request.orderedInputs.length !== request.orderedInputNullifiers.length || request.orderedInputs.length !== normalizedEffect.nullifiers.length) {
+    throw new Error("batch transfer structured input count mismatch");
+  }
+  if (!Array.isArray(request.orderedOutputs) || request.orderedOutputs.length < 1 || request.orderedOutputs.length > 32 || request.orderedOutputs.length !== normalizedEffect.outputs.length) {
+    throw new Error("batch transfer structured output count mismatch");
+  }
+  const assetID = canonicalField(request.assetID, "batch transfer structured asset ID", { nonZero: true });
+  const ownerSpend = structuredPointBytes(request.ownerSpendPubKey, "batch transfer structured owner spend public key");
+  const ownerView = structuredPointBytes(request.ownerViewPubKey, "batch transfer structured owner view public key");
+  const inputs = request.orderedInputs.map((entry, index) => {
+    const input = structuredInput(entry, index, ownerSpend, ownerView, assetID, normalizedEffect.nullifiers[index]);
+    if (!sameBytes(byteValue(request.orderedInputNullifiers[index], `batch transfer structured ordered nullifier ${index}`), input.nullifier)) {
+      throw new Error(`batch transfer structured ordered nullifier ${index} mismatch`);
+    }
+    return input;
+  });
+  const owner = inputs[0].note;
+  const inputTotal = inputs.reduce((total, input) => total + input.note.amount, 0n);
+  if (canonicalField(request.inputTotal, "batch transfer structured input total") !== inputTotal) throw new Error("batch transfer structured input total mismatch");
+  // Enforce global freshness before checking any digest projection so an
+  // external signer never reaches its callback with a reused secret.
+  const outputSecrets = request.orderedOutputs.map((entry, index) => ({
+    note: signingNote(entry?.note),
+    privacyPolicy: Number(entry?.privacyPolicy),
+    userDisclosureBlinding: canonicalField(entry?.userDisclosureBlinding, `batch transfer structured output ${index} user disclosure blinding`, { nonZero: Number(entry?.privacyPolicy) !== 0 }),
+    fullDisclosureBlinding: canonicalField(entry?.fullDisclosureBlinding, `batch transfer structured output ${index} full disclosure blinding`, { nonZero: true })
+  }));
+  validateSecretIndependence(inputs, outputSecrets);
+  const outputs = request.orderedOutputs.map((entry, index) => structuredOutput(entry, index, owner, assetID, normalizedEffect.outputs[index]));
+  validateOutputOrderAndConservation(inputs, outputs);
+  validateSecretIndependence(inputs, outputs);
+  const selfViewEnabled = normalizedEffect.outputs[0].selfViewDisclosurePayload.length !== 0;
+  if (Boolean(request.selfViewEnabled) !== selfViewEnabled) throw new Error("batch transfer structured self-view all-or-none mismatch");
+  if (String(request.auditKeyId ?? "") !== normalizedEffect.auditKeyId || safePositiveInteger(request.auditKeyEpoch, "batch transfer structured audit key epoch") !== Number(normalizedEffect.auditKeyEpoch) || !sameBytes(structuredPointBytes(request.auditDisclosureTargetPubKey, "batch transfer structured audit target"), normalizedEffect.auditDisclosureTargetPubkey)) {
+    throw new Error("batch transfer structured audit identity mismatch");
+  }
+  const nullifierRoot = computeBatchVectorRootV1("nullifier", inputs.length, [...inputs.map(input => bytesToBigIntBE(input.nullifier)), ...Array(16 - inputs.length).fill(0n)]);
+  const commitments = Array(32).fill(0n);
+  const userDigests = Array(32).fill(0n);
+  const fullDigests = Array(32).fill(0n);
+  const policies = Array(32).fill(0);
+  normalizedEffect.outputs.forEach((output, index) => {
+    commitments[index] = bytesToBigIntBE(output.commitment);
+    userDigests[index] = bytesToBigIntBE(output.userDisclosureDigest);
+    fullDigests[index] = bytesToBigIntBE(output.fullDisclosureDigest);
+    policies[index] = output.userPrivacyPolicy;
+  });
+  const commitmentRoot = computeBatchVectorRootV1("commitment", outputs.length, commitments);
+  const userDisclosureRoot = computeBatchUserDisclosureVectorRootV1(outputs.length, policies, userDigests);
+  const fullDisclosureRoot = computeBatchVectorRootV1("full_disclosure", outputs.length, fullDigests);
+  for (const [field, expected] of [["nullifierRoot", nullifierRoot], ["commitmentRoot", commitmentRoot], ["userDisclosureRoot", userDisclosureRoot], ["fullDisclosureRoot", fullDisclosureRoot]]) {
+    if (canonicalField(request[field], `batch transfer structured ${field}`) !== expected) throw new Error(`batch transfer structured ${field} mismatch`);
+  }
+  const digest = computeBatchTransferPayloadDigestV1(effect);
+  if (canonicalField(request.payloadDigestHi, "batch transfer structured payload digest hi") !== digest.hi || canonicalField(request.payloadDigestLo, "batch transfer structured payload digest lo") !== digest.lo) {
+    throw new Error("batch transfer structured payload digest mismatch");
+  }
+  const chainDomain = computeChainDomainV1(chainId, batchTransferCircuitSetId);
+  const expectedIntent = computeBatchTransferIntentV1({
+    chainDomainHi: chainDomain.hi, chainDomainLo: chainDomain.lo, merkleRoot: bytesToBigIntBE(root), inputCount: inputs.length, outputCount: outputs.length,
+    assetID, nullifierRoot, commitmentRoot, userDisclosureRoot, fullDisclosureRoot, payloadDigestHi: digest.hi, payloadDigestLo: digest.lo, expiresAtUnix
+  });
+  if (canonicalField(request.expectedIntent, "batch transfer structured expected intent") !== expectedIntent) throw new Error("batch transfer structured expected intent does not match the final effect");
+  return Object.freeze({ expected_intent: expectedIntent });
+}
+
+/** Invoke an external signer only after the complete one-proof effect is validated. */
+export async function signValidatedBatchTransferIntentV1(signer, request, { allowLegacyNoteHashSigner = false } = {}) {
   if (!signer) throw new Error("a structured batch signer is required");
+  const validated = validateBatchTransferSigningRequestV1(request);
   let signature;
   if (typeof signer.signBatchTransfer === "function") signature = await signer.signBatchTransfer(request);
-  else {
+  else if (allowLegacyNoteHashSigner) {
     const sign = signer.signSpendNoteHash || signer.signNoteHash;
     if (typeof sign !== "function") throw new Error("a structured batch signer or note hash signer is required");
-    signature = await sign.call(signer, request.expectedIntent);
-  }
+    signature = await sign.call(signer, validated.expected_intent);
+  } else throw new Error("a structured batch signer with signBatchTransfer(request) is required");
   const raw = byteValue(signature, "batch transfer owner signature");
   if (raw.length !== 64) throw new Error("batch transfer owner signature must be 64 bytes");
   try {
@@ -561,6 +781,73 @@ async function resolveBatchTransferSignature(signer, request) {
   }
   if (bytesToBigIntBE(raw.slice(32)) >= CURVE_ORDER) throw new Error("batch transfer owner signature scalar is not canonical");
   return raw;
+}
+
+function buildBatchTransferSigningRequest({ chainId, expiresAtUnix, root, assetID, inputs, outputs, messageOutputs, auditKeyId, auditKeyEpoch, auditTarget, nullifierRoot, commitmentRoot, userDisclosureRoot, fullDisclosureRoot, digest, expectedIntent }) {
+  const effect = Object.freeze({
+    creator: "",
+    proof: new Uint8Array(),
+    root: frozenBytes(root),
+    nullifiers: Object.freeze(inputs.map(entry => frozenBytes(entry.nullifier))),
+    outputs: Object.freeze(messageOutputs.map(cloneBatchWireOutput)),
+    auditKeyId,
+    auditKeyEpoch: BigInt(auditKeyEpoch),
+    auditDisclosureTargetPubkey: frozenBytes(auditTarget.bytes),
+    expiresAtUnix: BigInt(expiresAtUnix)
+  });
+  const owner = inputs[0].note;
+  return Object.freeze({
+    version: preparedBatchTransferPayloadVersion,
+    circuitSetId: batchTransferCircuitSetId,
+    chainId,
+    expiresAtUnix,
+    orderedInputs: Object.freeze(inputs.map(entry => Object.freeze({
+      note: signingNote(entry.note),
+      commitment: fixedFieldBytes(computeNoteCommitmentV1(entry.note)),
+      nullifier: frozenBytes(entry.nullifier),
+      spendPubKey: notePointBytes(entry.note, "spend"),
+      viewPubKey: notePointBytes(entry.note, "view"),
+      amount: entry.note.amount,
+      assetID: entry.note.assetID,
+      randomness: entry.note.randomness
+    }))),
+    orderedInputNullifiers: Object.freeze(inputs.map(entry => frozenBytes(entry.nullifier))),
+    orderedOutputs: Object.freeze(outputs.map((entry, index) => Object.freeze({
+      kind: entry.kind,
+      note: signingNote(entry.note),
+      commitment: fixedFieldBytes(entry.commitment),
+      recipientSpendPubKey: notePointBytes(entry.note, "spend"),
+      recipientViewPubKey: notePointBytes(entry.note, "view"),
+      amount: entry.note.amount,
+      assetID: entry.note.assetID,
+      randomness: entry.note.randomness,
+      privacyPolicy: entry.privacyPolicy,
+      disclosureMode: entry.disclosureMode,
+      userDisclosureBlinding: entry.userDisclosureBlinding,
+      fullDisclosureBlinding: entry.fullDisclosureBlinding,
+      wireOutput: cloneBatchWireOutput(messageOutputs[index])
+    }))),
+    ownerSpendPubKey: notePointBytes(owner, "spend"),
+    ownerViewPubKey: notePointBytes(owner, "view"),
+    root: frozenBytes(root),
+    assetID,
+    inputTotal: inputs.reduce((total, entry) => total + entry.note.amount, 0n),
+    auditKeyId,
+    auditKeyEpoch,
+    auditDisclosureTargetPubKey: frozenBytes(auditTarget.bytes),
+    selfViewEnabled: effect.outputs[0].selfViewDisclosurePayload.length !== 0,
+    nullifierRoot,
+    commitmentRoot,
+    userDisclosureRoot,
+    fullDisclosureRoot,
+    canonicalPayload: canonicalBatchTransferPayloadBytesV1(effect),
+    payloadDigestHi: digest.hi,
+    payloadDigestLo: digest.lo,
+    expectedIntent,
+    canonicalEffect: effect,
+    // `message` is retained as an identical alias for existing signer adapters.
+    message: effect
+  });
 }
 
 export async function buildPreparedBatchTransferPayload(input) {
@@ -644,16 +931,12 @@ export async function buildPreparedBatchTransferPayload(input) {
     chainDomainHi: chainDomain.hi, chainDomainLo: chainDomain.lo, merkleRoot: bytesToBigIntBE(root), inputCount: inputs.length, outputCount: outputs.length,
     assetID, nullifierRoot, commitmentRoot, userDisclosureRoot, fullDisclosureRoot, payloadDigestHi: digest.hi, payloadDigestLo: digest.lo, expiresAtUnix
   });
-  const signingRequest = {
-    version: preparedBatchTransferPayloadVersion,
-    circuitSetId: batchTransferCircuitSetId,
-    chainId,
-    expiresAtUnix,
-    canonicalPayload: canonicalBatchTransferPayloadBytesV1(message),
-    expectedIntent,
-    message
-  };
-  const ownerSignature = await resolveBatchTransferSignature(input.signer, signingRequest);
+  const signingRequest = buildBatchTransferSigningRequest({
+    chainId, expiresAtUnix, root, assetID, inputs, outputs, messageOutputs,
+    auditKeyId, auditKeyEpoch, auditTarget, nullifierRoot, commitmentRoot,
+    userDisclosureRoot, fullDisclosureRoot, digest, expectedIntent
+  });
+  const ownerSignature = await signValidatedBatchTransferIntentV1(input.signer, signingRequest);
   const payload = {
     version: preparedBatchTransferPayloadVersion,
     circuit_set_id: batchTransferCircuitSetId,

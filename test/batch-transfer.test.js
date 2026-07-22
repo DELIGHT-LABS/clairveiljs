@@ -6,7 +6,9 @@ import {
   buildPreparedBatchTransferPayload,
   buildMsgBatchTransferFromPrepared,
   preparedBatchTransferProofVersion,
+  signValidatedBatchTransferIntentV1,
   serializeBatchTransferProofRequest,
+  validateBatchTransferSigningRequestV1,
   validatePreparedBatchTransferPayloadEnvelope
 } from "clairveiljs/batch-transfer";
 import { computeAssetIdV1, emptyNoteTreeRootsV1, unmarshalDisclosurePlaintextV1 } from "clairveiljs/protocol-v1";
@@ -48,7 +50,7 @@ async function batchPayload({ privacyPolicy = 0, disclosureMode = 0 } = {}) {
     auditDisclosureTargetPubKey: derivePubKeyFromScalar(31n),
     selfViewDisclosureTargetPubKey: derivePubKeyFromScalar(47n),
     signer: {
-      signNoteHash: intent => signNoteHash(intent, { spendScalar: 17n, spendPubKey: ownerSpend })
+      signBatchTransfer: request => signNoteHash(request.expectedIntent, { spendScalar: 17n, spendPubKey: ownerSpend })
     }
   });
 }
@@ -112,6 +114,58 @@ test("one-proof batch preparation binds public disclosure and rejects post-signa
     () => validatePreparedBatchTransferPayloadEnvelope({ ...payload, audit_key_id: "another-audit-key" }),
     /payload hash mismatch/
   );
+});
+
+test("one-proof batch signer validates the complete effect and global secret freshness before callback", async () => {
+  let request;
+  const ownerSpend = derivePubKeyFromScalar(17n);
+  const ownerView = derivePubKeyFromScalar(19n);
+  const assetID = computeAssetIdV1("uclair");
+  const inputNote = {
+    receiverSpendPubKeyX: ownerSpend.x, receiverSpendPubKeyY: ownerSpend.y,
+    receiverViewPubKeyX: ownerView.x, receiverViewPubKeyY: ownerView.y,
+    amount: 7n, assetID, randomness: 11n, memo: "input"
+  };
+  const outputNote = {
+    receiverSpendPubKeyX: derivePubKeyFromScalar(23n).x, receiverSpendPubKeyY: derivePubKeyFromScalar(23n).y,
+    receiverViewPubKeyX: derivePubKeyFromScalar(29n).x, receiverViewPubKeyY: derivePubKeyFromScalar(29n).y,
+    amount: 7n, assetID, randomness: 13n, memo: "payment"
+  };
+  await buildPreparedBatchTransferPayload({
+    chainId: "clairveil-test-1", expiresAtUnix: 4_102_448_400,
+    inputs: [{ note: inputNote, merklePath: emptyNoteTreeRootsV1(32).slice(0, 32).map(value => value.toString(16).padStart(64, "0")), merklePathHelper: Array(32).fill(0) }],
+    outputs: [{ kind: "payment", note: outputNote, privacyPolicy: 0, disclosureMode: 0, userDisclosureBlinding: 0n, fullDisclosureBlinding: 15n }],
+    auditKeyId: "audit-key-1", auditKeyEpoch: 1, auditDisclosureTargetPubKey: derivePubKeyFromScalar(31n), disableSelfViewDisclosure: true,
+    signer: {
+      signBatchTransfer(candidate) {
+        request = candidate;
+        const validated = validateBatchTransferSigningRequestV1(candidate);
+        return signNoteHash(validated.expected_intent, { spendScalar: 17n, spendPubKey: ownerSpend });
+      }
+    }
+  });
+  assert.equal(request.orderedInputs.length, 1);
+  assert.equal(request.orderedOutputs.length, 1);
+  assert.equal(request.canonicalEffect.creator, "");
+
+  let callbacks = 0;
+  const reusedSecret = {
+    ...request,
+    orderedOutputs: [{
+      ...request.orderedOutputs[0],
+      fullDisclosureBlinding: request.orderedInputs[0].randomness
+    }]
+  };
+  await assert.rejects(
+    () => signValidatedBatchTransferIntentV1({
+      signBatchTransfer() {
+        callbacks += 1;
+        return new Uint8Array(64);
+      }
+    }, reusedSecret),
+    /reuses an input\/output secret/
+  );
+  assert.equal(callbacks, 0);
 });
 
 test("one-proof batch fixture defines the batch boundary and representative E2E", fixtureTestOptions, async () => {

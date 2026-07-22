@@ -151,7 +151,7 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
       "salary-001": { randomness: 13n, full_disclosure_blinding: 15n }
     },
     signer: {
-      signNoteHash: intent => signNoteHash(intent, { spendScalar: 17n, spendPubKey: ownerSpend })
+      signBatchTransfer: request => signNoteHash(request.expectedIntent, { spendScalar: 17n, spendPubKey: ownerSpend })
     }
   });
   assert.equal(prepared.payload.circuit_set_id, oneProofPayrollCircuitSetId);
@@ -346,7 +346,7 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
       audit_key_epoch: 1,
       audit_disclosure_target_pubkey: derivePubKeyFromScalar(31n),
       disable_self_view_disclosure: true,
-      signer: { signNoteHash: intent => signNoteHash(intent, { spendScalar: 17n, spendPubKey: ownerSpend }) }
+      signer: { signBatchTransfer: request => signNoteHash(request.expectedIntent, { spendScalar: 17n, spendPubKey: ownerSpend }) }
     }),
     /AssetRegistryV1 asset_id does not match/
   );
