@@ -23,7 +23,8 @@ import {
   computePreparedTransferV5PayloadHash,
   validateJoinSplitOwnerIntentSigningRequestV1,
   validatePreparedTransferV5PayloadAt,
-  validatePreparedTransferV5PayloadMetadata
+  validatePreparedTransferV5PayloadMetadata,
+  validatePreparedTransferV5Proof
 } from "clairveiljs/transfer-v5";
 import { buildPreparedTransferPayload } from "clairveiljs/payload";
 
@@ -108,6 +109,17 @@ test("transfer v5 rejects stale or tampered prepared effects before MsgTransfer 
   assert.equal(message.viewTags.length, 2);
   assert.throws(() => validatePreparedTransferV5PayloadAt(payload, payload.expires_at_unix));
   assert.throws(() => validatePreparedTransferV5PayloadMetadata({ ...payload, creator: "clair1altered" }));
+});
+
+test("transfer v5 proof and message builders reject expired payloads by default", () => {
+  const payload = validPayload();
+  payload.expires_at_unix = 1;
+  payload.payload_hash = computePreparedTransferV5PayloadHash(payload);
+  const proof = { version: "v2", payload_hash: payload.payload_hash, proof_hex: `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}` };
+
+  assert.throws(() => validatePreparedTransferV5Proof(payload, proof), /payload expired/);
+  assert.throws(() => buildTransferV5MsgFromPayloadAndProof(payload, proof), /payload expired/);
+  assert.equal(validatePreparedTransferV5Proof(payload, proof, { nowUnix: 0 }), true);
 });
 
 test("standard transfer builder emits the Clairveil 0.2 V5 fixed-envelope contract", async () => {

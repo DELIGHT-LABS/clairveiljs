@@ -94,6 +94,16 @@ import {
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const validV2ProofHex = `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}`;
 
+function transferProtocolConfig({ policies = ["all-private"], modes = ["none"] } = {}) {
+  return {
+    audit_config: { audit_master_pubkey_hex: Buffer.from(packPoint(CURVE_BASE)).toString("hex") },
+    disclosure_config: {
+      supported_user_policies: policies,
+      supported_user_modes: modes
+    }
+  };
+}
+
 async function readyBroadcastReservation(suffix = "01", options = {}) {
   const store = new MemoryReservationStore();
   const reservationManager = createNoteReservationManager({
@@ -2058,9 +2068,8 @@ test("cosmos prepareTransfer returns its artifact with reconciliation warning af
     shieldedPrefix: "clairs",
     defaultDenom: "uclair"
   });
-  client.assertProtocolPreflight = async () => ({});
+  client.assertTransferProtocolConfig = async () => transferProtocolConfig();
   client.scanNotes = async () => heartbeatTestScanResult();
-  client.fetchAuditConfig = async () => ({ audit_master_pubkey_hex: "aa".repeat(32) });
   client.buildTransferMessage = async () => heartbeatTestBuiltTransfer();
   client.buildDirectSignDoc = async input => input;
 
@@ -2086,6 +2095,37 @@ test("cosmos prepareTransfer returns its artifact with reconciliation warning af
   const reservations = (await store.load()).reservations;
   assert.equal(reservations.length > 0, true);
   assert.equal(reservations.every(reservation => reservation.status === reservationStatuses.ProofReady), true);
+});
+
+test("cosmos prepareTransfer validates disclosure capabilities before reserving or proving", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    defaultDenom: "uclair"
+  });
+  client.assertTransferProtocolConfig = async () => transferProtocolConfig();
+  client.scanNotes = async () => heartbeatTestScanResult();
+  let buildCalls = 0;
+  client.buildTransferMessage = async () => {
+    buildCalls += 1;
+    return heartbeatTestBuiltTransfer();
+  };
+
+  await assert.rejects(
+    () => client.prepareTransfer({
+      material: heartbeatTestMaterial(),
+      amount: "1uclair",
+      recipient: "clairs1recipient",
+      proverAdapter: null,
+      userPrivacyPolicy: "amount",
+      userDisclosureMode: "public"
+    }),
+    /does not support transfer privacy policy amount/
+  );
+  assert.equal(buildCalls, 0);
 });
 
 test("browser EVM prepareTransfer returns its transaction with reconciliation warning after a final heartbeat failure", async () => {
@@ -2533,7 +2573,7 @@ test("cosmos prepareTransferBatch accepts reservation_manager and builds one sig
     shieldedPrefix: "clairs",
     defaultDenom: "uclair"
   });
-  client.assertProtocolPreflight = async () => ({});
+  client.assertTransferProtocolConfig = async () => transferProtocolConfig();
   const note = (amount, randomness, height) => ({
     note: createNote({
       spendPubKey: CURVE_BASE,
@@ -2559,7 +2599,6 @@ test("cosmos prepareTransferBatch accepts reservation_manager and builds one sig
     ],
     scanCursor: { has_more: false }
   });
-  client.fetchAuditConfig = async () => ({ audit_master_pubkey_hex: "aa".repeat(32) });
   const builtAmounts = [];
   client.buildTransferMessage = async input => {
     builtAmounts.push(input.amount);
@@ -2854,7 +2893,7 @@ test("cosmos prepareTransferBatch keeps ProofReady transitions atomic across eve
     shieldedPrefix: "clairs",
     defaultDenom: "uclair"
   });
-  client.assertProtocolPreflight = async () => ({});
+  client.assertTransferProtocolConfig = async () => transferProtocolConfig();
   const note = (amount, randomness, height) => ({
     note: createNote({
       spendPubKey: CURVE_BASE,
@@ -2880,7 +2919,6 @@ test("cosmos prepareTransferBatch keeps ProofReady transitions atomic across eve
     ],
     scanCursor: { has_more: false }
   });
-  client.fetchAuditConfig = async () => ({ audit_master_pubkey_hex: "aa".repeat(32) });
   client.buildTransferMessage = async input => {
     const outputAmount = input.amount.replace(/[^0-9].*$/, "");
     return {

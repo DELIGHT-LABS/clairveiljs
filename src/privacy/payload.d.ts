@@ -183,8 +183,8 @@ export function buildSelfViewDisclosureData(input: {
 }): Omit<TransferDisclosureData, "target_pubkey_hex">;
 export function computePreparedTransferPayloadHash(payload: PreparedTransferPayload): Hex;
 export function buildPreparedTransferPayload(input: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;
-export function validatePreparedTransferProof(payload: PreparedTransferPayload, proof: PreparedTransferProof): true;
-export function buildTransferMsgFromPayloadAndProof(payload: PreparedTransferPayload, proof: PreparedTransferProof): TransferMessage;
+export function validatePreparedTransferProof(payload: PreparedTransferPayload, proof: PreparedTransferProof, options?: { nowUnix?: number }): true;
+export function buildTransferMsgFromPayloadAndProof(payload: PreparedTransferPayload, proof: PreparedTransferProof, options?: { nowUnix?: number }): TransferMessage;
 export type NullifierUsage =
   | boolean
   | { used: boolean; Used?: never }

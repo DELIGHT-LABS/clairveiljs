@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  createHttpProverAdapter
+  createHttpProverAdapter,
+  createStaticProverAdapter
 } from "clairveiljs/prover";
 import { ClairveilErrorCode } from "clairveiljs/errors";
 import {
@@ -15,6 +16,18 @@ function jsonResponse(body, status = 200) {
     headers: { "content-type": "application/json" }
   });
 }
+
+test("static prover adapter validates and returns a transfer v5 proof", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const adapter = createStaticProverAdapter({
+    transferProofHex: examples.transfer.response.proof.proof_hex
+  });
+
+  const response = await adapter.proveTransfer(examples.transfer.request);
+
+  assert.equal(response.version, "v2");
+  assert.deepEqual(response.proof, examples.transfer.response.proof);
+});
 
 test("HTTP prover adapter follows the Go route and version contract", fixtureTestOptions, async () => {
   const contract = readFixture("privacy_prover_http_api_contract.json");

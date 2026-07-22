@@ -944,8 +944,7 @@ export function validatePreparedTransferV5PayloadAt(payload, nowUnix = Math.floo
 }
 
 export function validatePreparedTransferV5Proof(payload, proof, { nowUnix } = {}) {
-  if (nowUnix == null) validatePreparedTransferV5PayloadMetadata(payload);
-  else validatePreparedTransferV5PayloadAt(payload, nowUnix);
+  validatePreparedTransferV5PayloadAt(payload, nowUnix);
   if (!proof || proof.version !== preparedTransferV5ProofVersion) throw new Error(`unsupported transfer v5 proof version ${JSON.stringify(proof?.version)}`);
   if (proof.payload_hash !== payload.payload_hash) throw new Error("transfer v5 proof payload hash mismatch");
   const proofHex = opaqueHex(proof.proof_hex, "transfer v5 proof", { exactLength: 164 });

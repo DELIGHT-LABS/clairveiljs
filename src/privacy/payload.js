@@ -954,12 +954,12 @@ async function buildLegacyPreparedTransferPayload({
   return payload;
 }
 
-export function validatePreparedTransferProof(payload, proof) {
-  return validatePreparedTransferV5Proof(payload, proof);
+export function validatePreparedTransferProof(payload, proof, options) {
+  return validatePreparedTransferV5Proof(payload, proof, options);
 }
 
-export function buildTransferMsgFromPayloadAndProof(payload, proof) {
-  return buildTransferV5MsgFromPayloadAndProof(payload, proof);
+export function buildTransferMsgFromPayloadAndProof(payload, proof, options) {
+  return buildTransferV5MsgFromPayloadAndProof(payload, proof, options);
 }
 
 export async function buildPreparedTransferPayload(input = {}) {

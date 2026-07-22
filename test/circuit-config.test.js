@@ -7,6 +7,7 @@ import {
   validateExpectedCircuitIdentityV1
 } from "clairveiljs/circuit-config";
 import { createClairveilClient } from "clairveiljs/cosmos-client";
+import { derivePubKeyFromScalar, packPointHex } from "clairveiljs/core";
 import { computeAssetIdV1 } from "clairveiljs/protocol-v1";
 
 function circuitConfig() {
@@ -90,15 +91,29 @@ test("protocol preflight binds the consensus circuit identity and authoritative 
   });
   client.fetchJson = async path => {
     if (path === "/clairveil/privacy/v1/circuit_config") return response;
-    assert.equal(path, "/clairveil/privacy/v1/assets/by_denom/uclair");
-    return {
+    if (path === "/clairveil/privacy/v1/assets/by_denom/uclair") return {
       mapping_version: "privacy-asset-registry-v1",
       asset: { canonical_denom: "uclair", asset_id: assetID }
     };
+    if (path === "/clairveil/privacy/v1/audit_config") return {
+      audit_master_pubkey_hex: packPointHex(derivePubKeyFromScalar(101n)),
+      audit_key_id: "master",
+      audit_key_epoch: "1"
+    };
+    if (path === "/clairveil/privacy/v1/disclosure_config") return {
+      payload_version: "privacy-fixed-v1",
+      audit_disclosure_required: true,
+      supported_user_policies: ["all-private"],
+      supported_user_modes: ["none"]
+    };
+    throw new Error(`unexpected path ${path}`);
   };
   const preflight = await client.assertProtocolPreflight("uclair");
   assert.equal(preflight.circuit_config.circuit_set_identity.circuits.length, 4);
   assert.equal(preflight.asset.asset_id_hex, assetID);
+  const transfer = await client.assertTransferProtocolConfig("uclair");
+  assert.equal(transfer.audit_config.audit_key_id, "master");
+  assert.deepEqual(transfer.disclosure_config.supported_user_modes, ["none"]);
 });
 
 test("low-level proof builders cannot bypass consensus protocol preflight", async () => {

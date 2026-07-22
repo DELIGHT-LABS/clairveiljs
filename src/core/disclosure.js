@@ -6,7 +6,6 @@ import {
   decodeCanonicalFieldHex,
   decodeShieldedAddress,
   encodeShieldedAddress,
-  hashStringToField,
   hexFromBytes,
   mimcHash,
   normalizeHex,
@@ -22,6 +21,7 @@ import {
   computeBatchUserDisclosureDigestV1,
   computeTransferFullDisclosureDigestV2,
   computeTransferUserDisclosureDigestV2,
+  computeAssetIdV1,
   decryptDisclosureV1,
   encryptedEnvelopeKindV1,
   fieldHexV1,
@@ -221,7 +221,7 @@ export function disclosureAmountAndAsset(payload) {
   }
   const amount = BigInt(amountRaw);
   const assetId = bytesToBigIntBE(decodeCanonicalFieldHex(assetIdRaw, "asset id"));
-  const expectedAssetId = hashStringToField(assetDenom);
+  const expectedAssetId = computeAssetIdV1(assetDenom);
   if (assetId !== expectedAssetId) {
     throw new Error(`asset denom ${JSON.stringify(assetDenom)} does not match asset_id_hex ${assetIdRaw}`);
   }

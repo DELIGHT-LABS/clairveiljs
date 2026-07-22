@@ -561,7 +561,7 @@ export function createStaticProverAdapter({ transferProofHex = "", withdrawProof
         payload_hash: payload.payload_hash,
         proof_hex: transferProofHex
       };
-      validatePreparedTransferProof(payload, proof);
+      validatePreparedTransferV5Proof(payload, proof);
       return { version: transferProofResponseVersion, proof };
     },
 

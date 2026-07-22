@@ -28,6 +28,7 @@ import {
   marshalNotePlaintextV1,
   unmarshalDisclosurePlaintextV1,
   unmarshalNotePlaintextV1,
+  validateNoteV1,
   wrapEncryptedEnvelopeV1
 } from "clairveiljs/protocol-v1";
 
@@ -83,6 +84,30 @@ test("privacy-fixed-v1 note primitives match the Clairveil main golden vector", 
   malformedMemo[222] = 0xc3;
   malformedMemo[223] = 0x28;
   assert.throws(() => unmarshalNotePlaintextV1(malformedMemo), /memo must be valid UTF-8/);
+});
+
+test("privacy-fixed-v1 rejects identity and non-canonical recipient key coordinates", () => {
+  const spend = derivePubKeyFromScalar(17n);
+  const view = derivePubKeyFromScalar(19n);
+  const base = {
+    receiverSpendPubKeyX: spend.x,
+    receiverSpendPubKeyY: spend.y,
+    receiverViewPubKeyX: view.x,
+    receiverViewPubKeyY: view.y,
+    amount: 7n,
+    assetID: computeAssetIdV1("uclair"),
+    randomness: 13n,
+    memo: "fixed"
+  };
+
+  assert.throws(
+    () => validateNoteV1({ ...base, receiverSpendPubKeyX: 0n, receiverSpendPubKeyY: 1n }),
+    /identity is not allowed/
+  );
+  assert.throws(
+    () => validateNoteV1({ ...base, receiverSpendPubKeyX: 0n }),
+    /point coordinates are not canonical/
+  );
 });
 
 test("batch canonical payload excludes creator and proof while binding every effect", () => {

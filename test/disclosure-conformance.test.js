@@ -4,9 +4,11 @@ import {
   decodeAuditDisclosureFromEvent,
   decodeSelfViewDisclosureFromEvent,
   decodeUserDisclosureFromEvent,
+  disclosureAmountAndAsset,
   publicPayloadReport,
   userDisclosureModeRecipientEncrypted
 } from "clairveiljs/disclosure";
+import { computeAssetIdV1 } from "clairveiljs/protocol-v1";
 import {
   fixtureTestOptions,
   readFixture
@@ -73,6 +75,14 @@ function expectedDisclosure(summary) {
     to: summary.to_shielded_address
   };
 }
+
+test("disclosure asset validation uses the NoteV1 asset-ID derivation", () => {
+  const assetIdHex = computeAssetIdV1("uclair").toString(16).padStart(64, "0");
+  assert.deepEqual(
+    disclosureAmountAndAsset({ amount: "7", asset_id_hex: assetIdHex, asset_denom: "uclair" }),
+    { amount: 7n, assetId: computeAssetIdV1("uclair"), assetDenom: "uclair" }
+  );
+});
 
 test("user public disclosure payload verifies against the golden vector", fixtureTestOptions, () => {
   const vectors = readFixture("privacy_wallet_golden_vectors.json");

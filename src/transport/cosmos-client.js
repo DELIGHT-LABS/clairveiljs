@@ -139,6 +139,76 @@ const defaultQueryRetry = Object.freeze({
   jitter: true,
   retryStatuses: defaultRetryStatuses
 });
+const transferPrivacyPolicyNames = Object.freeze([
+  "all-private",
+  "amount",
+  "to",
+  "amount-to",
+  "from",
+  "amount-from",
+  "from-to",
+  "amount-from-to"
+]);
+const transferPrivacyPolicyAliases = Object.freeze({
+  "to-from": "from-to",
+  "amount-to-from": "amount-from-to"
+});
+const transferDisclosureModeNames = Object.freeze([
+  "none",
+  "public",
+  "recipient-encrypted"
+]);
+const transferDisclosureModeAliases = Object.freeze({
+  USER_DISCLOSURE_MODE_NONE: "none",
+  USER_DISCLOSURE_MODE_PUBLIC: "public",
+  USER_DISCLOSURE_MODE_RECIPIENT_ENCRYPTED: "recipient-encrypted"
+});
+
+function canonicalTransferPrivacyPolicyName(value) {
+  let policy;
+  if (typeof value === "number") policy = value;
+  else if (typeof value === "bigint") policy = Number(value);
+  else {
+    const text = String(value ?? "all-private").trim() || "all-private";
+    const alias = transferPrivacyPolicyAliases[text] || text;
+    policy = /^[0-7]$/.test(alias) ? Number(alias) : transferPrivacyPolicyNames.indexOf(alias);
+  }
+  if (!Number.isInteger(policy) || policy < 0 || policy >= transferPrivacyPolicyNames.length) {
+    throw new Error("unsupported transfer privacy policy");
+  }
+  return transferPrivacyPolicyNames[policy];
+}
+
+function canonicalTransferDisclosureModeName(value, policy) {
+  if (policy === "all-private") return "none";
+  let mode;
+  if (typeof value === "number") mode = value;
+  else if (typeof value === "bigint") mode = Number(value);
+  else {
+    const text = String(value ?? "recipient-encrypted").trim() || "recipient-encrypted";
+    const alias = transferDisclosureModeAliases[text] || text;
+    mode = /^[0-2]$/.test(alias) ? Number(alias) : transferDisclosureModeNames.indexOf(alias);
+  }
+  if (!Number.isInteger(mode) || mode < 1 || mode >= transferDisclosureModeNames.length) {
+    throw new Error("disclosure mode must be public or recipient-encrypted when disclosure is enabled");
+  }
+  return transferDisclosureModeNames[mode];
+}
+
+function assertTransferDisclosureCapabilities(disclosureConfig, {
+  userPrivacyPolicy,
+  userDisclosureMode
+} = {}) {
+  const policy = canonicalTransferPrivacyPolicyName(userPrivacyPolicy);
+  const mode = canonicalTransferDisclosureModeName(userDisclosureMode, policy);
+  if (!disclosureConfig.supported_user_policies.includes(policy)) {
+    throw new Error(`disclosure config does not support transfer privacy policy ${policy}`);
+  }
+  if (!disclosureConfig.supported_user_modes.includes(mode)) {
+    throw new Error(`disclosure config does not support user disclosure mode ${mode}`);
+  }
+  return Object.freeze({ policy, mode });
+}
 
 function normalizeTimeoutMs(value, label = "timeoutMs") {
   const timeoutMs = Number(value);
@@ -2708,12 +2778,16 @@ export class ClairveilJS {
         privacyAccount: publicPrivacyAccount(privacy)
       };
     }
+    const isFinal = plan.status === "final_transfer_ready";
     assertPlanCanBuildTx(plan);
-    await this.assertProtocolPreflight(denom ?? this.defaultDenom);
+    const transferProtocolConfig = await this.assertTransferProtocolConfig(denom ?? this.defaultDenom);
+    assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
+      userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
+      userDisclosureMode: isFinal ? userDisclosureMode : "none"
+    });
 
     const auditPubKeyHex = auditDisclosureTargetPubKeyHex
-      || (await this.fetchAuditConfig()).audit_master_pubkey_hex;
-    const isFinal = plan.status === "final_transfer_ready";
+      || transferProtocolConfig.audit_config.audit_master_pubkey_hex;
     const stepRecipient = isFinal ? recipient : privacy.shieldedAddress;
     const stepAmount = isFinal ? amount : plan.nextAmount;
     let reservationBatch = null;
@@ -2901,10 +2975,14 @@ export class ClairveilJS {
       };
     }
     assertPlanCanBuildTx(plan);
-    await this.assertProtocolPreflight(denom ?? this.defaultDenom);
+    const transferProtocolConfig = await this.assertTransferProtocolConfig(denom ?? this.defaultDenom);
+    assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
+      userPrivacyPolicy,
+      userDisclosureMode
+    });
 
     const auditPubKeyHex = auditDisclosureTargetPubKeyHex
-      || (await this.fetchAuditConfig()).audit_master_pubkey_hex;
+      || transferProtocolConfig.audit_config.audit_master_pubkey_hex;
     let reservationBatch = null;
     try {
       reservationBatch = await preparePlanReservation(resolvedReservationManager, {

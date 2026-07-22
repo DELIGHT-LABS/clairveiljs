@@ -132,7 +132,14 @@ function fixedDomainTag(label) {
 function pointFromCoordinates(x, y, label) {
   const point = { x: field(x, `${label} x`), y: field(y, `${label} y`) };
   try {
-    return unpackPoint(packPoint(point));
+    const canonical = unpackPoint(packPoint(point));
+    if (canonical.x !== point.x || canonical.y !== point.y) {
+      throw new Error("point coordinates are not canonical");
+    }
+    if (canonical.x === 0n && canonical.y === 1n) {
+      throw new Error("point identity is not allowed");
+    }
+    return canonical;
   } catch (error) {
     throw new Error(`${label} must be a canonical prime-subgroup point: ${error.message}`);
   }
