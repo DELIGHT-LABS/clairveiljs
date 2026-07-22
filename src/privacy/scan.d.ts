@@ -43,6 +43,15 @@ export interface PrivacyScanValidationStateV2 {
   batch_self_view_by_event: Map<string, boolean>;
 }
 
+/** JSON-safe cursor payload for restoring typed-page validation after restart. */
+export interface PrivacyScanValidationStateSnapshotV2 {
+  version: "privacy-scan-validation-v2";
+  batch_self_view_by_event: readonly Readonly<{
+    event_key: string;
+    self_view_enabled: boolean;
+  }>[];
+}
+
 export interface PrivacyScanCursorV2 {
   height: number | string;
   global_sequence: number | string;
@@ -109,6 +118,8 @@ export function parseNullifierUsage(value: unknown): boolean | null;
 export function processPrivacyEvent(event: object, input: { rootSeed?: BytesLike; spendScalar?: bigint; viewScalar?: bigint }): NormalizedFoundNote[];
 export function normalizeFoundNotes(notes: Array<object | FoundNote>): NormalizedFoundNote[];
 export function createPrivacyScanValidationStateV2(): PrivacyScanValidationStateV2;
+export function serializePrivacyScanValidationStateV2(state: PrivacyScanValidationStateV2): PrivacyScanValidationStateSnapshotV2;
+export function restorePrivacyScanValidationStateV2(snapshot: PrivacyScanValidationStateSnapshotV2): PrivacyScanValidationStateV2;
 export type ScanNullifierUsage =
   | boolean
   | { used: boolean; Used?: never }
@@ -143,6 +154,8 @@ export function validatePrivacyScanPageV2(response: object, request?: {
   validationState?: PrivacyScanValidationStateV2;
   validation_state?: PrivacyScanValidationStateV2;
 }): ValidatedPrivacyScanPageV2;
+/** Runtime guard for the opaque output brand issued by validatePrivacyScanPageV2. */
+export function isValidatedPrivacyScanOutputV2(value: unknown): value is ValidatedPrivacyScanOutputV2;
 export function processPrivacyScanOutputV2(output: ValidatedPrivacyScanOutputV2, input: {
   rootSeed: BytesLike;
   spendScalar?: bigint;

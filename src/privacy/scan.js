@@ -41,6 +41,10 @@ export const privacyScanEventTypeV2 = Object.freeze({
 });
 export const privacyScanValidationStateVersionV2 = "privacy-scan-validation-v2";
 
+// Kept module-private: a batch disclosure decoder may only consume an output
+// produced by this validator, never an arbitrary protobuf-shaped object.
+const validatedPrivacyScanOutputBrandV2 = Symbol("validatedPrivacyScanOutputV2");
+
 const maxUint64 = (1n << 64n) - 1n;
 
 export function parseNullifierUsage(value) {
@@ -560,7 +564,7 @@ function scanOutput(input, index, summaries) {
   });
   if (!leafIndexFound) throw new Error(`privacy scan output ${index} leaf index is absent`);
   const leafIndex = aliasedScanValue(input, ["leafIndex", "leaf_index"], `privacy scan output ${index} leaf index`, raw => scanUint64Value(raw, `privacy scan output ${index} leaf index`), { required: false, fallback: 0 });
-  const output = Object.freeze({
+  const output = {
     height,
     global_sequence: globalSequence,
     output_index: outputIndex,
@@ -587,7 +591,9 @@ function scanOutput(input, index, summaries) {
     audit_target_pubkey: scanOptionalBytes(input, ["auditTargetPubkey", "audit_target_pubkey"], `privacy scan output ${index} audit target`),
     tx_hash: txHash,
     event_type: eventType
-  });
+  };
+  Object.defineProperty(output, validatedPrivacyScanOutputBrandV2, { value: true });
+  Object.freeze(output);
   if (output.audit_key_id !== summary.audit_key_id || String(output.audit_key_epoch) !== String(summary.audit_key_epoch) || !equalScanBytes(output.audit_target_pubkey, summary.audit_target_pubkey)) {
     throw new Error(`privacy scan output ${index} does not match its summary audit identity`);
   }
@@ -607,6 +613,11 @@ function scanOutput(input, index, summaries) {
     throw new Error(`privacy scan output ${index} has unsupported event type ${JSON.stringify(eventType)}`);
   }
   return output;
+}
+
+/** True only for an output emitted by validatePrivacyScanPageV2 in this SDK instance. */
+export function isValidatedPrivacyScanOutputV2(value) {
+  return Boolean(value && typeof value === "object" && value[validatedPrivacyScanOutputBrandV2] === true);
 }
 
 function scanRequest(input = {}) {
@@ -629,6 +640,16 @@ export function createPrivacyScanValidationStateV2() {
   };
 }
 
+function scanValidationEventKey(value) {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)\/[1-9][0-9]*$/.test(value)) {
+    throw new Error("privacy scan validation state event key is invalid");
+  }
+  const [height, sequence] = value.split("/");
+  scanUint64Value(height, "privacy scan validation state event height");
+  scanUint64Value(sequence, "privacy scan validation state event sequence");
+  return value;
+}
+
 function scanValidationState(input = {}) {
   const camel = input.validationState;
   const snake = input.validation_state;
@@ -639,7 +660,40 @@ function scanValidationState(input = {}) {
     throw new Error("privacy scan validation state is invalid");
   }
   for (const [key, enabled] of state.batch_self_view_by_event) {
-    if (typeof key !== "string" || typeof enabled !== "boolean") throw new Error("privacy scan validation state is invalid");
+    scanValidationEventKey(key);
+    if (typeof enabled !== "boolean") throw new Error("privacy scan validation state is invalid");
+  }
+  return state;
+}
+
+/** Serialize page-validation state so an interrupted cursor sequence stays fail-closed after restart. */
+export function serializePrivacyScanValidationStateV2(input) {
+  const state = scanValidationState({ validationState: input });
+  const entries = [...state.batch_self_view_by_event]
+    .map(([event_key, self_view_enabled]) => Object.freeze({ event_key, self_view_enabled }))
+    .sort((left, right) => left.event_key.localeCompare(right.event_key));
+  return Object.freeze({
+    version: privacyScanValidationStateVersionV2,
+    batch_self_view_by_event: Object.freeze(entries)
+  });
+}
+
+/** Restore serialized page-validation state supplied by a durable scan cursor. */
+export function restorePrivacyScanValidationStateV2(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input) || input.version !== privacyScanValidationStateVersionV2 || !Array.isArray(input.batch_self_view_by_event)) {
+    throw new Error("privacy scan validation state snapshot is invalid");
+  }
+  const entries = input.batch_self_view_by_event;
+  const state = createPrivacyScanValidationStateV2();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || Object.keys(entry).length !== 2 || !("event_key" in entry) || !("self_view_enabled" in entry)) {
+      throw new Error("privacy scan validation state snapshot is invalid");
+    }
+    const eventKey = scanValidationEventKey(entry.event_key);
+    if (typeof entry.self_view_enabled !== "boolean" || state.batch_self_view_by_event.has(eventKey)) {
+      throw new Error("privacy scan validation state snapshot is invalid");
+    }
+    state.batch_self_view_by_event.set(eventKey, entry.self_view_enabled);
   }
   return state;
 }

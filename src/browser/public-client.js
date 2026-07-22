@@ -9,6 +9,11 @@ import {
   canonicalAssetIDHexV1,
   normalizeAssetRegistryQueryResponseV1
 } from "../privacy/asset-registry.js";
+import {
+  normalizeAuditConfigV1,
+  normalizeDisclosureConfigV1,
+  normalizeReserveResponseV1
+} from "../privacy/network-config.js";
 
 function trimTrailingSlash(value) {
   return String(value || "").replace(/\/$/, "");
@@ -405,6 +410,27 @@ export class ClairveilPublicClient {
       throw new Error("reserve denom is required");
     }
     return this.fetchJson(`/clairveil/privacy/v1/reserve/${encodeURIComponent(normalizedDenom)}`);
+  }
+
+  async fetchAuditConfig() {
+    return this.fetchJson("/clairveil/privacy/v1/audit_config");
+  }
+
+  async fetchDisclosureConfig() {
+    return this.fetchJson("/clairveil/privacy/v1/disclosure_config");
+  }
+
+  async queryAuditConfig() {
+    return normalizeAuditConfigV1(await this.fetchAuditConfig());
+  }
+
+  async queryDisclosureConfig() {
+    return normalizeDisclosureConfigV1(await this.fetchDisclosureConfig());
+  }
+
+  async queryReserve(denom) {
+    const canonicalDenom = canonicalAssetDenomV1(denom);
+    return normalizeReserveResponseV1(await this.fetchReserve(canonicalDenom), canonicalDenom);
   }
 
   async fetchAssetByDenom(denom) {

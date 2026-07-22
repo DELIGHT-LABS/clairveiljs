@@ -511,6 +511,8 @@ npm run test:e2e:local
 
 `CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT`, `CLAIRVEIL_E2E_ONE_PROOF_PAYROLL_AMOUNT`로 input/payment를 바꿀 수 있습니다. Recipient는 typed output evidence를 독립적으로 decrypt·검증할 수 있도록 의도적으로 E2E wallet으로 고정합니다. 기본 snapshot height는 새 input deposit output의 height입니다. 동시 활동으로 tree가 전진했다면 검증된 같은 snapshot의 `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX`와 `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT`를 항상 함께 지정하세요.
 
+릴리스 환경에서 wallet·deposit proof credential까지 준비되었다면 `npm run verify:release:integration`을 실행하세요. 이 명령은 wallet-contract JSON Schema, required Go fixture, 모든 localnet one-proof shape를 검사하며, 필요한 wallet/proof 설정이 없으면 skip 대신 실패합니다.
+
 ## 테스트
 
 ```bash
@@ -529,5 +531,5 @@ npm pack --dry-run --json
 3. `npm test`
 4. `npm run test:conformance:required`
 5. `npm pack --dry-run --json`
-6. 필요하면 `CLAIRVEIL_E2E_LOCAL=1 npm run test:e2e:local`
+6. 릴리스 localnet에서 `npm run verify:release:integration`
 7. 최종 EVM ABI/prover contract를 pin한 뒤 EVM support stable 여부를 선언

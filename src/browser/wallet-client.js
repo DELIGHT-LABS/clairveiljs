@@ -209,6 +209,7 @@ function scanOptionsFromBody(body = {}) {
     outputLimit: scan.outputLimit ?? scan.output_limit ?? body.outputLimit ?? body.output_limit,
     eventLimit: scan.eventLimit ?? scan.event_limit ?? body.eventLimit ?? body.event_limit,
     maxEncodedBytes: scan.maxEncodedBytes ?? scan.max_encoded_bytes ?? body.maxEncodedBytes ?? body.max_encoded_bytes,
+    validationStateSnapshot: scan.validationStateSnapshot ?? scan.validation_state_snapshot ?? body.validationStateSnapshot ?? body.validation_state_snapshot,
     scanSource: scan.scanSource ?? scan.scan_source ?? body.scanSource ?? body.scan_source
   };
 }
@@ -699,8 +700,28 @@ export class ClairveilBrowserClient {
     return this.cosmos.fetchAuditableTransfers(options);
   }
 
+  async fetchAuditConfig() {
+    return this.cosmos.fetchAuditConfig();
+  }
+
+  async fetchDisclosureConfig() {
+    return this.cosmos.fetchDisclosureConfig();
+  }
+
+  async queryAuditConfig() {
+    return this.cosmos.queryAuditConfig();
+  }
+
+  async queryDisclosureConfig() {
+    return this.cosmos.queryDisclosureConfig();
+  }
+
   async fetchReserve(denom) {
     return this.cosmos.fetchReserve(denom);
+  }
+
+  async queryReserve(denom) {
+    return this.cosmos.queryReserve(denom);
   }
 
   buildRootSigningMessage(address, pubKeyHex) {
@@ -1386,6 +1407,8 @@ export class ClairveilBrowserClient {
       event_limit,
       maxEncodedBytes,
       max_encoded_bytes,
+      validationStateSnapshot,
+      validation_state_snapshot,
       scanSource,
       scan_source,
       noteStore,
@@ -1411,6 +1434,8 @@ export class ClairveilBrowserClient {
       event_limit,
       maxEncodedBytes,
       max_encoded_bytes,
+      validationStateSnapshot,
+      validation_state_snapshot,
       scanSource,
       scan_source,
       noteStore: noteStore ?? note_store,

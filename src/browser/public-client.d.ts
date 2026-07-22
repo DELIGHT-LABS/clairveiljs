@@ -4,6 +4,11 @@ import type {
   NormalizedAssetRegistryQueryResponseV1
 } from "../privacy/asset-registry.js";
 import type { VerifiedCommitmentPathSnapshot } from "../privacy/merkle-path.js";
+import type {
+  ValidatedAuditConfigV1,
+  ValidatedDisclosureConfigV1,
+  ValidatedReserveResponseV1
+} from "../privacy/network-config.js";
 
 export interface PrivacyEventsQuery {
   afterHeight?: Uint64CursorInput;
@@ -99,7 +104,12 @@ export class ClairveilPublicClient {
   checkNullifier(nullifierHex: string): Promise<object & { used?: boolean; Used?: boolean }>;
   checkNullifiers(nullifierHexes: readonly string[]): Promise<Map<string, boolean>>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
+  fetchAuditConfig(): Promise<object>;
+  fetchDisclosureConfig(): Promise<object>;
+  queryAuditConfig(): Promise<ValidatedAuditConfigV1>;
+  queryDisclosureConfig(): Promise<ValidatedDisclosureConfigV1>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
+  queryReserve(denom: string): Promise<ValidatedReserveResponseV1>;
   fetchAssetByDenom(denom: string): Promise<object>;
   fetchAssetByID(assetIdHex: string): Promise<object>;
   queryAssetByDenom(denom: string): Promise<NormalizedAssetRegistryQueryResponseV1>;

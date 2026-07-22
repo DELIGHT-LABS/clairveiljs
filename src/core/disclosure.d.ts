@@ -1,5 +1,4 @@
 import type { Hex } from "./crypto.js";
-import type { PrivacyScanOutputV2 } from "../generated/clairveil/privacy/v1/genesis.js";
 import type { ValidatedPrivacyScanOutputV2 } from "../privacy/scan.js";
 
 export interface DisclosureDecodeOptions {
@@ -73,8 +72,8 @@ export interface DisclosureReport {
   payload: DisclosurePayload;
 }
 
-/** A generated protobuf output or a strict `validatePrivacyScanPageV2` output. */
-export type BatchPrivacyScanDisclosureOutputV2 = PrivacyScanOutputV2 | ValidatedPrivacyScanOutputV2;
+/** An opaque output returned by `validatePrivacyScanPageV2`; raw protobuf records are rejected. */
+export type BatchPrivacyScanDisclosureOutputV2 = ValidatedPrivacyScanOutputV2;
 
 export interface BatchDisclosureDecodeOptions extends DisclosureDecodeOptions {
   /** Required for recipient-encrypted, audit, and self-view envelopes. */

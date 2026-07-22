@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { derivePubKeyFromScalar, packPoint, signNoteHash } from "clairveiljs/core";
+import { canonicalFieldBytes, derivePubKeyFromScalar, packPoint, signNoteHash } from "clairveiljs/core";
 import { base64FromBytes, bytesFromBase64, hexFromBytes } from "clairveiljs/browser-crypto";
 import {
   buildPreparedBatchTransferPayload,
@@ -17,8 +17,10 @@ import {
   computeNoteTreeNodeV1,
   emptyNoteTreeRootsV1,
   fieldHexV1,
+  privacyFixedV1,
   unmarshalDisclosurePlaintextV1
 } from "clairveiljs/protocol-v1";
+import { validatePrivacyScanPageV2 } from "clairveiljs/scan";
 import { createHttpProverAdapter } from "clairveiljs/prover";
 import { createClairveilClient } from "clairveiljs/cosmos";
 import {
@@ -142,6 +144,56 @@ async function batchPayload({
   });
 }
 
+function validatedBatchScanOutput(message, payload, index) {
+  const txHash = new Uint8Array(32).fill(0xab);
+  const auditTarget = bytesFromBase64(payload.audit_disclosure_target_pubkey);
+  const modeName = mode => [
+    "USER_DISCLOSURE_MODE_NONE",
+    "USER_DISCLOSURE_MODE_PUBLIC",
+    "USER_DISCLOSURE_MODE_RECIPIENT_ENCRYPTED"
+  ][Number(mode)];
+  const summary = {
+    height: 10,
+    globalSequence: 4,
+    txHash,
+    eventType: "batch_transfer",
+    nullifiers: message.nullifiers,
+    outputCount: message.outputs.length,
+    effectId: canonicalFieldBytes(59n),
+    circuitSetId: "privacy-note-v1",
+    payloadVersion: privacyFixedV1,
+    scanSchemaVersion: "privacy-scan-v2",
+    auditKeyId: payload.audit_key_id,
+    auditKeyEpoch: payload.audit_key_epoch,
+    auditTargetPubkey: auditTarget
+  };
+  const page = validatePrivacyScanPageV2({
+    scanSchemaVersion: "privacy-scan-v2",
+    summaries: [summary],
+    outputs: message.outputs.map((entry, outputIndex) => ({
+      ...entry,
+      height: summary.height,
+      globalSequence: summary.globalSequence,
+      outputIndex,
+      effectId: summary.effectId,
+      txHash,
+      eventType: summary.eventType,
+      circuitSetId: summary.circuitSetId,
+      payloadVersion: summary.payloadVersion,
+      scanSchemaVersion: summary.scanSchemaVersion,
+      auditKeyId: summary.auditKeyId,
+      auditKeyEpoch: summary.auditKeyEpoch,
+      auditTargetPubkey: summary.auditTargetPubkey,
+      userDisclosureMode: modeName(entry.userDisclosureMode),
+      leafIndexFound: true,
+      leafIndex: outputIndex
+    })),
+    nextCursor: { height: summary.height, globalSequence: summary.globalSequence, outputIndex: message.outputs.length - 1 },
+    hasMore: false
+  });
+  return page.outputs[index];
+}
+
 test("one-proof batch prover uses the Clairveil main route and binds the response hash", async () => {
   const payload = await batchPayload();
   const proof = new Uint8Array(164).fill(7);
@@ -217,13 +269,7 @@ test("Batch V1 typed-scan disclosure decoders bind output index, commitment, pol
     circuit_set_id: "privacy-note-v1"
   };
   const message = buildMsgBatchTransferFromPrepared(payload, proof, { nowUnix: 1_700_000_000 });
-  const output = (index, fields = {}) => ({
-    ...message.outputs[index],
-    eventType: "batch_transfer",
-    outputIndex: index,
-    txHash: new Uint8Array(32).fill(0xab),
-    ...fields
-  });
+  const output = index => validatedBatchScanOutput(message, payload, index);
 
   const publicUser = decodeBatchUserDisclosureFromScanOutput(output(1), {
     shieldedPrefix: "clairs",
@@ -286,17 +332,15 @@ test("Batch V1 typed-scan disclosure decoders bind output index, commitment, pol
   assert.equal(wrappedAudit.digest_hex, audit.digest_hex);
 
   assert.throws(
-    () => decodeBatchUserDisclosureFromScanOutput(output(2, { outputIndex: 1 }), {
+    () => decodeBatchUserDisclosureFromScanOutput({ ...output(2), output_index: 1 }, {
       disclosureScalar: recipientScalar,
       disclosurePubKeyHex: hexFromBytes(packPoint(derivePubKeyFromScalar(recipientScalar)))
     }),
-    /output index mismatch/
+    /must come from validatePrivacyScanPageV2/
   );
   assert.throws(
-    () => decodeBatchAuditDisclosureFromScanOutput(output(2, {
-      fullDisclosureDigest: Uint8Array.from(message.outputs[2].fullDisclosureDigest).fill(1)
-    }), { disclosureScalar: 31n }),
-    /batch audit disclosure digest mismatch/
+    () => decodeBatchAuditDisclosureFromScanOutput(message.outputs[2], { disclosureScalar: 31n }),
+    /must come from validatePrivacyScanPageV2/
   );
 });
 

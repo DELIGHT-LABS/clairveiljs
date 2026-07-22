@@ -17,6 +17,11 @@ import type {
   SignDocBase64,
   TxSearchResult
 } from "../transport/cosmos-client.js";
+import type {
+  ValidatedAuditConfigV1,
+  ValidatedDisclosureConfigV1,
+  ValidatedReserveResponseV1
+} from "../privacy/network-config.js";
 import type { EvmPrivacyTransactionOptions, EvmTransactionRequest, EvmWithdrawMessage } from "../transport/evm.js";
 import type { CoinString } from "../core/note.js";
 import type { DisclosureReport } from "../core/disclosure.js";
@@ -571,7 +576,12 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   fetchPrivacyEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchScanEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
+  fetchAuditConfig(): Promise<object>;
+  fetchDisclosureConfig(): Promise<object>;
+  queryAuditConfig(): Promise<ValidatedAuditConfigV1>;
+  queryDisclosureConfig(): Promise<ValidatedDisclosureConfigV1>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
+  queryReserve(denom: string): Promise<ValidatedReserveResponseV1>;
   buildRootSigningMessage(address: ClairAddress, pubKeyHex: Hex): string;
   verifySignerPubKey(address: ClairAddress, pubKeyHex: Hex): object;
   evmAccountIdentity(address: string): { evmAddress: string; address: ClairAddress; pubKeyHex: Hex };

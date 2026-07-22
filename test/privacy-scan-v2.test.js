@@ -268,3 +268,38 @@ test("Cosmos pagination retains batch self-view validation state", async () => {
     /self-view disclosure must be all-or-none/
   );
 });
+
+test("durable privacy scan cursors retain partial batch validation across a restart", async () => {
+  const batch = validBatchPage();
+  const firstPage = {
+    ...batch,
+    outputs: [batch.outputs[0]],
+    nextCursor: { height: 10, globalSequence: 4, outputIndex: 0 },
+    hasMore: true
+  };
+  const finalPage = {
+    ...batch,
+    outputs: [{ ...batch.outputs[1], selfViewDisclosurePayload: new Uint8Array() }],
+    hasMore: false
+  };
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-test-1"
+  });
+  client.fetchPrivacyScan = async () => firstPage;
+  const first = await client.scanNotes({ rootSeed: new Uint8Array(32).fill(9), maxPages: 1 });
+  assert.deepEqual(first.scanCursor.validation_state, {
+    version: "privacy-scan-validation-v2",
+    batch_self_view_by_event: [{ event_key: "10/4", self_view_enabled: true }]
+  });
+  assert.deepEqual(first.nextScanOptions.validationStateSnapshot, first.scanCursor.validation_state);
+
+  // JSON round-tripping is what a NoteStore/process restart does to the cursor.
+  const resumed = JSON.parse(JSON.stringify(first.nextScanOptions));
+  client.fetchPrivacyScan = async () => finalPage;
+  await assert.rejects(
+    () => client.scanNotes({ rootSeed: new Uint8Array(32).fill(9), ...resumed }),
+    /self-view disclosure must be all-or-none/
+  );
+});

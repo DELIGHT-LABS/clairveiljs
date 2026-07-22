@@ -45,6 +45,12 @@ const env = process.env;
 const localE2eEnabled = env.CLAIRVEIL_E2E_LOCAL === "1";
 const fullFlowEnabled = localE2eEnabled && env.CLAIRVEIL_E2E_FULL_FLOW === "1";
 const oneProofBatchEnabled = fullFlowEnabled && env.CLAIRVEIL_E2E_ONE_PROOF_BATCH === "1";
+const e2eRequired = env.CLAIRVEIL_E2E_REQUIRED === "1";
+
+function skipOrRequire(t, message) {
+  if (e2eRequired) throw new Error(message);
+  t.skip(message);
+}
 
 function positiveIntegerEnv(name, fallback) {
   const value = env[name];
@@ -552,12 +558,12 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
   const config = configFromEnv();
   const wallet = await loadE2eWallet(config);
   if (!wallet) {
-    t.skip("set CLAIRVEIL_E2E_WALLET_MODULE or CLAIRVEIL_E2E_MNEMONIC plus CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64");
+    skipOrRequire(t, "set CLAIRVEIL_E2E_WALLET_MODULE or CLAIRVEIL_E2E_MNEMONIC plus CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64");
     return;
   }
   const depositProofProvider = await loadDepositProofProvider(config);
   if (!depositProofProvider) {
-    t.skip("set CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE to run the full deposit flow");
+    skipOrRequire(t, "set CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE to run the full deposit flow");
     return;
   }
 
@@ -640,12 +646,12 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
   const config = configFromEnv();
   const wallet = await loadE2eWallet(config);
   if (!wallet) {
-    t.skip("set CLAIRVEIL_E2E_WALLET_MODULE or CLAIRVEIL_E2E_MNEMONIC plus CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64");
+    skipOrRequire(t, "set CLAIRVEIL_E2E_WALLET_MODULE or CLAIRVEIL_E2E_MNEMONIC plus CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64");
     return;
   }
   const depositProofProvider = await loadDepositProofProvider(config);
   if (!depositProofProvider) {
-    t.skip("set CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE to fund the one-proof batch input note");
+    skipOrRequire(t, "set CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE to fund the one-proof batch input note");
     return;
   }
 

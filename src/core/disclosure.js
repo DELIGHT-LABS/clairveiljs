@@ -28,6 +28,7 @@ import {
   unwrapEncryptedEnvelopeV1,
   unmarshalDisclosurePlaintextV1
 } from "../privacy/protocol-v1.js";
+import { isValidatedPrivacyScanOutputV2 } from "../privacy/scan.js";
 
 export const payloadVersion = "v4";
 export const planeUser = "user";
@@ -612,13 +613,13 @@ function typedScanTxHash(output, txHash) {
 }
 
 /**
- * Strictly normalize a single Batch V1 PrivacyScanOutputV2 disclosure record.
- * This intentionally accepts both generated-protobuf camel case and the
- * validated scanner's snake case, while rejecting contradictory aliases.
+ * Strictly normalize one validated Batch V1 typed-scan disclosure record.
+ * The private validator brand closes the raw protobuf-shaped input boundary:
+ * callers must validate the complete page (including its summary) first.
  */
 function normalizedBatchScanDisclosureOutput(output) {
-  if (!output || typeof output !== "object" || Array.isArray(output)) {
-    throw new Error("PrivacyScanOutputV2 batch output is required");
+  if (!isValidatedPrivacyScanOutputV2(output)) {
+    throw new Error("batch disclosure output must come from validatePrivacyScanPageV2");
   }
   const eventType = String(typedScanAliasedValue(output, "eventType", "event_type", "privacy scan batch event type") || "").trim();
   if (eventType !== batchTransferScanEventType) {

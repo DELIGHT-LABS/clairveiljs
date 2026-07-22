@@ -44,6 +44,11 @@ import {
   normalizeAssetRegistryQueryResponseV1
 } from "../privacy/asset-registry.js";
 import {
+  normalizeAuditConfigV1,
+  normalizeDisclosureConfigV1,
+  normalizeReserveResponseV1
+} from "../privacy/network-config.js";
+import {
   validateCircuitConfigV1,
   validateExpectedCircuitIdentityV1
 } from "../privacy/circuit-config.js";
@@ -64,7 +69,9 @@ import {
   createPrivacyScanValidationStateV2,
   parseNullifierUsage,
   processPrivacyScanPageV2,
+  restorePrivacyScanValidationStateV2,
   scanNotes as scanNotesCore,
+  serializePrivacyScanValidationStateV2,
   validatePrivacyScanPageV2
 } from "../privacy/scan.js";
 import {
@@ -778,6 +785,14 @@ export function nextPrivacyScanOptions(scanOrCursor = {}, defaults = {}) {
       hasMore,
       completed: !hasMore
     };
+    const validationState = cursor.validation_state ?? cursor.validationState;
+    if (validationState != null) {
+      // Parse before returning it so a corrupt durable cursor cannot silently
+      // downgrade the cross-page all-or-none batch disclosure guarantee.
+      next.validationStateSnapshot = serializePrivacyScanValidationStateV2(
+        restorePrivacyScanValidationStateV2(validationState)
+      );
+    }
     const maxPages = defaults.maxPages ?? defaults.max_pages;
     if (maxPages != null) next.maxPages = maxPages;
     const includeFoundNotes = defaults.includeFoundNotes ?? defaults.include_found_notes;
@@ -855,6 +870,8 @@ function resolveScanOptions({
   event_limit,
   maxEncodedBytes,
   max_encoded_bytes,
+  validationStateSnapshot,
+  validation_state_snapshot,
   scanSource,
   scan_source
 } = {}) {
@@ -869,6 +886,7 @@ function resolveScanOptions({
     outputLimit: scan?.outputLimit ?? scan?.output_limit ?? outputLimit ?? output_limit,
     eventLimit: scan?.eventLimit ?? scan?.event_limit ?? eventLimit ?? event_limit,
     maxEncodedBytes: scan?.maxEncodedBytes ?? scan?.max_encoded_bytes ?? maxEncodedBytes ?? max_encoded_bytes,
+    validationStateSnapshot: scan?.validationStateSnapshot ?? scan?.validation_state_snapshot ?? validationStateSnapshot ?? validation_state_snapshot,
     scanSource: scan?.scanSource ?? scan?.scan_source ?? scanSource ?? scan_source
   };
 }
@@ -1728,6 +1746,16 @@ export class ClairveilJS {
     return this.fetchJson("/clairveil/privacy/v1/disclosure_config", { failover: true });
   }
 
+  /** Fetch and fail-closed validate the active audit recipient identity. */
+  async queryAuditConfig() {
+    return normalizeAuditConfigV1(await this.fetchAuditConfig());
+  }
+
+  /** Fetch and fail-closed validate disclosure policy/mode compatibility. */
+  async queryDisclosureConfig() {
+    return normalizeDisclosureConfigV1(await this.fetchDisclosureConfig());
+  }
+
   async fetchCircuitConfig() {
     return validateCircuitConfigV1(
       await this.fetchJson("/clairveil/privacy/v1/circuit_config", { failover: true }),
@@ -1746,6 +1774,12 @@ export class ClairveilJS {
       throw new Error("reserve denom is required");
     }
     return this.fetchJson(`/clairveil/privacy/v1/reserve/${encodeURIComponent(normalizedDenom)}`, { failover: true });
+  }
+
+  /** Fetch and independently check reserve accounting before relying on it. */
+  async queryReserve(denom) {
+    const canonicalDenom = canonicalAssetDenomV1(denom);
+    return normalizeReserveResponseV1(await this.fetchReserve(canonicalDenom), canonicalDenom);
   }
 
   async fetchAssetByDenom(denom) {
@@ -1808,6 +1842,25 @@ export class ClairveilJS {
       this.resolveAsset(canonicalDenom)
     ]);
     return Object.freeze({ circuit_config: circuitConfig, asset });
+  }
+
+  /**
+   * Bind a transfer operation to the active circuit/asset and typed
+   * audit/disclosure configuration. Reserve accounting is exposed separately
+   * through queryReserve because its value changes with operations.
+   */
+  async assertTransferProtocolConfig(denom) {
+    const canonicalDenom = canonicalAssetDenomV1(denom);
+    const [preflight, auditConfig, disclosureConfig] = await Promise.all([
+      this.assertProtocolPreflight(canonicalDenom),
+      this.queryAuditConfig(),
+      this.queryDisclosureConfig()
+    ]);
+    return Object.freeze({
+      ...preflight,
+      audit_config: auditConfig,
+      disclosure_config: disclosureConfig
+    });
   }
 
   async fetchCommitmentPathsAtRoot(options = {}) {
@@ -1894,6 +1947,8 @@ export class ClairveilJS {
     event_limit,
     maxEncodedBytes,
     max_encoded_bytes,
+    validationStateSnapshot,
+    validation_state_snapshot,
     eventTypes,
     event_types,
     includeFoundNotes = false,
@@ -1932,7 +1987,10 @@ export class ClairveilJS {
       let scannedEvents = 0;
       let hasMore = false;
       let found = [];
-      const validationState = createPrivacyScanValidationStateV2();
+      const requestedValidationState = validationStateSnapshot ?? validation_state_snapshot;
+      const validationState = requestedValidationState == null
+        ? createPrivacyScanValidationStateV2()
+        : restorePrivacyScanValidationStateV2(requestedValidationState);
       try {
         for (; pagesScanned < pageBudget;) {
           const request = {
@@ -1998,7 +2056,10 @@ export class ClairveilJS {
         latest_sequence: currentAfter.globalSequence,
         latest_output_index: currentAfter.outputIndex,
         pages_scanned: pagesScanned,
-        completed: !hasMore
+        completed: !hasMore,
+        ...(validationState.batch_self_view_by_event.size
+          ? { validation_state: serializePrivacyScanValidationStateV2(validationState) }
+          : {})
       };
       return {
         ...result,
@@ -2329,6 +2390,8 @@ export class ClairveilJS {
     event_limit,
     maxEncodedBytes,
     max_encoded_bytes,
+    validationStateSnapshot,
+    validation_state_snapshot,
     scanSource,
     scan_source
   } = {}) {
@@ -2338,6 +2401,7 @@ export class ClairveilJS {
     let resolvedAfterSequence = afterSequence ?? after_sequence;
     let resolvedPage = page;
     let resolvedScanSource = scan_source ?? scanSource;
+    let resolvedValidationStateSnapshot = validationStateSnapshot ?? validation_state_snapshot;
     if (resolvedAfter == null && resolvedAfterHeight == null && noteStore) {
       const cached = await noteStore.load();
       const cachedCursor = cached.scanCursor || {};
@@ -2352,6 +2416,7 @@ export class ClairveilJS {
         } else {
           resolvedAfter = next.after;
           resolvedScanSource = "privacy_scan";
+          resolvedValidationStateSnapshot = resolvedValidationStateSnapshot ?? next.validationStateSnapshot;
         }
       } else if (cachedCursor.source === "scan_events" || cachedCursor.source === "privacy_events") {
         const next = nextPrivacyScanOptions(cachedCursor, { limit, maxPages });
@@ -2395,6 +2460,7 @@ export class ClairveilJS {
       outputLimit: output_limit ?? outputLimit,
       eventLimit: event_limit ?? eventLimit,
       maxEncodedBytes: max_encoded_bytes ?? maxEncodedBytes,
+      validationStateSnapshot: resolvedValidationStateSnapshot,
       includeFoundNotes: true
     });
     if (noteStore) {

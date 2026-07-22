@@ -1,9 +1,12 @@
+import type { PrivacyScanValidationStateSnapshotV2 } from "../privacy/scan.js";
+
 export * from "../core/crypto.js";
 export * from "../core/disclosure.js";
 export * from "../core/errors.js";
 export * from "../core/note.js";
 export * from "../privacy/payload.js";
 export * from "../privacy/circuit-config.js";
+export * from "../privacy/network-config.js";
 export * from "../privacy/planner.js";
 export * from "../privacy/prover.js";
 export * from "../privacy/reservation.js";
@@ -277,6 +280,9 @@ export interface PrivacyScanOptions extends PrivacyEventsQuery {
   max_encoded_bytes?: Uint64CursorInput;
   maxPages?: number;
   max_pages?: number;
+  /** Durable typed-page state returned by nextPrivacyScanOptions. */
+  validationStateSnapshot?: PrivacyScanValidationStateSnapshotV2;
+  validation_state_snapshot?: PrivacyScanValidationStateSnapshotV2;
   scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
   scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
 }
@@ -331,6 +337,8 @@ export interface PrivacyEventsCursor {
   source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
   after?: { height?: Uint64CursorValue; globalSequence?: Uint64CursorValue; global_sequence?: Uint64CursorValue; outputIndex?: number; output_index?: number };
   next_cursor?: { height?: Uint64CursorValue; globalSequence?: Uint64CursorValue; global_sequence?: Uint64CursorValue; outputIndex?: number; output_index?: number };
+  /** Validated state persisted with a partial privacy_scan cursor. */
+  validation_state?: PrivacyScanValidationStateSnapshotV2;
   output_limit?: number;
   event_limit?: number;
   max_encoded_bytes?: Uint64CursorInput;
@@ -365,6 +373,7 @@ export interface PrivacyScanResumeOptions {
   maxEncodedBytes?: Uint64CursorValue;
   scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
   maxPages?: number;
+  validationStateSnapshot?: PrivacyScanValidationStateSnapshotV2;
   includeFoundNotes?: boolean;
   hasMore: boolean;
   completed: boolean;
@@ -699,9 +708,12 @@ export class ClairveilJS {
   fetchCommitmentInfo(commitmentHex: Hex): Promise<object>;
   fetchAuditConfig(): Promise<object>;
   fetchDisclosureConfig(): Promise<object>;
+  queryAuditConfig(): Promise<import("../privacy/network-config.js").ValidatedAuditConfigV1>;
+  queryDisclosureConfig(): Promise<import("../privacy/network-config.js").ValidatedDisclosureConfigV1>;
   fetchCircuitConfig(): Promise<ValidatedCircuitConfigV1>;
   assertCircuitConfig(): Promise<ValidatedCircuitConfigV1>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
+  queryReserve(denom: string): Promise<import("../privacy/network-config.js").ValidatedReserveResponseV1>;
   fetchAssetByDenom(denom: string): Promise<object>;
   fetchAssetByID(assetIdHex: Hex): Promise<object>;
   queryAssetByDenom(denom: string): Promise<NormalizedAssetRegistryQueryResponseV1>;
@@ -710,6 +722,12 @@ export class ClairveilJS {
   resolveAssetByDenom(denom: string): Promise<NormalizedAssetRegistryEntryV1>;
   resolveAssetByID(assetIdHex: Hex): Promise<NormalizedAssetRegistryEntryV1>;
   assertProtocolPreflight(denom: string): Promise<{ circuit_config: ValidatedCircuitConfigV1; asset: NormalizedAssetRegistryEntryV1 }>;
+  assertTransferProtocolConfig(denom: string): Promise<{
+    circuit_config: ValidatedCircuitConfigV1;
+    asset: NormalizedAssetRegistryEntryV1;
+    audit_config: import("../privacy/network-config.js").ValidatedAuditConfigV1;
+    disclosure_config: import("../privacy/network-config.js").ValidatedDisclosureConfigV1;
+  }>;
   fetchCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<object>;
   queryCommitmentPathsAtRoot(options: CommitmentPathsAtRootQuery): Promise<VerifiedCommitmentPathSnapshot>;
   createCommitmentPathSnapshotProvider(options: CommitmentPathsAtRootQuery): Promise<{
