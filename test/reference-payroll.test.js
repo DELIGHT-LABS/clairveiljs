@@ -6,6 +6,7 @@ import {
   assertOneProofPayrollNullifiersUnspent,
   buildExpectedPayrollEvidence,
   buildOneProofPayrollOperationEvidence,
+  createOneProofPayrollArtifact,
   createOneProofPayrollBatchSignDoc,
   markOneProofPayrollReservationBroadcastAttempting,
   markOneProofPayrollReservationProofReady,
@@ -22,7 +23,11 @@ import {
   reconcileOneProofPayrollReservation,
   reconcileOneProofPayrollOperationEvidence,
   reconcileOneProofPayrollEvidence,
+  parseOneProofPayrollArtifact,
+  resumeOneProofPayrollArtifact,
+  retransmitOneProofPayrollArtifact,
   reserveOneProofPayrollOperation,
+  serializeOneProofPayrollArtifact,
   validateOneProofPayrollOperationEvidence
 } from "clairveiljs/reference-payroll";
 import { canonicalFieldBytes, derivePubKeyFromScalar, signNoteHash } from "clairveiljs/core";
@@ -125,6 +130,11 @@ test("reference payroll plans current one-proof batches without using legacy tra
   assert.equal(paddedPlan.operations[0].output_mode, "exact-32");
   assert.equal(paddedPlan.operations[0].padding_count, 30);
   assert.equal(paddedPlan.operations[0].output_count, 32);
+  const exact32AliasPlan = planOneProofPayroll(input, [
+    { note_id: "treasury-20", owner_key_id: "treasury-key", nullifier_lookup_key: "n1", denom: "uclair", amount: "20" },
+    { note_id: "treasury-30", owner_key_id: "treasury-key", nullifier_lookup_key: "n2", denom: "uclair", amount: "30" }
+  ], { outputMode: "exact32" });
+  assert.equal(exact32AliasPlan.operations[0].output_mode, "exact-32");
 
   const normalized = normalizePayrollInput(input);
   assert.equal(normalized.items[0].amount, 20n);
@@ -269,7 +279,7 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
       proof: base64FromBytes(new Uint8Array(164).fill(9))
     })
   }, {
-    creator: "clair1creator",
+    creator: "clair1relayer",
     nowUnix: 1_700_000_000,
     checkNullifiers: async values => {
       proofCalls.push([...values]);
@@ -277,7 +287,8 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     }
   });
   assert.equal(proofCalls.length, 2);
-  assert.equal(execution.message.creator, "clair1creator");
+  assert.equal(execution.payload.creator, "clair1creator");
+  assert.equal(execution.message.creator, "clair1relayer");
   assert.equal(execution.operation_evidence.payload_hash, prepared.payload.payload_hash);
   assert.match(execution.operation_evidence.proof_hash, /^[0-9a-f]{64}$/);
   assert.doesNotThrow(() => validateOneProofPayrollOperationEvidence(execution.operation_evidence, prepared));
@@ -318,11 +329,61 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     cosmosClient: {
       createBatchTransferSignDoc: async input => ({ messageCreator: input.message.creator, signer: input.signer })
     },
-    signer: "clair1creator",
+    signer: "clair1relayer",
     pubKeyHex: "02".repeat(33),
     gasLimit: 25000000
   });
-  assert.equal(signDoc.sign_doc.messageCreator, "clair1creator");
+  assert.equal(signDoc.sign_doc.messageCreator, "clair1relayer");
+  await assert.rejects(
+    () => createOneProofPayrollBatchSignDoc(execution, {
+      cosmosClient: { createBatchTransferSignDoc: async () => ({}) },
+      signer: "clair1creator"
+    }),
+    /signer must match the proven message creator/
+  );
+  const artifact = createOneProofPayrollArtifact({
+    prepared,
+    execution,
+    reservationBatch: reservation,
+    signDoc: signDoc.sign_doc,
+    signedTxBytes: Uint8Array.from([1, 2, 3, 4]),
+    txHash: "PAYROLL-SUCCESS"
+  });
+  const serializedArtifact = serializeOneProofPayrollArtifact(artifact);
+  assert.match(serializedArtifact, /payroll-one-proof-artifact-v1/);
+  const restoredArtifact = parseOneProofPayrollArtifact(serializedArtifact, { nowUnix: 1_700_000_000 });
+  assert.equal(restoredArtifact.artifact_hash, artifact.artifact_hash);
+  assert.equal(restoredArtifact.prepared.operation.input_total, prepared.operation.input_total);
+  assert.deepEqual([...restoredArtifact.signed_tx_bytes], [1, 2, 3, 4]);
+  assert.match(restoredArtifact.sign_doc_hash, /^[0-9a-f]{64}$/);
+  const resumedArtifact = resumeOneProofPayrollArtifact(serializedArtifact, { nowUnix: 1_700_000_000 });
+  assert.equal(resumedArtifact.next_action, "retransmit-signed-transaction");
+  let retransmitted;
+  await retransmitOneProofPayrollArtifact(serializedArtifact, {
+    nowUnix: 1_700_000_000,
+    broadcastSignedTx: async (bytes, context) => {
+      retransmitted = { bytes: [...bytes], hash: context.tx_bytes_hash };
+      return { txhash: "PAYROLL-SUCCESS" };
+    }
+  });
+  assert.deepEqual(retransmitted.bytes, [1, 2, 3, 4]);
+  assert.equal(retransmitted.hash, restoredArtifact.tx_bytes_hash);
+  const tamperedArtifact = JSON.parse(serializedArtifact);
+  tamperedArtifact.tx_hash = "PAYROLL-TAMPERED";
+  assert.throws(
+    () => parseOneProofPayrollArtifact(JSON.stringify(tamperedArtifact), { nowUnix: 1_700_000_000 }),
+    /integrity hash does not match/
+  );
+  const missingHashArtifact = JSON.parse(serializedArtifact);
+  delete missingHashArtifact.artifact_hash;
+  assert.throws(
+    () => parseOneProofPayrollArtifact(JSON.stringify(missingHashArtifact), { nowUnix: 1_700_000_000 }),
+    /missing its integrity hash/
+  );
+  assert.throws(
+    () => createOneProofPayrollArtifact({ prepared, signedTxBytes: Uint8Array.from([1]) }),
+    /signed transaction requires a proven execution and sign-doc/
+  );
   const observed = prepared.expected_evidence.map(item => ({
     output_index: item.batch_item_index,
     commitment: item.expected_output_commitment,

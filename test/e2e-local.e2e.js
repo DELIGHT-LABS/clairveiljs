@@ -390,8 +390,8 @@ async function typedBatchOutputsForTransaction(client, txHash, commitmentHexes, 
   throw lastError || new Error("typed privacy scan did not return every one-proof batch output");
 }
 
-function selectedOneProofBatchShape(config) {
-  const selected = String(env.CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE || "one-input-one-payment").trim().toLowerCase();
+function oneProofBatchShape(selectedValue, config) {
+  const selected = String(selectedValue || "one-input-one-payment").trim().toLowerCase();
   const coin = amount => `${amount}${config.denom}`;
   if (selected === "one-input-one-payment" || selected === "1-1") {
     return {
@@ -399,7 +399,8 @@ function selectedOneProofBatchShape(config) {
       inputAmounts: [config.oneProofBatchDepositAmount],
       paymentAmounts: [config.oneProofBatchPayrollAmount],
       disclosureModes: ["none"],
-      outputMode: "compact"
+      outputMode: "compact",
+      selfViewEnabled: true
     };
   }
   if (selected === "three-input-four-output" || selected === "3-4") {
@@ -408,7 +409,8 @@ function selectedOneProofBatchShape(config) {
       inputAmounts: [coin(4), coin(5), coin(7)],
       paymentAmounts: [coin(4), coin(5), coin(6)],
       disclosureModes: ["none", "public", "recipient-encrypted"],
-      outputMode: "compact"
+      outputMode: "compact",
+      selfViewEnabled: true
     };
   }
   if (selected === "thirty-one-payments-plus-change" || selected === "16-31-change") {
@@ -417,7 +419,8 @@ function selectedOneProofBatchShape(config) {
       inputAmounts: Array(16).fill(coin(100)),
       paymentAmounts: Array(31).fill(coin(50)),
       disclosureModes: Array(31).fill("none"),
-      outputMode: "compact"
+      outputMode: "compact",
+      selfViewEnabled: false
     };
   }
   if (selected === "exact-thirty-two-payments" || selected === "16-32") {
@@ -426,7 +429,8 @@ function selectedOneProofBatchShape(config) {
       inputAmounts: Array(16).fill(coin(64)),
       paymentAmounts: Array(32).fill(coin(32)),
       disclosureModes: Array(32).fill("none"),
-      outputMode: "compact"
+      outputMode: "compact",
+      selfViewEnabled: true
     };
   }
   if (selected === "explicit-zero-padding" || selected === "padding") {
@@ -435,11 +439,74 @@ function selectedOneProofBatchShape(config) {
       inputAmounts: [coin(5)],
       paymentAmounts: [coin(5)],
       disclosureModes: ["none"],
-      outputMode: "exact-32"
+      outputMode: "exact32",
+      selfViewEnabled: false
     };
   }
   throw new Error("CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE must be one-input-one-payment, three-input-four-output, thirty-one-payments-plus-change, exact-thirty-two-payments, or explicit-zero-padding");
 }
+
+function selectedOneProofBatchShape(config) {
+  return oneProofBatchShape(env.CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE, config);
+}
+
+test("one-proof local E2E shape profiles retain the v0.2 disclosure contract", () => {
+  const config = {
+    denom: "uclair",
+    oneProofBatchDepositAmount: "10uclair",
+    oneProofBatchPayrollAmount: "10uclair"
+  };
+  const cases = [
+    {
+      id: "one-input-one-payment",
+      selfViewEnabled: true,
+      outputMode: "compact",
+      inputCount: 1,
+      paymentCount: 1,
+      disclosureModes: ["none"]
+    },
+    {
+      id: "three-input-four-output",
+      selfViewEnabled: true,
+      outputMode: "compact",
+      inputCount: 3,
+      paymentCount: 3,
+      disclosureModes: ["none", "public", "recipient-encrypted"]
+    },
+    {
+      id: "thirty-one-payments-plus-change",
+      selfViewEnabled: false,
+      outputMode: "compact",
+      inputCount: 16,
+      paymentCount: 31,
+      disclosureModes: Array(31).fill("none")
+    },
+    {
+      id: "exact-thirty-two-payments",
+      selfViewEnabled: true,
+      outputMode: "compact",
+      inputCount: 16,
+      paymentCount: 32,
+      disclosureModes: Array(32).fill("none")
+    },
+    {
+      id: "explicit-zero-padding",
+      selfViewEnabled: false,
+      outputMode: "exact32",
+      inputCount: 1,
+      paymentCount: 1,
+      disclosureModes: ["none"]
+    }
+  ];
+  for (const expected of cases) {
+    const shape = oneProofBatchShape(expected.id, config);
+    assert.equal(shape.selfViewEnabled, expected.selfViewEnabled, expected.id);
+    assert.equal(shape.outputMode, expected.outputMode, expected.id);
+    assert.equal(shape.inputAmounts.length, expected.inputCount, expected.id);
+    assert.equal(shape.paymentAmounts.length, expected.paymentCount, expected.id);
+    assert.deepEqual(shape.disclosureModes, expected.disclosureModes, expected.id);
+  }
+});
 
 test("local Clairveil node endpoints respond", {
   skip: localE2eEnabled ? false : "set CLAIRVEIL_E2E_LOCAL=1 to run against a local Clairveil node"
@@ -629,7 +696,7 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
         const disclosurePolicy = mode === "public"
           ? { user_privacy_policy: "amount", user_disclosure_mode: "public" }
           : mode === "recipient-encrypted"
-            ? { user_privacy_policy: "amount", user_disclosure_mode: "recipient-encrypted", user_disclosure_target_pubkey_hex: material.disclosurePubKeyHex }
+            ? { user_privacy_policy: "amount-from-to", user_disclosure_mode: "recipient-encrypted", user_disclosure_target_pubkey_hex: material.disclosurePubKeyHex }
             : undefined;
         return {
           item_id: `one-proof-item-${String(index).padStart(2, "0")}`,
@@ -643,6 +710,16 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
     assert.equal(plan.operations.length, 1, `${shape.id} should produce one canonical batch operation`);
     assert.equal(plan.operations[0].input_notes.length, shape.inputAmounts.length, shape.id);
     assert.equal(plan.operations[0].output_count, shape.paymentAmounts.length + (shape.id === "thirty-one-payments-plus-change" ? 1 : shape.id === "explicit-zero-padding" ? 31 : 0), shape.id);
+    const expectedPaymentDisclosure = shape.disclosureModes.map(mode => {
+      if (mode === "public") return [1, 1];
+      if (mode === "recipient-encrypted") return [7, 2]; // amount-from-to / recipient-encrypted
+      return [0, 0];
+    });
+    assert.deepEqual(
+      plan.operations[0].items.map(item => [item.disclosure_policy.user_privacy_policy, item.disclosure_policy.user_disclosure_mode]),
+      expectedPaymentDisclosure,
+      `${shape.id} payment disclosure policies must retain the selected shape contract`
+    );
 
     const [auditConfig, latest] = await Promise.all([
       client.fetchAuditConfig(),
@@ -664,11 +741,27 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       audit_key_id: auditKeyId,
       audit_key_epoch: auditKeyEpoch,
       audit_disclosure_target_pubkey: auditTarget,
-      disable_self_view_disclosure: true,
+      ...(shape.selfViewEnabled
+        ? { self_view_disclosure_target_pubkey: material.disclosurePubKeyHex }
+        : { disable_self_view_disclosure: true }),
       signer: {
         signBatchTransfer: request => noteHashSigner.signNoteHash(request.expected_intent)
       }
     });
+    assert.deepEqual(
+      prepared.payload.outputs.slice(0, shape.paymentAmounts.length).map(output => [output.privacy_policy, output.disclosure_mode]),
+      expectedPaymentDisclosure,
+      `${shape.id} prepared payload must retain per-payment disclosure policy`
+    );
+    for (const [index, mode] of shape.disclosureModes.entries()) {
+      if (mode === "recipient-encrypted") {
+        assert.notEqual(
+          prepared.payload.message_outputs[index].user_disclosure_target_pubkey,
+          "",
+          `${shape.id} recipient-encrypted payment must carry its disclosure target`
+        );
+      }
+    }
     const reservationManager = createNoteReservationManager({
       store: new MemoryReservationStore(),
       ownerKeyId: material.address,
@@ -684,6 +777,11 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       checkNullifiers: values => client.checkNullifiers(values),
       nowUnix: latest.timeUnix
     });
+    assert.equal(
+      execution.message.outputs.every(output => output.selfViewDisclosurePayload.length === (shape.selfViewEnabled ? 472 : 0)),
+      true,
+      `${shape.id} self-view disclosure shape must match the Clairveil localnet contract`
+    );
     const proofReadyReservations = await markOneProofPayrollReservationProofReady(
       reservationManager,
       reservationBatch,

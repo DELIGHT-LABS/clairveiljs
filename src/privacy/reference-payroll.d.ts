@@ -236,7 +236,7 @@ export interface OneProofPayrollOperationPlan {
   output_count: number;
   has_change: boolean;
   /** compact emits only payments/change; exact-32 fills remaining output slots with zero-value padding notes. */
-  output_mode?: "compact" | "exact-32";
+  output_mode?: "compact" | "exact-32" | "exact32";
   padding_count?: number;
 }
 
@@ -381,6 +381,52 @@ export interface ProvenOneProofPayrollOperation {
   input_nullifier_hexes: readonly Hex[];
 }
 
+/** Private-at-rest, restart-safe checkpoint for a one-proof payroll operation. */
+export interface OneProofPayrollArtifact {
+  version: typeof oneProofPayrollArtifactVersion;
+  prepared: PreparedOneProofPayrollOperation;
+  execution: ProvenOneProofPayrollOperation | null;
+  reservation_batch: OneProofPayrollReservationBatch | null;
+  sign_doc: object | null;
+  signed_tx_bytes: Uint8Array | null;
+  tx_hash: string;
+  tx_bytes_hash: Hex | "";
+  /** Deterministic SHA-256 of the checkpointed sign_doc. */
+  sign_doc_hash: Hex | "";
+  tx_result: object | null;
+  artifact_hash: Hex;
+}
+
+export interface OneProofPayrollArtifactInput {
+  prepared: PreparedOneProofPayrollOperation;
+  execution?: ProvenOneProofPayrollOperation | null;
+  reservation_batch?: OneProofPayrollReservationBatch | null;
+  reservationBatch?: OneProofPayrollReservationBatch | null;
+  sign_doc?: object | null;
+  signDoc?: object | null;
+  signed_tx_bytes?: Uint8Array | null;
+  signedTxBytes?: Uint8Array | null;
+  tx_hash?: string;
+  txHash?: string;
+  tx_bytes_hash?: Hex;
+  txBytesHash?: Hex;
+  /** Optional assertion; when sign_doc is present it must equal its SHA-256. */
+  sign_doc_hash?: Hex;
+  signDocHash?: Hex;
+  tx_result?: object | null;
+  txResult?: object | null;
+}
+
+export interface ResumedOneProofPayrollArtifact {
+  artifact: OneProofPayrollArtifact;
+  prepared: PreparedOneProofPayrollOperation;
+  execution?: ProvenOneProofPayrollOperation;
+  reservation_batch?: OneProofPayrollReservationBatch;
+  sign_doc?: object;
+  signed_tx_bytes?: Uint8Array;
+  next_action: "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction";
+}
+
 export interface ReconciledOneProofPayrollOperationEvidence {
   operation_id: string;
   status: "Pending" | "Succeeded" | "Failed" | "ManualReview";
@@ -488,7 +534,7 @@ export function normalizePayrollInput(input?: PayrollInput, options?: { shielded
 export function validatePayrollInput(input?: PayrollInput, options?: { shieldedPrefix?: string; prefix?: string }): true;
 export function analyzeNotePreparation(input: PayrollInput, treasuryNotes?: TreasuryNote[], policy?: { max_messages_per_tx?: number; maxMessagesPerTx?: number; shieldedPrefix?: string; prefix?: string }): NotePreparationReport;
 export function payrollBatchOperationID(input: Pick<NormalizedPayrollInput, "company_id" | "payroll_id" | "batch_id" | "attempt">, operationIndex: number): string;
-export function planOneProofPayroll(input: PayrollInput, treasuryNotes?: TreasuryNote[], options?: { search_limit?: number; searchLimit?: number; output_mode?: "compact" | "exact-32"; outputMode?: "compact" | "exact-32"; shieldedPrefix?: string; prefix?: string }): PayrollPlan;
+export function planOneProofPayroll(input: PayrollInput, treasuryNotes?: TreasuryNote[], options?: { search_limit?: number; searchLimit?: number; output_mode?: "compact" | "exact-32" | "exact32"; outputMode?: "compact" | "exact-32" | "exact32"; shieldedPrefix?: string; prefix?: string }): PayrollPlan;
 export function normalizePayrollAssetRegistryEntry(entry: PayrollAssetRegistryEntryV1 | { asset?: PayrollAssetRegistryEntryV1 }, denom: string): NormalizedPayrollAssetRegistryEntryV1;
 export function buildExpectedPayrollEvidence(operation: OneProofPayrollOperationPlan, payload: PreparedBatchTransferPayload, options?: { now_unix?: number; nowUnix?: number; shieldedPrefix?: string; prefix?: string }): readonly ExpectedPayrollOutputEvidence[];
 export function prepareOneProofPayrollOperation(input: PrepareOneProofPayrollOperationInput): Promise<PreparedOneProofPayrollOperation>;
@@ -499,8 +545,20 @@ export function prepareOneProofPayrollReservation(reservationManager: NoteReserv
 export function proveOneProofPayrollOperation(payload: PreparedBatchTransferPayload, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options?: { nowUnix?: number }): Promise<PreparedBatchTransferProof & { proof_bytes: Uint8Array }>;
 export function buildOneProofPayrollOperationEvidence(prepared: PreparedOneProofPayrollOperation, options?: { proof?: PreparedBatchTransferProof; nowUnix?: number }): OneProofPayrollOperationEvidence;
 export function oneProofPayrollOperationEvidenceHash(evidence: OneProofPayrollOperationEvidence): OneProofPayrollOperationEvidenceHash;
+export const oneProofPayrollArtifactVersion: "payroll-one-proof-artifact-v1";
+export function createOneProofPayrollArtifact(input: OneProofPayrollArtifactInput): OneProofPayrollArtifact;
+export function serializeOneProofPayrollArtifact(artifact: OneProofPayrollArtifact): string;
+export function parseOneProofPayrollArtifact(serialized: string, options?: { nowUnix?: number }): OneProofPayrollArtifact;
+export function resumeOneProofPayrollArtifact(value: OneProofPayrollArtifact | string, options?: { nowUnix?: number }): ResumedOneProofPayrollArtifact;
+export function retransmitOneProofPayrollArtifact(value: OneProofPayrollArtifact | string, input: {
+  /** Receives the exact checkpointed TxRaw bytes. This callback performs the external broadcast. */
+  broadcastSignedTx(signedTxBytes: Uint8Array, context: { artifact: OneProofPayrollArtifact; tx_bytes_hash: Hex | "" }): Promise<unknown> | unknown;
+  /** Latest chain time; defaults to the local current time and rejects expired artifacts. */
+  nowUnix?: number;
+}): Promise<unknown>;
 export function validateOneProofPayrollOperationEvidence(evidence: OneProofPayrollOperationEvidence, prepared: PreparedOneProofPayrollOperation, options?: { nowUnix?: number }): true;
 export function provePreparedOneProofPayrollOperation(prepared: PreparedOneProofPayrollOperation, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options: {
+  /** Optional Cosmos relayer/signer. It may differ from the creator pinned in the prepared payload. */
   creator?: string;
   checkNullifiers: (nullifiers: string[]) => Promise<Map<string, boolean> | Record<string, boolean>>;
   nowUnix?: number;

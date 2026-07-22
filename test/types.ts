@@ -52,6 +52,7 @@ import { planTransferBatchNotes } from "clairveiljs/planner";
 import {
   analyzeNotePreparation,
   buildOneProofPayrollOperationEvidence,
+  createOneProofPayrollArtifact,
   createOneProofPayrollBatchSignDoc,
   oneProofPayrollOperationEvidenceHash,
   markOneProofPayrollReservationBroadcastAttempting,
@@ -59,15 +60,20 @@ import {
   createDisclosureKeyRegistry,
   planOneProofPayroll,
   prepareOneProofPayrollOperation,
+  parseOneProofPayrollArtifact,
   provePreparedOneProofPayrollOperation,
   reconcileOneProofPayrollOperationEvidence,
+  resumeOneProofPayrollArtifact,
+  retransmitOneProofPayrollArtifact,
   type NotePreparationReport,
+  type OneProofPayrollArtifact,
   type OneProofPayrollOperationEvidence,
   type OneProofPayrollReservationBatch,
   type PreparedOneProofPayrollOperation,
   type ProvenOneProofPayrollOperation,
   type PayrollInput,
-  type PayrollPlan
+  type PayrollPlan,
+  serializeOneProofPayrollArtifact
 } from "clairveiljs/reference-payroll";
 import {
   createAssetRegistryResolverV1,
@@ -119,6 +125,13 @@ const payrollPlan: PayrollPlan = planOneProofPayroll(payrollInput, [{
   denom: "udemo",
   amount: "7"
 }], { shieldedPrefix: "demos" });
+const exact32PayrollPlan: PayrollPlan = planOneProofPayroll(payrollInput, [{
+  note_id: "treasury-exact32",
+  owner_key_id: "owner-a",
+  nullifier_lookup_key: "lookup-exact32",
+  denom: "udemo",
+  amount: "7"
+}], { outputMode: "exact32", shieldedPrefix: "demos" });
 const payrollRegistry = createDisclosureKeyRegistry([{
   key_id: "employee-key-v1",
   scope: "employee",
@@ -168,6 +181,19 @@ async function provePayrollOperationTypes(): Promise<void> {
     checkNullifiers: async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]))
   });
   const reservationBatch = {} as OneProofPayrollReservationBatch;
+  const artifact: OneProofPayrollArtifact = createOneProofPayrollArtifact({
+    prepared,
+    execution: proven,
+    reservationBatch,
+    signDoc: { messageCreator: "clair1creator" },
+    signedTxBytes: new Uint8Array([1, 2, 3])
+  });
+  const restoredArtifact: OneProofPayrollArtifact = parseOneProofPayrollArtifact(serializeOneProofPayrollArtifact(artifact));
+  const resumedAction: "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction" = resumeOneProofPayrollArtifact(restoredArtifact).next_action;
+  await retransmitOneProofPayrollArtifact(restoredArtifact, {
+    nowUnix: 1_700_000_000,
+    broadcastSignedTx: async (bytes, context) => ({ bytes, hash: context.tx_bytes_hash })
+  });
   await markOneProofPayrollReservationBroadcastAttempting(reservationManager, reservationBatch, proven, {
     txBytesHash: "ab".repeat(32),
     reason: "cosmos_broadcast_tx_sync"
@@ -184,6 +210,8 @@ async function provePayrollOperationTypes(): Promise<void> {
     signDocHash: "sign-doc-only"
   });
   void operationEvidenceHash;
+  void exact32PayrollPlan;
+  void resumedAction;
 }
 void provePayrollOperationTypes;
 const material = derivePrivacyMaterial({

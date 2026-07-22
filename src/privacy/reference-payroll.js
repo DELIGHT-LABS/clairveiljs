@@ -51,6 +51,8 @@ export const oneProofPayrollMaxInputs = 16;
 export const oneProofPayrollMaxOutputs = 32;
 export const oneProofPayrollOperationEvidenceVersion = "payroll-one-proof-operation-evidence-v1";
 export const oneProofPayrollExecutionVersion = "payroll-one-proof-execution-v1";
+/** Versioned, private-at-rest checkpoint for a resumable one-proof payroll operation. */
+export const oneProofPayrollArtifactVersion = "payroll-one-proof-artifact-v1";
 
 const disclosureScopeSet = new Set(payrollDisclosureScopes);
 const disclosureModeName = new Map([
@@ -68,8 +70,12 @@ const maxInputCandidates = 64;
 
 function oneProofOutputMode(options = {}) {
   const mode = text(options.output_mode ?? options.outputMode ?? "compact").toLowerCase();
-  if (mode === "compact" || mode === "exact-32") return mode;
-  throw new Error("one-proof payroll output mode must be compact or exact-32");
+  if (mode === "compact") return mode;
+  // The CLI/reference docs spell this mode `exact32`; retain the older
+  // hyphenated SDK spelling as a compatible alias while storing one canonical
+  // value in every prepared operation.
+  if (mode === "exact32" || mode === "exact-32") return "exact-32";
+  throw new Error("one-proof payroll output mode must be compact, exact32, or exact-32");
 }
 
 function text(value) {
@@ -812,10 +818,10 @@ export async function prepareOneProofPayrollOperation(input = {}) {
   const change = inputTotal - paymentTotal;
   const plannedChange = canonicalUint64(operation.change, "one-proof payroll operation change");
   const plannedOutputCount = Number(operation.output_count);
-  const outputMode = text(operation.output_mode ?? operation.outputMode ?? "compact").toLowerCase();
+  const outputMode = oneProofOutputMode(operation);
   const paddingCount = Number(operation.padding_count ?? operation.paddingCount ?? 0);
   if (!Number.isSafeInteger(plannedOutputCount) || plannedOutputCount < 1 || plannedOutputCount > oneProofPayrollMaxOutputs) throw new Error("one-proof payroll operation output count is invalid");
-  if (!["compact", "exact-32"].includes(outputMode) || !Number.isSafeInteger(paddingCount) || paddingCount < 0) throw new Error("one-proof payroll operation output mode is invalid");
+  if (!Number.isSafeInteger(paddingCount) || paddingCount < 0) throw new Error("one-proof payroll operation output mode is invalid");
   if (change < 0n || change !== plannedChange || Boolean(change > 0n) !== Boolean(operation.has_change)) throw new Error("one-proof payroll operation totals are inconsistent");
   const compactOutputCount = operation.items.length + (change > 0n ? 1 : 0);
   if (plannedOutputCount !== compactOutputCount + paddingCount || (outputMode === "compact" && paddingCount !== 0) || (outputMode === "exact-32" && plannedOutputCount !== oneProofPayrollMaxOutputs)) {
@@ -1338,6 +1344,239 @@ export function oneProofPayrollOperationEvidenceHash(evidence) {
   return sha256Hex(utf8Bytes(JSON.stringify(canonical)));
 }
 
+function artifactJSONValue(value, ancestors = new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("one-proof payroll artifact cannot contain a non-finite number");
+    return value;
+  }
+  if (typeof value === "bigint") return { $clairveil_artifact_type: "bigint", decimal: value.toString() };
+  if (value instanceof Uint8Array) return { $clairveil_artifact_type: "bytes", base64: base64FromBytes(value) };
+  if (ArrayBuffer.isView(value)) {
+    return { $clairveil_artifact_type: "bytes", base64: base64FromBytes(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) };
+  }
+  if (value instanceof ArrayBuffer) return { $clairveil_artifact_type: "bytes", base64: base64FromBytes(new Uint8Array(value)) };
+  if (Array.isArray(value)) {
+    if (ancestors.has(value)) throw new Error("one-proof payroll artifact cannot contain a cycle");
+    ancestors.add(value);
+    const result = value.map(item => artifactJSONValue(item, ancestors));
+    ancestors.delete(value);
+    return result;
+  }
+  if (!value || typeof value !== "object") throw new Error("one-proof payroll artifact contains an unsupported value");
+  if (ancestors.has(value)) throw new Error("one-proof payroll artifact cannot contain a cycle");
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) throw new Error("one-proof payroll artifact contains a non-plain object");
+  ancestors.add(value);
+  const result = {};
+  for (const key of Object.keys(value).sort()) {
+    if (key === "__proto__" || key === "prototype" || key === "constructor") {
+      throw new Error("one-proof payroll artifact contains a forbidden object key");
+    }
+    if (value[key] !== undefined) result[key] = artifactJSONValue(value[key], ancestors);
+  }
+  ancestors.delete(value);
+  return result;
+}
+
+function artifactValueFromJSON(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
+  if (Array.isArray(value)) return value.map(artifactValueFromJSON);
+  if (!value || typeof value !== "object") throw new Error("one-proof payroll artifact JSON contains an unsupported value");
+  const type = value.$clairveil_artifact_type;
+  if (type !== undefined) {
+    if (type === "bigint" && Object.keys(value).length === 2 && /^(0|[1-9][0-9]*)$/.test(String(value.decimal ?? ""))) {
+      return BigInt(value.decimal);
+    }
+    if (type === "bytes" && Object.keys(value).length === 2 && typeof value.base64 === "string") {
+      const bytes = bytesFromBase64(value.base64, "one-proof payroll artifact bytes");
+      if (base64FromBytes(bytes) === value.base64) return bytes;
+    }
+    throw new Error("one-proof payroll artifact JSON contains an invalid typed value");
+  }
+  const result = {};
+  for (const key of Object.keys(value)) {
+    if (key === "__proto__" || key === "prototype" || key === "constructor") {
+      throw new Error("one-proof payroll artifact JSON contains a forbidden object key");
+    }
+    result[key] = artifactValueFromJSON(value[key]);
+  }
+  return result;
+}
+
+function canonicalArtifactJSON(value) {
+  return JSON.stringify(artifactJSONValue(value));
+}
+
+function cloneArtifactValue(value) {
+  return artifactValueFromJSON(JSON.parse(canonicalArtifactJSON(value)));
+}
+
+function canonicalArtifactDigest(value, label) {
+  return canonicalDigest(value, label);
+}
+
+function artifactContentHash(contents) {
+  return sha256Hex(utf8Bytes(canonicalArtifactJSON(contents)));
+}
+
+function artifactOptionalText(value, label) {
+  const normalized = text(value);
+  if (normalized && typeof value !== "string") throw new Error(`one-proof payroll artifact ${label} must be a string`);
+  return normalized;
+}
+
+function artifactSignedTransactionBytes(value) {
+  if (value === undefined || value === null) return null;
+  if (value instanceof Uint8Array) return Uint8Array.from(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+  throw new Error("one-proof payroll artifact signed transaction must be bytes");
+}
+
+function normalizeOneProofPayrollArtifact(artifact, { nowUnix } = {}) {
+  if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) throw new Error("one-proof payroll artifact is required");
+  if (artifact.version !== oneProofPayrollArtifactVersion) {
+    throw new Error(`unsupported one-proof payroll artifact version ${JSON.stringify(artifact.version)}`);
+  }
+  const prepared = cloneArtifactValue(artifact.prepared);
+  const preparedNormalized = expectedPayrollEvidenceForPreparedOperation(prepared, nowUnix == null ? {} : { nowUnix });
+  const execution = artifact.execution == null ? null : cloneArtifactValue(artifact.execution);
+  if (execution) {
+    const executionPrepared = preparedFromPayrollExecution(execution).prepared;
+    validateOneProofPayrollOperationEvidence(execution.operation_evidence, prepared, nowUnix == null ? {} : { nowUnix });
+    if (executionPrepared.payload.payload_hash !== preparedNormalized.payload.payload_hash ||
+        executionPrepared.operation.operation_id !== preparedNormalized.operation.operation_id ||
+        !text(execution.message?.creator)) {
+      throw new Error("one-proof payroll artifact execution does not match its prepared operation");
+    }
+  }
+  const reservationBatch = artifact.reservation_batch == null ? null : cloneArtifactValue(artifact.reservation_batch);
+  const signDoc = artifact.sign_doc == null ? null : cloneArtifactValue(artifact.sign_doc);
+  const signedTxBytes = artifact.signed_tx_bytes == null ? null : artifactSignedTransactionBytes(artifact.signed_tx_bytes);
+  const txHash = artifactOptionalText(artifact.tx_hash, "transaction hash");
+  const suppliedTxBytesHash = artifactOptionalText(artifact.tx_bytes_hash, "transaction bytes hash");
+  const suppliedSignDocHash = artifactOptionalText(artifact.sign_doc_hash, "sign-doc hash");
+  if (suppliedTxBytesHash) canonicalArtifactDigest(suppliedTxBytesHash, "one-proof payroll artifact transaction bytes hash");
+  if (suppliedSignDocHash) canonicalArtifactDigest(suppliedSignDocHash, "one-proof payroll artifact sign-doc hash");
+  if (signDoc && !execution) throw new Error("one-proof payroll artifact sign-doc requires a proven execution");
+  if (signedTxBytes && (!execution || !signDoc)) {
+    throw new Error("one-proof payroll artifact signed transaction requires a proven execution and sign-doc");
+  }
+  if (txHash && !signedTxBytes) throw new Error("one-proof payroll artifact transaction hash requires exact signed transaction bytes");
+  if (suppliedTxBytesHash && !signedTxBytes) {
+    throw new Error("one-proof payroll artifact transaction bytes hash requires exact signed transaction bytes");
+  }
+  if (suppliedSignDocHash && !signDoc) throw new Error("one-proof payroll artifact sign-doc hash requires a sign-doc");
+  const txBytesHash = signedTxBytes ? sha256Hex(signedTxBytes) : suppliedTxBytesHash.toLowerCase();
+  if (signedTxBytes && suppliedTxBytesHash && suppliedTxBytesHash.toLowerCase() !== txBytesHash) {
+    throw new Error("one-proof payroll artifact signed transaction bytes do not match tx_bytes_hash");
+  }
+  const signDocHash = signDoc ? artifactContentHash(signDoc) : "";
+  if (signDoc && suppliedSignDocHash && suppliedSignDocHash.toLowerCase() !== signDocHash) {
+    throw new Error("one-proof payroll artifact sign-doc does not match sign_doc_hash");
+  }
+  const contents = {
+    version: oneProofPayrollArtifactVersion,
+    prepared,
+    execution,
+    reservation_batch: reservationBatch,
+    sign_doc: signDoc,
+    signed_tx_bytes: signedTxBytes,
+    tx_hash: txHash,
+    tx_bytes_hash: txBytesHash,
+    sign_doc_hash: signDocHash.toLowerCase(),
+    tx_result: artifact.tx_result == null ? null : cloneArtifactValue(artifact.tx_result)
+  };
+  const artifactHash = artifactOptionalText(artifact.artifact_hash, "integrity hash").toLowerCase();
+  if (artifactHash && canonicalArtifactDigest(artifactHash, "one-proof payroll artifact integrity hash") !== artifactContentHash(contents)) {
+    throw new Error("one-proof payroll artifact integrity hash does not match its contents");
+  }
+  return Object.freeze({ ...contents, artifact_hash: artifactContentHash(contents) });
+}
+
+/**
+ * Create a private-at-rest checkpoint for a prepared/proven one-proof payroll
+ * operation. Persist the result through an encrypted private store (0600 when
+ * using a local file); it includes notes, reservation lease material, and
+ * optionally the exact already-signed transaction bytes.
+ */
+export function createOneProofPayrollArtifact(input = {}) {
+  if (!input || typeof input !== "object") throw new Error("one-proof payroll artifact input is required");
+  const provisional = {
+    version: oneProofPayrollArtifactVersion,
+    prepared: input.prepared,
+    execution: input.execution ?? null,
+    reservation_batch: input.reservation_batch ?? input.reservationBatch ?? null,
+    sign_doc: input.sign_doc ?? input.signDoc ?? null,
+    signed_tx_bytes: input.signed_tx_bytes ?? input.signedTxBytes ?? null,
+    tx_hash: input.tx_hash ?? input.txHash ?? "",
+    tx_bytes_hash: input.tx_bytes_hash ?? input.txBytesHash ?? "",
+    sign_doc_hash: input.sign_doc_hash ?? input.signDocHash ?? "",
+    tx_result: input.tx_result ?? input.txResult ?? null
+  };
+  return normalizeOneProofPayrollArtifact(provisional);
+}
+
+/** Serialize a verified artifact to deterministic typed JSON for private durable storage. */
+export function serializeOneProofPayrollArtifact(artifact) {
+  return canonicalArtifactJSON(normalizeOneProofPayrollArtifact(artifact));
+}
+
+/** Parse and validate a versioned private artifact restored from durable storage. */
+export function parseOneProofPayrollArtifact(serialized, { nowUnix } = {}) {
+  if (typeof serialized !== "string" || !serialized.trim()) throw new Error("serialized one-proof payroll artifact is required");
+  let decoded;
+  try {
+    decoded = artifactValueFromJSON(JSON.parse(serialized));
+  } catch (error) {
+    throw new Error(`serialized one-proof payroll artifact is invalid: ${error.message}`);
+  }
+  if (!decoded || typeof decoded !== "object" || typeof decoded.artifact_hash !== "string" || !decoded.artifact_hash.trim()) {
+    throw new Error("serialized one-proof payroll artifact is missing its integrity hash");
+  }
+  return normalizeOneProofPayrollArtifact(decoded, { nowUnix });
+}
+
+/**
+ * Recover the next safe action after a process restart. Supply the latest
+ * chain time when a retry must reject an expired prepared payload.
+ */
+export function resumeOneProofPayrollArtifact(value, { nowUnix } = {}) {
+  if (typeof value !== "string" && (!value || typeof value !== "object" || typeof value.artifact_hash !== "string" || !value.artifact_hash.trim())) {
+    throw new Error("one-proof payroll artifact is missing its integrity hash");
+  }
+  const artifact = typeof value === "string"
+    ? parseOneProofPayrollArtifact(value, { nowUnix })
+    : normalizeOneProofPayrollArtifact(value, { nowUnix });
+  const nextAction = artifact.signed_tx_bytes ? "retransmit-signed-transaction"
+    : artifact.execution ? (artifact.sign_doc ? "sign-transaction" : "create-sign-doc")
+      : "prove";
+  return Object.freeze({
+    artifact,
+    prepared: artifact.prepared,
+    ...(artifact.execution ? { execution: artifact.execution } : {}),
+    ...(artifact.reservation_batch ? { reservation_batch: artifact.reservation_batch } : {}),
+    ...(artifact.sign_doc ? { sign_doc: artifact.sign_doc } : {}),
+    ...(artifact.signed_tx_bytes ? { signed_tx_bytes: Uint8Array.from(artifact.signed_tx_bytes) } : {}),
+    next_action: nextAction
+  });
+}
+
+/** Retransmit only the exact signed bytes checkpointed in a verified artifact. */
+export async function retransmitOneProofPayrollArtifact(value, {
+  broadcastSignedTx,
+  nowUnix
+} = {}) {
+  if (typeof broadcastSignedTx !== "function") throw new Error("a broadcastSignedTx callback is required to retransmit a one-proof payroll artifact");
+  const resumed = resumeOneProofPayrollArtifact(value, { nowUnix: nowUnix ?? Math.floor(Date.now() / 1000) });
+  if (!resumed.signed_tx_bytes) throw new Error("one-proof payroll artifact does not contain exact signed transaction bytes");
+  return broadcastSignedTx(Uint8Array.from(resumed.signed_tx_bytes), {
+    artifact: resumed.artifact,
+    tx_bytes_hash: resumed.artifact.tx_bytes_hash
+  });
+}
+
 /** Validate an operation evidence artifact against the exact prepared payload. */
 export function validateOneProofPayrollOperationEvidence(evidence, prepared, { nowUnix } = {}) {
   if (!evidence || typeof evidence !== "object") throw new Error("one-proof payroll operation evidence is required");
@@ -1394,8 +1633,10 @@ export async function provePreparedOneProofPayrollOperation(prepared, prover, {
   await assertOneProofPayrollNullifiersUnspent(normalized.payload, checkNullifiers);
   const preparedCreator = text(normalized.payload.creator);
   const sender = text(creator ?? preparedCreator);
-  if (!preparedCreator || !sender) throw new Error("one-proof payroll batch transfer creator must be fixed during payload preparation");
-  if (sender !== preparedCreator) throw new Error("one-proof payroll batch transfer creator does not match the prepared payload");
+  if (!preparedCreator || !sender) throw new Error("one-proof payroll batch transfer creator is required");
+  // `creator` is a Cosmos envelope signer, not a batch-proof public input.
+  // The payload creator remains pinned for auditability while a fresh relayer
+  // may replace the message creator after proof generation.
   const message = buildMsgBatchTransferFromPrepared(normalized.payload, proof, { creator: sender, nowUnix: resolvedNowUnix });
   const operationEvidence = buildOneProofPayrollOperationEvidence(prepared, { proof, nowUnix: resolvedNowUnix });
   return Object.freeze({
@@ -1437,11 +1678,13 @@ export async function createOneProofPayrollBatchSignDoc(execution, {
     throw new Error("one-proof payroll execution proof does not match its operation evidence");
   }
   const preparedCreator = text(execution.payload.creator);
-  if (!preparedCreator || text(execution.message?.creator) !== preparedCreator) {
-    throw new Error("one-proof payroll execution creator does not match the prepared payload");
+  const messageCreator = text(execution.message?.creator);
+  if (!preparedCreator || !messageCreator) throw new Error("one-proof payroll execution creator is required");
+  if (signer !== undefined && text(signer) !== messageCreator) {
+    throw new Error("one-proof payroll sign-doc signer must match the proven message creator");
   }
   const message = buildMsgBatchTransferFromPrepared(execution.payload, execution.proof, {
-    creator: preparedCreator,
+    creator: messageCreator,
     nowUnix: resolvedNowUnix
   });
   const signDoc = await cosmosClient.createBatchTransferSignDoc({
