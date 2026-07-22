@@ -427,6 +427,15 @@ export interface ResumedOneProofPayrollArtifact {
   next_action: "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction";
 }
 
+/** Fail-closed retry decision after a tx-hash-first, then nullifier, lookup. */
+export interface InspectedOneProofPayrollArtifactRetry {
+  artifact: OneProofPayrollArtifact;
+  transaction_state: "succeeded" | "failed" | "not-found" | "not-checked";
+  input_nullifiers: readonly { nullifier: Hex; spent: boolean }[];
+  next_action: "reconcile-succeeded" | "manual-review" | "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction";
+  reason: string;
+}
+
 export interface ReconciledOneProofPayrollOperationEvidence {
   operation_id: string;
   status: "Pending" | "Succeeded" | "Failed" | "ManualReview";
@@ -550,6 +559,13 @@ export function createOneProofPayrollArtifact(input: OneProofPayrollArtifactInpu
 export function serializeOneProofPayrollArtifact(artifact: OneProofPayrollArtifact): string;
 export function parseOneProofPayrollArtifact(serialized: string, options?: { nowUnix?: number }): OneProofPayrollArtifact;
 export function resumeOneProofPayrollArtifact(value: OneProofPayrollArtifact | string, options?: { nowUnix?: number }): ResumedOneProofPayrollArtifact;
+export function inspectOneProofPayrollArtifactRetry(value: OneProofPayrollArtifact | string, input: {
+  /** Called first when the artifact records a transaction hash. */
+  queryTransaction?(txHash: string, context: { artifact: OneProofPayrollArtifact; tx_bytes_hash: Hex | ""; sign_doc_hash: Hex | "" }): Promise<"succeeded" | "failed" | "not-found" | { state?: string; status?: string }> | "succeeded" | "failed" | "not-found" | { state?: string; status?: string };
+  /** Called after the transaction lookup; every prepared input must be present with an explicit boolean status. */
+  checkNullifiers(nullifiers: string[]): Promise<Map<string, boolean> | Record<string, boolean>>;
+  nowUnix?: number;
+}): Promise<InspectedOneProofPayrollArtifactRetry>;
 export function retransmitOneProofPayrollArtifact(value: OneProofPayrollArtifact | string, input: {
   /** Receives the exact checkpointed TxRaw bytes. This callback performs the external broadcast. */
   broadcastSignedTx(signedTxBytes: Uint8Array, context: { artifact: OneProofPayrollArtifact; tx_bytes_hash: Hex | "" }): Promise<unknown> | unknown;

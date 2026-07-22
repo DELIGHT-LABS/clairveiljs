@@ -17,6 +17,9 @@ import {
 } from "../core/crypto.js";
 import {
   decodeAuditDisclosureFromEvent,
+  decodeBatchAuditDisclosureFromScanOutput,
+  decodeBatchSelfViewDisclosureFromScanOutput,
+  decodeBatchUserDisclosureFromScanOutput,
   decodeSelfViewDisclosureFromEvent,
   decodeUserDisclosureFromEvent,
   disclosureScalarFromHex
@@ -58,6 +61,7 @@ import {
   rollbackPlanReservationPreservingError
 } from "../privacy/reservation.js";
 import {
+  createPrivacyScanValidationStateV2,
   parseNullifierUsage,
   processPrivacyScanPageV2,
   scanNotes as scanNotesCore,
@@ -427,6 +431,58 @@ function externalCosmosSignDoc(signDoc) {
   return external;
 }
 
+function directBroadcastContext(input = {}) {
+  const {
+    wallet,
+    signDoc,
+    waitOptions,
+    attempts,
+    intervalMs,
+    reservationManager,
+    reservation_manager,
+    reservation,
+    reservationBatch,
+    reservation_batch
+  } = input;
+  if (attempts !== undefined && waitOptions?.attempts !== undefined && attempts !== waitOptions.attempts) {
+    throw new Error("attempts conflicts with waitOptions.attempts");
+  }
+  if (intervalMs !== undefined && waitOptions?.intervalMs !== undefined && intervalMs !== waitOptions.intervalMs) {
+    throw new Error("intervalMs conflicts with waitOptions.intervalMs");
+  }
+  const resolvedWaitOptions = {
+    ...(waitOptions || {}),
+    ...(attempts !== undefined ? { attempts } : {}),
+    ...(intervalMs !== undefined ? { intervalMs } : {})
+  };
+  const resolvedReservation = reservation ?? reservationBatch ?? reservation_batch;
+  const reservationContext = broadcastReservationContext({
+    ...resolvedWaitOptions,
+    reservationManager: reservationManager ?? reservation_manager ?? null,
+    reservation: resolvedReservation
+  });
+  const walletSignDoc = externalCosmosSignDoc(signDoc);
+  const broadcastOptions = {
+    ...resolvedWaitOptions,
+    reservationManager: reservationManager ?? reservation_manager ?? null,
+    reservation: resolvedReservation,
+    relayPayload: input.relayPayload ?? input.relay_payload,
+    getChainNowUnix: input.getChainNowUnix ?? input.get_chain_now_unix,
+    chainNowUnix: input.chainNowUnix ?? input.chain_now_unix,
+    expectedChainId: input.expectedChainId ?? input.expected_chain_id,
+    expectedRecipient: input.expectedRecipient ?? input.expected_recipient,
+    accountPrefix: input.accountPrefix ?? input.account_prefix
+  };
+  return {
+    wallet,
+    signDoc,
+    walletSignDoc,
+    reservationContext,
+    signDocHash: cosmosSignDocBindingHash(signDoc),
+    broadcastOptions
+  };
+}
+
 function fromHex(value, label = "hex") {
   return rawBytesFromHex(value, label);
 }
@@ -611,13 +667,10 @@ function commitmentPathsAtRootRequestBody({
   const normalizedRoot = String(rootHex ?? root_hex ?? "").trim();
   if (!normalizedRoot) throw new Error("rootHex is required");
   const height = snapshotHeight ?? snapshot_height;
-  if (height == null || String(height).trim() === "") {
-    throw new Error("snapshotHeight is required");
-  }
   return {
     commitmentHexes: commitments.map(value => String(value || "").trim()),
     rootHex: normalizedRoot,
-    snapshotHeight: height
+    ...(height == null || String(height).trim() === "" ? {} : { snapshotHeight: height })
   };
 }
 
@@ -891,6 +944,33 @@ function signedWithdrawMessage(signedTx) {
     throw new Error("withdraw broadcast must contain exactly one MsgWithdraw");
   }
   return GeneratedMsgWithdraw.decode(withdrawals[0].value);
+}
+
+function normalizedTxRawBytes(value) {
+  if (!(value instanceof Uint8Array)) {
+    throw new Error("signed TxRaw bytes must be a Uint8Array");
+  }
+  if (!value.length) {
+    throw new Error("signed TxRaw bytes must not be empty");
+  }
+  const txBytes = Uint8Array.from(value);
+  try {
+    TxRaw.decode(txBytes);
+  } catch (error) {
+    throw new Error(`signed TxRaw bytes are invalid: ${error.message}`);
+  }
+  return txBytes;
+}
+
+function signedTxFromRawBytes(txBytes) {
+  const txRaw = TxRaw.decode(txBytes);
+  return {
+    bodyBytes: toBase64(txRaw.bodyBytes),
+    authInfoBytes: toBase64(txRaw.authInfoBytes),
+    // Relay/reservation validation only binds TxBody and AuthInfo. Keep this
+    // field for the familiar SignedTxBase64 shape without rewriting TxRaw.
+    signature: toBase64(txRaw.signatures[0] || new Uint8Array())
+  };
 }
 
 export function cosmosSignDocBindingHash({ bodyBytes, authInfoBytes } = {}) {
@@ -1739,7 +1819,7 @@ export class ClairveilJS {
     });
   }
 
-  /** Fetch, validate, and root-recompute a single same-root Merkle-path snapshot. */
+  /** Fetch, validate, and root-recompute a single exact-root, optionally height-pinned Merkle snapshot. */
   async queryCommitmentPathsAtRoot(options = {}) {
     const request = normalizeCommitmentPathsAtRootRequest(options);
     const response = await this.fetchCommitmentPathsAtRoot(request);
@@ -1852,6 +1932,7 @@ export class ClairveilJS {
       let scannedEvents = 0;
       let hasMore = false;
       let found = [];
+      const validationState = createPrivacyScanValidationStateV2();
       try {
         for (; pagesScanned < pageBudget;) {
           const request = {
@@ -1863,7 +1944,7 @@ export class ClairveilJS {
             // cursor progress across withdraws and filtered wallet outputs.
             eventTypes: []
           };
-          const pageResult = validatePrivacyScanPageV2(await this.fetchPrivacyScan(request), request);
+          const pageResult = validatePrivacyScanPageV2(await this.fetchPrivacyScan(request), { ...request, validationState });
           found.push(...processPrivacyScanPageV2(pageResult, { rootSeed }));
           currentAfter = {
             height: pageResult.next_cursor.height,
@@ -3423,6 +3504,149 @@ export class ClairveilJS {
     );
   }
 
+  /**
+   * Decode a Batch V1 user disclosure from a validated PrivacyScanOutputV2
+   * record. Public records need no wallet material; recipient-encrypted
+   * records can use either an explicit scalar/key pair or wallet-derived
+   * privacy material.
+   */
+  async decodeBatchUserDisclosure({
+    output,
+    scanOutput,
+    txHash,
+    tx_hash,
+    address,
+    pubKeyHex,
+    pub_key_hex,
+    signatureBase64,
+    signature_base64,
+    skipSignerPubKeyCheck,
+    skip_signer_pubkey_check,
+    disclosureScalar,
+    disclosure_scalar,
+    disclosureScalarHex,
+    disclosure_scalar_hex,
+    disclosurePubKeyHex,
+    disclosure_pubkey_hex,
+    assetDenom,
+    asset_denom
+  } = {}) {
+    const selectedOutput = output ?? scanOutput;
+    if (!selectedOutput) throw new Error("Batch user disclosure requires a PrivacyScanOutputV2 output");
+    const mode = selectedOutput.userDisclosureMode ?? selectedOutput.user_disclosure_mode;
+    const isPublic = mode === 1 || mode === "1" || mode === "USER_DISCLOSURE_MODE_PUBLIC";
+    const common = {
+      txHash: txHash ?? tx_hash,
+      shieldedPrefix: this.shieldedPrefix,
+      assetDenom: assetDenom ?? asset_denom ?? ""
+    };
+    if (isPublic) return decodeBatchUserDisclosureFromScanOutput(selectedOutput, common);
+
+    const directScalar = disclosureScalar ?? disclosure_scalar;
+    const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
+    const directPubKey = disclosurePubKeyHex ?? disclosure_pubkey_hex;
+    if (directScalar != null || directScalarHex != null || directPubKey != null) {
+      return decodeBatchUserDisclosureFromScanOutput(selectedOutput, {
+        ...common,
+        disclosureScalar: directScalar != null ? directScalar : disclosureScalarFromHex(directScalarHex),
+        disclosurePubKeyHex: directPubKey
+      });
+    }
+    const signerPubKeyHex = pubKeyHex ?? pub_key_hex;
+    const skipSignerCheck = Boolean(skipSignerPubKeyCheck ?? skip_signer_pubkey_check);
+    if (!skipSignerCheck) assertSignerPubKey(address, signerPubKeyHex, this.bech32Prefix);
+    const material = derivePrivacyMaterial({
+      address,
+      pubKeyHex: signerPubKeyHex,
+      signatureBase64: signatureBase64 ?? signature_base64,
+      shieldedPrefix: this.shieldedPrefix
+    });
+    return decodeBatchUserDisclosureFromScanOutput(selectedOutput, {
+      ...common,
+      disclosureScalar: material.disclosureScalar,
+      disclosurePubKeyHex: material.disclosurePubKeyHex
+    });
+  }
+
+  /** Decode a Batch V1 self-view disclosure from a validated PrivacyScanOutputV2 record. */
+  async decodeBatchSelfViewDisclosure({
+    output,
+    scanOutput,
+    txHash,
+    tx_hash,
+    address,
+    pubKeyHex,
+    pub_key_hex,
+    signatureBase64,
+    signature_base64,
+    skipSignerPubKeyCheck,
+    skip_signer_pubkey_check,
+    disclosureScalar,
+    disclosure_scalar,
+    disclosureScalarHex,
+    disclosure_scalar_hex,
+    assetDenom,
+    asset_denom
+  } = {}) {
+    const selectedOutput = output ?? scanOutput;
+    if (!selectedOutput) throw new Error("Batch self-view disclosure requires a PrivacyScanOutputV2 output");
+    const common = {
+      txHash: txHash ?? tx_hash,
+      shieldedPrefix: this.shieldedPrefix,
+      assetDenom: assetDenom ?? asset_denom ?? ""
+    };
+    const directScalar = disclosureScalar ?? disclosure_scalar;
+    const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
+    if (directScalar != null || directScalarHex != null) {
+      return decodeBatchSelfViewDisclosureFromScanOutput(selectedOutput, {
+        ...common,
+        disclosureScalar: directScalar != null ? directScalar : disclosureScalarFromHex(directScalarHex)
+      });
+    }
+    const signerPubKeyHex = pubKeyHex ?? pub_key_hex;
+    const skipSignerCheck = Boolean(skipSignerPubKeyCheck ?? skip_signer_pubkey_check);
+    if (!skipSignerCheck) assertSignerPubKey(address, signerPubKeyHex, this.bech32Prefix);
+    const material = derivePrivacyMaterial({
+      address,
+      pubKeyHex: signerPubKeyHex,
+      signatureBase64: signatureBase64 ?? signature_base64,
+      shieldedPrefix: this.shieldedPrefix
+    });
+    return decodeBatchSelfViewDisclosureFromScanOutput(selectedOutput, {
+      ...common,
+      disclosureScalar: material.disclosureScalar
+    });
+  }
+
+  /** Decode a Batch V1 auditor disclosure from a validated PrivacyScanOutputV2 record. */
+  async decodeBatchAuditDisclosure({
+    output,
+    scanOutput,
+    txHash,
+    tx_hash,
+    disclosurePrivKeyHex,
+    disclosure_privkey_hex,
+    disclosureScalar,
+    disclosure_scalar,
+    disclosureScalarHex,
+    disclosure_scalar_hex,
+    assetDenom,
+    asset_denom
+  } = {}) {
+    const selectedOutput = output ?? scanOutput;
+    if (!selectedOutput) throw new Error("Batch audit disclosure requires a PrivacyScanOutputV2 output");
+    const directScalar = disclosureScalar ?? disclosure_scalar;
+    const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
+    return decodeBatchAuditDisclosureFromScanOutput(selectedOutput, {
+      txHash: txHash ?? tx_hash,
+      shieldedPrefix: this.shieldedPrefix,
+      assetDenom: assetDenom ?? asset_denom ?? "",
+      disclosureScalar: directScalar != null
+        ? directScalar
+        : disclosureScalarFromHex(directScalarHex ?? disclosurePrivKeyHex ?? disclosure_privkey_hex)
+    });
+  }
+
   async buildDirectSignDoc({ signer, pubKeyHex, messages, memo = "", gasLimit = 200000, feeAmount = [] }) {
     assertSignerPubKey(signer, pubKeyHex, this.bech32Prefix);
     const account = await this.getAccountInfo(signer);
@@ -3459,7 +3683,7 @@ export class ClairveilJS {
     return TxRaw.encode(txRaw).finish();
   }
 
-  async broadcastSignedTx(signedTx, waitOptions) {
+  async _broadcastTxRawBytes(txBytes, signedTx, waitOptions) {
     const reservationContext = broadcastReservationContext(waitOptions || signedTx || {});
     const signDocHash = cosmosSignDocBindingHash(signedTx);
     const reservationRequired = cosmosSignDocMetadata(signedTx).reservationRequired ||
@@ -3467,7 +3691,6 @@ export class ClairveilJS {
     if (reservationRequired && !reservationContext) {
       throw new Error("prepared reserved Cosmos signed transaction requires reservationManager and reservation");
     }
-    const txBytes = this.buildTxRawBytes(signedTx);
     const txBytesHash = sha256Hex(txBytes);
     await validateRelayBroadcastContext(waitOptions || signedTx || {}, {
       expectedChainId: this.chainId,
@@ -3485,7 +3708,9 @@ export class ClairveilJS {
     let txhash = "";
     let tx;
     try {
-      txhash = await client.broadcastTxSync(txBytes);
+      // Do not reconstruct TxRaw here: callers may have checkpointed the
+      // exact wallet-produced bytes for crash-safe retransmission.
+      txhash = await client.broadcastTxSync(Uint8Array.from(txBytes));
       tx = await this.waitForTx(txhash, waitOptions);
     } catch (error) {
       const wrapped = attachBroadcastEvidence(error, { txHash: txhash, txBytesHash });
@@ -3536,54 +3761,39 @@ export class ClairveilJS {
     return result;
   }
 
-  async signDirectAndBroadcast(input = {}) {
+  /**
+   * Broadcast an exact pre-encoded TxRaw checkpoint. The bytes are decoded
+   * only for reservation and relay validation and are never re-encoded before
+   * the RPC boundary.
+   */
+  async broadcastTxRawBytes(txRawBytes, waitOptions) {
+    const txBytes = normalizedTxRawBytes(txRawBytes);
+    return this._broadcastTxRawBytes(txBytes, signedTxFromRawBytes(txBytes), waitOptions);
+  }
+
+  async broadcastSignedTx(signedTx, waitOptions) {
+    const txBytes = this.buildTxRawBytes(signedTx);
+    return this._broadcastTxRawBytes(txBytes, signedTx, waitOptions);
+  }
+
+  /**
+   * Ask the wallet to sign, then return a checkpoint containing the exact
+   * TxRaw bytes. Persist txRawBytes before calling broadcastTxRawBytes when a
+   * process restart must be able to retransmit the same signed transaction.
+   */
+  async signDirect(input = {}) {
     const {
       wallet,
-      signDoc,
-      waitOptions,
-      attempts,
-      intervalMs,
-      reservationManager,
-      reservation_manager,
-      reservation,
-      reservationBatch,
-      reservation_batch
-    } = input;
-    if (attempts !== undefined && waitOptions?.attempts !== undefined && attempts !== waitOptions.attempts) {
-      throw new Error("attempts conflicts with waitOptions.attempts");
-    }
-    if (intervalMs !== undefined && waitOptions?.intervalMs !== undefined && intervalMs !== waitOptions.intervalMs) {
-      throw new Error("intervalMs conflicts with waitOptions.intervalMs");
-    }
-    const resolvedWaitOptions = {
-      ...(waitOptions || {}),
-      ...(attempts !== undefined ? { attempts } : {}),
-      ...(intervalMs !== undefined ? { intervalMs } : {})
-    };
-    const resolvedReservation = reservation ?? reservationBatch ?? reservation_batch;
-    const reservationContext = broadcastReservationContext({
-      ...resolvedWaitOptions,
-      reservationManager: reservationManager ?? reservation_manager ?? null,
-      reservation: resolvedReservation
-    });
-    const signDocHash = cosmosSignDocBindingHash(signDoc);
-    const reservationRequired = cosmosSignDocMetadata(signDoc).reservationRequired ||
-      cosmosTxBodyRequiresReservation(signDoc);
+      walletSignDoc,
+      reservationContext,
+      signDocHash,
+      broadcastOptions
+    } = directBroadcastContext(input);
+    const reservationRequired = cosmosSignDocMetadata(input.signDoc).reservationRequired ||
+      cosmosTxBodyRequiresReservation(input.signDoc);
     if (reservationRequired && !reservationContext) {
       throw new Error("prepared reserved Cosmos sign doc requires reservationManager and reservation");
     }
-    const walletSignDoc = externalCosmosSignDoc(signDoc);
-    const broadcastOptions = {
-      ...resolvedWaitOptions,
-      reservationManager: reservationManager ?? reservation_manager ?? null,
-      reservation: resolvedReservation,
-      relayPayload: input.relayPayload ?? input.relay_payload,
-      getChainNowUnix: input.getChainNowUnix ?? input.get_chain_now_unix,
-      chainNowUnix: input.chainNowUnix ?? input.chain_now_unix,
-      expectedChainId: input.expectedChainId ?? input.expected_chain_id,
-      expectedRecipient: input.expectedRecipient ?? input.expected_recipient,
-      accountPrefix: input.accountPrefix ?? input.account_prefix
-    };
     await validateRelayBroadcastContext(broadcastOptions, {
       expectedChainId: this.chainId,
       accountPrefix: this.accountPrefix,
@@ -3605,11 +3815,32 @@ export class ClairveilJS {
     }
     const signedDoc = signed.signed || {};
     const signature = signed.signature?.signature || signed.signature;
-    return this.broadcastSignedTx({
+    const signedTx = {
       bodyBytes: toBase64(signedDoc.bodyBytes || fromBase64(walletSignDoc.bodyBytes, "bodyBytes")),
       authInfoBytes: toBase64(signedDoc.authInfoBytes || fromBase64(walletSignDoc.authInfoBytes, "authInfoBytes")),
       signature
-    }, broadcastOptions);
+    };
+    const signedTxSignDocHash = cosmosSignDocBindingHash(signedTx);
+    await validateRelayBroadcastContext(broadcastOptions, {
+      expectedChainId: this.chainId,
+      accountPrefix: this.accountPrefix,
+      signedTx,
+      reservationContext,
+      signDocHash: signedTxSignDocHash
+    });
+    const txRawBytes = this.buildTxRawBytes(signedTx);
+    return Object.freeze({
+      signedTx: Object.freeze({ ...signedTx }),
+      txRawBytes: Uint8Array.from(txRawBytes),
+      txBytesHash: sha256Hex(txRawBytes),
+      signDocHash: signedTxSignDocHash
+    });
+  }
+
+  async signDirectAndBroadcast(input = {}) {
+    const checkpoint = await this.signDirect(input);
+    const { broadcastOptions } = directBroadcastContext(input);
+    return this.broadcastTxRawBytes(checkpoint.txRawBytes, broadcastOptions);
   }
 }
 

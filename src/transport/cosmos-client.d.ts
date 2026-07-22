@@ -122,6 +122,14 @@ export interface SignedTxBase64 {
   signature: Base64;
 }
 
+/** Exact wallet-produced TxRaw bytes, suitable for private durable checkpointing. */
+export interface SignedTxRawCheckpoint {
+  signedTx: SignedTxBase64;
+  txRawBytes: Uint8Array;
+  txBytesHash: Hex;
+  signDocHash: Hex;
+}
+
 export interface PrivacyAccountSummary {
   address: ClairAddress;
   pubKeyHex: Hex;
@@ -936,6 +944,66 @@ export class ClairveilJS {
     disclosurePrivKeyHex?: Hex;
     disclosure_privkey_hex?: Hex;
   } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
+  decodeBatchUserDisclosure(input: {
+    /** One output from `validatePrivacyScanPageV2`, never a lossy ABCI event. */
+    output?: import("../core/disclosure.js").BatchPrivacyScanDisclosureOutputV2;
+    /** Alias for `output`. */
+    scanOutput?: import("../core/disclosure.js").BatchPrivacyScanDisclosureOutputV2;
+    txHash?: Hex;
+    tx_hash?: Hex;
+    address?: ClairAddress;
+    pubKeyHex?: Hex;
+    pub_key_hex?: Hex;
+    signatureBase64?: Base64;
+    signature_base64?: Base64;
+    skipSignerPubKeyCheck?: boolean;
+    skip_signer_pubkey_check?: boolean;
+    disclosureScalar?: bigint | string | number;
+    disclosure_scalar?: bigint | string | number;
+    disclosureScalarHex?: Hex;
+    disclosure_scalar_hex?: Hex;
+    disclosurePubKeyHex?: Hex;
+    disclosure_pubkey_hex?: Hex;
+    assetDenom?: string;
+    asset_denom?: string;
+  }): Promise<import("../core/disclosure.js").DisclosureReport>;
+  decodeBatchSelfViewDisclosure(input: {
+    /** One output from `validatePrivacyScanPageV2`, never a lossy ABCI event. */
+    output?: import("../core/disclosure.js").BatchPrivacyScanDisclosureOutputV2;
+    /** Alias for `output`. */
+    scanOutput?: import("../core/disclosure.js").BatchPrivacyScanDisclosureOutputV2;
+    txHash?: Hex;
+    tx_hash?: Hex;
+    address?: ClairAddress;
+    pubKeyHex?: Hex;
+    pub_key_hex?: Hex;
+    signatureBase64?: Base64;
+    signature_base64?: Base64;
+    skipSignerPubKeyCheck?: boolean;
+    skip_signer_pubkey_check?: boolean;
+    disclosureScalar?: bigint | string | number;
+    disclosure_scalar?: bigint | string | number;
+    disclosureScalarHex?: Hex;
+    disclosure_scalar_hex?: Hex;
+    assetDenom?: string;
+    asset_denom?: string;
+  }): Promise<import("../core/disclosure.js").DisclosureReport>;
+  decodeBatchAuditDisclosure(input: {
+    /** One output from `validatePrivacyScanPageV2`, never a lossy ABCI event. */
+    output?: import("../core/disclosure.js").BatchPrivacyScanDisclosureOutputV2;
+    /** Alias for `output`. */
+    scanOutput?: import("../core/disclosure.js").BatchPrivacyScanDisclosureOutputV2;
+    txHash?: Hex;
+    tx_hash?: Hex;
+    disclosurePrivKeyHex?: Hex;
+    disclosure_privkey_hex?: Hex;
+    disclosureScalar?: bigint | string | number;
+    disclosure_scalar?: bigint | string | number;
+    disclosureScalarHex?: Hex;
+    disclosure_scalar_hex?: Hex;
+    assetDenom?: string;
+    asset_denom?: string;
+  }): Promise<import("../core/disclosure.js").DisclosureReport>;
   buildDirectSignDoc(input: {
     signer: ClairAddress;
     pubKeyHex: Hex;
@@ -945,7 +1013,11 @@ export class ClairveilJS {
     feeAmount?: Array<object>;
   }): Promise<SignDocBase64>;
   buildTxRawBytes(signedTx: SignedTxBase64): Uint8Array;
+  /** Broadcast exact pre-encoded TxRaw bytes without re-encoding them. */
+  broadcastTxRawBytes(txRawBytes: Uint8Array, waitOptions?: ReservationBroadcastOptions): Promise<BroadcastSignedTxResult>;
   broadcastSignedTx(signedTx: SignedTxBase64, waitOptions?: ReservationBroadcastOptions): Promise<BroadcastSignedTxResult>;
+  /** Sign without broadcasting so callers can durably checkpoint exact TxRaw bytes first. */
+  signDirect(input: ReservationBroadcastOptions & { wallet: WalletAdapterLike; signDoc: SignDocBase64; waitOptions?: { attempts?: number; intervalMs?: number } }): Promise<SignedTxRawCheckpoint>;
   signDirectAndBroadcast(input: ReservationBroadcastOptions & { wallet: WalletAdapterLike; signDoc: SignDocBase64; waitOptions?: { attempts?: number; intervalMs?: number } }): Promise<BroadcastSignedTxResult>;
 }
 

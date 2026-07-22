@@ -36,7 +36,13 @@ import {
   type ScanWalletNotesInput,
   type ScanWalletNotesResult
 } from "clairveiljs/browser-dapp";
-import type { DisclosureReport } from "clairveiljs/disclosure";
+import {
+  decodeBatchAuditDisclosureFromScanOutput,
+  decodeBatchSelfViewDisclosureFromScanOutput,
+  decodeBatchUserDisclosureFromScanOutput,
+  type BatchPrivacyScanDisclosureOutputV2,
+  type DisclosureReport
+} from "clairveiljs/disclosure";
 import type { NullifierStatusReader, PreparedWithdrawPayload, WithdrawMessage } from "clairveiljs/payload";
 import { scanNotes } from "clairveiljs/scan";
 import { runClairveilConformanceFixtures } from "clairveiljs/conformance";
@@ -54,6 +60,7 @@ import {
   buildOneProofPayrollOperationEvidence,
   createOneProofPayrollArtifact,
   createOneProofPayrollBatchSignDoc,
+  inspectOneProofPayrollArtifactRetry,
   oneProofPayrollOperationEvidenceHash,
   markOneProofPayrollReservationBroadcastAttempting,
   markOneProofPayrollReservationSubmitted,
@@ -67,6 +74,7 @@ import {
   retransmitOneProofPayrollArtifact,
   type NotePreparationReport,
   type OneProofPayrollArtifact,
+  type InspectedOneProofPayrollArtifactRetry,
   type OneProofPayrollOperationEvidence,
   type OneProofPayrollReservationBatch,
   type PreparedOneProofPayrollOperation,
@@ -190,6 +198,12 @@ async function provePayrollOperationTypes(): Promise<void> {
   });
   const restoredArtifact: OneProofPayrollArtifact = parseOneProofPayrollArtifact(serializeOneProofPayrollArtifact(artifact));
   const resumedAction: "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction" = resumeOneProofPayrollArtifact(restoredArtifact).next_action;
+  const retryInspection: InspectedOneProofPayrollArtifactRetry = await inspectOneProofPayrollArtifactRetry(restoredArtifact, {
+    queryTransaction: async (): Promise<"not-found"> => "not-found",
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]))
+  });
+  const retryAction: "reconcile-succeeded" | "manual-review" | "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction" = retryInspection.next_action;
+  void retryAction;
   await retransmitOneProofPayrollArtifact(restoredArtifact, {
     nowUnix: 1_700_000_000,
     broadcastSignedTx: async (bytes, context) => ({ bytes, hash: context.tx_bytes_hash })
@@ -328,10 +342,43 @@ const cosmosAuditDisclosureLookup: Promise<DisclosureReport> = cosmos.decodeAudi
   after_sequence: 7,
   scan_source: "scan_events"
 });
+const batchScanDisclosureOutput = {} as BatchPrivacyScanDisclosureOutputV2;
+const batchUserDisclosureReport: DisclosureReport = decodeBatchUserDisclosureFromScanOutput(batchScanDisclosureOutput, {
+  disclosureScalar: 1n,
+  disclosurePubKeyHex: "01".repeat(32),
+  assetDenom: "udemo"
+});
+const batchSelfViewDisclosureReport: DisclosureReport = decodeBatchSelfViewDisclosureFromScanOutput(batchScanDisclosureOutput, {
+  disclosureScalar: 1n,
+  assetDenom: "udemo"
+});
+const batchAuditDisclosureReport: DisclosureReport = decodeBatchAuditDisclosureFromScanOutput(batchScanDisclosureOutput, {
+  disclosureScalar: 1n,
+  assetDenom: "udemo"
+});
+const cosmosBatchUserDisclosureLookup: Promise<DisclosureReport> = cosmos.decodeBatchUserDisclosure({
+  output: batchScanDisclosureOutput,
+  disclosureScalar: 1n,
+  disclosurePubKeyHex: "01".repeat(32)
+});
+const cosmosBatchSelfViewDisclosureLookup: Promise<DisclosureReport> = cosmos.decodeBatchSelfViewDisclosure({
+  scanOutput: batchScanDisclosureOutput,
+  disclosureScalarHex: "01".repeat(32)
+});
+const cosmosBatchAuditDisclosureLookup: Promise<DisclosureReport> = cosmos.decodeBatchAuditDisclosure({
+  output: batchScanDisclosureOutput,
+  disclosurePrivKeyHex: "01".repeat(32)
+});
 void cosmosScanEventLookup;
 void cosmosUserDisclosureLookup;
 void cosmosSelfViewDisclosureLookup;
 void cosmosAuditDisclosureLookup;
+void batchUserDisclosureReport;
+void batchSelfViewDisclosureReport;
+void batchAuditDisclosureReport;
+void cosmosBatchUserDisclosureLookup;
+void cosmosBatchSelfViewDisclosureLookup;
+void cosmosBatchAuditDisclosureLookup;
 const dappClient = createClairveilBrowserDappClient({
   rpc: "http://127.0.0.1:26657",
   rest: "http://127.0.0.1:1317",
@@ -746,6 +793,25 @@ const conformanceResult = runClairveilConformanceFixtures({
   fixtureNames: ["privacy_wallet_golden_vectors.json"]
 });
 const cosmosReserveResult: Promise<ReserveResponse> = cosmos.fetchReserve("udemo");
+const cosmosTxRawCheckpoint = cosmos.signDirect({
+  wallet: {
+    async signDirect(signDoc) {
+      return { signed: signDoc, signature: { signature: "AQ==" } };
+    }
+  },
+  signDoc: {
+    chainId: "demo-1",
+    bodyBytes: "",
+    authInfoBytes: "",
+    accountNumber: "0"
+  }
+});
+cosmosTxRawCheckpoint.then(checkpoint => {
+  const exactTxRawBytes: Uint8Array = checkpoint.txRawBytes;
+  const exactTxRawHash: string = checkpoint.txBytesHash;
+  cosmos.broadcastTxRawBytes(exactTxRawBytes);
+  void exactTxRawHash;
+});
 const cosmosPreparedTransfer = null as unknown as CosmosPreparedTransfer;
 const cosmosPreparedTransferPlanAction: string = cosmosPreparedTransfer.prepared?.planAction ?? "";
 // @ts-expect-error Cosmos prepared transfer summary does not expose built payload artifacts.

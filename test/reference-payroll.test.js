@@ -8,6 +8,7 @@ import {
   buildOneProofPayrollOperationEvidence,
   createOneProofPayrollArtifact,
   createOneProofPayrollBatchSignDoc,
+  inspectOneProofPayrollArtifactRetry,
   markOneProofPayrollReservationBroadcastAttempting,
   markOneProofPayrollReservationProofReady,
   markOneProofPayrollReservationSubmitted,
@@ -368,6 +369,40 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   });
   assert.deepEqual(retransmitted.bytes, [1, 2, 3, 4]);
   assert.equal(retransmitted.hash, restoredArtifact.tx_bytes_hash);
+  const retryCalls = [];
+  const retryInspection = await inspectOneProofPayrollArtifactRetry(serializedArtifact, {
+    nowUnix: 1_700_000_000,
+    queryTransaction: async (txHash, context) => {
+      retryCalls.push(["tx", txHash, context.tx_bytes_hash]);
+      return "not-found";
+    },
+    checkNullifiers: async nullifiers => {
+      retryCalls.push(["nullifiers", [...nullifiers]]);
+      return new Map(nullifiers.map(value => [value, false]));
+    }
+  });
+  assert.deepEqual(retryCalls.map(call => call[0]), ["tx", "nullifiers"]);
+  assert.equal(retryInspection.next_action, "retransmit-signed-transaction");
+  assert.equal(retryInspection.transaction_state, "not-found");
+  const succeededInspection = await inspectOneProofPayrollArtifactRetry(serializedArtifact, {
+    nowUnix: 1_700_000_000,
+    queryTransaction: async () => "succeeded",
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(value => [value, true]))
+  });
+  assert.equal(succeededInspection.next_action, "reconcile-succeeded");
+  const spentInspection = await inspectOneProofPayrollArtifactRetry(serializedArtifact, {
+    nowUnix: 1_700_000_000,
+    queryTransaction: async () => "not-found",
+    checkNullifiers: async nullifiers => new Map(nullifiers.map((value, index) => [value, index === 0]))
+  });
+  assert.equal(spentInspection.next_action, "manual-review");
+  await assert.rejects(
+    () => inspectOneProofPayrollArtifactRetry(serializedArtifact, {
+      nowUnix: 1_700_000_000,
+      checkNullifiers: async nullifiers => new Map(nullifiers.map(value => [value, false]))
+    }),
+    /transaction query callback is required/
+  );
   const tamperedArtifact = JSON.parse(serializedArtifact);
   tamperedArtifact.tx_hash = "PAYROLL-TAMPERED";
   assert.throws(

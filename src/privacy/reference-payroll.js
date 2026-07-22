@@ -1563,6 +1563,82 @@ export function resumeOneProofPayrollArtifact(value, { nowUnix } = {}) {
   });
 }
 
+function normalizedPayrollRetryTransactionState(value) {
+  const candidate = typeof value === "string" ? value : value?.state ?? value?.status;
+  const state = text(candidate).toLowerCase().replaceAll("_", "-");
+  if (state === "succeeded" || state === "success") return "succeeded";
+  if (state === "failed" || state === "failure") return "failed";
+  if (state === "not-found" || state === "notfound" || state === "absent") return "not-found";
+  throw new Error("one-proof payroll transaction query must return succeeded, failed, or not-found");
+}
+
+/**
+ * Query transaction identity before input nullifiers, then decide whether an
+ * exact signed transaction is safe to retransmit. A timeout is not evidence
+ * that a broadcast failed: spent or incomplete nullifier evidence always
+ * remains a manual-review outcome.
+ */
+export async function inspectOneProofPayrollArtifactRetry(value, {
+  queryTransaction,
+  checkNullifiers,
+  nowUnix
+} = {}) {
+  if (typeof checkNullifiers !== "function") {
+    throw new Error("a batch nullifier status reader is required before one-proof payroll retry");
+  }
+  const resumed = resumeOneProofPayrollArtifact(value, { nowUnix: nowUnix ?? Math.floor(Date.now() / 1000) });
+  const artifact = resumed.artifact;
+  const prepared = expectedPayrollEvidenceForPreparedOperation(artifact.prepared, { nowUnix: nowUnix ?? Math.floor(Date.now() / 1000) });
+  let transactionState = "not-checked";
+  if (artifact.tx_hash) {
+    if (typeof queryTransaction !== "function") {
+      throw new Error("a transaction query callback is required when a one-proof payroll artifact has a transaction hash");
+    }
+    transactionState = normalizedPayrollRetryTransactionState(await queryTransaction(artifact.tx_hash, {
+      artifact,
+      tx_bytes_hash: artifact.tx_bytes_hash,
+      sign_doc_hash: artifact.sign_doc_hash
+    }));
+  }
+  const inputNullifiers = normalizedNullifierStatuses(
+    prepared.effects.nullifier_hexes,
+    await checkNullifiers([...prepared.effects.nullifier_hexes])
+  );
+  const anySpent = inputNullifiers.some(entry => entry.spent);
+  const allSpent = inputNullifiers.every(entry => entry.spent);
+  let nextAction;
+  let reason;
+  if (transactionState === "succeeded") {
+    if (!allSpent) {
+      nextAction = "manual-review";
+      reason = "successful transaction has incomplete input nullifier evidence";
+    } else {
+      nextAction = "reconcile-succeeded";
+      reason = "transaction is confirmed and every input nullifier is spent";
+    }
+  } else if (anySpent) {
+    nextAction = "manual-review";
+    reason = transactionState === "failed"
+      ? "failed transaction has spent input nullifier evidence"
+      : "input nullifier is spent without a confirmed successful transaction";
+  } else if (resumed.signed_tx_bytes) {
+    nextAction = "retransmit-signed-transaction";
+    reason = transactionState === "failed"
+      ? "transaction failed and every input nullifier is explicitly unspent"
+      : "transaction is absent and every input nullifier is explicitly unspent";
+  } else {
+    nextAction = resumed.next_action;
+    reason = "every input nullifier is explicitly unspent";
+  }
+  return Object.freeze({
+    artifact,
+    transaction_state: transactionState,
+    input_nullifiers: Object.freeze(inputNullifiers),
+    next_action: nextAction,
+    reason
+  });
+}
+
 /** Retransmit only the exact signed bytes checkpointed in a verified artifact. */
 export async function retransmitOneProofPayrollArtifact(value, {
   broadcastSignedTx,

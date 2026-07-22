@@ -9,7 +9,8 @@ import {
   hashStringToField,
   hexFromBytes,
   mimcHash,
-  normalizeHex
+  normalizeHex,
+  unpackPoint
 } from "./crypto.js";
 import {
   bytesFromHex,
@@ -17,11 +18,14 @@ import {
   utf8String
 } from "./browser-crypto.js";
 import {
+  computeBatchFullDisclosureDigestV1,
+  computeBatchUserDisclosureDigestV1,
   computeTransferFullDisclosureDigestV2,
   computeTransferUserDisclosureDigestV2,
   decryptDisclosureV1,
   encryptedEnvelopeKindV1,
   fieldHexV1,
+  unwrapEncryptedEnvelopeV1,
   unmarshalDisclosurePlaintextV1
 } from "../privacy/protocol-v1.js";
 
@@ -42,6 +46,12 @@ export const transferSelfViewDisclosureDomain = 254;
 export const transferDisclosureRecipientOutputIndex = 0;
 
 const supportedPolicies = new Set([0, 1, 2, 3, 4, 5, 6, 7]);
+const batchTransferScanEventType = "batch_transfer";
+const batchUserDisclosureModes = Object.freeze({
+  none: "USER_DISCLOSURE_MODE_NONE",
+  public: "USER_DISCLOSURE_MODE_PUBLIC",
+  recipientEncrypted: "USER_DISCLOSURE_MODE_RECIPIENT_ENCRYPTED"
+});
 
 export function privacyPolicyLabel(policy) {
   switch (Number(policy || 0)) {
@@ -508,6 +518,397 @@ export function buildDisclosureReport({
     },
     payload
   };
+}
+
+function equalDisclosureBytes(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
+function typedScanBytes(value, label) {
+  if (value instanceof Uint8Array) return Uint8Array.from(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+  throw new Error(`${label} must be bytes from PrivacyScanOutputV2`);
+}
+
+function typedScanAliasedValue(output, camel, snake, label) {
+  const camelValue = output?.[camel];
+  const snakeValue = output?.[snake];
+  if (camelValue != null && snakeValue != null) {
+    const camelBytes = camelValue instanceof Uint8Array || ArrayBuffer.isView(camelValue) || camelValue instanceof ArrayBuffer;
+    const snakeBytes = snakeValue instanceof Uint8Array || ArrayBuffer.isView(snakeValue) || snakeValue instanceof ArrayBuffer;
+    if (camelBytes || snakeBytes) {
+      if (!camelBytes || !snakeBytes || !equalDisclosureBytes(typedScanBytes(camelValue, label), typedScanBytes(snakeValue, label))) {
+        throw new Error(`${label} aliases conflict`);
+      }
+    } else if (String(camelValue) !== String(snakeValue)) {
+      throw new Error(`${label} aliases conflict`);
+    }
+  }
+  return camelValue ?? snakeValue;
+}
+
+function typedScanOptionalBytes(output, camel, snake, label) {
+  const value = typedScanAliasedValue(output, camel, snake, label);
+  return value == null ? new Uint8Array() : typedScanBytes(value, label);
+}
+
+function typedScanRequiredBytes(output, camel, snake, label, expectedLength) {
+  const value = typedScanAliasedValue(output, camel, snake, label);
+  if (value == null) throw new Error(`${label} is required`);
+  const bytes = typedScanBytes(value, label);
+  if (expectedLength != null && bytes.length !== expectedLength) throw new Error(`${label} must be exactly ${expectedLength} bytes`);
+  return bytes;
+}
+
+function typedScanField(bytes, label, { nonZero = false } = {}) {
+  if (bytes.length !== 32) throw new Error(`${label} must be exactly 32 bytes`);
+  const value = bytesToBigIntBE(bytes);
+  // fieldHexV1 both checks canonicality and supplies the exact wire form used
+  // by the batch disclosure digest contract.
+  fieldHexV1(value);
+  if (nonZero && value === 0n) throw new Error(`${label} must be non-zero`);
+  return value;
+}
+
+function typedScanOutputIndex(output) {
+  const value = typedScanAliasedValue(output, "outputIndex", "output_index", "privacy scan batch output index");
+  const index = Number(value);
+  if (!Number.isSafeInteger(index) || index < 0 || index > 31) {
+    throw new Error("privacy scan batch output index must be in 0..31");
+  }
+  return index;
+}
+
+function typedScanPolicy(output) {
+  const value = typedScanAliasedValue(output, "userPrivacyPolicy", "user_privacy_policy", "privacy scan batch user privacy policy");
+  const policy = Number(value);
+  if (!Number.isSafeInteger(policy) || !supportedPolicies.has(policy)) {
+    throw new Error("privacy scan batch user privacy policy is invalid");
+  }
+  return policy;
+}
+
+function typedScanUserDisclosureMode(output) {
+  const value = typedScanAliasedValue(output, "userDisclosureMode", "user_disclosure_mode", "privacy scan batch user disclosure mode");
+  if (value === 0 || value === "0") return batchUserDisclosureModes.none;
+  if (value === 1 || value === "1") return batchUserDisclosureModes.public;
+  if (value === 2 || value === "2") return batchUserDisclosureModes.recipientEncrypted;
+  const mode = String(value || "").trim();
+  if (!Object.values(batchUserDisclosureModes).includes(mode)) {
+    throw new Error("privacy scan batch user disclosure mode is invalid");
+  }
+  return mode;
+}
+
+function typedScanTxHash(output, txHash) {
+  if (txHash != null && String(txHash).trim()) return String(txHash).trim();
+  const value = typedScanAliasedValue(output, "txHash", "tx_hash", "privacy scan batch transaction hash");
+  if (value == null) return "";
+  return hexFromBytes(typedScanBytes(value, "privacy scan batch transaction hash"));
+}
+
+/**
+ * Strictly normalize a single Batch V1 PrivacyScanOutputV2 disclosure record.
+ * This intentionally accepts both generated-protobuf camel case and the
+ * validated scanner's snake case, while rejecting contradictory aliases.
+ */
+function normalizedBatchScanDisclosureOutput(output) {
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    throw new Error("PrivacyScanOutputV2 batch output is required");
+  }
+  const eventType = String(typedScanAliasedValue(output, "eventType", "event_type", "privacy scan batch event type") || "").trim();
+  if (eventType !== batchTransferScanEventType) {
+    throw new Error("selected PrivacyScanOutputV2 is not a batch transfer output");
+  }
+  const outputIndex = typedScanOutputIndex(output);
+  const commitmentBytes = typedScanRequiredBytes(output, "commitment", "commitment", "privacy scan batch commitment", 32);
+  const commitment = typedScanField(commitmentBytes, "privacy scan batch commitment", { nonZero: true });
+  const policy = typedScanPolicy(output);
+  const mode = typedScanUserDisclosureMode(output);
+  const userDigestBytes = typedScanOptionalBytes(output, "userDisclosureDigest", "user_disclosure_digest", "privacy scan batch user disclosure digest");
+  const userTarget = typedScanOptionalBytes(output, "userDisclosureTargetPubkey", "user_disclosure_target_pubkey", "privacy scan batch user disclosure target");
+  const userPayload = typedScanOptionalBytes(output, "userDisclosurePayload", "user_disclosure_payload", "privacy scan batch user disclosure payload");
+  const fullDigestBytes = typedScanRequiredBytes(output, "fullDisclosureDigest", "full_disclosure_digest", "privacy scan batch full disclosure digest", 32);
+  const fullDigest = typedScanField(fullDigestBytes, "privacy scan batch full disclosure digest", { nonZero: true });
+  const auditPayload = typedScanRequiredBytes(output, "auditDisclosurePayload", "audit_disclosure_payload", "privacy scan batch audit disclosure payload");
+  const selfViewPayload = typedScanOptionalBytes(output, "selfViewDisclosurePayload", "self_view_disclosure_payload", "privacy scan batch self-view disclosure payload");
+
+  try {
+    unwrapBatchDisclosureEnvelope(auditPayload, encryptedEnvelopeKindV1.auditDisclosure);
+    if (selfViewPayload.length) unwrapBatchDisclosureEnvelope(selfViewPayload, encryptedEnvelopeKindV1.selfViewDisclosure);
+  } catch (error) {
+    throw new Error(`privacy scan batch disclosure envelope is invalid: ${error.message}`);
+  }
+
+  if (policy === 0) {
+    if (mode !== batchUserDisclosureModes.none || userDigestBytes.length || userTarget.length || userPayload.length) {
+      throw new Error("privacy scan batch all-private user disclosure framing is invalid");
+    }
+  } else if (mode === batchUserDisclosureModes.public) {
+    typedScanField(userDigestBytes, "privacy scan batch user disclosure digest", { nonZero: true });
+    if (userTarget.length || userPayload.length !== 392) {
+      throw new Error("privacy scan batch public user disclosure framing is invalid");
+    }
+  } else if (mode === batchUserDisclosureModes.recipientEncrypted) {
+    typedScanField(userDigestBytes, "privacy scan batch user disclosure digest", { nonZero: true });
+    if (userTarget.length !== 32) throw new Error("privacy scan batch encrypted user disclosure target is invalid");
+    try {
+      // This establishes canonical, non-identity point encoding before a
+      // caller's target key is compared or ECIES is attempted.
+      unpackBatchDisclosureTarget(userTarget);
+      unwrapBatchDisclosureEnvelope(userPayload, encryptedEnvelopeKindV1.userDisclosure);
+    } catch (error) {
+      throw new Error(`privacy scan batch encrypted user disclosure is invalid: ${error.message}`);
+    }
+  } else {
+    throw new Error("privacy scan batch user disclosure mode is invalid for the selected policy");
+  }
+  return {
+    outputIndex,
+    commitment,
+    policy,
+    mode,
+    userDigestBytes,
+    userTarget,
+    userPayload,
+    fullDigest,
+    auditPayload,
+    selfViewPayload
+  };
+}
+
+// Keep protocol-v1 imports narrow above; these wrappers make the validation
+// calls readable and keep all typed-scan envelope handling in this module.
+function unwrapBatchDisclosureEnvelope(payload, kind) {
+  return unwrapEncryptedEnvelopeV1(payload, kind);
+}
+
+function unpackBatchDisclosureTarget(value) {
+  const point = unpackPoint(value);
+  if (point.x === 0n && point.y === 1n) {
+    throw new Error("identity disclosure target is not allowed");
+  }
+  return point;
+}
+
+function batchDisclosurePlaintextPayload(value, digest, { plane, shieldedPrefix, assetDenom = "" }) {
+  const full = plane === planeAudit || plane === planeSelfView;
+  const policy = full ? 7 : value.policy;
+  const payload = {
+    version: "privacy-fixed-v1",
+    plane,
+    policy,
+    output_index: value.outputIndex,
+    commitment_hex: fieldHexV1(value.commitment),
+    disclosure_digest_hex: fieldHexV1(digest),
+    disclosure_blinding_hex: fieldHexV1(value.disclosureBlinding),
+    asset_id_hex: fieldHexV1(value.assetID),
+    ...(full || (policy & transferPrivacyPolicyDiscloseAmount) !== 0 ? { amount: value.amount.toString(), asset_denom: assetDenom } : {}),
+    ...(full || (policy & transferPrivacyPolicyDiscloseFrom) !== 0 ? { from_shielded_address: optionalFixedAddress(value, shieldedPrefix) } : {}),
+    ...(full || (policy & transferPrivacyPolicyDiscloseTo) !== 0 ? { to_shielded_address: optionalFixedRecipientAddress(value, shieldedPrefix) } : {})
+  };
+  return payload;
+}
+
+function batchDisclosureReport(value, digest, txHash, { plane, source, delivery, shieldedPrefix, assetDenom = "" }) {
+  const payload = batchDisclosurePlaintextPayload(value, digest, { plane, shieldedPrefix, assetDenom });
+  const amount = payload.amount || "";
+  const from = payload.from_shielded_address || "";
+  const to = payload.to_shielded_address || "";
+  const policy = plane === planeAudit ? "audit-full" : plane === planeSelfView ? "amount-from-to" : privacyPolicyLabel(payload.policy);
+  return {
+    plane,
+    policy,
+    output_index: value.outputIndex,
+    commitment_hex: payload.commitment_hex,
+    digest_hex: payload.disclosure_digest_hex,
+    verified: true,
+    amount,
+    asset_denom: payload.asset_denom || "",
+    from,
+    to,
+    source,
+    tx_hash: txHash ? String(txHash).toUpperCase() : "",
+    verification: {
+      fixed_encoding: true,
+      batch_typed_scan_output: true,
+      output_index_match: true,
+      output_commitment_match: true,
+      output_policy_match: true,
+      plaintext_blinding_bound: true,
+      local_disclosure_digest_match: true,
+      typed_scan_disclosure_digest_match: true
+    },
+    summary: {
+      plane,
+      delivery,
+      policy,
+      disclosed_fields: disclosedFields(payload),
+      amount,
+      asset_denom: payload.asset_denom || "",
+      from_shielded_address: from,
+      to_shielded_address: to
+    },
+    payload
+  };
+}
+
+function batchPlaintextMatchesOutput(value, record, expectedPlane) {
+  if (value.plane !== expectedPlane) {
+    throw new Error(`batch disclosure plaintext has unexpected plane ${value.plane}`);
+  }
+  if (value.outputIndex !== record.outputIndex) {
+    throw new Error(`batch disclosure output index mismatch: plaintext has ${value.outputIndex}, typed scan has ${record.outputIndex}`);
+  }
+  if (value.commitment !== record.commitment) {
+    throw new Error("batch disclosure commitment mismatch between plaintext and typed scan output");
+  }
+  if (expectedPlane === 1) {
+    if (value.policy !== record.policy || value.disclosedFieldBitmap !== record.policy) {
+      throw new Error("batch user disclosure policy mismatch between plaintext and typed scan output");
+    }
+  }
+}
+
+function computeBatchUserPlaintextDigest(value) {
+  return computeBatchUserDisclosureDigestV1({
+    outputIndex: value.outputIndex,
+    commitment: value.commitment,
+    policy: value.policy,
+    disclosedFieldBitmap: value.disclosedFieldBitmap,
+    selectedAmount: value.amount,
+    selectedFromSpendKeyX: value.senderSpendKeyX,
+    selectedFromSpendKeyY: value.senderSpendKeyY,
+    selectedFromViewKeyX: value.senderViewKeyX,
+    selectedFromViewKeyY: value.senderViewKeyY,
+    selectedToSpendKeyX: value.recipientSpendKeyX,
+    selectedToSpendKeyY: value.recipientSpendKeyY,
+    selectedToViewKeyX: value.recipientViewKeyX,
+    selectedToViewKeyY: value.recipientViewKeyY,
+    assetID: value.assetID,
+    userDisclosureBlinding: value.disclosureBlinding
+  });
+}
+
+function computeBatchFullPlaintextDigest(value) {
+  return computeBatchFullDisclosureDigestV1({
+    outputIndex: value.outputIndex,
+    commitment: value.commitment,
+    amount: value.amount,
+    assetID: value.assetID,
+    senderSpendKeyX: value.senderSpendKeyX,
+    senderSpendKeyY: value.senderSpendKeyY,
+    senderViewKeyX: value.senderViewKeyX,
+    senderViewKeyY: value.senderViewKeyY,
+    recipientSpendKeyX: value.recipientSpendKeyX,
+    recipientSpendKeyY: value.recipientSpendKeyY,
+    recipientViewKeyX: value.recipientViewKeyX,
+    recipientViewKeyY: value.recipientViewKeyY,
+    fullDisclosureBlinding: value.disclosureBlinding
+  });
+}
+
+function assertBatchDigestMatchesTypedOutput(digest, outputDigest, label) {
+  const actual = fieldHexV1(digest);
+  const expected = fieldHexV1(outputDigest);
+  if (actual !== expected) {
+    throw new Error(`${label} mismatch: typed scan has ${expected}, decoded plaintext resolves to ${actual}`);
+  }
+  return digest;
+}
+
+/**
+ * Decode and verify one public or recipient-encrypted user disclosure carried
+ * by a Batch V1 PrivacyScanOutputV2 record. The proof-bound digest is
+ * recomputed from the plaintext, including its per-output blinding.
+ */
+export function decodeBatchUserDisclosureFromScanOutput(output, {
+  disclosureScalar,
+  disclosurePubKeyHex,
+  txHash,
+  shieldedPrefix,
+  assetDenom = ""
+} = {}) {
+  const record = normalizedBatchScanDisclosureOutput(output);
+  if (record.policy === 0) throw new Error("selected batch output has no user disclosure");
+  let value;
+  if (record.mode === batchUserDisclosureModes.public) {
+    value = unmarshalDisclosurePlaintextV1(record.userPayload);
+  } else {
+    const target = String(disclosurePubKeyHex || "").trim().toLowerCase();
+    if (!target || target !== hexFromBytes(record.userTarget).toLowerCase()) {
+      throw new Error("This batch output is not targeted to the provided disclosure public key");
+    }
+    if (disclosureScalar == null) throw new Error("recipient-encrypted batch disclosure requires a disclosure scalar");
+    value = decryptDisclosureV1(record.userPayload, disclosureScalar, encryptedEnvelopeKindV1.userDisclosure);
+  }
+  batchPlaintextMatchesOutput(value, record, 1);
+  const digest = assertBatchDigestMatchesTypedOutput(
+    computeBatchUserPlaintextDigest(value),
+    typedScanField(record.userDigestBytes, "privacy scan batch user disclosure digest", { nonZero: true }),
+    "batch user disclosure digest"
+  );
+  return batchDisclosureReport(value, digest, typedScanTxHash(output, txHash), {
+    plane: planeUser,
+    source: record.mode === batchUserDisclosureModes.public ? "public" : "recipient_encrypted",
+    delivery: record.mode === batchUserDisclosureModes.public ? "public" : "recipient-encrypted",
+    shieldedPrefix,
+    assetDenom
+  });
+}
+
+function decodeBatchFullDisclosureFromScanOutput(output, {
+  disclosureScalar,
+  txHash,
+  shieldedPrefix,
+  assetDenom = "",
+  plane,
+  source,
+  delivery
+}) {
+  const record = normalizedBatchScanDisclosureOutput(output);
+  if (disclosureScalar == null) throw new Error(`${plane} batch disclosure requires a disclosure scalar`);
+  const payload = plane === planeAudit ? record.auditPayload : record.selfViewPayload;
+  if (!payload.length) throw new Error(`selected batch output has no ${plane} disclosure`);
+  const kind = plane === planeAudit ? encryptedEnvelopeKindV1.auditDisclosure : encryptedEnvelopeKindV1.selfViewDisclosure;
+  const value = decryptDisclosureV1(payload, disclosureScalar, kind);
+  batchPlaintextMatchesOutput(value, record, 2);
+  const digest = assertBatchDigestMatchesTypedOutput(
+    computeBatchFullPlaintextDigest(value),
+    record.fullDigest,
+    `batch ${plane} disclosure digest`
+  );
+  return batchDisclosureReport(value, digest, typedScanTxHash(output, txHash), {
+    plane,
+    source,
+    delivery,
+    shieldedPrefix,
+    assetDenom
+  });
+}
+
+/** Decode and verify the mandatory auditor full-disclosure envelope for one Batch V1 typed-scan output. */
+export function decodeBatchAuditDisclosureFromScanOutput(output, options = {}) {
+  return decodeBatchFullDisclosureFromScanOutput(output, {
+    ...options,
+    plane: planeAudit,
+    source: "audit_encrypted",
+    delivery: "audit-encrypted"
+  });
+}
+
+/** Decode and verify the optional sender self-view full-disclosure envelope for one Batch V1 typed-scan output. */
+export function decodeBatchSelfViewDisclosureFromScanOutput(output, options = {}) {
+  return decodeBatchFullDisclosureFromScanOutput(output, {
+    ...options,
+    plane: planeSelfView,
+    source: "self_view_encrypted",
+    delivery: "self-view-encrypted"
+  });
 }
 
 export function eventAttribute(event, key) {

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { derivePubKeyFromScalar, signNoteHash } from "clairveiljs/core";
-import { base64FromBytes, bytesFromBase64 } from "clairveiljs/browser-crypto";
+import { derivePubKeyFromScalar, packPoint, signNoteHash } from "clairveiljs/core";
+import { base64FromBytes, bytesFromBase64, hexFromBytes } from "clairveiljs/browser-crypto";
 import {
   buildPreparedBatchTransferPayload,
   buildMsgBatchTransferFromPrepared,
@@ -20,6 +20,12 @@ import {
   unmarshalDisclosurePlaintextV1
 } from "clairveiljs/protocol-v1";
 import { createHttpProverAdapter } from "clairveiljs/prover";
+import { createClairveilClient } from "clairveiljs/cosmos";
+import {
+  decodeBatchAuditDisclosureFromScanOutput,
+  decodeBatchSelfViewDisclosureFromScanOutput,
+  decodeBatchUserDisclosureFromScanOutput
+} from "clairveiljs/disclosure";
 import { batchTransferConformanceFixtureName } from "clairveiljs/conformance";
 import { fixtureTestOptions, readFixture } from "./helpers.js";
 
@@ -194,6 +200,103 @@ test("one-proof batch preparation binds public disclosure and rejects post-signa
   assert.throws(
     () => validatePreparedBatchTransferPayloadEnvelope({ ...payload, audit_key_id: "another-audit-key" }),
     /payload hash mismatch/
+  );
+});
+
+test("Batch V1 typed-scan disclosure decoders bind output index, commitment, policy, digest, and blinding", async () => {
+  const payload = await batchPayload({
+    inputAmounts: [5, 7, 9],
+    paymentAmounts: [4, 5, 6],
+    disclosureModes: ["none", "public", "recipient-encrypted"],
+    selfViewEnabled: true
+  });
+  const proof = {
+    version: preparedBatchTransferProofVersion,
+    request_payload_hash: payload.payload_hash,
+    proof: base64FromBytes(new Uint8Array(164).fill(7)),
+    circuit_set_id: "privacy-note-v1"
+  };
+  const message = buildMsgBatchTransferFromPrepared(payload, proof, { nowUnix: 1_700_000_000 });
+  const output = (index, fields = {}) => ({
+    ...message.outputs[index],
+    eventType: "batch_transfer",
+    outputIndex: index,
+    txHash: new Uint8Array(32).fill(0xab),
+    ...fields
+  });
+
+  const publicUser = decodeBatchUserDisclosureFromScanOutput(output(1), {
+    shieldedPrefix: "clairs",
+    assetDenom: "uclair"
+  });
+  assert.equal(publicUser.verified, true);
+  assert.equal(publicUser.plane, "user");
+  assert.equal(publicUser.output_index, 1);
+  assert.equal(publicUser.policy, "amount");
+  assert.equal(publicUser.amount, "5");
+  assert.equal(publicUser.verification.plaintext_blinding_bound, true);
+
+  const recipientScalar = 403n;
+  const recipientUser = decodeBatchUserDisclosureFromScanOutput(output(2), {
+    disclosureScalar: recipientScalar,
+    disclosurePubKeyHex: hexFromBytes(packPoint(derivePubKeyFromScalar(recipientScalar))),
+    shieldedPrefix: "clairs",
+    assetDenom: "uclair"
+  });
+  assert.equal(recipientUser.verified, true);
+  assert.equal(recipientUser.output_index, 2);
+  assert.equal(recipientUser.source, "recipient_encrypted");
+
+  const audit = decodeBatchAuditDisclosureFromScanOutput(output(2), {
+    disclosureScalar: 31n,
+    shieldedPrefix: "clairs",
+    assetDenom: "uclair"
+  });
+  assert.equal(audit.verified, true);
+  assert.equal(audit.plane, "audit");
+  assert.equal(audit.output_index, 2);
+  assert.equal(audit.amount, "6");
+
+  const selfView = decodeBatchSelfViewDisclosureFromScanOutput(output(2), {
+    disclosureScalar: 47n,
+    shieldedPrefix: "clairs",
+    assetDenom: "uclair"
+  });
+  assert.equal(selfView.verified, true);
+  assert.equal(selfView.plane, "self-view");
+  assert.equal(selfView.digest_hex, audit.digest_hex);
+
+  const client = createClairveilClient({
+    rest: "http://127.0.0.1:1317",
+    rpc: "http://127.0.0.1:26657",
+    chainId: "clairveil-test-1",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs"
+  });
+  const wrappedPublicUser = await client.decodeBatchUserDisclosure({
+    output: output(1),
+    assetDenom: "uclair"
+  });
+  assert.equal(wrappedPublicUser.digest_hex, publicUser.digest_hex);
+  const wrappedAudit = await client.decodeBatchAuditDisclosure({
+    output: output(2),
+    disclosureScalar: 31n,
+    assetDenom: "uclair"
+  });
+  assert.equal(wrappedAudit.digest_hex, audit.digest_hex);
+
+  assert.throws(
+    () => decodeBatchUserDisclosureFromScanOutput(output(2, { outputIndex: 1 }), {
+      disclosureScalar: recipientScalar,
+      disclosurePubKeyHex: hexFromBytes(packPoint(derivePubKeyFromScalar(recipientScalar)))
+    }),
+    /output index mismatch/
+  );
+  assert.throws(
+    () => decodeBatchAuditDisclosureFromScanOutput(output(2, {
+      fullDisclosureDigest: Uint8Array.from(message.outputs[2].fullDisclosureDigest).fill(1)
+    }), { disclosureScalar: 31n }),
+    /batch audit disclosure digest mismatch/
   );
 });
 

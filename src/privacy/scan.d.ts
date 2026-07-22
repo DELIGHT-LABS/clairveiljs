@@ -35,6 +35,13 @@ export const privacyScanEventTypeV2: Readonly<{
   batchTransfer: "batch_transfer";
   withdraw: "withdraw";
 }>;
+export const privacyScanValidationStateVersionV2: "privacy-scan-validation-v2";
+
+/** Mutable state supplied to validatePrivacyScanPageV2 across cursor pages. */
+export interface PrivacyScanValidationStateV2 {
+  version: "privacy-scan-validation-v2";
+  batch_self_view_by_event: Map<string, boolean>;
+}
 
 export interface PrivacyScanCursorV2 {
   height: number | string;
@@ -101,6 +108,7 @@ export function parseNoteBytes(bytes: BytesLike): object;
 export function parseNullifierUsage(value: unknown): boolean | null;
 export function processPrivacyEvent(event: object, input: { rootSeed?: BytesLike; spendScalar?: bigint; viewScalar?: bigint }): NormalizedFoundNote[];
 export function normalizeFoundNotes(notes: Array<object | FoundNote>): NormalizedFoundNote[];
+export function createPrivacyScanValidationStateV2(): PrivacyScanValidationStateV2;
 export type ScanNullifierUsage =
   | boolean
   | { used: boolean; Used?: never }
@@ -131,6 +139,9 @@ export function validatePrivacyScanPageV2(response: object, request?: {
   max_encoded_bytes?: number | bigint | string;
   eventTypes?: string[];
   event_types?: string[];
+  /** Retain this object while validating consecutive pages to bind batch self-view all-or-none. */
+  validationState?: PrivacyScanValidationStateV2;
+  validation_state?: PrivacyScanValidationStateV2;
 }): ValidatedPrivacyScanPageV2;
 export function processPrivacyScanOutputV2(output: ValidatedPrivacyScanOutputV2, input: {
   rootSeed: BytesLike;

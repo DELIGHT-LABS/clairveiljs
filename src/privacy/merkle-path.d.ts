@@ -29,7 +29,7 @@ export interface VerifiedCommitmentPathSnapshot {
 export function normalizeCommitmentPathsAtRootRequest(input: CommitmentPathsAtRootRequest): Readonly<{
   commitmentHexes: readonly Hex[];
   rootHex: Hex;
-  snapshotHeight: number | string;
+  snapshotHeight?: number | string;
 }>;
 export function normalizeCommitmentPathsAtRootResponse(response: object, request: CommitmentPathsAtRootRequest): VerifiedCommitmentPathSnapshot;
 export function createCommitmentPathSnapshotProvider(snapshot: VerifiedCommitmentPathSnapshot): {

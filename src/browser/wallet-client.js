@@ -847,6 +847,14 @@ export class ClairveilBrowserClient {
     return this.cosmos.broadcastSignedTx(input, waitOptions);
   }
 
+  async broadcastTxRawBytes(txRawBytes, waitOptions) {
+    return this.cosmos.broadcastTxRawBytes(txRawBytes, waitOptions);
+  }
+
+  async signDirect(input) {
+    return this.cosmos.signDirect(input);
+  }
+
   async signDirectAndBroadcast(input) {
     return this.cosmos.signDirectAndBroadcast(input);
   }

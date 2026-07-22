@@ -13,6 +13,7 @@ import type {
   BroadcastSignedTxResult,
   ReservationBroadcastOptions,
   SignedTxBase64,
+  SignedTxRawCheckpoint,
   SignDocBase64,
   TxSearchResult
 } from "../transport/cosmos-client.js";
@@ -580,7 +581,13 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   waitForEvmTransaction(txHash: Hex): Promise<BrowserEvmTransactionWaitResult>;
   evmNativeSendTransaction(input: { to: string; amount: CoinString }): BrowserEvmNativeSendTransaction;
   buildBankSendSignDoc(input: { from: ClairAddress; pubKeyHex: Hex; to: ClairAddress; amount: CoinString }): Promise<SignDocBase64>;
+  broadcastTxRawBytes(txRawBytes: Uint8Array, waitOptions?: ReservationBroadcastOptions): Promise<BroadcastSignedTxResult>;
   broadcastSignedTx(input: SignedTxBase64, waitOptions?: ReservationBroadcastOptions): Promise<BroadcastSignedTxResult>;
+  signDirect(input: ReservationBroadcastOptions & {
+    wallet: WalletAdapterLike;
+    signDoc: SignDocBase64;
+    waitOptions?: { attempts?: number; intervalMs?: number };
+  }): Promise<SignedTxRawCheckpoint>;
   signDirectAndBroadcast(input: ReservationBroadcastOptions & {
     wallet: WalletAdapterLike;
     signDoc: SignDocBase64;

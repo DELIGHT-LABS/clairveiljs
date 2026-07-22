@@ -450,6 +450,18 @@ function selectedOneProofBatchShape(config) {
   return oneProofBatchShape(env.CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE, config);
 }
 
+function selectedOneProofBatchShapes(config) {
+  const selected = String(env.CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE || "one-input-one-payment").trim().toLowerCase();
+  if (selected !== "all") return [selectedOneProofBatchShape(config)];
+  return [
+    "one-input-one-payment",
+    "three-input-four-output",
+    "thirty-one-payments-plus-change",
+    "exact-thirty-two-payments",
+    "explicit-zero-padding"
+  ].map(shape => oneProofBatchShape(shape, config));
+}
+
 test("one-proof local E2E shape profiles retain the v0.2 disclosure contract", () => {
   const config = {
     denom: "uclair",
@@ -644,7 +656,8 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
   });
   try {
     const material = await client.deriveWalletPrivacyMaterial(wallet);
-    const shape = selectedOneProofBatchShape(config);
+    const shapes = selectedOneProofBatchShapes(config);
+    for (const shape of shapes) {
     const depositTxHashes = [];
     for (const amount of shape.inputAmounts) {
       depositTxHashes.push(await prepareDepositAndBroadcast(client, wallet, material, amount, config, depositProofProvider));
@@ -856,6 +869,7 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
     assert.equal(reconciliation.reconciliation.items.every(item => item.status === "Succeeded"), true, shape.id);
     assert.equal(reconciliation.reservation_action, "ConfirmedSpent");
     assert.equal(reconciliation.reservations.every(reservation => reservation.status === "ConfirmedSpent"), true, shape.id);
+    }
   } finally {
     await client.disconnect();
   }

@@ -86,21 +86,26 @@ function requestedCommitments(input = {}) {
   return commitments;
 }
 
-/** Normalize the exact root/height snapshot request accepted by Clairveil. */
+/** Normalize the exact-root, optionally height-pinned snapshot request accepted by Clairveil. */
 export function normalizeCommitmentPathsAtRootRequest(input = {}) {
   const commitmentHexes = requestedCommitments(input);
   const rootHex = canonicalFieldHex(
     aliasedValue(input, ["rootHex", "root_hex"], "commitment path root"),
     "commitment path root"
   ).hex;
-  const snapshotHeight = nonNegativeInt64Value(
-    aliasedValue(input, ["snapshotHeight", "snapshot_height"], "commitment path snapshot height"),
-    "commitment path snapshot height"
+  const requestedSnapshotHeight = aliasedValue(
+    input,
+    ["snapshotHeight", "snapshot_height"],
+    "commitment path snapshot height",
+    { required: false }
   );
+  const snapshotHeight = requestedSnapshotHeight === undefined
+    ? undefined
+    : nonNegativeInt64Value(requestedSnapshotHeight, "commitment path snapshot height");
   return Object.freeze({
     commitmentHexes: Object.freeze(commitmentHexes),
     rootHex,
-    snapshotHeight
+    ...(snapshotHeight === undefined ? {} : { snapshotHeight })
   });
 }
 
@@ -125,7 +130,8 @@ export function normalizeCommitmentPathsAtRootResponse(response, request) {
     aliasedValue(response, ["leafCount", "leaf_count"], "commitment path response leaf count"),
     "commitment path response leaf count"
   );
-  if (rootHex !== normalizedRequest.rootHex || String(snapshotHeight) !== String(normalizedRequest.snapshotHeight)) {
+  if (rootHex !== normalizedRequest.rootHex ||
+      (normalizedRequest.snapshotHeight !== undefined && String(snapshotHeight) !== String(normalizedRequest.snapshotHeight))) {
     throw new Error("commitment path snapshot identity does not match the request");
   }
   if (uint64(leafCount, "commitment path response leaf count") === 0n) {

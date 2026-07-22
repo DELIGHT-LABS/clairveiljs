@@ -1,4 +1,6 @@
 import type { Hex } from "./crypto.js";
+import type { PrivacyScanOutputV2 } from "../generated/clairveil/privacy/v1/genesis.js";
+import type { ValidatedPrivacyScanOutputV2 } from "../privacy/scan.js";
 
 export interface DisclosureDecodeOptions {
   shieldedPrefix?: string;
@@ -71,6 +73,20 @@ export interface DisclosureReport {
   payload: DisclosurePayload;
 }
 
+/** A generated protobuf output or a strict `validatePrivacyScanPageV2` output. */
+export type BatchPrivacyScanDisclosureOutputV2 = PrivacyScanOutputV2 | ValidatedPrivacyScanOutputV2;
+
+export interface BatchDisclosureDecodeOptions extends DisclosureDecodeOptions {
+  /** Required for recipient-encrypted, audit, and self-view envelopes. */
+  disclosureScalar?: bigint | string | number;
+  /** Required with `disclosureScalar` for recipient-encrypted user disclosure. */
+  disclosurePubKeyHex?: Hex;
+  /** Overrides the transaction hash carried by the typed scan output. */
+  txHash?: Hex;
+  /** Optional display-only denom; the field element remains independently bound. */
+  assetDenom?: string;
+}
+
 export function privacyPolicyLabel(policy: number | string): string;
 export function decodePublicPayloadHex(payloadHex: Hex): DisclosurePayload;
 export function decryptPayloadHex(ciphertextHex: Hex, disclosureScalar: bigint | string | number): DisclosurePayload;
@@ -91,6 +107,9 @@ export function disclosureTargetPubKeyFromEvent(event: object, plane?: string): 
 export function decodeUserDisclosureFromEvent(event: object, disclosureScalar: bigint | string | number, disclosurePubKeyHex: Hex, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
 export function decodeSelfViewDisclosureFromEvent(event: object, disclosureScalar: bigint | string | number, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
 export function decodeAuditDisclosureFromEvent(event: object, disclosureScalar: bigint | string | number, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
+export function decodeBatchUserDisclosureFromScanOutput(output: BatchPrivacyScanDisclosureOutputV2, options?: BatchDisclosureDecodeOptions): DisclosureReport;
+export function decodeBatchSelfViewDisclosureFromScanOutput(output: BatchPrivacyScanDisclosureOutputV2, options?: BatchDisclosureDecodeOptions): DisclosureReport;
+export function decodeBatchAuditDisclosureFromScanOutput(output: BatchPrivacyScanDisclosureOutputV2, options?: BatchDisclosureDecodeOptions): DisclosureReport;
 export function disclosureScalarFromHex(value: Hex): bigint;
 export function publicPayloadReport(payloadHex: Hex, onChainDigestHex?: Hex, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
 export function payloadHex(payload: DisclosurePayload): Hex;

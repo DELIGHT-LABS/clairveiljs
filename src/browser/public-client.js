@@ -250,13 +250,10 @@ function commitmentPathsAtRootRequestBody(options = {}) {
   const rootHex = String(options.rootHex ?? options.root_hex ?? "").trim();
   if (!rootHex) throw new Error("rootHex is required");
   const snapshotHeight = options.snapshotHeight ?? options.snapshot_height;
-  if (snapshotHeight == null || String(snapshotHeight).trim() === "") {
-    throw new Error("snapshotHeight is required");
-  }
   return {
     commitmentHexes: commitments.map(value => String(value || "").trim()),
     rootHex,
-    snapshotHeight
+    ...(snapshotHeight == null || String(snapshotHeight).trim() === "" ? {} : { snapshotHeight })
   };
 }
 

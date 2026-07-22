@@ -2693,7 +2693,7 @@ test("cosmos prepareTransferBatch accepts reservation_manager and builds one sig
   }
   assert.equal(signCalls, 3);
   const forwardedReservations = [];
-  client.broadcastSignedTx = async (_signedTx, options) => {
+  client.broadcastTxRawBytes = async (_txRawBytes, options) => {
     forwardedReservations.push(options.reservation);
     return { ok: true };
   };
@@ -3544,6 +3544,112 @@ test("cosmos broadcast errors retain tx bytes and tx hash evidence", async () =>
   );
 });
 
+test("cosmos signs to an exact TxRaw checkpoint and retransmits those unchanged bytes", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  const signDoc = {
+    chainId: "clairveil-local-3",
+    bodyBytes: "",
+    authInfoBytes: "",
+    accountNumber: "0"
+  };
+  let walletCalls = 0;
+  const checkpoint = await client.signDirect({
+    wallet: {
+      async signDirect(directSignDoc) {
+        walletCalls += 1;
+        return {
+          signed: directSignDoc,
+          signature: { signature: "AQ==" }
+        };
+      }
+    },
+    signDoc
+  });
+  assert.equal(walletCalls, 1);
+  assert.deepEqual(
+    checkpoint.txRawBytes,
+    client.buildTxRawBytes(checkpoint.signedTx)
+  );
+  assert.equal(
+    checkpoint.txBytesHash,
+    createHash("sha256").update(checkpoint.txRawBytes).digest("hex")
+  );
+  assert.equal(checkpoint.signDocHash, cosmosSignDocBindingHash(signDoc));
+
+  const exactCheckpoint = Uint8Array.from(checkpoint.txRawBytes);
+  client.buildTxRawBytes = () => {
+    throw new Error("a raw checkpoint must not be reconstructed before broadcast");
+  };
+  let submittedBytes;
+  client.connect = async () => ({
+    async broadcastTxSync(txBytes) {
+      submittedBytes = Uint8Array.from(txBytes);
+      return "RAW-CHECKPOINT";
+    }
+  });
+  client.waitForTx = async () => ({
+    height: "9",
+    txhash: "RAW-CHECKPOINT",
+    code: 0,
+    raw_log: "",
+    events: []
+  });
+
+  const result = await client.broadcastTxRawBytes(checkpoint.txRawBytes);
+  assert.equal(result.ok, true);
+  assert.equal(result.txBytesHash, checkpoint.txBytesHash);
+  assert.deepEqual(submittedBytes, exactCheckpoint);
+  assert.equal(walletCalls, 1);
+});
+
+test("cosmos raw TxRaw retransmission preserves reservation attempt evidence", async () => {
+  const unsigned = {
+    bodyBytes: "",
+    authInfoBytes: "",
+    signature: "AQ=="
+  };
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  const txRawBytes = client.buildTxRawBytes(unsigned);
+  const txBytesHash = createHash("sha256").update(txRawBytes).digest("hex");
+  const { store, reservationManager, reservation } = await readyBroadcastReservation("2c", {
+    signDocHash: cosmosSignDocBindingHash(unsigned),
+    txBytesHash
+  });
+  client.connect = async () => ({
+    async broadcastTxSync(txBytes) {
+      assert.deepEqual(txBytes, txRawBytes);
+      const stored = await store.getReservation(reservation.reservation_ids[0]);
+      assert.equal(stored.broadcast_in_flight, true);
+      assert.equal(stored.tx_bytes_hash, txBytesHash);
+      return "RAW-RESERVED";
+    }
+  });
+  client.waitForTx = async () => ({
+    height: "9",
+    txhash: "RAW-RESERVED",
+    code: 0,
+    raw_log: "",
+    events: []
+  });
+
+  const result = await client.broadcastTxRawBytes(txRawBytes, {
+    reservationManager,
+    reservation
+  });
+  assert.equal(result.ok, true);
+  const stored = await store.getReservation(reservation.reservation_ids[0]);
+  assert.equal(stored.status, reservationStatuses.Submitted);
+  assert.equal(stored.tx_bytes_hash, txBytesHash);
+});
+
 test("cosmos broadcastSignedTx does not mark unindexed transactions as ok", async () => {
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
@@ -4145,7 +4251,7 @@ test("cosmos signDirectAndBroadcast forwards top-level polling options", async (
       };
     }
   };
-  client.broadcastSignedTx = async (_signedTx, options) => {
+  client.broadcastTxRawBytes = async (_txRawBytes, options) => {
     forwardedOptions = options;
     return { ok: true };
   };
@@ -4772,6 +4878,7 @@ test("unified privacy scan validates a whole cursor page before decrypting and p
           globalSequence: 2,
           txHash: new Uint8Array(32).fill(12),
           eventType: "withdraw",
+          nullifiers: [canonicalFieldBytes(13n)],
           outputCount: 0,
           circuitSetId: activeCircuitSetIdV1,
           payloadVersion: privacyFixedV1,
@@ -4943,6 +5050,20 @@ test("same-root Merkle path snapshots are batch-verified before use by the prove
   assert.equal(
     (await publicClient.queryCommitmentPathsAtRoot({ commitmentHexes: [commitmentHex], rootHex, snapshotHeight: 22 })).paths[0].commitment_hex,
     commitmentHex
+  );
+
+  client.fetchCommitmentPathsAtRoot = async input => {
+    assert.deepEqual(input, { commitmentHexes: [commitmentHex], rootHex });
+    return {
+      rootHex,
+      snapshotHeight: 22,
+      leafCount: 23,
+      paths: [{ commitmentHex, leafIndex: 5, path: siblings, pathHelper: helpers }]
+    };
+  };
+  assert.equal(
+    (await client.queryCommitmentPathsAtRoot({ commitmentHexes: [commitmentHex], rootHex })).snapshot_height,
+    22
   );
 
   client.fetchCommitmentPathsAtRoot = async () => ({

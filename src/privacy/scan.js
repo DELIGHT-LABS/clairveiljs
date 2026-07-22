@@ -39,6 +39,7 @@ export const privacyScanEventTypeV2 = Object.freeze({
   batchTransfer: "batch_transfer",
   withdraw: "withdraw"
 });
+export const privacyScanValidationStateVersionV2 = "privacy-scan-validation-v2";
 
 const maxUint64 = (1n << 64n) - 1n;
 
@@ -314,7 +315,17 @@ function equalScanBytes(left, right) {
 
 function sameScanValue(left, right) {
   if (left instanceof Uint8Array && right instanceof Uint8Array) return equalScanBytes(left, right);
-  return JSON.stringify(left) === JSON.stringify(right);
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length && left.every((value, index) => sameScanValue(value, right[index]));
+  }
+  if (left && right && typeof left === "object" && typeof right === "object") {
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length && leftKeys.every((key, index) =>
+      key === rightKeys[index] && sameScanValue(left[key], right[key])
+    );
+  }
+  return Object.is(left, right);
 }
 
 function aliasedScanValue(input, keys, label, normalize, { required = true, fallback } = {}) {
@@ -390,6 +401,22 @@ function scanOutputCount(value, label) {
   return scanUint32(value, label);
 }
 
+function scanNonIdentityPoint(value, label) {
+  if (value.length !== 32) throw new Error(`${label} must be a canonical non-identity point`);
+  try {
+    const point = unpackPoint(value);
+    if (point.x === 0n && point.y === 1n) throw new Error("identity point is not allowed");
+  } catch {
+    throw new Error(`${label} must be a canonical non-identity point`);
+  }
+}
+
+function scanZeroAuditSentinel(summary, label) {
+  if (summary.audit_key_id || scanUint64(summary.audit_key_epoch, `${label} audit key epoch`) !== 0n || summary.audit_target_pubkey.length) {
+    throw new Error(`${label} must use the zero audit sentinel`);
+  }
+}
+
 function scanSummary(input, index) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error(`privacy scan summary ${index} is required`);
   const height = aliasedScanValue(input, ["height"], `privacy scan summary ${index} height`, raw => scanUint64Value(raw, `privacy scan summary ${index} height`));
@@ -429,28 +456,32 @@ function scanSummary(input, index) {
     audit_target_pubkey: auditTargetPubkey,
     effect_id: effectId
   });
+  if (new Set(nullifiers.map(value => value.hex)).size !== nullifiers.length) {
+    throw new Error(`privacy scan summary ${index} nullifiers must be distinct`);
+  }
   if (eventType === privacyScanEventTypeV2.deposit) {
-    if (outputCount !== 1 || effectId.length) throw new Error(`privacy scan summary ${index} has invalid deposit framing`);
+    if (outputCount !== 1 || nullifiers.length || effectId.length) throw new Error(`privacy scan summary ${index} has invalid deposit framing`);
+    scanZeroAuditSentinel(summary, `privacy scan summary ${index} deposit`);
   } else if (eventType === privacyScanEventTypeV2.shieldedTransfer) {
-    if (outputCount !== 2 || effectId.length) throw new Error(`privacy scan summary ${index} has invalid shielded-transfer framing`);
+    if (outputCount !== 2 || nullifiers.length !== 2 || effectId.length) throw new Error(`privacy scan summary ${index} has invalid shielded-transfer framing`);
+    if (auditKeyId || scanUint64(auditKeyEpoch, `privacy scan summary ${index} audit key epoch`) !== 0n) {
+      throw new Error(`privacy scan summary ${index} shielded transfer must use the zero audit ID/epoch sentinel`);
+    }
+    scanNonIdentityPoint(auditTargetPubkey, `privacy scan summary ${index} shielded transfer audit target`);
   } else if (eventType === privacyScanEventTypeV2.batchTransfer) {
     if (outputCount < 1 || outputCount > 32 || nullifiers.length < 1 || nullifiers.length > 16) {
       throw new Error(`privacy scan summary ${index} has invalid batch counts`);
     }
     scanCanonicalField(effectId, `privacy scan summary ${index} effect ID`, { nonZero: true });
-    if (new Set(nullifiers.map(value => value.hex)).size !== nullifiers.length) throw new Error(`privacy scan summary ${index} batch nullifiers must be distinct`);
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(auditKeyId) ||
         scanUint64(auditKeyEpoch, `privacy scan summary ${index} audit key epoch`) === 0n ||
         auditTargetPubkey.length !== 32) {
       throw new Error(`privacy scan summary ${index} has invalid batch audit identity`);
     }
-    try {
-      unpackPoint(auditTargetPubkey);
-    } catch {
-      throw new Error(`privacy scan summary ${index} has invalid batch audit target`);
-    }
+    scanNonIdentityPoint(auditTargetPubkey, `privacy scan summary ${index} batch audit target`);
   } else if (eventType === privacyScanEventTypeV2.withdraw) {
-    if (outputCount !== 0 || effectId.length) throw new Error(`privacy scan summary ${index} has invalid withdraw framing`);
+    if (outputCount !== 0 || nullifiers.length !== 1 || effectId.length) throw new Error(`privacy scan summary ${index} has invalid withdraw framing`);
+    scanZeroAuditSentinel(summary, `privacy scan summary ${index} withdraw`);
   } else {
     throw new Error(`privacy scan summary ${index} has unsupported event type ${JSON.stringify(eventType)}`);
   }
@@ -463,6 +494,14 @@ function scanUserDisclosureMode(value) {
     throw new Error("privacy scan batch user disclosure mode is invalid");
   }
   return mode;
+}
+
+function scanZeroDisclosureSentinel(output, label) {
+  if (output.user_privacy_policy !== 0 || output.user_disclosure_mode ||
+      output.user_disclosure_digest.length || output.user_disclosure_target_pubkey.length || output.user_disclosure_payload.length ||
+      output.full_disclosure_digest.length || output.audit_disclosure_payload.length || output.self_view_disclosure_payload.length) {
+    throw new Error(`${label} must use exact zero disclosure sentinels`);
+  }
 }
 
 function scanBatchOutputDisclosure(output, label) {
@@ -485,12 +524,7 @@ function scanBatchOutputDisclosure(output, label) {
     }
   } else if (mode === "USER_DISCLOSURE_MODE_RECIPIENT_ENCRYPTED") {
     scanCanonicalField(output.user_disclosure_digest, `${label} user disclosure digest`, { nonZero: true });
-    if (output.user_disclosure_target_pubkey.length !== 32) throw new Error(`${label} encrypted disclosure target is invalid`);
-    try {
-      unpackPoint(output.user_disclosure_target_pubkey);
-    } catch {
-      throw new Error(`${label} encrypted disclosure target is invalid`);
-    }
+    scanNonIdentityPoint(output.user_disclosure_target_pubkey, `${label} encrypted disclosure target`);
     unwrapEncryptedEnvelopeV1(output.user_disclosure_payload, encryptedEnvelopeKindV1.userDisclosure);
   } else {
     throw new Error(`${label} user disclosure mode is invalid for the selected policy`);
@@ -560,10 +594,15 @@ function scanOutput(input, index, summaries) {
   if (eventType === privacyScanEventTypeV2.deposit) {
     if (output.ciphertext.length || output.view_tag.length) throw new Error(`privacy scan output ${index} deposit framing is invalid`);
     unwrapEncryptedEnvelopeV1(output.encrypted_note, encryptedEnvelopeKindV1.depositNote);
+    scanZeroDisclosureSentinel(output, `privacy scan output ${index} deposit`);
   } else if (eventType === privacyScanEventTypeV2.shieldedTransfer || eventType === privacyScanEventTypeV2.batchTransfer) {
     if (output.encrypted_note.length || output.view_tag.length !== 2) throw new Error(`privacy scan output ${index} transfer framing is invalid`);
     unwrapEncryptedEnvelopeV1(output.ciphertext, encryptedEnvelopeKindV1.transferNote);
-    if (eventType === privacyScanEventTypeV2.batchTransfer) scanBatchOutputDisclosure(output, `privacy scan output ${index}`);
+    if (eventType === privacyScanEventTypeV2.shieldedTransfer && output.output_index === 1) {
+      scanZeroDisclosureSentinel(output, `privacy scan output ${index} shielded-transfer change`);
+    } else {
+      scanBatchOutputDisclosure(output, `privacy scan output ${index}`);
+    }
   } else {
     throw new Error(`privacy scan output ${index} has unsupported event type ${JSON.stringify(eventType)}`);
   }
@@ -582,6 +621,83 @@ function scanRequest(input = {}) {
   return Object.freeze({ after, output_limit: outputLimit, event_limit: eventLimit, max_encoded_bytes: maxEncodedBytes, event_types: Object.freeze(eventTypes) });
 }
 
+/** Create mutable validation state for checking typed pages across a cursor sequence. */
+export function createPrivacyScanValidationStateV2() {
+  return {
+    version: privacyScanValidationStateVersionV2,
+    batch_self_view_by_event: new Map()
+  };
+}
+
+function scanValidationState(input = {}) {
+  const camel = input.validationState;
+  const snake = input.validation_state;
+  if (camel != null && snake != null && camel !== snake) throw new Error("privacy scan validation state aliases do not match");
+  const state = camel ?? snake ?? null;
+  if (state == null) return null;
+  if (!state || typeof state !== "object" || state.version !== privacyScanValidationStateVersionV2 || !(state.batch_self_view_by_event instanceof Map)) {
+    throw new Error("privacy scan validation state is invalid");
+  }
+  for (const [key, enabled] of state.batch_self_view_by_event) {
+    if (typeof key !== "string" || typeof enabled !== "boolean") throw new Error("privacy scan validation state is invalid");
+  }
+  return state;
+}
+
+function validateBatchSelfViewDisclosurePage(outputs, summaries, state) {
+  const selfViewByEvent = new Map(state?.batch_self_view_by_event);
+  for (const output of outputs) {
+    if (output.event_type !== privacyScanEventTypeV2.batchTransfer) continue;
+    const key = scanEventKey(output);
+    const enabled = output.self_view_disclosure_payload.length !== 0;
+    if (selfViewByEvent.has(key) && selfViewByEvent.get(key) !== enabled) {
+      throw new Error("privacy scan batch self-view disclosure must be all-or-none");
+    }
+    selfViewByEvent.set(key, enabled);
+  }
+  for (const summary of summaries) {
+    if (summary.event_type !== privacyScanEventTypeV2.batchTransfer) continue;
+    const key = scanEventKey(summary);
+    if (outputs.some(output => scanEventKey(output) === key && output.output_index === summary.output_count - 1)) {
+      selfViewByEvent.delete(key);
+    }
+  }
+  return selfViewByEvent;
+}
+
+function commitBatchSelfViewValidationState(state, next) {
+  if (!state) return;
+  state.batch_self_view_by_event.clear();
+  for (const [key, enabled] of next) state.batch_self_view_by_event.set(key, enabled);
+}
+
+function validateCompletedPrivacyScanPage(request, page) {
+  if (page.has_more) return;
+  const outputsByEvent = new Map();
+  for (const output of page.outputs) {
+    const key = scanEventKey(output);
+    if (!outputsByEvent.has(key)) outputsByEvent.set(key, new Set());
+    outputsByEvent.get(key).add(output.output_index);
+  }
+  const afterEvent = eventCursor(request.after);
+  for (const summary of page.summaries) {
+    const summaryCursor = eventCursor(summary);
+    const comparison = compareScanCursor(summaryCursor, afterEvent);
+    if (comparison < 0) throw new Error("privacy scan completed page includes a summary before the cursor");
+    let firstRequiredIndex = 0;
+    if (comparison === 0) {
+      if (request.after.output_index >= summary.output_count - 1) continue;
+      firstRequiredIndex = request.after.output_index + 1;
+    }
+    const returned = outputsByEvent.get(scanEventKey(summary)) ?? new Set();
+    for (let outputIndex = firstRequiredIndex; outputIndex < summary.output_count; outputIndex += 1) {
+      if (!returned.has(outputIndex)) {
+        throw new Error("privacy scan completed page omits an output from a summarized event");
+      }
+    }
+  }
+}
+
 function validatePrivacyScanNextCursor(request, page, summaries) {
   const after = request.after;
   const last = page.outputs.at(-1);
@@ -597,8 +713,11 @@ function validatePrivacyScanNextCursor(request, page, summaries) {
   const lastCursor = { height: last.height, global_sequence: last.global_sequence, output_index: last.output_index };
   const comparison = compareScanCursor(page.next_cursor, lastCursor);
   if (comparison < 0) throw new Error("privacy scan next cursor precedes the final output");
-  if (comparison === 0) return;
   const lastSummary = summaries.get(scanEventKey(lastCursor));
+  if (!page.has_more && (!lastSummary || last.output_index + 1 !== lastSummary.output_count)) {
+    throw new Error("privacy scan completed page ends with an incomplete output event");
+  }
+  if (comparison === 0) return;
   if (!lastSummary || last.output_index + 1 !== lastSummary.output_count) {
     throw new Error("privacy scan next cursor advances past an incomplete output event");
   }
@@ -620,6 +739,7 @@ function validatePrivacyScanNextCursor(request, page, summaries) {
 export function validatePrivacyScanPageV2(response, request = {}) {
   if (!response || typeof response !== "object" || Array.isArray(response)) throw new Error("privacy scan response is required");
   const normalizedRequest = scanRequest(request);
+  const validationState = scanValidationState(request);
   const schemaVersion = aliasedScanValue(response, ["scanSchemaVersion", "scan_schema_version"], "privacy scan response schema version", raw => scanString(raw, "privacy scan response schema version"));
   if (schemaVersion !== privacyScanSchemaVersionV2) throw new Error(`unsupported privacy scan schema version ${JSON.stringify(schemaVersion)}`);
   const summariesValue = aliasedScanValue(response, ["summaries"], "privacy scan response summaries", raw => {
@@ -645,6 +765,7 @@ export function validatePrivacyScanPageV2(response, request = {}) {
     throw new Error("privacy scan response exceeds the requested output limit");
   }
   const outputs = outputsValue.map((value, index) => scanOutput(value, index, summariesByEvent));
+  const nextBatchSelfViewState = validateBatchSelfViewDisclosurePage(outputs, summaries, validationState);
   let previous = normalizedRequest.after;
   const seen = new Set();
   for (const output of outputs) {
@@ -683,7 +804,9 @@ export function validatePrivacyScanPageV2(response, request = {}) {
     encoded_bytes: encodedBytes
   });
   validatePrivacyScanNextCursor(normalizedRequest, page, summariesByEvent);
+  validateCompletedPrivacyScanPage(normalizedRequest, page);
   if (hasMore && compareScanCursor(nextCursor, normalizedRequest.after) <= 0) throw new Error("privacy scan has_more page did not advance the cursor");
+  commitBatchSelfViewValidationState(validationState, nextBatchSelfViewState);
   return page;
 }
 
