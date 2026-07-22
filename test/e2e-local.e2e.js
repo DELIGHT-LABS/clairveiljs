@@ -11,10 +11,34 @@ import {
   createOfflineSignerWalletAdapter,
   createWalletAdapter
 } from "clairveiljs/wallet-adapter";
+import {
+  createSpendNoteHashSigner,
+  encodeShieldedAddress
+} from "clairveiljs/core";
+import {
+  planOneProofPayroll,
+  prepareOneProofPayrollOperation,
+  provePreparedOneProofPayrollOperation,
+  createOneProofPayrollBatchSignDoc,
+  reconcileOneProofPayrollOperationEvidence
+} from "clairveiljs/reference-payroll";
+import {
+  hashAmount,
+  hashRecipient
+} from "clairveiljs/reservation";
+import {
+  privacyScanEventTypeV2,
+  processPrivacyScanPageV2,
+  validatePrivacyScanPageV2
+} from "clairveiljs/scan";
+import {
+  hexFromBytes
+} from "clairveiljs/browser-crypto";
 
 const env = process.env;
 const localE2eEnabled = env.CLAIRVEIL_E2E_LOCAL === "1";
 const fullFlowEnabled = localE2eEnabled && env.CLAIRVEIL_E2E_FULL_FLOW === "1";
+const oneProofBatchEnabled = fullFlowEnabled && env.CLAIRVEIL_E2E_ONE_PROOF_BATCH === "1";
 
 function positiveIntegerEnv(name, fallback) {
   const value = env[name];
@@ -54,6 +78,13 @@ function configFromEnv() {
     depositAmount: coinEnv("CLAIRVEIL_E2E_DEPOSIT_AMOUNT", "10", denom),
     transferAmount,
     withdrawAmount: coinEnvOrDefaultCoin("CLAIRVEIL_E2E_WITHDRAW_AMOUNT", transferAmount, denom),
+    oneProofBatchDepositAmount: coinEnv("CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT", "10", denom),
+    oneProofBatchPayrollAmount: coinEnvOrDefaultCoin(
+      "CLAIRVEIL_E2E_ONE_PROOF_PAYROLL_AMOUNT",
+      coinEnv("CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT", "10", denom),
+      denom
+    ),
+    oneProofBatchGasLimit: positiveIntegerEnv("CLAIRVEIL_E2E_ONE_PROOF_BATCH_GAS_LIMIT", 25000000),
     scanLimit: positiveIntegerEnv("CLAIRVEIL_E2E_SCAN_LIMIT", 200),
     scanMaxPages: positiveIntegerEnv("CLAIRVEIL_E2E_SCAN_MAX_PAGES", 1000),
     maxPlannerSteps: positiveIntegerEnv("CLAIRVEIL_E2E_MAX_PLANNER_STEPS", 8),
@@ -167,16 +198,25 @@ function assertDisclosureReport(report, label, config, amount) {
   assert.equal(report.asset_denom ?? report.summary?.asset_denom, config.denom);
 }
 
-async function latestChainBlockTimeUnix(config) {
+async function latestChainBlock(config) {
   const response = await fetch(`${config.rest}/cosmos/base/tendermint/v1beta1/blocks/latest`);
   if (!response.ok) {
-    throw new Error(`latest block time query failed with HTTP ${response.status}`);
+    throw new Error(`latest block query failed with HTTP ${response.status}`);
   }
   const data = await response.json();
-  const value = data?.block?.header?.time ?? data?.sdk_block?.header?.time;
+  const header = data?.block?.header ?? data?.sdk_block?.header;
+  const value = header?.time;
   const milliseconds = Date.parse(String(value || ""));
   if (!Number.isFinite(milliseconds)) throw new Error("latest block response omitted a valid block time");
-  return Math.floor(milliseconds / 1000);
+  const height = String(header?.height ?? "").trim();
+  if (!/^(0|[1-9][0-9]*)$/.test(height)) {
+    throw new Error("latest block response omitted a valid block height");
+  }
+  return { timeUnix: Math.floor(milliseconds / 1000), height };
+}
+
+async function latestChainBlockTimeUnix(config) {
+  return (await latestChainBlock(config)).timeUnix;
 }
 
 async function broadcastPrepared(client, wallet, prepared, label, config, { relayWithdraw = false } = {}) {
@@ -267,6 +307,73 @@ async function prepareFinalTransfer(client, wallet, material, proverAdapter, rec
   }
 
   throw new Error(`transfer planner did not produce a final transfer within ${config.maxPlannerSteps} steps`);
+}
+
+function coinAmount(coin, denom, label) {
+  const match = String(coin || "").match(/^(0|[1-9][0-9]*)([A-Za-z][A-Za-z0-9/:._-]{2,127})$/);
+  if (!match || match[2] !== denom) throw new Error(`${label} must be a canonical ${denom} coin`);
+  return match[1];
+}
+
+async function createCurrentRootPathProvider(client, commitmentHex, snapshotHeight) {
+  const configuredRoot = String(env.CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX || "").trim();
+  const configuredHeight = String(env.CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT || "").trim();
+  if (Boolean(configuredRoot) !== Boolean(configuredHeight)) {
+    throw new Error("CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX and CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT must be set together");
+  }
+  const treeState = await client.fetchTreeState();
+  const rootHex = configuredRoot || String(treeState?.root ?? treeState?.root_hex ?? treeState?.rootHex ?? "").trim();
+  const exactSnapshotHeight = configuredHeight || String(snapshotHeight ?? "").trim();
+  if (!rootHex || !/^(0|[1-9][0-9]*)$/.test(exactSnapshotHeight)) {
+    throw new Error("one-proof batch E2E requires a current tree root and exact snapshot height");
+  }
+  return client.createCommitmentPathSnapshotProvider({
+    commitmentHexes: [commitmentHex],
+    rootHex,
+    snapshotHeight: exactSnapshotHeight
+  });
+}
+
+async function typedBatchOutputForTransaction(client, txHash, commitmentHex, material, config) {
+  let after = { height: 0, globalSequence: 0, outputIndex: 0 };
+  let lastError = null;
+  for (let attempt = 1; attempt <= config.waitOptions.attempts; attempt += 1) {
+    try {
+      for (let page = 0; page < config.scanMaxPages; page += 1) {
+        const request = {
+          after,
+          outputLimit: config.scanLimit,
+          eventLimit: config.scanLimit,
+          eventTypes: []
+        };
+        const scanned = validatePrivacyScanPageV2(await client.fetchPrivacyScan(request), request);
+        const output = scanned.outputs.find(candidate =>
+          candidate.event_type === privacyScanEventTypeV2.batchTransfer &&
+          hexFromBytes(candidate.tx_hash).toUpperCase() === txHash.toUpperCase() &&
+          hexFromBytes(candidate.commitment).toLowerCase() === commitmentHex.toLowerCase()
+        );
+        if (output) {
+          const found = processPrivacyScanPageV2(scanned, { rootSeed: material.rootSeed })
+            .find(candidate => String(candidate.commitment_hex || "").toLowerCase() === commitmentHex.toLowerCase());
+          if (!found) throw new Error("typed batch output did not decrypt for the configured E2E wallet");
+          return { output, found };
+        }
+        if (!scanned.has_more) break;
+        after = {
+          height: scanned.next_cursor.height,
+          globalSequence: scanned.next_cursor.global_sequence,
+          outputIndex: scanned.next_cursor.output_index
+        };
+      }
+      lastError = new Error("typed privacy scan has not indexed the one-proof batch output yet");
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < config.waitOptions.attempts) {
+      await new Promise(resolve => setTimeout(resolve, config.waitOptions.intervalMs));
+    }
+  }
+  throw lastError || new Error("typed privacy scan did not return the one-proof batch output");
 }
 
 test("local Clairveil node endpoints respond", {
@@ -375,6 +482,160 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
     assert.equal(withdraw.status, "ready", withdraw.plan?.message || "withdraw should be ready");
 
     await broadcastPrepared(client, wallet, withdraw, "withdraw", config, { relayWithdraw: true });
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test("local one-proof payroll batch proves, broadcasts, and reconciles typed output evidence", {
+  timeout: positiveIntegerEnv("CLAIRVEIL_E2E_ONE_PROOF_BATCH_TIMEOUT_MS", 600000),
+  skip: oneProofBatchEnabled
+    ? false
+    : "set CLAIRVEIL_E2E_LOCAL=1, CLAIRVEIL_E2E_FULL_FLOW=1, and CLAIRVEIL_E2E_ONE_PROOF_BATCH=1 to run one-proof batch E2E"
+}, async t => {
+  const config = configFromEnv();
+  const wallet = await loadE2eWallet(config);
+  if (!wallet) {
+    t.skip("set CLAIRVEIL_E2E_WALLET_MODULE or CLAIRVEIL_E2E_MNEMONIC plus CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64");
+    return;
+  }
+  const depositProofProvider = await loadDepositProofProvider(config);
+  if (!depositProofProvider) {
+    t.skip("set CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE to fund the one-proof batch input note");
+    return;
+  }
+
+  const client = createClient(config);
+  const proverAdapter = createHttpProverAdapter({
+    baseURL: config.proverUrl,
+    timeoutMs: config.proverTimeoutMs
+  });
+  try {
+    const material = await client.deriveWalletPrivacyMaterial(wallet);
+    const depositTxHash = await prepareDepositAndBroadcast(
+      client,
+      wallet,
+      material,
+      config.oneProofBatchDepositAmount,
+      config,
+      depositProofProvider
+    );
+    const scan = await scanWallet(client, wallet, material, config);
+    const inputNote = scan.foundNotes.find(found =>
+      String(found.txHash || "").toUpperCase() === depositTxHash &&
+      String(found.note?.amount ?? "") === coinAmount(config.oneProofBatchDepositAmount, config.denom, "one-proof deposit amount") &&
+      found.nullifierStatus === "unspent"
+    );
+    assert.ok(inputNote, "typed wallet scan should find the freshly deposited one-proof input note");
+
+    const pathProvider = await createCurrentRootPathProvider(client, inputNote.commitment_hex, inputNote.height);
+    const path = await pathProvider.lookupMerklePath(inputNote.commitment_hex);
+    // The E2E recipient is deliberately this wallet so the test can decrypt
+    // the typed output and recompute recipient/amount evidence independently.
+    const recipient = material.shieldedAddress;
+    const payrollAmount = coinAmount(config.oneProofBatchPayrollAmount, config.denom, "one-proof payroll amount");
+    const plan = planOneProofPayroll({
+      company_id: "clairveiljs-e2e",
+      payroll_id: "one-proof-payroll",
+      batch_id: `localnet-${depositTxHash.slice(0, 16).toLowerCase()}`,
+      denom: config.denom,
+      default_disclosure_policy: { user_privacy_policy: "all-private", user_disclosure_mode: "none" },
+      items: [{
+        item_id: "one-proof-item-0",
+        employee_id: "localnet-recipient",
+        recipient_address: recipient,
+        amount: payrollAmount
+      }]
+    }, [{
+      note_id: inputNote.commitment_hex,
+      owner_key_id: material.address,
+      nullifier_lookup_key: inputNote.nullifier,
+      nullifier_lookup_key_id: "e2e",
+      denom: config.denom,
+      amount: inputNote.note.amount.toString(),
+      note: inputNote.note,
+      merkle_path: path.path,
+      merkle_path_helper: path.path_helper
+    }], { shieldedPrefix: config.shieldedPrefix });
+    assert.equal(plan.operations.length, 1, "one input should produce one canonical batch operation");
+
+    const [auditConfig, latest] = await Promise.all([
+      client.fetchAuditConfig(),
+      latestChainBlock(config)
+    ]);
+    const auditKeyId = String(auditConfig?.audit_key_id ?? auditConfig?.auditKeyId ?? "").trim();
+    const auditKeyEpoch = Number(auditConfig?.audit_key_epoch ?? auditConfig?.auditKeyEpoch);
+    const auditTarget = String(auditConfig?.audit_master_pubkey_hex ?? auditConfig?.auditMasterPubkeyHex ?? "").trim();
+    assert.ok(auditKeyId, "audit config must expose an audit key id");
+    assert.ok(Number.isSafeInteger(auditKeyEpoch) && auditKeyEpoch > 0, "audit config must expose a positive audit key epoch");
+    assert.match(auditTarget, /^[0-9a-f]{64}$/i, "audit config must expose a compressed audit disclosure key");
+    const noteHashSigner = createSpendNoteHashSigner(material.rootSeed);
+    const prepared = await prepareOneProofPayrollOperation({
+      operation: plan.operations[0],
+      cosmos_client: client,
+      creator: material.address,
+      chain_id: config.chainId,
+      expires_at_unix: latest.timeUnix + 1800,
+      audit_key_id: auditKeyId,
+      audit_key_epoch: auditKeyEpoch,
+      audit_disclosure_target_pubkey: auditTarget,
+      disable_self_view_disclosure: true,
+      signer: {
+        signBatchTransfer: request => noteHashSigner.signNoteHash(request.expected_intent)
+      }
+    });
+    const execution = await provePreparedOneProofPayrollOperation(prepared, proverAdapter, {
+      creator: material.address,
+      checkNullifiers: values => client.checkNullifiers(values),
+      nowUnix: latest.timeUnix
+    });
+    const signDoc = await createOneProofPayrollBatchSignDoc(execution, {
+      cosmosClient: client,
+      signer: material.address,
+      pubKeyHex: material.pubKeyHex,
+      gasLimit: config.oneProofBatchGasLimit,
+      nowUnix: latest.timeUnix
+    });
+    const result = await client.signDirectAndBroadcast({
+      wallet,
+      signDoc: signDoc.sign_doc,
+      waitOptions: config.waitOptions
+    });
+    const batchTxHash = assertBroadcastOk(result, "one-proof payroll batch");
+    const expected = execution.operation_evidence.expected_evidence[0];
+    const typed = await typedBatchOutputForTransaction(
+      client,
+      batchTxHash,
+      expected.expected_output_commitment,
+      material,
+      config
+    );
+    const observedRecipient = encodeShieldedAddress({
+      x: typed.found.note.receiverSpendPubKeyX,
+      y: typed.found.note.receiverSpendPubKeyY
+    }, {
+      x: typed.found.note.receiverViewPubKeyX,
+      y: typed.found.note.receiverViewPubKeyY
+    }, { prefix: config.shieldedPrefix });
+    const reconciliation = await reconcileOneProofPayrollOperationEvidence({
+      prepared,
+      operation_evidence: execution.operation_evidence,
+      checkNullifiers: values => client.checkNullifiers(values),
+      tx_succeeded: true,
+      observed_outputs: [{
+        output_index: typed.output.output_index,
+        commitment: hexFromBytes(typed.output.commitment),
+        user_disclosure_digest: typed.output.user_disclosure_digest.length
+          ? hexFromBytes(typed.output.user_disclosure_digest)
+          : "",
+        full_disclosure_digest: hexFromBytes(typed.output.full_disclosure_digest),
+        recipient_hash: hashRecipient(observedRecipient, { shieldedPrefix: config.shieldedPrefix }),
+        amount_hash: hashAmount(config.denom, typed.found.note.amount),
+        denom: config.denom
+      }]
+    });
+    assert.equal(reconciliation.status, "Succeeded");
+    assert.equal(reconciliation.items[0].status, "Succeeded");
   } finally {
     await client.disconnect();
   }

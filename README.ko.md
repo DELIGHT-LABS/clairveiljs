@@ -482,7 +482,7 @@ Local node e2e는 `prepublishOnly`의 필수 gate가 아닙니다. Clairveil nod
 - disclosure decode
 - direct withdraw
 
-Relay withdraw payload/signDoc 생성은 SDK test와 Go conformance fixture로 검증합니다. 실제 relayer service e2e는 product-defined relayer transport와 배포 환경에 맞춰 별도로 구성하세요.
+Relay withdraw payload/signDoc 생성은 SDK test와 Go conformance fixture로 검증합니다. 실제 relayer service e2e는 product-defined relayer transport와 배포 환경에 맞춰 별도로 구성하세요. One-proof payroll batch는 별도 opt-in E2E로 deposit, typed scan, same-root Merkle path, batch prover, `MsgBatchTransfer`, typed output evidence reconciliation까지 검증합니다.
 
 ```bash
 CLAIRVEIL_E2E_LOCAL=1 npm run test:e2e:local
@@ -497,6 +497,19 @@ CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
 CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 npm run test:e2e:local
 ```
+
+One-proof batch까지 실행하려면 다음을 추가합니다.
+
+```bash
+CLAIRVEIL_E2E_LOCAL=1 \
+CLAIRVEIL_E2E_FULL_FLOW=1 \
+CLAIRVEIL_E2E_ONE_PROOF_BATCH=1 \
+CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
+CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
+npm run test:e2e:local
+```
+
+`CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT`, `CLAIRVEIL_E2E_ONE_PROOF_PAYROLL_AMOUNT`로 input/payment를 바꿀 수 있습니다. Recipient는 typed output evidence를 독립적으로 decrypt·검증할 수 있도록 의도적으로 E2E wallet으로 고정합니다. 기본 snapshot height는 새 input deposit output의 height입니다. 동시 활동으로 tree가 전진했다면 검증된 같은 snapshot의 `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX`와 `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT`를 항상 함께 지정하세요.
 
 ## 테스트
 

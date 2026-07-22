@@ -140,7 +140,7 @@ if (!result.skipped) {
 
 The handoff e2e item is intentionally not part of `prepublishOnly`. Running a Clairveil node and prover is the chain repository's responsibility; this package only proves that the published SDK surface can attach to those services and execute the full wallet flow.
 
-Current local e2e scope is deposit, wallet note scan, shielded transfer, disclosure decode, and direct withdraw. Relay withdraw payload/signDoc construction is covered by SDK tests and Go conformance fixtures; full relayer service e2e depends on the product's relayer transport and deployment.
+Current local e2e scope is deposit, wallet note scan, shielded transfer, disclosure decode, direct withdraw, and an opt-in one-proof payroll batch. Relay withdraw payload/signDoc construction is covered by SDK tests and Go conformance fixtures; full relayer service e2e depends on the product's relayer transport and deployment.
 
 Run the optional smoke/e2e command with a local Clairveil node:
 
@@ -167,6 +167,19 @@ The full flow performs:
 - transfer to a shielded recipient
 - public user disclosure decode
 - direct withdraw
+
+To run the actual one-proof batch contract as well, opt in separately. It creates a deposit input, obtains a verified same-root Merkle snapshot, prepares and proves one `MsgBatchTransfer`, broadcasts it, then reconciles the result against the typed `privacy_scan` output and input nullifier state.
+
+```bash
+CLAIRVEIL_E2E_LOCAL=1 \
+CLAIRVEIL_E2E_FULL_FLOW=1 \
+CLAIRVEIL_E2E_ONE_PROOF_BATCH=1 \
+CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
+CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
+npm run test:e2e:local
+```
+
+`CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT` and `CLAIRVEIL_E2E_ONE_PROOF_PAYROLL_AMOUNT` override the one-proof input/payment. The recipient is intentionally the E2E wallet so the test can independently decrypt and validate typed output evidence. The default snapshot height is the fresh input deposit's output height; if concurrent activity advances the tree, set the exact pair `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX` and `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT` from that node's verified snapshot.
 
 It uses these defaults, all overrideable through environment variables:
 
