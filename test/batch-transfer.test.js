@@ -22,7 +22,7 @@ import {
   unmarshalDisclosurePlaintextV1
 } from "clairveiljs/protocol-v1";
 import { validatePrivacyScanPageV2 } from "clairveiljs/scan";
-import { createHttpProverAdapter } from "clairveiljs/prover";
+import { createAsyncJobProverAdapter, createHttpProverAdapter } from "clairveiljs/prover";
 import { createClairveilClient } from "clairveiljs/cosmos";
 import {
   decodeBatchAuditDisclosureFromScanOutput,
@@ -224,6 +224,41 @@ test("one-proof batch prover uses the Clairveil main route and binds the respons
   assert.equal(message.nullifiers.length, 1);
   assert.equal(message.outputs.length, 1);
   assert.equal(message.creator, "clair1creator");
+});
+
+test("async prover job adapter supports a batch-only one-proof prover", async () => {
+  const payload = await batchPayload();
+  const proof = new Uint8Array(164).fill(13);
+  let submitted;
+  const adapter = createAsyncJobProverAdapter({
+    submitBatchTransferJob: async request => {
+      submitted = request;
+      return { job_id: "batch-job-1" };
+    },
+    getJob: async jobId => {
+      assert.equal(jobId, "batch-job-1");
+      return {
+        status: "completed",
+        result: {
+          version: "v1",
+          proof: {
+            version: preparedBatchTransferProofVersion,
+            request_payload_hash: payload.payload_hash,
+            proof: base64FromBytes(proof),
+            circuit_set_id: "privacy-note-v1"
+          }
+        }
+      };
+    },
+    intervalMs: 0
+  });
+
+  const response = await adapter.proveBatchTransfer(payload);
+
+  assert.deepEqual(submitted, { version: "v1", payload });
+  assert.deepEqual(response.proof.proof_bytes, proof);
+  assert.equal(typeof adapter.proveTransfer, "undefined");
+  assert.equal(typeof adapter.proveWithdraw, "undefined");
 });
 
 test("one-proof batch prover rejects a proof bound to another prepared operation", async () => {

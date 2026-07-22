@@ -109,8 +109,20 @@ import {
 } from "clairveiljs/evm";
 import type { WalletAdapterLike } from "clairveiljs/wallet-adapter";
 import type { MsgDeposit as GeneratedMsgDepositWithExtension } from "clairveiljs/generated/clairveil/privacy/v1/tx.js";
+import {
+  createAsyncJobProverAdapter,
+  type BatchTransferProverAdapter
+} from "clairveiljs/prover";
 
 const rootSeed = new Uint8Array(32);
+const batchOnlyAsyncProver = createAsyncJobProverAdapter({
+  submitBatchTransferJob: async () => ({ job_id: "batch-job" }),
+  getJob: async () => ({ status: "completed" })
+});
+const batchOnlyAsyncProverContract: BatchTransferProverAdapter = batchOnlyAsyncProver;
+void batchOnlyAsyncProverContract;
+// @ts-expect-error Batch-only job provers must not promise legacy transfer support.
+batchOnlyAsyncProver.proveTransfer;
 const shielded: string = deriveShieldedAddress(rootSeed, { shieldedPrefix: "demos" });
 const payrollInput: PayrollInput = {
   company_id: "company-a",

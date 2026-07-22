@@ -450,17 +450,15 @@ function normalizeJobResult(job) {
 export function createAsyncJobProverAdapter({
   submitTransferJob,
   submitWithdrawJob,
+  submitBatchTransferJob,
   getJob,
   intervalMs = 1000,
   timeoutMs = 300000,
   now = () => Date.now(),
   sleepImpl = sleep
 } = {}) {
-  if (typeof submitTransferJob !== "function") {
-    throw new Error("submitTransferJob(request) is required");
-  }
-  if (typeof submitWithdrawJob !== "function") {
-    throw new Error("submitWithdrawJob(request) is required");
+  if (![submitTransferJob, submitWithdrawJob, submitBatchTransferJob].some(submit => typeof submit === "function")) {
+    throw new Error("at least one prover job submit function is required");
   }
   if (typeof getJob !== "function") {
     throw new Error("getJob(jobId) is required");
@@ -489,8 +487,10 @@ export function createAsyncJobProverAdapter({
     throw wrapProverError(new Error(`prover job ${jobId} timed out after ${timeoutMs}ms`));
   }
 
-  return {
-    async proveTransfer(request) {
+  const adapter = {};
+
+  if (typeof submitTransferJob === "function") {
+    adapter.proveTransfer = async request => {
       const normalizedRequest = {
         version: request?.version || transferProofRequestVersion,
         payload: request?.payload || request
@@ -506,9 +506,11 @@ export function createAsyncJobProverAdapter({
         submit: submitTransferJob,
         unwrap: unwrapTransferProof
       });
-    },
+    };
+  }
 
-    async proveWithdraw(request) {
+  if (typeof submitWithdrawJob === "function") {
+    adapter.proveWithdraw = async request => {
       const normalizedRequest = {
         version: request?.version || withdrawProofRequestVersion,
         payload: request?.payload || request
@@ -521,8 +523,33 @@ export function createAsyncJobProverAdapter({
         submit: submitWithdrawJob,
         unwrap: unwrapWithdrawProof
       });
-    }
-  };
+    };
+  }
+
+  if (typeof submitBatchTransferJob === "function") {
+    adapter.proveBatchTransfer = async request => {
+      const isEnvelope = Boolean(
+        request && typeof request === "object" && Object.prototype.hasOwnProperty.call(request, "payload")
+      );
+      const normalizedRequest = {
+        version: isEnvelope ? (request.version || batchTransferProofRequestVersion) : batchTransferProofRequestVersion,
+        payload: isEnvelope ? request.payload : request
+      };
+      if (normalizedRequest.version !== batchTransferProofRequestVersion) {
+        throw new Error(`unsupported batch transfer proof request version: ${normalizedRequest.version}`);
+      }
+      validatePreparedBatchTransferPayloadEnvelope(normalizedRequest.payload, {
+        nowUnix: Math.floor(Date.now() / 1000)
+      });
+      return waitForProof({
+        request: normalizedRequest,
+        submit: submitBatchTransferJob,
+        unwrap: unwrapBatchTransferProof
+      });
+    };
+  }
+
+  return adapter;
 }
 
 export function createStaticProverAdapter({ transferProofHex = "", withdrawProofHex = "" } = {}) {

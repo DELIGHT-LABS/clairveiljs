@@ -19,7 +19,7 @@ English documentation: [README.md](./README.md)
 - memory/localStorage 기반 note store
 - transfer/withdraw planner와 안정적인 `ClairveilError` 코드
 - prepared transfer/withdraw/relay withdraw payload builder
-- `/v1/prover/transfer`, `/v1/prover/withdraw` HTTP prover adapter
+- `/v1/prover/transfer`, `/v1/prover/withdraw`, `/v1/proofs/batch-transfer` HTTP prover adapter
 - Keplr `signDirect`용 sign doc 생성, signed tx 조립, broadcast
 - EIP-1193 wallet용 Clairveil-compatible `IPrivacy` EVM precompile calldata adapter
 - runtime shape assertion과 TypeScript declaration
@@ -174,8 +174,9 @@ const proverAdapter = createHttpProverAdapter({
 
 - `POST /v1/prover/transfer`
 - `POST /v1/prover/withdraw`
+- `POST /v1/proofs/batch-transfer`
 
-Remote prover가 job ID를 반환하는 구조라면 `createAsyncJobProverAdapter`로 submit/poll 함수를 감싸세요.
+Remote prover가 job ID를 반환하는 구조라면 `createAsyncJobProverAdapter`로 submit/poll 함수를 감싸세요. one-proof batch 전용 prover는 `submitBatchTransferJob`과 `getJob`만 제공해도 됩니다.
 
 ## Disclosure
 

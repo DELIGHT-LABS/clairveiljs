@@ -15,6 +15,30 @@ export interface BatchTransferProverAdapter {
   proveBatchTransfer(request: { version?: "v1"; payload?: PreparedBatchTransferPayload } | PreparedBatchTransferPayload): Promise<{ version: "v1"; proof: PreparedBatchTransferProof & { proof_bytes: Uint8Array } }>;
 }
 
+export type AsyncJobSubmitter = (request: object) => Promise<object>;
+
+interface AsyncJobProverAdapterOptions {
+  submitTransferJob?: AsyncJobSubmitter;
+  submitWithdrawJob?: AsyncJobSubmitter;
+  submitBatchTransferJob?: AsyncJobSubmitter;
+  getJob: (jobId: string) => Promise<object>;
+  intervalMs?: number;
+  timeoutMs?: number;
+  now?: () => number;
+  sleepImpl?: (ms: number) => Promise<void>;
+}
+
+export type AsyncJobProverAdapterInput = AsyncJobProverAdapterOptions & (
+  { submitTransferJob: AsyncJobSubmitter } |
+  { submitWithdrawJob: AsyncJobSubmitter } |
+  { submitBatchTransferJob: AsyncJobSubmitter }
+);
+
+export type AsyncJobProverAdapterFor<T extends AsyncJobProverAdapterInput> =
+  (T["submitTransferJob"] extends AsyncJobSubmitter ? Pick<ProverAdapter, "proveTransfer"> : {}) &
+  (T["submitWithdrawJob"] extends AsyncJobSubmitter ? Pick<ProverAdapter, "proveWithdraw"> : {}) &
+  (T["submitBatchTransferJob"] extends AsyncJobSubmitter ? BatchTransferProverAdapter : {});
+
 export const transferProofRequestVersion: "v2";
 export const transferProofResponseVersion: "v2";
 export const withdrawProofRequestVersion: "v2";
@@ -30,14 +54,6 @@ export function createHttpProverAdapter(input?: {
   fetchImpl?: typeof fetch;
 }): ProverAdapter & BatchTransferProverAdapter;
 
-export function createAsyncJobProverAdapter(input: {
-  submitTransferJob: (request: object) => Promise<object>;
-  submitWithdrawJob: (request: object) => Promise<object>;
-  getJob: (jobId: string) => Promise<object>;
-  intervalMs?: number;
-  timeoutMs?: number;
-  now?: () => number;
-  sleepImpl?: (ms: number) => Promise<void>;
-}): ProverAdapter;
+export function createAsyncJobProverAdapter<T extends AsyncJobProverAdapterInput>(input: T): AsyncJobProverAdapterFor<T>;
 
 export function createStaticProverAdapter(input?: { transferProofHex?: Hex; withdrawProofHex?: Hex }): ProverAdapter;

@@ -27,7 +27,7 @@ It uses CosmJS as the transport/signing foundation and provides Clairveil-specif
 - stable `ClairveilError` codes for planner/prover/wallet failures
 - prepared transfer payload building
 - prepared withdraw and relay withdraw prover/final payload building
-- HTTP prover adapter for `/v1/prover/transfer` and `/v1/prover/withdraw`
+- HTTP prover adapter for `/v1/prover/transfer`, `/v1/prover/withdraw`, and `/v1/proofs/batch-transfer`
 - async job prover adapter for remote queue/poll prover deployments
 - direct sign-doc construction for Keplr `signDirect`
 - signed tx assembly and broadcast
@@ -772,11 +772,14 @@ import { createAsyncJobProverAdapter } from "clairveiljs";
 const proverAdapter = createAsyncJobProverAdapter({
   submitTransferJob: request => fetchJSON("/proof-jobs/transfer", request),
   submitWithdrawJob: request => fetchJSON("/proof-jobs/withdraw", request),
+  submitBatchTransferJob: request => fetchJSON("/proof-jobs/batch-transfer", request),
   getJob: jobId => fetchJSON(`/proof-jobs/${jobId}`),
   intervalMs: 1000,
   timeoutMs: 300000
 });
 ```
+
+Pass only the submit handlers your remote prover supports. A one-proof batch-only prover can use `submitBatchTransferJob` and `getJob` without implementing legacy transfer or withdraw jobs.
 
 ## Tests
 
