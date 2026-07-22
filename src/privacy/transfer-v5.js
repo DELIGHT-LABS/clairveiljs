@@ -39,13 +39,15 @@ import {
   encryptedEnvelopeKindV1,
   marshalDisclosurePlaintextV1,
   unmarshalDisclosurePlaintextV1,
-  unwrapEncryptedEnvelopeV1
+  unwrapEncryptedEnvelopeV1,
+  validateNoteV1
 } from "./protocol-v1.js";
 
 export const preparedTransferV5PayloadVersion = "v5";
 export const preparedTransferV5ProofVersion = "v2";
 export const transferV5ProofRequestVersion = "v2";
 export const transferV5ProofResponseVersion = "v2";
+export const joinSplitOwnerIntentSigningRequestV1Version = "joinsplit-owner-intent-signing-request-v1";
 
 const maxShieldedAmount = (1n << 64n) - 1n;
 
@@ -140,15 +142,6 @@ function notePublicKeyHex(note, kind) {
     ? { x: normalized.receiverSpendPubKeyX, y: normalized.receiverSpendPubKeyY }
     : { x: normalized.receiverViewPubKeyX, y: normalized.receiverViewPubKeyY };
   return hexFromBytes(packPoint(point));
-}
-
-async function resolveOwnerIntentSignature(signer, intent) {
-  if (!signer) throw new Error("an owner intent signer is required");
-  const sign = signer.signOwnerIntent || signer.signSpendNoteHash || signer.signNoteHash;
-  if (typeof sign !== "function") throw new Error("owner intent signer must expose signOwnerIntent(intent) or signSpendNoteHash(intent)");
-  const signature = Uint8Array.from(await sign.call(signer, intent));
-  if (signature.length !== 64) throw new Error("transfer owner intent signature must be 64 bytes");
-  return hexFromBytes(signature);
 }
 
 function writeLines(values) {
@@ -246,15 +239,15 @@ function normalizeV5Output(output, index) {
 function validateDisclosureBlindings(payload, policy, outputs) {
   const outputRandomness = BigInt(`0x${outputs[0].randomness_hex}`);
   const full = BigInt(`0x${fieldHex(payload.full_disclosure_blinding_hex, "transfer full disclosure blinding", { nonZero: true })}`);
-  if (full === outputRandomness) throw new Error("transfer full disclosure blinding must differ from recipient output randomness");
+  if (full === outputRandomness) throw new Error("DBS-02: transfer full disclosure blinding must differ from recipient output randomness");
   const encodedUser = String(payload.user_disclosure_blinding_hex ?? "").trim();
   if (policy === 0) {
     if (encodedUser) throw new Error("all-private transfer payload must omit the zero user disclosure blinding sentinel");
     return;
   }
   const user = BigInt(`0x${fieldHex(encodedUser, "transfer user disclosure blinding", { nonZero: true })}`);
-  if (user === outputRandomness) throw new Error("transfer user disclosure blinding must differ from recipient output randomness");
-  if (user === full) throw new Error("transfer user and full disclosure blindings must differ");
+  if (user === outputRandomness) throw new Error("DBS-01: transfer user disclosure blinding must differ from recipient output randomness");
+  if (user === full) throw new Error("DBS-03: transfer user and full disclosure blindings must differ");
 }
 
 function validateDisclosures(payload, policy, mode, outputs) {
@@ -314,6 +307,202 @@ function normalizedPayloadForValidation(payload) {
   validateDisclosureBlindings(payload, policy, outputs);
   validateOwnerSignature(payload.owner_signature_hex);
   return { expiresAtUnix, rootHex, assetIdHex, policy, mode, inputs, outputs };
+}
+
+function signingNote(note) {
+  // This is the external signer boundary, so do not rely on the more
+  // permissive generic note normalizer. In particular, reject field aliases
+  // that would otherwise reduce to the same MiMC inputs.
+  const normalized = validateNoteV1(note);
+  return Object.freeze({
+    receiverSpendPubKeyX: normalized.receiverSpendPubKeyX,
+    receiverSpendPubKeyY: normalized.receiverSpendPubKeyY,
+    receiverViewPubKeyX: normalized.receiverViewPubKeyX,
+    receiverViewPubKeyY: normalized.receiverViewPubKeyY,
+    amount: normalized.amount,
+    assetID: normalized.assetID,
+    randomness: normalized.randomness,
+    memo: normalized.memo
+  });
+}
+
+function sameNote(left, right) {
+  return left.receiverSpendPubKeyX === right.receiverSpendPubKeyX &&
+    left.receiverSpendPubKeyY === right.receiverSpendPubKeyY &&
+    left.receiverViewPubKeyX === right.receiverViewPubKeyX &&
+    left.receiverViewPubKeyY === right.receiverViewPubKeyY &&
+    left.amount === right.amount &&
+    left.assetID === right.assetID &&
+    left.randomness === right.randomness &&
+    left.memo === right.memo;
+}
+
+function ownerSignaturePlaceholder(payload) {
+  const key = payload?.inputs?.[0]?.spend_pubkey_hex;
+  return `${pointHex(key, "transfer signing request input 0 spend public key")}${"0".repeat(63)}1`;
+}
+
+function requiredRequestText(value, label) {
+  const text = String(value ?? "").trim();
+  if (!text) throw new Error(`${label} is required`);
+  return text;
+}
+
+function expectedTransferFinalEffect(payload, payloadDigest, intent) {
+  return Object.freeze({
+    root_hex: payload.root_hex,
+    asset_id_hex: payload.asset_id_hex,
+    nullifier_hexes: Object.freeze(payload.inputs.map(input => input.nullifier_hex)),
+    commitment_hexes: Object.freeze(payload.outputs.map(output => output.commitment_hex)),
+    user_disclosure_digest_hex: payload.user_disclosure_digest_hex,
+    full_disclosure_digest_hex: payload.audit_disclosure_digest_hex,
+    expires_at_unix: payload.expires_at_unix,
+    payload_digest_hex: opaqueHex(payloadDigest?.hex, "transfer payload digest", { exactLength: 32 }),
+    intent_hex: canonicalFieldHex(intent)
+  });
+}
+
+function validateFinalEffect(actual, expected) {
+  if (!actual || typeof actual !== "object") throw new Error("JoinSplit owner intent final_effect is required");
+  const fields = [
+    "root_hex",
+    "asset_id_hex",
+    "user_disclosure_digest_hex",
+    "full_disclosure_digest_hex",
+    "payload_digest_hex",
+    "intent_hex"
+  ];
+  for (const field of fields) {
+    if (String(actual[field] ?? "") !== expected[field]) throw new Error(`JoinSplit owner intent final_effect.${field} does not match the canonical effect`);
+  }
+  if (Number(actual.expires_at_unix) !== expected.expires_at_unix) throw new Error("JoinSplit owner intent final_effect.expires_at_unix does not match the canonical effect");
+  for (const field of ["nullifier_hexes", "commitment_hexes"]) {
+    if (!Array.isArray(actual[field]) || actual[field].length !== expected[field].length || actual[field].some((value, index) => String(value) !== expected[field][index])) {
+      throw new Error(`JoinSplit owner intent final_effect.${field} does not match the canonical effect`);
+    }
+  }
+}
+
+/**
+ * Rebuild the signed JoinSplit intent from full NoteV1 values and the final
+ * effect. This is deliberately secret-free and must run before a hardware or
+ * external wallet callback receives the request.
+ */
+export function validateJoinSplitOwnerIntentSigningRequestV1(request) {
+  if (!request || typeof request !== "object") throw new Error("JoinSplit owner intent signing request is required");
+  if (request.version !== joinSplitOwnerIntentSigningRequestV1Version) throw new Error(`unsupported JoinSplit owner intent signing request version ${JSON.stringify(request.version)}`);
+  if (request.circuit_set_id !== activeCircuitSetIdV1) throw new Error("JoinSplit owner intent signing request circuit set is invalid");
+  const payload = request.payload;
+  if (!payload || typeof payload !== "object") throw new Error("JoinSplit owner intent signing request payload is required");
+  const unsignedPayload = { ...payload, owner_signature_hex: ownerSignaturePlaceholder(payload) };
+  const normalized = normalizedPayloadForValidation(unsignedPayload);
+  if (!Array.isArray(request.input_notes) || request.input_notes.length !== 2 || !Array.isArray(request.output_notes) || request.output_notes.length !== 2) {
+    throw new Error("JoinSplit owner intent signing request requires two input and two output NoteV1 values");
+  }
+  const inputs = request.input_notes.map(signingNote);
+  const outputs = request.output_notes.map(signingNote);
+  if (inputs.some((note, index) => (
+    note.amount.toString() !== normalized.inputs[index].amount ||
+    canonicalFieldHex(note.randomness) !== normalized.inputs[index].randomness_hex ||
+    notePublicKeyHex(note, "spend") !== normalized.inputs[index].spend_pubkey_hex ||
+    notePublicKeyHex(note, "view") !== normalized.inputs[index].view_pubkey_hex ||
+    canonicalFieldHex(computeNoteNullifierV1(note)) !== normalized.inputs[index].nullifier_hex
+  ))) throw new Error("JoinSplit owner intent signing request input Notes do not match the final effect");
+  if (outputs.some((note, index) => (
+    note.amount.toString() !== normalized.outputs[index].amount ||
+    canonicalFieldHex(note.randomness) !== normalized.outputs[index].randomness_hex ||
+    notePublicKeyHex(note, "spend") !== normalized.outputs[index].spend_pubkey_hex ||
+    notePublicKeyHex(note, "view") !== normalized.outputs[index].view_pubkey_hex ||
+    canonicalFieldHex(computeNoteCommitmentV1(note)) !== normalized.outputs[index].commitment_hex
+  ))) throw new Error("JoinSplit owner intent signing request output Notes do not match the final effect");
+  if (inputs[0].assetID !== inputs[1].assetID || outputs.some(note => note.assetID !== inputs[0].assetID) || canonicalFieldHex(inputs[0].assetID) !== normalized.assetIdHex) {
+    throw new Error("JoinSplit owner intent signing request asset identity is invalid");
+  }
+  if (inputs.some(note => note.receiverSpendPubKeyX !== inputs[0].receiverSpendPubKeyX || note.receiverSpendPubKeyY !== inputs[0].receiverSpendPubKeyY || note.receiverViewPubKeyX !== inputs[0].receiverViewPubKeyX || note.receiverViewPubKeyY !== inputs[0].receiverViewPubKeyY) ||
+    !sameNote(outputs[1], signingNote({ ...outputs[1], receiverSpendPubKeyX: inputs[0].receiverSpendPubKeyX, receiverSpendPubKeyY: inputs[0].receiverSpendPubKeyY, receiverViewPubKeyX: inputs[0].receiverViewPubKeyX, receiverViewPubKeyY: inputs[0].receiverViewPubKeyY }))) {
+    throw new Error("JoinSplit owner intent signing request change ownership is invalid");
+  }
+  if (inputs.reduce((total, note) => total + note.amount, 0n) !== outputs.reduce((total, note) => total + note.amount, 0n)) {
+    throw new Error("JoinSplit owner intent signing request value conservation is invalid");
+  }
+  const senderSpendPubKeyHex = pointHex(request.sender_spend_pubkey_hex, "JoinSplit owner intent sender spend public key");
+  if (senderSpendPubKeyHex !== notePublicKeyHex(inputs[0], "spend")) throw new Error("JoinSplit owner intent signing request sender projection is invalid");
+  if (fieldHex(request.recipient_output_randomness_hex, "JoinSplit owner intent recipient output randomness") !== normalized.outputs[0].randomness_hex) {
+    throw new Error("JoinSplit owner intent signing request recipient output randomness is invalid");
+  }
+  if (String(request.user_disclosure_blinding_hex ?? "") !== String(payload.user_disclosure_blinding_hex ?? "") || String(request.full_disclosure_blinding_hex ?? "") !== String(payload.full_disclosure_blinding_hex ?? "")) {
+    throw new Error("JoinSplit owner intent signing request disclosure blindings do not match the final effect");
+  }
+  const fullBlinding = BigInt(`0x${fieldHex(payload.full_disclosure_blinding_hex, "transfer full disclosure blinding", { nonZero: true })}`);
+  const fullDigest = computeTransferFullDisclosureDigestV2(disclosureDigestFields(inputs[0], outputs[0], computeNoteCommitmentV1(outputs[0]), fullBlinding));
+  if (canonicalFieldHex(fullDigest) !== payload.audit_disclosure_digest_hex || (payload.self_view_disclosure_digest_hex && payload.self_view_disclosure_digest_hex !== canonicalFieldHex(fullDigest))) {
+    throw new Error("JoinSplit owner intent signing request full disclosure digest is invalid");
+  }
+  if (normalized.policy !== 0) {
+    const userBlinding = BigInt(`0x${fieldHex(payload.user_disclosure_blinding_hex, "transfer user disclosure blinding", { nonZero: true })}`);
+    const userDigest = computeTransferUserDisclosureDigestV2({
+      ...disclosureDigestFields(inputs[0], outputs[0], computeNoteCommitmentV1(outputs[0]), userBlinding),
+      policy: normalized.policy,
+      disclosureBlinding: userBlinding
+    });
+    if (canonicalFieldHex(userDigest) !== payload.user_disclosure_digest_hex) throw new Error("JoinSplit owner intent signing request user disclosure digest is invalid");
+  }
+  const effect = buildTransferV5Effect(payload);
+  const payloadDigest = computeTransferPayloadDigestV1(effect);
+  const chainDomain = computeChainDomainV1(requiredRequestText(request.chain_id, "JoinSplit owner intent chain_id"), activeCircuitSetIdV1);
+  if (request.chain_id !== payload.chain_id || Number(request.expires_at_unix) !== normalized.expiresAtUnix) throw new Error("JoinSplit owner intent signing request chain or expiry is invalid");
+  const intent = computeTransferIntentV2({
+    chainDomain,
+    root: bytesToBigIntBE(bytesFromHex(normalized.rootHex, "transfer root")),
+    assetId: inputs[0].assetID,
+    nullifiers: normalized.inputs.map(input => bytesToBigIntBE(bytesFromHex(input.nullifier_hex, "transfer nullifier"))),
+    commitments: normalized.outputs.map(output => bytesToBigIntBE(bytesFromHex(output.commitment_hex, "transfer commitment"))),
+    userDisclosureDigest: normalized.policy === 0 ? 0n : bytesToBigIntBE(bytesFromHex(payload.user_disclosure_digest_hex, "transfer user disclosure digest")),
+    fullDisclosureDigest: fullDigest,
+    payloadDigest,
+    expiresAtUnix: normalized.expiresAtUnix
+  });
+  const finalEffect = expectedTransferFinalEffect(payload, payloadDigest, intent);
+  validateFinalEffect(request.final_effect, finalEffect);
+  if (fieldHex(request.expected_intent_hex, "JoinSplit owner intent expected intent") !== finalEffect.intent_hex) throw new Error("JoinSplit owner intent signing request expected intent is invalid");
+  return Object.freeze({ expected_intent: intent, final_effect: finalEffect });
+}
+
+/** Build the complete secret-free request expected by an external transfer signer. */
+export function buildJoinSplitOwnerIntentSigningRequestV1({ payload, inputNotes, outputNotes, intent, payloadDigest }) {
+  const finalEffect = expectedTransferFinalEffect(payload, payloadDigest, intent);
+  return Object.freeze({
+    version: joinSplitOwnerIntentSigningRequestV1Version,
+    circuit_set_id: activeCircuitSetIdV1,
+    chain_id: payload.chain_id,
+    expires_at_unix: payload.expires_at_unix,
+    input_notes: Object.freeze(inputNotes.map(signingNote)),
+    output_notes: Object.freeze(outputNotes.map(signingNote)),
+    sender_spend_pubkey_hex: notePublicKeyHex(inputNotes[0], "spend"),
+    recipient_output_randomness_hex: canonicalFieldHex(normalizeNote(outputNotes[0]).randomness),
+    user_disclosure_blinding_hex: payload.user_disclosure_blinding_hex,
+    full_disclosure_blinding_hex: payload.full_disclosure_blinding_hex,
+    payload: Object.freeze({ ...payload }),
+    final_effect: finalEffect,
+    expected_intent_hex: finalEffect.intent_hex
+  });
+}
+
+/** Invoke a signer only after the complete final effect has been rebuilt and verified. */
+export async function signValidatedJoinSplitOwnerIntentV1(signer, request, { allowLegacyNoteHashSigner = false } = {}) {
+  if (!signer) throw new Error("an owner intent signer is required");
+  const validated = validateJoinSplitOwnerIntentSigningRequestV1(request);
+  let signature;
+  if (typeof signer.signJoinSplitOwnerIntent === "function") signature = await signer.signJoinSplitOwnerIntent(request);
+  else if (typeof signer.signOwnerIntent === "function") signature = await signer.signOwnerIntent(request);
+  else if (allowLegacyNoteHashSigner) {
+    const sign = signer.signSpendNoteHash || signer.signNoteHash;
+    if (typeof sign !== "function") throw new Error("owner intent signer must expose signJoinSplitOwnerIntent(request)");
+    signature = await sign.call(signer, validated.expected_intent);
+  } else throw new Error("owner intent signer must expose signJoinSplitOwnerIntent(request)");
+  const bytes = Uint8Array.from(signature);
+  if (bytes.length !== 64) throw new Error("transfer owner intent signature must be 64 bytes");
+  return hexFromBytes(bytes);
 }
 
 export function computePreparedTransferV5PayloadHash(payload) {
@@ -498,13 +687,9 @@ export async function buildPreparedTransferV5Payload({
   let selfViewPayloadHex = "";
   if (!disableSelfViewDisclosure) {
     const targetHex = String(selfViewDisclosureTargetPubKeyHex ?? "").trim() || (rootSeed ? deriveDisclosureKeys(rootSeed).pubKeyHex : "");
-    // Hardware/external spend signers may deliberately supply no view key.
-    // Keep their transfer valid, while emitting self-view disclosure whenever
-    // the caller provides a target or locally-held root seed.
-    if (targetHex) {
-      selfViewDigestHex = canonicalFieldHex(fullDigest);
-      selfViewPayloadHex = plaintextHex(encryptDisclosureV1(fullDisclosure, unpackPointHex(pointHex(targetHex, "transfer self-view disclosure target public key")), encryptedEnvelopeKindV1.selfViewDisclosure));
-    }
+    if (!targetHex) throw new Error("transfer self-view disclosure requires rootSeed or selfViewDisclosureTargetPubKeyHex; set disableSelfViewDisclosure only for an explicit opt-out");
+    selfViewDigestHex = canonicalFieldHex(fullDigest);
+    selfViewPayloadHex = plaintextHex(encryptDisclosureV1(fullDisclosure, unpackPointHex(pointHex(targetHex, "transfer self-view disclosure target public key")), encryptedEnvelopeKindV1.selfViewDisclosure));
   }
 
   const cipherOutputs = outputNotes.map((note, index) => encryptNoteForTransferV1(note, canonicalFieldHex(outputCommitments[index]), index));
@@ -557,7 +742,16 @@ export async function buildPreparedTransferV5Payload({
     payloadDigest,
     expiresAtUnix: expiry
   });
-  payload.owner_signature_hex = await resolveOwnerIntentSignature(signer, intent);
+  const signingRequest = buildJoinSplitOwnerIntentSigningRequestV1({
+    payload,
+    inputNotes: [first, second],
+    outputNotes,
+    intent,
+    payloadDigest
+  });
+  payload.owner_signature_hex = await signValidatedJoinSplitOwnerIntentV1(signer, signingRequest, {
+    allowLegacyNoteHashSigner: !ownerIntentSigner
+  });
   payload.payload_hash = computePreparedTransferV5PayloadHash(payload);
   validatePreparedTransferV5PayloadMetadata(payload);
   return payload;

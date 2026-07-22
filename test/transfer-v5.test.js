@@ -5,7 +5,9 @@ import {
   deriveSpendKeys,
   deriveViewKeys,
   encodeShieldedAddress,
-  packPoint
+  FIELD_MODULUS,
+  packPoint,
+  createSpendNoteHashSigner
 } from "clairveiljs/core";
 import { createNote } from "clairveiljs/note";
 import {
@@ -15,7 +17,9 @@ import {
 } from "clairveiljs/protocol-v1";
 import {
   buildTransferV5MsgFromPayloadAndProof,
+  signValidatedJoinSplitOwnerIntentV1,
   computePreparedTransferV5PayloadHash,
+  validateJoinSplitOwnerIntentSigningRequestV1,
   validatePreparedTransferV5PayloadAt,
   validatePreparedTransferV5PayloadMetadata
 } from "clairveiljs/transfer-v5";
@@ -148,4 +152,86 @@ test("standard transfer builder emits the Clairveil 0.2 V5 fixed-envelope contra
   assert.equal(payload.self_view_disclosure_payload_hex.length, 944);
   assert.equal(payload.owner_signature_hex.length, 128);
   assert.equal(validatePreparedTransferV5PayloadMetadata(payload), true);
+});
+
+test("external transfer signer receives a validated full JoinSplit request before callback", async () => {
+  const rootSeed = new Uint8Array(32).fill(12);
+  const senderSpend = deriveSpendKeys(rootSeed).pubKey;
+  const senderView = deriveViewKeys(rootSeed).pubKey;
+  const recipientSpend = derivePubKeyFromScalar(47n);
+  const recipientView = derivePubKeyFromScalar(53n);
+  const audit = derivePubKeyFromScalar(59n);
+  const assetId = computeAssetIdV1("uclair");
+  const inputs = [31n, 37n].map((randomness, index) => ({
+    note: createNote({
+      spendPubKey: senderSpend,
+      viewPubKey: senderView,
+      amount: index === 0 ? 7n : 5n,
+      assetId,
+      randomness
+    }),
+    nullifier: field(BigInt(301 + index)),
+    isSpent: false,
+    nullifierStatus: "unspent",
+    txHash: field(BigInt(401 + index)),
+    height: 1,
+    sequence: index
+  }));
+  const localSigner = createSpendNoteHashSigner(rootSeed);
+  let request;
+  const payload = await buildPreparedTransferPayload({
+    creator: "clair1creator",
+    chainId: "clairveil-test-1",
+    chainNowUnix: 1_700_000_000,
+    inputs,
+    recipient: encodeShieldedAddress(recipientSpend, recipientView, { prefix: "clairs" }),
+    amount: "7uclair",
+    rootSeed,
+    merklePathProvider: () => ({ root: field(1n), path: [], path_helper: [] }),
+    auditDisclosureTargetPubKeyHex: Buffer.from(packPoint(audit)).toString("hex"),
+    ownerIntentSigner: {
+      async signJoinSplitOwnerIntent(candidate) {
+        request = candidate;
+        const validated = validateJoinSplitOwnerIntentSigningRequestV1(candidate);
+        return localSigner.signSpendNoteHash(validated.expected_intent);
+      }
+    }
+  });
+
+  assert.equal(request.version, "joinsplit-owner-intent-signing-request-v1");
+  assert.equal(request.input_notes.length, 2);
+  assert.equal(request.output_notes.length, 2);
+  assert.equal(request.final_effect.intent_hex.length, 64);
+  assert.equal(payload.owner_signature_hex.length, 128);
+
+  let callbacks = 0;
+  const redirected = {
+    ...request,
+    final_effect: { ...request.final_effect, intent_hex: field(1n) }
+  };
+  await assert.rejects(
+    () => signValidatedJoinSplitOwnerIntentV1({
+      signJoinSplitOwnerIntent() {
+        callbacks += 1;
+        return new Uint8Array(64);
+      }
+    }, redirected),
+    /final_effect.intent_hex does not match/
+  );
+  assert.equal(callbacks, 0);
+
+  const aliasedNote = {
+    ...request.input_notes[0],
+    randomness: request.input_notes[0].randomness + FIELD_MODULUS
+  };
+  await assert.rejects(
+    () => signValidatedJoinSplitOwnerIntentV1({
+      signJoinSplitOwnerIntent() {
+        callbacks += 1;
+        return new Uint8Array(64);
+      }
+    }, { ...request, input_notes: [aliasedNote, request.input_notes[1]] }),
+    /canonical BN254 field element/
+  );
+  assert.equal(callbacks, 0);
 });

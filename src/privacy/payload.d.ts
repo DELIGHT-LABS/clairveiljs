@@ -1,6 +1,7 @@
 import type { BytesLike, ClairAddress, Hex, Point, ShieldedAddress } from "../core/crypto.js";
 import type { CoinString, FoundNote, Note, NoteHashSigner } from "../core/note.js";
 import type { ProverAdapter } from "./prover.js";
+import type { JoinSplitOwnerIntentSignerV1 } from "./transfer-v5.js";
 import type {
   MsgTransfer as TransferMessage,
   MsgWithdraw as WithdrawMessage,
@@ -82,6 +83,7 @@ export interface PreparedTransferPayloadInput {
   senderSpendPubKey?: Point;
   senderViewPubKey?: Point;
   merklePathProvider?: MerklePathProviderLike;
+  ownerIntentSigner?: JoinSplitOwnerIntentSignerV1;
   noteHashSigner?: NoteHashSigner;
   userPrivacyPolicy?: TransferPrivacyPolicy;
   userDisclosureMode?: TransferUserDisclosureMode;

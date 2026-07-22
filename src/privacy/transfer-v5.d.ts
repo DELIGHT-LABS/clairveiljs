@@ -1,10 +1,12 @@
 import type { Hex } from "../core/crypto.js";
+import type { Note, NoteHashSigner } from "../core/note.js";
 import type { MsgTransfer } from "../generated/clairveil/privacy/v1/tx.js";
 
 export const preparedTransferV5PayloadVersion: "v5";
 export const preparedTransferV5ProofVersion: "v2";
 export const transferV5ProofRequestVersion: "v2";
 export const transferV5ProofResponseVersion: "v2";
+export const joinSplitOwnerIntentSigningRequestV1Version: "joinsplit-owner-intent-signing-request-v1";
 
 export interface PreparedTransferV5Input {
   amount: string;
@@ -57,7 +59,47 @@ export interface PreparedTransferV5Proof {
   proof_hex: Hex;
 }
 
+export interface JoinSplitOwnerIntentSigningRequestV1 {
+  version: typeof joinSplitOwnerIntentSigningRequestV1Version;
+  circuit_set_id: "privacy-note-v1";
+  chain_id: string;
+  expires_at_unix: number;
+  input_notes: readonly [Note, Note];
+  output_notes: readonly [Note, Note];
+  sender_spend_pubkey_hex: Hex;
+  recipient_output_randomness_hex: Hex;
+  user_disclosure_blinding_hex: Hex | "";
+  full_disclosure_blinding_hex: Hex;
+  payload: Omit<PreparedTransferV5Payload, "owner_signature_hex" | "payload_hash"> & Partial<Pick<PreparedTransferV5Payload, "owner_signature_hex" | "payload_hash">>;
+  final_effect: {
+    root_hex: Hex;
+    asset_id_hex: Hex;
+    nullifier_hexes: readonly [Hex, Hex];
+    commitment_hexes: readonly [Hex, Hex];
+    user_disclosure_digest_hex: Hex | "";
+    full_disclosure_digest_hex: Hex;
+    expires_at_unix: number;
+    payload_digest_hex: Hex;
+    intent_hex: Hex;
+  };
+  expected_intent_hex: Hex;
+}
+
+export interface JoinSplitOwnerIntentSignerV1 {
+  signJoinSplitOwnerIntent?(request: JoinSplitOwnerIntentSigningRequestV1): Promise<Uint8Array> | Uint8Array;
+  signOwnerIntent?(request: JoinSplitOwnerIntentSigningRequestV1): Promise<Uint8Array> | Uint8Array;
+}
+
 export function buildPreparedTransferV5Payload(input: object): Promise<PreparedTransferV5Payload>;
+export function buildJoinSplitOwnerIntentSigningRequestV1(input: {
+  payload: JoinSplitOwnerIntentSigningRequestV1["payload"];
+  inputNotes: [Note, Note];
+  outputNotes: [Note, Note];
+  intent: bigint;
+  payloadDigest: { hex: Hex; hi: bigint; lo: bigint };
+}): JoinSplitOwnerIntentSigningRequestV1;
+export function validateJoinSplitOwnerIntentSigningRequestV1(request: JoinSplitOwnerIntentSigningRequestV1): { expected_intent: bigint; final_effect: JoinSplitOwnerIntentSigningRequestV1["final_effect"] };
+export function signValidatedJoinSplitOwnerIntentV1(signer: JoinSplitOwnerIntentSignerV1 | NoteHashSigner, request: JoinSplitOwnerIntentSigningRequestV1, options?: { allowLegacyNoteHashSigner?: boolean }): Promise<Hex>;
 export function computePreparedTransferV5PayloadHash(payload: Partial<PreparedTransferV5Payload>): Hex;
 export function validatePreparedTransferV5PayloadMetadata(payload: PreparedTransferV5Payload): true;
 export function validatePreparedTransferV5PayloadAt(payload: PreparedTransferV5Payload, nowUnix?: number): true;

@@ -5149,7 +5149,7 @@ test("relay withdraw keeps authoritative chain time through proof finalization",
   assert.equal(result.payload.expires_at_unix, 2_000);
 });
 
-test("prepared transfer payload skips self-view disclosure when signer material is external", async () => {
+test("prepared transfer requires explicit self-view opt-out when signer material is external", async () => {
   const senderRootSeed = new Uint8Array(32).fill(9);
   const senderSpend = deriveSpendKeys(senderRootSeed).pubKey;
   const senderView = deriveViewKeys(senderRootSeed).pubKey;
@@ -5183,7 +5183,7 @@ test("prepared transfer payload skips self-view disclosure when signer material 
       nullifierStatus: "unspent"
     }
   ];
-  const payload = await buildPreparedTransferPayload({
+  const input = {
     creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
     chainId: "clairveil-local-1",
     inputs,
@@ -5199,7 +5199,13 @@ test("prepared transfer payload skips self-view disclosure when signer material 
       }
     },
     shieldedPrefix: "clairs"
-  });
+  };
+
+  await assert.rejects(
+    () => buildPreparedTransferPayload(input),
+    /self-view disclosure requires rootSeed or selfViewDisclosureTargetPubKeyHex/
+  );
+  const payload = await buildPreparedTransferPayload({ ...input, disableSelfViewDisclosure: true });
 
   assertPreparedTransferPayloadShape(payload);
   assert.equal(payload.self_view_disclosure_digest_hex, "");
