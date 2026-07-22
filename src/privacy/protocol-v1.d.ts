@@ -77,4 +77,6 @@ export function canonicalTransferPayloadBytesV1(message: object): Uint8Array;
 export function computeTransferPayloadDigestV1(message: object): DigestLimbsV1;
 export function computeChainDomainV1(chainId: string, circuitSetId?: string): DigestLimbsV1;
 export function computeTransferIntentV2(input: object): bigint;
+export function computeWithdrawRecipientDigestV1(recipientBytes: Uint8Array | Hex): DigestLimbsV1;
+export function computeSpendIntentV2(input: object): bigint;
 export function fieldHexV1(value: bigint): Hex;

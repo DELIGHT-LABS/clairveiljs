@@ -7,11 +7,11 @@ import type {
   UserDisclosureMode
 } from "../generated/clairveil/privacy/v1/tx.js";
 
-export const preparedTransferPayloadVersion: "v3";
-export const preparedTransferProofVersion: "v1";
-export const preparedWithdrawProverPayloadVersion: "v1";
-export const preparedWithdrawProofVersion: "v1";
-export const preparedWithdrawPayloadVersion: "v1";
+export const preparedTransferPayloadVersion: "v5";
+export const preparedTransferProofVersion: "v2";
+export const preparedWithdrawProverPayloadVersion: "v2";
+export const preparedWithdrawProofVersion: "v2";
+export const preparedWithdrawPayloadVersion: "v2";
 export const userDisclosureModeValue: Readonly<Record<string, number>>;
 export const userDisclosureModeName: Readonly<Record<number, string>>;
 export const privacyPolicyValue: Readonly<Record<string, number>>;
@@ -69,6 +69,9 @@ export interface TransferDisclosureData {
 
 export interface PreparedTransferPayloadInput {
   creator?: ClairAddress | string;
+  chainId?: string;
+  expiresAtUnix?: number;
+  chainNowUnix?: number;
   inputs?: FoundNote[];
   recipient?: ShieldedAddress;
   amount?: CoinString;
@@ -96,7 +99,6 @@ export interface PreparedTransferPayloadInputNote {
   view_pubkey_hex: Hex;
   merkle_path: string[];
   merkle_path_helper: number[];
-  note_hash_signature_hex: Hex;
   nullifier_hex: Hex;
 }
 
@@ -111,6 +113,8 @@ export interface PreparedTransferPayloadOutputNote {
 export interface PreparedTransferPayload {
   version: typeof preparedTransferPayloadVersion;
   creator: ClairAddress | string;
+  chain_id: string;
+  expires_at_unix: number;
   root_hex: Hex;
   asset_id_hex: Hex;
   inputs: [PreparedTransferPayloadInputNote, PreparedTransferPayloadInputNote];
@@ -125,8 +129,11 @@ export interface PreparedTransferPayload {
   audit_disclosure_digest_hex: Hex;
   audit_disclosure_target_pubkey_hex: Hex;
   audit_disclosure_payload_hex: Hex;
-  self_view_disclosure_digest_hex?: Hex;
-  self_view_disclosure_payload_hex?: Hex;
+  self_view_disclosure_digest_hex: Hex | "";
+  self_view_disclosure_payload_hex: Hex | "";
+  user_disclosure_blinding_hex: Hex | "";
+  full_disclosure_blinding_hex: Hex;
+  owner_signature_hex: Hex;
   payload_hash: Hex;
 }
 
@@ -222,7 +229,7 @@ export interface PreparedWithdrawProverPayload {
   view_pubkey_hex: Hex;
   merkle_path: string[];
   merkle_path_helper: number[];
-  spend_note_hash_signature_hex: Hex;
+  spend_intent_signature_hex: Hex;
   payload_hash: Hex;
 }
 
@@ -274,6 +281,7 @@ export interface RelayWithdrawRelayOptions {
 
 export function buildPreparedWithdrawProverPayload(input: PreparedWithdrawProverPayloadInput): Promise<PreparedWithdrawProverPayloadResult>;
 export function computePreparedWithdrawPayloadHash(payload: PreparedWithdrawPayload): Hex;
+export function validatePreparedWithdrawProverPayloadMetadata(payload: PreparedWithdrawProverPayload, nowUnix?: number): true;
 export function validatePreparedWithdrawProof(proverPayload: PreparedWithdrawProverPayload, proof: PreparedWithdrawProof, nowUnix?: number): true;
 export function buildPreparedWithdrawPayloadFromProof(proverPayload: PreparedWithdrawProverPayload, proof: PreparedWithdrawProof, nowUnix?: number): PreparedWithdrawPayload;
 export function validatePreparedWithdrawPayload(payload: PreparedWithdrawPayload, nowUnix?: number): true;

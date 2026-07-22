@@ -1,6 +1,5 @@
 import {
-  canonicalFieldHex,
-  hashStringToField
+  canonicalFieldHex
 } from "../core/crypto.js";
 import {
   defaultAssetDenom,
@@ -17,6 +16,7 @@ import {
   ClairveilError,
   plannerStatusToErrorCode
 } from "../core/errors.js";
+import { computeAssetIdV1 } from "./protocol-v1.js";
 
 function coinString(amount, denom) {
   return `${amount.toString()}${denom}`;
@@ -35,7 +35,7 @@ function maxBigInt(values) {
 }
 
 function sameDenomExactMatch(notes, denom, target) {
-  const assetIdHex = canonicalFieldHex(hashStringToField(denom));
+  const assetIdHex = canonicalFieldHex(computeAssetIdV1(denom));
   for (const note of notes || []) {
     const found = normalizeFoundNote(note);
     if (!isVerifiedUnspentFoundNote(found)) continue;

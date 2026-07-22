@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { derivePubKeyFromScalar, packPoint } from "clairveiljs/core";
 import {
+  derivePubKeyFromScalar,
+  deriveSpendKeys,
+  deriveViewKeys,
+  encodeShieldedAddress,
+  packPoint
+} from "clairveiljs/core";
+import { createNote } from "clairveiljs/note";
+import {
+  computeAssetIdV1,
   encryptedEnvelopeKindV1,
   wrapEncryptedEnvelopeV1
 } from "clairveiljs/protocol-v1";
@@ -11,6 +19,7 @@ import {
   validatePreparedTransferV5PayloadAt,
   validatePreparedTransferV5PayloadMetadata
 } from "clairveiljs/transfer-v5";
+import { buildPreparedTransferPayload } from "clairveiljs/payload";
 
 function field(value) {
   return BigInt(value).toString(16).padStart(64, "0");
@@ -93,4 +102,50 @@ test("transfer v5 rejects stale or tampered prepared effects before MsgTransfer 
   assert.equal(message.viewTags.length, 2);
   assert.throws(() => validatePreparedTransferV5PayloadAt(payload, payload.expires_at_unix));
   assert.throws(() => validatePreparedTransferV5PayloadMetadata({ ...payload, creator: "clair1altered" }));
+});
+
+test("standard transfer builder emits the Clairveil 0.2 V5 fixed-envelope contract", async () => {
+  const rootSeed = new Uint8Array(32).fill(7);
+  const senderSpend = deriveSpendKeys(rootSeed).pubKey;
+  const senderView = deriveViewKeys(rootSeed).pubKey;
+  const recipientSpend = derivePubKeyFromScalar(37n);
+  const recipientView = derivePubKeyFromScalar(41n);
+  const audit = derivePubKeyFromScalar(43n);
+  const assetId = computeAssetIdV1("uclair");
+  const inputs = [3n, 5n].map((randomness, index) => ({
+    note: createNote({
+      spendPubKey: senderSpend,
+      viewPubKey: senderView,
+      amount: index === 0 ? 7n : 5n,
+      assetId,
+      randomness
+    }),
+    nullifier: field(BigInt(100 + index)),
+    isSpent: false,
+    nullifierStatus: "unspent",
+    txHash: field(BigInt(200 + index)),
+    height: 1,
+    sequence: index
+  }));
+  const payload = await buildPreparedTransferPayload({
+    creator: "clair1creator",
+    chainId: "clairveil-test-1",
+    chainNowUnix: 1_700_000_000,
+    inputs,
+    recipient: encodeShieldedAddress(recipientSpend, recipientView, { prefix: "clairs" }),
+    amount: "7uclair",
+    rootSeed,
+    merklePathProvider: () => ({ root: field(1n), path: [], path_helper: [] }),
+    auditDisclosureTargetPubKeyHex: Buffer.from(packPoint(audit)).toString("hex")
+  });
+
+  assert.equal(payload.version, "v5");
+  assert.equal(payload.expires_at_unix, 1_700_001_800);
+  assert.equal(payload.asset_id_hex, field(assetId));
+  assert.equal(payload.cipher_text_hexes[0].length, 860);
+  assert.equal(payload.cipher_text_hexes[1].length, 860);
+  assert.equal(payload.audit_disclosure_payload_hex.length, 944);
+  assert.equal(payload.self_view_disclosure_payload_hex.length, 944);
+  assert.equal(payload.owner_signature_hex.length, 128);
+  assert.equal(validatePreparedTransferV5PayloadMetadata(payload), true);
 });

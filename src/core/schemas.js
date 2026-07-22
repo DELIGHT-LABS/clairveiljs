@@ -87,10 +87,12 @@ export function assertFoundNoteShape(value, label = "found note") {
 
 export function assertPreparedTransferPayloadShape(value, label = "prepared transfer payload", options = {}) {
   const payload = assertObject(value, label);
-  if (payload.version !== "v1" && payload.version !== "v2" && payload.version !== "v3") {
-    throw new Error(`${label}.version must be v1, v2, or v3`);
+  if (payload.version !== "v5") {
+    throw new Error(`${label}.version must be v5; legacy prepared payloads must be regenerated`);
   }
   assertClairAddress(payload.creator, `${label}.creator`, options);
+  assertString(payload.chain_id, `${label}.chain_id`);
+  assertDecimalString(String(payload.expires_at_unix), `${label}.expires_at_unix`);
   assertHex(payload.root_hex, 32, `${label}.root_hex`);
   assertHex(payload.asset_id_hex, 32, `${label}.asset_id_hex`);
   if (!Array.isArray(payload.inputs) || payload.inputs.length !== 2) {
@@ -102,35 +104,33 @@ export function assertPreparedTransferPayloadShape(value, label = "prepared tran
   if (!Array.isArray(payload.cipher_text_hexes) || payload.cipher_text_hexes.length !== 2) {
     throw new Error(`${label}.cipher_text_hexes must contain exactly 2 ciphertexts`);
   }
-  if (payload.version === "v3") {
-    if (!Array.isArray(payload.view_tag_hexes) || payload.view_tag_hexes.length !== 2) {
-      throw new Error(`${label}.view_tag_hexes must contain exactly 2 view tags`);
-    }
-    payload.view_tag_hexes.forEach((value, index) => {
-      assertHex(value, 2, `${label}.view_tag_hexes[${index}]`);
-    });
-  } else if (payload.view_tag_hexes) {
-    throw new Error(`${label}.view_tag_hexes requires version v3`);
+  if (!Array.isArray(payload.view_tag_hexes) || payload.view_tag_hexes.length !== 2) {
+    throw new Error(`${label}.view_tag_hexes must contain exactly 2 view tags`);
   }
+  payload.view_tag_hexes.forEach((value, index) => assertHex(value, 2, `${label}.view_tag_hexes[${index}]`));
   assertHex(payload.audit_disclosure_digest_hex, 32, `${label}.audit_disclosure_digest_hex`);
   assertDisclosurePubKeyHex(payload.audit_disclosure_target_pubkey_hex, `${label}.audit_disclosure_target_pubkey_hex`);
-  if (payload.version === "v2" || payload.version === "v3") {
-    const selfViewDigest = String(payload.self_view_disclosure_digest_hex || "").trim();
-    const selfViewPayload = String(payload.self_view_disclosure_payload_hex || "").trim();
-    if (selfViewDigest || selfViewPayload) {
-      assertHex(selfViewDigest, 32, `${label}.self_view_disclosure_digest_hex`);
-      assertHex(selfViewPayload, undefined, `${label}.self_view_disclosure_payload_hex`);
-    }
-  } else if (payload.self_view_disclosure_digest_hex || payload.self_view_disclosure_payload_hex) {
-    throw new Error(`${label}.self_view_disclosure_* fields require version v2 or v3`);
+  const selfViewDigest = String(payload.self_view_disclosure_digest_hex || "").trim();
+  const selfViewPayload = String(payload.self_view_disclosure_payload_hex || "").trim();
+  if (selfViewDigest || selfViewPayload) {
+    assertHex(selfViewDigest, 32, `${label}.self_view_disclosure_digest_hex`);
+    assertHex(selfViewPayload, undefined, `${label}.self_view_disclosure_payload_hex`);
   }
+  const userBlinding = String(payload.user_disclosure_blinding_hex || "").trim();
+  if (Number(payload.user_privacy_policy) === 0) {
+    if (userBlinding) throw new Error(`${label}.user_disclosure_blinding_hex must be empty for all-private transfers`);
+  } else {
+    assertHex(userBlinding, 32, `${label}.user_disclosure_blinding_hex`);
+  }
+  assertHex(payload.full_disclosure_blinding_hex, 32, `${label}.full_disclosure_blinding_hex`);
+  assertHex(payload.owner_signature_hex, 64, `${label}.owner_signature_hex`);
   assertHex(payload.payload_hash, 32, `${label}.payload_hash`);
   return payload;
 }
 
 export function assertPreparedWithdrawProverPayloadShape(value, label = "prepared withdraw prover payload", options = {}) {
   const payload = assertObject(value, label);
-  if (payload.version !== "v1") throw new Error(`${label}.version must be v1`);
+  if (payload.version !== "v2") throw new Error(`${label}.version must be v2`);
   assertHex(payload.root_hex, 32, `${label}.root_hex`);
   assertHex(payload.nullifier_hex, 32, `${label}.nullifier_hex`);
   assertDecimalString(payload.amount, `${label}.amount`);
@@ -145,7 +145,7 @@ export function assertPreparedWithdrawProverPayloadShape(value, label = "prepare
   assertHex(payload.view_pubkey_hex, 32, `${label}.view_pubkey_hex`);
   if (!Array.isArray(payload.merkle_path)) throw new Error(`${label}.merkle_path must be an array`);
   if (!Array.isArray(payload.merkle_path_helper)) throw new Error(`${label}.merkle_path_helper must be an array`);
-  assertHex(payload.spend_note_hash_signature_hex, undefined, `${label}.spend_note_hash_signature_hex`);
+  assertHex(payload.spend_intent_signature_hex, 64, `${label}.spend_intent_signature_hex`);
   assertHex(payload.payload_hash, 32, `${label}.payload_hash`);
   return payload;
 }

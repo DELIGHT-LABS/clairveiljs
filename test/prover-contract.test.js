@@ -84,7 +84,7 @@ test("HTTP prover adapter rejects proof payload hash mismatch", fixtureTestOptio
 
   await assert.rejects(
     () => adapter.proveTransfer(examples.transfer.request),
-    error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /transfer proof payload hash mismatch/.test(error.message)
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /transfer v5 proof payload hash mismatch/.test(error.message)
   );
   await assert.rejects(
     () => adapter.proveWithdraw(examples.withdraw.request),
@@ -96,8 +96,8 @@ test("HTTP prover adapter rejects malformed proof response shapes", fixtureTestO
   const examples = readFixture("privacy_prover_example_bundle.json");
 
   for (const [body, pattern] of [
-    [{}, /transfer proof response\.version must be v1/],
-    [{ version: "v1" }, /transfer proof response\.proof must be a JSON object/],
+    [{}, /transfer proof response\.version must be v2/],
+    [{ version: "v2" }, /transfer proof response\.proof must be a JSON object/],
     [
       {
         ...examples.transfer.response,

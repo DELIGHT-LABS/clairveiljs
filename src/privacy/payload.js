@@ -55,12 +55,30 @@ import {
   sha256Hex as digestSha256Hex,
   utf8Bytes
 } from "../core/browser-crypto.js";
+import {
+  buildPreparedTransferV5Payload,
+  buildTransferV5MsgFromPayloadAndProof,
+  computePreparedTransferV5PayloadHash,
+  preparedTransferV5PayloadVersion,
+  preparedTransferV5ProofVersion,
+  validatePreparedTransferV5PayloadMetadata,
+  validatePreparedTransferV5Proof
+} from "./transfer-v5.js";
+import {
+  activeCircuitSetIdV1,
+  computeAssetIdV1,
+  computeChainDomainV1,
+  computeNoteCommitmentV1,
+  computeNoteNullifierV1,
+  computeSpendIntentV2,
+  computeWithdrawRecipientDigestV1
+} from "./protocol-v1.js";
 
-export const preparedTransferPayloadVersion = "v3";
-export const preparedTransferProofVersion = "v1";
-export const preparedWithdrawProverPayloadVersion = "v1";
-export const preparedWithdrawProofVersion = "v1";
-export const preparedWithdrawPayloadVersion = "v1";
+export const preparedTransferPayloadVersion = preparedTransferV5PayloadVersion;
+export const preparedTransferProofVersion = preparedTransferV5ProofVersion;
+export const preparedWithdrawProverPayloadVersion = "v2";
+export const preparedWithdrawProofVersion = "v2";
+export const preparedWithdrawPayloadVersion = "v2";
 
 export const userDisclosureModeValue = {
   none: 0,
@@ -240,7 +258,7 @@ function betterMergePairCandidate(left, right, total, bestLeft, bestRight, bestT
 }
 
 export function summarizeSpendableNotesByDenom(notes, denom = defaultAssetDenom) {
-  const targetAssetIdHex = canonicalFieldHex(hashStringToField(denom));
+  const targetAssetIdHex = canonicalFieldHex(computeAssetIdV1(denom));
   const spendable = [...(notes || [])]
     .map(normalizeFoundNote)
     .filter(found => isVerifiedUnspentFoundNote(found) && canonicalFieldHex(found.note.assetID) === targetAssetIdHex)
@@ -766,94 +784,14 @@ function transferPayloadHashIncludesViewTags(version) {
 }
 
 export function validatePreparedTransferPayloadMetadata(payload) {
-  if (payload?.version === preparedTransferPayloadVersion) {
-    // Continue below.
-  } else if (payload?.version === "v2") {
-    throw new Error(`legacy transfer payload version "v2" does not include required view tags; regenerate it with transfer payload version "${preparedTransferPayloadVersion}"`);
-  } else if (payload?.version === "v1") {
-    throw new Error(`legacy transfer payload version "v1" does not include required self-view disclosure and view tags; regenerate it with transfer payload version "${preparedTransferPayloadVersion}"`);
-  } else {
-    throw new Error(`unsupported transfer payload version ${JSON.stringify(payload?.version)} (expected "${preparedTransferPayloadVersion}")`);
-  }
-  if (!Array.isArray(payload.inputs) || payload.inputs.length !== 2) {
-    throw new Error(`transfer payload requires exactly 2 inputs; got ${payload.inputs?.length ?? 0}`);
-  }
-  if (!Array.isArray(payload.outputs) || payload.outputs.length !== 2) {
-    throw new Error(`transfer payload requires exactly 2 outputs; got ${payload.outputs?.length ?? 0}`);
-  }
-  if (!Array.isArray(payload.cipher_text_hexes) || payload.cipher_text_hexes.length !== 2) {
-    throw new Error(`transfer payload requires exactly 2 ciphertexts; got ${payload.cipher_text_hexes?.length ?? 0}`);
-  }
-  if (!Array.isArray(payload.view_tag_hexes) || payload.view_tag_hexes.length !== 2) {
-    throw new Error(`transfer payload requires exactly 2 view tags; got ${payload.view_tag_hexes?.length ?? 0}`);
-  }
-  payload.view_tag_hexes.forEach((value, index) => {
-    const hex = normalizeHex(value, `transfer view tag ${index}`);
-    if (hex.length !== 4) {
-      throw new Error(`transfer view tag ${index} must be exactly 2 bytes`);
-    }
-  });
-  if (!payload.payload_hash || payload.payload_hash !== computePreparedTransferPayloadHash(payload)) {
-    throw new Error("transfer payload hash mismatch; the file may have been modified after preparation");
-  }
-  return true;
+  return validatePreparedTransferV5PayloadMetadata(payload);
 }
 
 export function computePreparedTransferPayloadHash(payload) {
-  const lines = [
-    payload.version,
-    payload.creator,
-    payload.root_hex,
-    payload.asset_id_hex,
-    String(payload.user_privacy_policy),
-    String(payload.user_disclosure_mode),
-    payload.user_disclosure_digest_hex || "",
-    payload.user_disclosure_target_pubkey_hex || "",
-    payload.user_disclosure_payload_hex || "",
-    payload.audit_disclosure_digest_hex,
-    payload.audit_disclosure_target_pubkey_hex,
-    payload.audit_disclosure_payload_hex
-  ];
-  if (transferPayloadHashIncludesSelfView(payload.version)) {
-    lines.push(
-      payload.self_view_disclosure_digest_hex || "",
-      payload.self_view_disclosure_payload_hex || ""
-    );
-  }
-  lines.push(String(payload.inputs.length));
-  for (const input of payload.inputs) {
-    lines.push(
-      input.amount,
-      input.randomness_hex,
-      input.spend_pubkey_hex,
-      input.view_pubkey_hex,
-      String(input.merkle_path.length),
-      ...input.merkle_path,
-      String(input.merkle_path_helper.length),
-      ...input.merkle_path_helper.map(String),
-      input.note_hash_signature_hex,
-      input.nullifier_hex
-    );
-  }
-  lines.push(String(payload.outputs.length));
-  for (const output of payload.outputs) {
-    lines.push(
-      output.amount,
-      output.randomness_hex,
-      output.spend_pubkey_hex,
-      output.view_pubkey_hex,
-      output.commitment_hex
-    );
-  }
-  lines.push(String(payload.cipher_text_hexes.length), ...payload.cipher_text_hexes);
-  if (transferPayloadHashIncludesViewTags(payload.version)) {
-    const viewTagHexes = payload.view_tag_hexes || [];
-    lines.push(String(viewTagHexes.length), ...viewTagHexes);
-  }
-  return sha256Hex(writeLines(lines));
+  return computePreparedTransferV5PayloadHash(payload);
 }
 
-export async function buildPreparedTransferPayload({
+async function buildLegacyPreparedTransferPayload({
   creator,
   inputs,
   recipient,
@@ -879,7 +817,7 @@ export async function buildPreparedTransferPayload({
   if (foundInputs.length !== 2) {
     throw new Error(`transfer prepared payload requires exactly 2 input notes; got ${foundInputs.length}`);
   }
-  const targetAssetIdHex = canonicalFieldHex(hashStringToField(coin.denom));
+  const targetAssetIdHex = canonicalFieldHex(computeAssetIdV1(coin.denom));
   foundInputs.forEach((found, index) => {
     const inputAssetIdHex = canonicalFieldHex(found.note.assetID);
     if (inputAssetIdHex !== targetAssetIdHex) {
@@ -1016,38 +954,15 @@ export async function buildPreparedTransferPayload({
 }
 
 export function validatePreparedTransferProof(payload, proof) {
-  validatePreparedTransferPayloadMetadata(payload);
-  if (!proof || proof.version !== preparedTransferProofVersion) {
-    throw new Error(`unsupported transfer proof version ${JSON.stringify(proof?.version)}`);
-  }
-  if (proof.payload_hash !== payload.payload_hash) {
-    throw new Error("transfer proof payload hash mismatch");
-  }
-  normalizeHex(proof.proof_hex, "transfer proof");
-  return true;
+  return validatePreparedTransferV5Proof(payload, proof);
 }
 
 export function buildTransferMsgFromPayloadAndProof(payload, proof) {
-  validatePreparedTransferProof(payload, proof);
-  return {
-    creator: payload.creator,
-    proof: hexToBytes(proof.proof_hex, "transfer proof"),
-    root: hexToBytes(payload.root_hex, "transfer root"),
-    nullifiers: payload.inputs.map(input => hexToBytes(input.nullifier_hex, "transfer nullifier")),
-    newCommitments: payload.outputs.map(output => hexToBytes(output.commitment_hex, "transfer commitment")),
-    cipherTexts: payload.cipher_text_hexes.map(value => hexToBytes(value, "transfer ciphertext")),
-    viewTags: (payload.view_tag_hexes || []).map(value => hexToBytes(value, "transfer view tag")),
-    userPrivacyPolicy: payload.user_privacy_policy,
-    userDisclosureDigest: optionalHexToBytes(payload.user_disclosure_digest_hex, "user disclosure digest"),
-    userDisclosureMode: payload.user_disclosure_mode,
-    userDisclosureTargetPubkey: optionalHexToBytes(payload.user_disclosure_target_pubkey_hex, "user disclosure target pubkey"),
-    userDisclosurePayload: optionalHexToBytes(payload.user_disclosure_payload_hex, "user disclosure payload"),
-    auditDisclosureDigest: hexToBytes(payload.audit_disclosure_digest_hex, "audit disclosure digest"),
-    auditDisclosureTargetPubkey: hexToBytes(payload.audit_disclosure_target_pubkey_hex, "audit disclosure target pubkey"),
-    auditDisclosurePayload: hexToBytes(payload.audit_disclosure_payload_hex, "audit disclosure payload"),
-    selfViewDisclosureDigest: optionalHexToBytes(payload.self_view_disclosure_digest_hex, "self-view disclosure digest"),
-    selfViewDisclosurePayload: optionalHexToBytes(payload.self_view_disclosure_payload_hex, "self-view disclosure payload")
-  };
+  return buildTransferV5MsgFromPayloadAndProof(payload, proof);
+}
+
+export async function buildPreparedTransferPayload(input = {}) {
+  return buildPreparedTransferV5Payload(input);
 }
 
 function literalNullifierUsage(value) {
@@ -1126,7 +1041,7 @@ export async function buildTransferMessage({ proverAdapter, ...input } = {}) {
     input.checkNullifiers,
   );
   const response = await proverAdapter.proveTransfer({
-    version: "v1",
+    version: "v2",
     payload
   });
   const proof = response?.proof || response;
@@ -1138,7 +1053,7 @@ export async function buildTransferMessage({ proverAdapter, ...input } = {}) {
 }
 
 function selectExactMatchNote(notes, denom, targetAmount) {
-  const targetAssetIdHex = canonicalFieldHex(hashStringToField(denom));
+  const targetAssetIdHex = canonicalFieldHex(computeAssetIdV1(denom));
   for (const found of notes) {
     if (!isVerifiedUnspentFoundNote(found)) continue;
     if (found.note.amount !== targetAmount) continue;
@@ -1167,7 +1082,7 @@ export function computePreparedWithdrawProverPayloadHash(payload) {
     ...payload.merkle_path,
     String(payload.merkle_path_helper.length),
     ...payload.merkle_path_helper.map(String),
-    payload.spend_note_hash_signature_hex
+    payload.spend_intent_signature_hex
   ]));
 }
 
@@ -1196,14 +1111,14 @@ export async function buildPreparedWithdrawProverPayload({
   const coin = parseCoin(amount, assetDenom ?? denom ?? defaultAssetDenom);
   const targetAmount = positiveBigInt(coin.amount, "withdraw amount");
   const foundNotes = [...(notes || [])].map(normalizeFoundNote);
-  const targetAssetIdHex = canonicalFieldHex(hashStringToField(coin.denom));
+  const targetAssetIdHex = canonicalFieldHex(computeAssetIdV1(coin.denom));
   const selected = selectExactMatchNote(foundNotes, coin.denom, targetAmount);
   if (!selected) {
     const sameDenom = foundNotes.filter(found => isVerifiedUnspentFoundNote(found) && canonicalFieldHex(found.note.assetID) === targetAssetIdHex);
     const total = sameDenom.reduce((sum, found) => sum + found.note.amount, 0n);
     throw new Error(`withdraw requires one exact-match note for ${coin.raw}; spendable ${coin.denom} total is ${total}${coin.denom} across ${sameDenom.length} notes`);
   }
-  const commitmentHex = computeNoteCommitmentHex(selected.note);
+  const commitmentHex = canonicalFieldHex(computeNoteCommitmentV1(selected.note));
   const merkle = normalizeMerklePathResult(await lookupMerklePath(merklePathProvider, commitmentHex), "withdraw selected note");
   const recipientDecoded = fromBech32(recipient);
   const expectedAccountPrefix = normalizeBech32Prefix(accountPrefix ?? defaultAccountPrefix, "accountPrefix");
@@ -1221,11 +1136,21 @@ export async function buildPreparedWithdrawProverPayload({
     "withdraw prover payload expired",
     "withdraw prover payload expires_at_unix"
   );
-  const signature = await resolveWithdrawSignature(signer, computeWithdrawNoteHash(selected.note, recipientBytes));
+  const nullifier = computeNoteNullifierV1(selected.note);
+  const intent = computeSpendIntentV2({
+    chainDomain: computeChainDomainV1(String(chainId || "").trim(), activeCircuitSetIdV1),
+    root: bytesToBigIntBE(decodeCanonicalFieldHex(merkle.rootHex, "withdraw root")),
+    nullifier,
+    amount: targetAmount,
+    assetId: selected.note.assetID,
+    recipientDigest: computeWithdrawRecipientDigestV1(recipientBytes),
+    expiresAtUnix: normalizedExpiresAtUnix
+  });
+  const signature = await resolveWithdrawSignature(signer, intent);
   const payload = {
     version: preparedWithdrawProverPayloadVersion,
     root_hex: merkle.rootHex,
-    nullifier_hex: computeNoteNullifierHex(selected.note),
+    nullifier_hex: canonicalFieldHex(nullifier),
     amount: targetAmount.toString(),
     asset_denom: coin.denom,
     asset_id_hex: canonicalFieldHex(selected.note.assetID),
@@ -1238,7 +1163,7 @@ export async function buildPreparedWithdrawProverPayload({
     view_pubkey_hex: noteViewPubKeyHex(selected.note),
     merkle_path: merkle.path,
     merkle_path_helper: merkle.pathHelper,
-    spend_note_hash_signature_hex: hexFromBytes(signature)
+    spend_intent_signature_hex: hexFromBytes(signature)
   };
   if (!payload.chain_id) {
     throw new Error("chainId is required for withdraw");
@@ -1264,19 +1189,20 @@ export function computePreparedWithdrawPayloadHash({
 }
 
 export function validatePreparedWithdrawProof(proverPayload, proof, nowUnix = Math.floor(Date.now() / 1000)) {
+  validatePreparedWithdrawProverPayloadMetadata(proverPayload, nowUnix);
   if (!proof || proof.version !== preparedWithdrawProofVersion) {
     throw new Error(`unsupported withdraw proof version ${JSON.stringify(proof?.version)}`);
   }
   if (proof.payload_hash !== proverPayload.payload_hash) {
     throw new Error("withdraw proof payload hash mismatch");
   }
-  assertFutureUnixTimestamp(
-    proverPayload.expires_at_unix,
-    nowUnix,
-    "withdraw prover payload expired",
-    "withdraw prover payload expires_at_unix"
-  );
-  normalizeHex(proof.proof_hex, "withdraw proof");
+  const proofHex = normalizeHex(proof.proof_hex, "withdraw proof");
+  if (proofHex.length !== 328) throw new Error("withdraw proof must be exactly 164 bytes");
+  const proofBytes = hexToBytes(proofHex, "withdraw proof");
+  for (const offset of [0, 32, 96, 132]) {
+    if ((proofBytes[offset] & 0xc0) === 0) throw new Error(`withdraw proof point at offset ${offset} is not compressed`);
+  }
+  if (proofBytes.slice(128, 132).some(byte => byte !== 0)) throw new Error("withdraw proof commitments are not supported");
   return true;
 }
 
@@ -1302,10 +1228,34 @@ function assertFutureUnixTimestamp(value, nowUnix, expiredMessage, label) {
   if (!Number.isSafeInteger(timestamp)) {
     throw new Error(`${label} must be a safe integer unix timestamp`);
   }
-  if (timestamp < nowUnix) {
+  if (timestamp <= nowUnix) {
     throw new Error(expiredMessage);
   }
   return timestamp;
+}
+
+export function validatePreparedWithdrawProverPayloadMetadata(payload, nowUnix = Math.floor(Date.now() / 1000)) {
+  if (!payload || payload.version !== preparedWithdrawProverPayloadVersion) {
+    throw new Error(`unsupported withdraw prover payload version ${JSON.stringify(payload?.version)}`);
+  }
+  if (!payload.payload_hash || payload.payload_hash !== computePreparedWithdrawProverPayloadHash(payload)) {
+    throw new Error("withdraw prover payload hash mismatch; the file may have been modified after preparation");
+  }
+  if (!String(payload.chain_id || "").trim()) throw new Error("withdraw prover payload chain_id is required");
+  assertFutureUnixTimestamp(payload.expires_at_unix, nowUnix, "withdraw prover payload expired", "withdraw prover payload expires_at_unix");
+  if (normalizeHex(payload.root_hex, "withdraw root").length !== 64 || normalizeHex(payload.nullifier_hex, "withdraw nullifier").length !== 64) {
+    throw new Error("withdraw prover root and nullifier must be 32-byte hex strings");
+  }
+  if (canonicalFieldHex(computeAssetIdV1(payload.asset_denom)) !== normalizeHex(payload.asset_id_hex, "withdraw asset ID")) {
+    throw new Error("withdraw prover payload asset_denom does not match asset_id_hex");
+  }
+  const recipientBytes = Uint8Array.from(fromBech32(payload.recipient).data);
+  if (hexFromBytes(recipientBytes) !== normalizeHex(payload.recipient_bytes_hex, "withdraw recipient bytes")) {
+    throw new Error("withdraw prover payload recipient_bytes_hex does not match recipient");
+  }
+  const signature = hexToBytes(normalizeHex(payload.spend_intent_signature_hex, "withdraw spend intent signature"), "withdraw spend intent signature");
+  if (signature.length !== 64) throw new Error("withdraw spend intent signature must be 64 bytes");
+  return true;
 }
 
 export function validatePreparedWithdrawPayload(payload, nowUnix = Math.floor(Date.now() / 1000)) {
@@ -1413,7 +1363,7 @@ async function buildWithdrawPayloadWithProof({ proverAdapter, ...input } = {}) {
   const { selectedNote, payload: proverPayload } = await buildPreparedWithdrawProverPayload(input);
   await assertProverNullifiersUnspent([proverPayload.nullifier_hex], input.checkNullifiers);
   const response = await proverAdapter.proveWithdraw({
-    version: "v1",
+    version: "v2",
     payload: proverPayload
   });
   const proof = response?.proof || response;

@@ -1,14 +1,43 @@
 import {
   CURVE_ORDER,
+  FIELD_MODULUS,
   bytesFromHex,
+  bytesToBigIntBE,
+  canonicalFieldHex,
+  decodeShieldedAddress,
   decodeCanonicalFieldHex,
+  deriveDisclosureKeys,
+  deriveSpendKeys,
+  deriveViewKeys,
+  hexFromBytes,
+  hashStringToField,
   normalizeHex,
+  packPoint,
   unpackPointHex
 } from "../core/crypto.js";
-import { sha256Hex } from "../core/browser-crypto.js";
+import { randomBytes, sha256Hex } from "../core/browser-crypto.js";
 import {
+  createNote,
+  createSpendNoteHashSigner,
+  normalizeFoundNote,
+  normalizeNote,
+  parseCoin
+} from "../core/note.js";
+import {
+  activeCircuitSetIdV1,
+  computeAssetIdV1,
+  computeChainDomainV1,
+  computeNoteCommitmentV1,
+  computeNoteNullifierV1,
+  computeTransferFullDisclosureDigestV2,
+  computeTransferIntentV2,
+  computeTransferPayloadDigestV1,
+  computeTransferUserDisclosureDigestV2,
   disclosurePlaintextV1Size,
+  encryptDisclosureV1,
+  encryptNoteForTransferV1,
   encryptedEnvelopeKindV1,
+  marshalDisclosurePlaintextV1,
   unmarshalDisclosurePlaintextV1,
   unwrapEncryptedEnvelopeV1
 } from "./protocol-v1.js";
@@ -19,6 +48,108 @@ export const transferV5ProofRequestVersion = "v2";
 export const transferV5ProofResponseVersion = "v2";
 
 const maxShieldedAmount = (1n << 64n) - 1n;
+
+function randomNonZeroField(excluded = new Set()) {
+  while (true) {
+    const candidate = bytesToBigIntBE(randomBytes(32));
+    if (candidate === 0n || candidate >= FIELD_MODULUS || excluded.has(candidate)) continue;
+    return candidate;
+  }
+}
+
+function canonicalExpiryFromInput(expiresAtUnix, chainNowUnix) {
+  const now = chainNowUnix == null ? Math.floor(Date.now() / 1000) : Number(chainNowUnix);
+  if (!Number.isSafeInteger(now) || now < 0) throw new Error("transfer chainNowUnix must be a non-negative safe integer");
+  const expiry = expiresAtUnix == null ? now + 1800 : Number(expiresAtUnix);
+  if (!Number.isSafeInteger(expiry) || expiry <= now) throw new Error("transfer expires_at_unix must be a future safe integer");
+  return expiry;
+}
+
+function positiveAmount(value, label) {
+  const amount = BigInt(canonicalAmount(value, label));
+  if (amount === 0n) throw new Error(`${label} must be positive`);
+  return amount;
+}
+
+function normalizedMerklePath(result, label) {
+  const root = canonicalFieldHex(bytesToBigIntBE(decodeCanonicalFieldHex(result?.root ?? result?.Root ?? "", `${label} root`)));
+  const path = [...(result?.path ?? result?.Path ?? [])].map((entry, index) => opaqueHex(entry, `${label} path ${index}`));
+  const helper = [...(result?.path_helper ?? result?.pathHelper ?? result?.PathHelper ?? [])].map((entry, index) => {
+    const value = Number(entry);
+    if (value !== 0 && value !== 1) throw new Error(`${label} path helper ${index} must be 0 or 1`);
+    return value;
+  });
+  if (path.length !== helper.length) throw new Error(`${label} merkle path and helper lengths must match`);
+  return { root, path, helper };
+}
+
+async function lookupMerklePath(provider, commitmentHex) {
+  if (!provider) throw new Error("a merkle path provider is required");
+  if (typeof provider === "function") return provider(commitmentHex);
+  if (typeof provider.lookupMerklePath === "function") return provider.lookupMerklePath(commitmentHex);
+  if (typeof provider.LookupMerklePath === "function") return provider.LookupMerklePath(commitmentHex);
+  throw new Error("merkle path provider must expose lookupMerklePath(commitmentHex)");
+}
+
+function disclosureFields(fromNote, recipientNote, commitment, blinding, { policy, full = false } = {}) {
+  const from = normalizeNote(fromNote);
+  const recipient = normalizeNote(recipientNote);
+  const field = {
+    commitment,
+    amount: (full || (policy & 1) !== 0) ? recipient.amount : 0n,
+    assetID: recipient.assetID,
+    senderSpendKeyX: (full || (policy & 4) !== 0) ? from.receiverSpendPubKeyX : 0n,
+    senderSpendKeyY: (full || (policy & 4) !== 0) ? from.receiverSpendPubKeyY : 0n,
+    senderViewKeyX: (full || (policy & 4) !== 0) ? from.receiverViewPubKeyX : 0n,
+    senderViewKeyY: (full || (policy & 4) !== 0) ? from.receiverViewPubKeyY : 0n,
+    recipientSpendKeyX: (full || (policy & 2) !== 0) ? recipient.receiverSpendPubKeyX : 0n,
+    recipientSpendKeyY: (full || (policy & 2) !== 0) ? recipient.receiverSpendPubKeyY : 0n,
+    recipientViewKeyX: (full || (policy & 2) !== 0) ? recipient.receiverViewPubKeyX : 0n,
+    recipientViewKeyY: (full || (policy & 2) !== 0) ? recipient.receiverViewPubKeyY : 0n,
+    disclosureBlinding: blinding
+  };
+  return field;
+}
+
+function disclosureDigestFields(fromNote, recipientNote, commitment, blinding) {
+  const from = normalizeNote(fromNote);
+  const recipient = normalizeNote(recipientNote);
+  return {
+    commitment,
+    amount: recipient.amount,
+    assetID: recipient.assetID,
+    fromSpendPubKeyX: from.receiverSpendPubKeyX,
+    fromSpendPubKeyY: from.receiverSpendPubKeyY,
+    fromViewPubKeyX: from.receiverViewPubKeyX,
+    fromViewPubKeyY: from.receiverViewPubKeyY,
+    toSpendPubKeyX: recipient.receiverSpendPubKeyX,
+    toSpendPubKeyY: recipient.receiverSpendPubKeyY,
+    toViewPubKeyX: recipient.receiverViewPubKeyX,
+    toViewPubKeyY: recipient.receiverViewPubKeyY,
+    disclosureBlinding: blinding
+  };
+}
+
+function plaintextHex(value) {
+  return hexFromBytes(value);
+}
+
+function notePublicKeyHex(note, kind) {
+  const normalized = normalizeNote(note);
+  const point = kind === "spend"
+    ? { x: normalized.receiverSpendPubKeyX, y: normalized.receiverSpendPubKeyY }
+    : { x: normalized.receiverViewPubKeyX, y: normalized.receiverViewPubKeyY };
+  return hexFromBytes(packPoint(point));
+}
+
+async function resolveOwnerIntentSignature(signer, intent) {
+  if (!signer) throw new Error("an owner intent signer is required");
+  const sign = signer.signOwnerIntent || signer.signSpendNoteHash || signer.signNoteHash;
+  if (typeof sign !== "function") throw new Error("owner intent signer must expose signOwnerIntent(intent) or signSpendNoteHash(intent)");
+  const signature = Uint8Array.from(await sign.call(signer, intent));
+  if (signature.length !== 64) throw new Error("transfer owner intent signature must be 64 bytes");
+  return hexFromBytes(signature);
+}
 
 function writeLines(values) {
   return values.map(value => `${value}\n`).join("");
@@ -221,6 +352,234 @@ export function computePreparedTransferV5PayloadHash(payload) {
   for (const output of outputs) lines.push(output?.amount ?? "", output?.randomness_hex ?? "", output?.spend_pubkey_hex ?? "", output?.view_pubkey_hex ?? "", output?.commitment_hex ?? "");
   lines.push(cipherTexts.length, ...cipherTexts, viewTags.length, ...viewTags);
   return sha256Hex(writeLines(lines));
+}
+
+/**
+ * Builds the 0.2.0 JoinSplit 2x2 prover artifact. This intentionally emits
+ * only the fixed `privacy-fixed-v1` encodings and V5/V2 wire contract.
+ */
+export async function buildPreparedTransferV5Payload({
+  creator,
+  chainId,
+  expiresAtUnix,
+  chainNowUnix,
+  inputs,
+  recipient,
+  amount,
+  transferAmount,
+  transferDenom,
+  denom,
+  rootSeed,
+  senderSpendPubKey,
+  senderViewPubKey,
+  merklePathProvider,
+  ownerIntentSigner,
+  noteHashSigner,
+  userPrivacyPolicy = 0,
+  userDisclosureMode,
+  userDisclosureTargetPubKeyHex = "",
+  auditDisclosureTargetPubKeyHex,
+  disableSelfViewDisclosure = false,
+  selfViewDisclosureTargetPubKeyHex,
+  shieldedPrefix
+} = {}) {
+  const sender = String(creator ?? "").trim();
+  if (!sender) throw new Error("transfer creator is required");
+  const normalizedChainId = String(chainId ?? "").trim();
+  if (!normalizedChainId) throw new Error("chainId is required for transfer");
+  const expiry = canonicalExpiryFromInput(expiresAtUnix, chainNowUnix);
+  const coin = parseCoin(amount ?? transferAmount, transferDenom ?? denom);
+  const targetAmount = positiveAmount(coin.amount, "transfer amount");
+  const foundInputs = [...(inputs ?? [])].map(normalizeFoundNote);
+  if (foundInputs.length !== 2) throw new Error(`transfer prepared payload requires exactly 2 input notes; got ${foundInputs.length}`);
+
+  const first = normalizeNote(foundInputs[0].note);
+  const second = normalizeNote(foundInputs[1].note);
+  const expectedAssetID = computeAssetIdV1(coin.denom);
+  for (const [index, note] of [first, second].entries()) {
+    if (note.assetID !== expectedAssetID) throw new Error(`transfer input ${index} asset does not match requested denom ${coin.denom}`);
+    if (note.receiverSpendPubKeyX !== first.receiverSpendPubKeyX || note.receiverSpendPubKeyY !== first.receiverSpendPubKeyY || note.receiverViewPubKeyX !== first.receiverViewPubKeyX || note.receiverViewPubKeyY !== first.receiverViewPubKeyY) {
+      throw new Error("transfer inputs must share the same owner");
+    }
+  }
+  const total = first.amount + second.amount;
+  if (total < targetAmount) throw new Error(`insufficient selected input total ${total} for transfer amount ${targetAmount}`);
+
+  const recipientKeys = decodeShieldedAddress(recipient, { shieldedPrefix });
+  const senderSpend = senderSpendPubKey ?? (rootSeed ? deriveSpendKeys(rootSeed).pubKey : null);
+  const senderView = senderViewPubKey ?? (rootSeed ? deriveViewKeys(rootSeed).pubKey : null);
+  if (!senderSpend || !senderView) throw new Error("sender spend/view public keys or rootSeed are required");
+  const signer = ownerIntentSigner ?? noteHashSigner ?? (rootSeed ? createSpendNoteHashSigner(rootSeed) : null);
+  if (!signer) throw new Error("ownerIntentSigner, noteHashSigner, or rootSeed is required");
+
+  const recipientNote = createNote({
+    spendPubKey: recipientKeys.spendPubKey,
+    viewPubKey: recipientKeys.viewPubKey,
+    amount: targetAmount,
+    assetId: first.assetID,
+    memo: "Transfer"
+  });
+  const changeNote = createNote({
+    spendPubKey: senderSpend,
+    viewPubKey: senderView,
+    amount: total - targetAmount,
+    assetId: first.assetID,
+    memo: "Change"
+  });
+  const outputNotes = [recipientNote, changeNote];
+  const outputCommitments = outputNotes.map(note => computeNoteCommitmentV1(note));
+  if (outputCommitments[0] === outputCommitments[1]) throw new Error("transfer output commitments must be distinct");
+
+  const preparedInputs = [];
+  let rootHex = "";
+  for (const [index, found] of foundInputs.entries()) {
+    const note = normalizeNote(found.note);
+    const commitmentHex = canonicalFieldHex(computeNoteCommitmentV1(note));
+    const merkle = normalizedMerklePath(await lookupMerklePath(merklePathProvider, commitmentHex), `transfer input ${index}`);
+    if (!rootHex) rootHex = merkle.root;
+    else if (rootHex !== merkle.root) throw new Error("merkle root mismatch across transfer inputs");
+    preparedInputs.push({
+      amount: note.amount.toString(),
+      randomness_hex: canonicalFieldHex(note.randomness),
+      spend_pubkey_hex: notePublicKeyHex(note, "spend"),
+      view_pubkey_hex: notePublicKeyHex(note, "view"),
+      merkle_path: merkle.path,
+      merkle_path_helper: merkle.helper,
+      nullifier_hex: canonicalFieldHex(computeNoteNullifierV1(note))
+    });
+  }
+  if (preparedInputs[0].nullifier_hex === preparedInputs[1].nullifier_hex) throw new Error("transfer input nullifiers must be distinct");
+
+  const policy = Number(userPrivacyPolicy);
+  if (!Number.isInteger(policy) || policy < 0 || policy > 7) throw new Error("transfer user privacy policy must be in 0..7");
+  const mode = policy === 0
+    ? 0
+    : Number(userDisclosureMode ?? 2);
+  if (policy === 0 && mode !== 0) throw new Error("all-private transfer must use disclosure mode NONE");
+  if (policy !== 0 && mode !== 1 && mode !== 2) throw new Error("disclosed transfer must use public or recipient-encrypted disclosure mode");
+
+  const outputRandomness = normalizeNote(recipientNote).randomness;
+  const fullBlinding = randomNonZeroField(new Set([outputRandomness]));
+  const userBlinding = policy === 0 ? 0n : randomNonZeroField(new Set([outputRandomness, fullBlinding]));
+  const common = disclosureDigestFields(first, recipientNote, outputCommitments[0], fullBlinding);
+  const fullDigest = computeTransferFullDisclosureDigestV2(common);
+  const fullDisclosure = {
+    plane: 2,
+    outputIndex: 0,
+    policy: 0xffffffff,
+    disclosedFieldBitmap: 7,
+    ...disclosureFields(first, recipientNote, outputCommitments[0], fullBlinding, { policy: 7, full: true })
+  };
+  const auditTarget = unpackPointHex(auditDisclosureTargetPubKeyHex);
+  const auditPayload = encryptDisclosureV1(fullDisclosure, auditTarget, encryptedEnvelopeKindV1.auditDisclosure);
+
+  let userDigestHex = "";
+  let userTargetHex = "";
+  let userPayloadHex = "";
+  if (policy !== 0) {
+    const userDigest = computeTransferUserDisclosureDigestV2({ ...common, policy, disclosureBlinding: userBlinding });
+    const userDisclosure = {
+      plane: 1,
+      outputIndex: 0,
+      policy,
+      disclosedFieldBitmap: policy,
+      ...disclosureFields(first, recipientNote, outputCommitments[0], userBlinding, { policy })
+    };
+    userDigestHex = canonicalFieldHex(userDigest);
+    if (mode === 1) userPayloadHex = plaintextHex(marshalDisclosurePlaintextV1(userDisclosure));
+    else {
+      const targetHex = pointHex(userDisclosureTargetPubKeyHex, "transfer user disclosure target public key");
+      userTargetHex = targetHex;
+      userPayloadHex = plaintextHex(encryptDisclosureV1(userDisclosure, unpackPointHex(targetHex), encryptedEnvelopeKindV1.userDisclosure));
+    }
+  }
+
+  let selfViewDigestHex = "";
+  let selfViewPayloadHex = "";
+  if (!disableSelfViewDisclosure) {
+    const targetHex = String(selfViewDisclosureTargetPubKeyHex ?? "").trim() || (rootSeed ? deriveDisclosureKeys(rootSeed).pubKeyHex : "");
+    if (!targetHex) throw new Error("self-view disclosure target public key or rootSeed is required");
+    selfViewDigestHex = canonicalFieldHex(fullDigest);
+    selfViewPayloadHex = plaintextHex(encryptDisclosureV1(fullDisclosure, unpackPointHex(pointHex(targetHex, "transfer self-view disclosure target public key")), encryptedEnvelopeKindV1.selfViewDisclosure));
+  }
+
+  const cipherOutputs = outputNotes.map((note, index) => encryptNoteForTransferV1(note, canonicalFieldHex(outputCommitments[index]), index));
+  const payload = {
+    version: preparedTransferV5PayloadVersion,
+    creator: sender,
+    chain_id: normalizedChainId,
+    expires_at_unix: expiry,
+    root_hex: rootHex,
+    asset_id_hex: canonicalFieldHex(first.assetID),
+    inputs: preparedInputs,
+    outputs: outputNotes.map((note, index) => {
+      const normalized = normalizeNote(note);
+      return {
+        amount: normalized.amount.toString(),
+        randomness_hex: canonicalFieldHex(normalized.randomness),
+        spend_pubkey_hex: notePublicKeyHex(normalized, "spend"),
+        view_pubkey_hex: notePublicKeyHex(normalized, "view"),
+        commitment_hex: canonicalFieldHex(outputCommitments[index])
+      };
+    }),
+    cipher_text_hexes: cipherOutputs.map(output => plaintextHex(output.ciphertext)),
+    view_tag_hexes: cipherOutputs.map(output => plaintextHex(output.viewTag)),
+    user_privacy_policy: policy,
+    user_disclosure_mode: mode,
+    user_disclosure_digest_hex: userDigestHex,
+    user_disclosure_target_pubkey_hex: userTargetHex,
+    user_disclosure_payload_hex: userPayloadHex,
+    audit_disclosure_digest_hex: canonicalFieldHex(fullDigest),
+    audit_disclosure_target_pubkey_hex: pointHex(auditDisclosureTargetPubKeyHex, "transfer audit disclosure target public key"),
+    audit_disclosure_payload_hex: plaintextHex(auditPayload),
+    self_view_disclosure_digest_hex: selfViewDigestHex,
+    self_view_disclosure_payload_hex: selfViewPayloadHex,
+    user_disclosure_blinding_hex: policy === 0 ? "" : canonicalFieldHex(userBlinding),
+    full_disclosure_blinding_hex: canonicalFieldHex(fullBlinding),
+    owner_signature_hex: "",
+    payload_hash: ""
+  };
+  const effect = buildTransferV5Effect(payload);
+  const payloadDigest = computeTransferPayloadDigestV1(effect);
+  const chainDomain = computeChainDomainV1(normalizedChainId, activeCircuitSetIdV1);
+  const intent = computeTransferIntentV2({
+    chainDomain,
+    root: bytesToBigIntBE(bytesFromHex(rootHex, "transfer root")),
+    assetId: first.assetID,
+    nullifiers: preparedInputs.map(input => bytesToBigIntBE(bytesFromHex(input.nullifier_hex, "transfer nullifier"))),
+    commitments: outputCommitments,
+    userDisclosureDigest: userDigestHex ? bytesToBigIntBE(bytesFromHex(userDigestHex, "transfer user disclosure digest")) : 0n,
+    fullDisclosureDigest: fullDigest,
+    payloadDigest,
+    expiresAtUnix: expiry
+  });
+  payload.owner_signature_hex = await resolveOwnerIntentSignature(signer, intent);
+  payload.payload_hash = computePreparedTransferV5PayloadHash(payload);
+  validatePreparedTransferV5PayloadMetadata(payload);
+  return payload;
+}
+
+function buildTransferV5Effect(payload) {
+  return {
+    creator: payload.creator,
+    proof: new Uint8Array(),
+    root: bytesFromHex(payload.root_hex, "transfer root"),
+    nullifiers: payload.inputs.map((input, index) => bytesFromHex(input.nullifier_hex, `transfer nullifier ${index}`)),
+    newCommitments: payload.outputs.map((output, index) => bytesFromHex(output.commitment_hex, `transfer commitment ${index}`)),
+    cipherTexts: payload.cipher_text_hexes.map((value, index) => bytesFromHex(value, `transfer ciphertext ${index}`)),
+    viewTags: payload.view_tag_hexes.map((value, index) => bytesFromHex(value, `transfer view tag ${index}`)),
+    userPrivacyPolicy: payload.user_privacy_policy,
+    userDisclosureDigest: payload.user_disclosure_digest_hex ? bytesFromHex(payload.user_disclosure_digest_hex, "transfer user disclosure digest") : new Uint8Array(),
+    userDisclosureMode: payload.user_disclosure_mode,
+    userDisclosureTargetPubkey: payload.user_disclosure_target_pubkey_hex ? bytesFromHex(payload.user_disclosure_target_pubkey_hex, "transfer user disclosure target") : new Uint8Array(),
+    userDisclosurePayload: payload.user_disclosure_payload_hex ? bytesFromHex(payload.user_disclosure_payload_hex, "transfer user disclosure payload") : new Uint8Array(),
+    auditDisclosureDigest: bytesFromHex(payload.audit_disclosure_digest_hex, "transfer audit disclosure digest"),
+    auditDisclosureTargetPubkey: bytesFromHex(payload.audit_disclosure_target_pubkey_hex, "transfer audit disclosure target"),
+    auditDisclosurePayload: bytesFromHex(payload.audit_disclosure_payload_hex, "transfer audit disclosure payload"),
+    selfViewDisclosureDigest: payload.self_view_disclosure_digest_hex ? bytesFromHex(payload.self_view_disclosure_digest_hex, "transfer self-view disclosure digest") : new Uint8Array(),
+    selfViewDisclosurePayload: payload.self_view_disclosure_payload_hex ? bytesFromHex(payload.self_view_disclosure_payload_hex, "transfer self-view disclosure payload") : new Uint8Array(),
+    expiresAtUnix: BigInt(payload.expires_at_unix)
+  };
 }
 
 export function validatePreparedTransferV5PayloadMetadata(payload) {

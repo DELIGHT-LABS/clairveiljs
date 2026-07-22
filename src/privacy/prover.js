@@ -2,11 +2,14 @@ import {
   normalizeHex
 } from "../core/crypto.js";
 import {
-  preparedTransferProofVersion,
   preparedWithdrawProofVersion,
-  validatePreparedTransferProof,
   validatePreparedWithdrawProof
 } from "./payload.js";
+import {
+  preparedTransferV5ProofVersion,
+  preparedTransferV5PayloadVersion,
+  validatePreparedTransferV5Proof
+} from "./transfer-v5.js";
 import {
   batchTransferProofPath,
   batchTransferProofRequestVersion,
@@ -19,10 +22,10 @@ import {
   wrapProverError
 } from "../core/errors.js";
 
-export const transferProofRequestVersion = "v1";
-export const transferProofResponseVersion = "v1";
-export const withdrawProofRequestVersion = "v1";
-export const withdrawProofResponseVersion = "v1";
+export const transferProofRequestVersion = "v2";
+export const transferProofResponseVersion = "v2";
+export const withdrawProofRequestVersion = "v2";
+export const withdrawProofResponseVersion = "v2";
 
 function normalizeBaseURL(baseURL) {
   const url = new URL(String(baseURL || ""));
@@ -108,10 +111,10 @@ function unwrapTransferProof(request, response) {
     response,
     "transfer",
     transferProofResponseVersion,
-    preparedTransferProofVersion
+    preparedTransferV5ProofVersion
   );
   const proof = normalized.proof;
-  validatePreparedTransferProof(request.payload, proof);
+  validatePreparedTransferV5Proof(request.payload, proof);
   return {
     version: normalized.version,
     proof
@@ -169,6 +172,9 @@ export function createHttpProverAdapter({
       };
       if (normalizedRequest.version !== transferProofRequestVersion) {
         throw new Error(`unsupported transfer proof request version ${JSON.stringify(normalizedRequest.version)}`);
+      }
+      if (normalizedRequest.payload?.version !== preparedTransferV5PayloadVersion) {
+        throw new Error(`unsupported transfer payload version ${JSON.stringify(normalizedRequest.payload?.version)} (expected ${preparedTransferV5PayloadVersion})`);
       }
       try {
         const response = await postJSON({
@@ -301,6 +307,9 @@ export function createAsyncJobProverAdapter({
       if (normalizedRequest.version !== transferProofRequestVersion) {
         throw new Error(`unsupported transfer proof request version ${JSON.stringify(normalizedRequest.version)}`);
       }
+      if (normalizedRequest.payload?.version !== preparedTransferV5PayloadVersion) {
+        throw new Error(`unsupported transfer payload version ${JSON.stringify(normalizedRequest.payload?.version)} (expected ${preparedTransferV5PayloadVersion})`);
+      }
       return waitForProof({
         request: normalizedRequest,
         submit: submitTransferJob,
@@ -330,7 +339,7 @@ export function createStaticProverAdapter({ transferProofHex = "", withdrawProof
     async proveTransfer(request) {
       const payload = request?.payload || request;
       const proof = {
-        version: preparedTransferProofVersion,
+        version: preparedTransferV5ProofVersion,
         payload_hash: payload.payload_hash,
         proof_hex: transferProofHex
       };

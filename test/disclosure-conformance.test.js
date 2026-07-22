@@ -53,7 +53,7 @@ function compactReport(report) {
     digest_hex: report.digest_hex,
     verified: report.verified,
     amount: report.amount,
-    asset_denom: report.asset_denom,
+    ...(report.asset_denom ? { asset_denom: report.asset_denom } : {}),
     from: report.from,
     to: report.to
   };
@@ -68,7 +68,7 @@ function expectedDisclosure(summary) {
     digest_hex: summary.digest_hex,
     verified: summary.verified,
     amount: summary.amount,
-    asset_denom: summary.asset_denom,
+    ...(summary.asset_denom ? { asset_denom: summary.asset_denom } : {}),
     from: summary.from_shielded_address,
     to: summary.to_shielded_address
   };
@@ -77,10 +77,10 @@ function expectedDisclosure(summary) {
 test("user public disclosure payload verifies against the golden vector", fixtureTestOptions, () => {
   const vectors = readFixture("privacy_wallet_golden_vectors.json");
   const report = publicPayloadReport(
-    vectors.disclosure.payload_json_hex,
+    vectors.disclosure.payload_plaintext_hex,
     vectors.disclosure.digest_hex,
     vectors.scan.tx_hash_hex,
-    { shieldedPrefix: "clairs" }
+    { shieldedPrefix: "clairs", assetDenom: vectors.note.denom }
   );
   const compact = compactReport(report);
 

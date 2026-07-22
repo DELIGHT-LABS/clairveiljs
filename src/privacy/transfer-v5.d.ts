@@ -57,6 +57,7 @@ export interface PreparedTransferV5Proof {
   proof_hex: Hex;
 }
 
+export function buildPreparedTransferV5Payload(input: object): Promise<PreparedTransferV5Payload>;
 export function computePreparedTransferV5PayloadHash(payload: Partial<PreparedTransferV5Payload>): Hex;
 export function validatePreparedTransferV5PayloadMetadata(payload: PreparedTransferV5Payload): true;
 export function validatePreparedTransferV5PayloadAt(payload: PreparedTransferV5Payload, nowUnix?: number): true;

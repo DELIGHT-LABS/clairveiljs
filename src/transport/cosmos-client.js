@@ -3162,7 +3162,8 @@ export class ClairveilJS {
       merklePathProvider: this,
       shieldedPrefix: this.shieldedPrefix,
       transferDenom: input?.transferDenom ?? input?.denom ?? this.defaultDenom,
-      ...input
+      ...input,
+      chainId: input?.chainId ?? this.chainId
     });
   }
 
@@ -3172,6 +3173,7 @@ export class ClairveilJS {
       shieldedPrefix: this.shieldedPrefix,
       transferDenom: input?.transferDenom ?? input?.denom ?? this.defaultDenom,
       ...input,
+      chainId: input?.chainId ?? this.chainId,
       checkNullifiers: input?.checkNullifiers ?? (nullifiers => this.checkNullifiers(nullifiers))
     });
   }

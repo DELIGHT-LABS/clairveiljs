@@ -6,9 +6,9 @@ import {
   noteViewPubKeyHex
 } from "../core/note.js";
 import {
-  canonicalFieldHex,
-  hashStringToField
+  canonicalFieldHex
 } from "../core/crypto.js";
+import { computeAssetIdV1 } from "./protocol-v1.js";
 
 const maxUint64 = (1n << 64n) - 1n;
 
@@ -57,7 +57,7 @@ export function serializeFoundNote(foundLike) {
     foundLike?.assetIdHex ??
     canonicalFieldHex(found.note.assetID)
   ).toLowerCase();
-  const defaultAssetIdHex = canonicalFieldHex(hashStringToField(defaultAssetDenom)).toLowerCase();
+  const defaultAssetIdHex = canonicalFieldHex(computeAssetIdV1(defaultAssetDenom)).toLowerCase();
   const assetDenom = String(
     foundLike?.asset_denom ??
     foundLike?.assetDenom ??

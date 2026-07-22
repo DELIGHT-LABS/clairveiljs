@@ -948,6 +948,16 @@ export function computeChainDomainV1(chainId, circuitSetId = activeCircuitSetIdV
   return { bytes: digest, hex: hexFromBytes(digest), hi: bytesToBigIntBE(digest.slice(0, 16)), lo: bytesToBigIntBE(digest.slice(16)) };
 }
 
+export function computeWithdrawRecipientDigestV1(recipientBytes) {
+  const recipient = bytes(recipientBytes, "withdraw recipient bytes");
+  if (!recipient.length) throw new Error("withdraw recipient bytes are required");
+  const digest = sha256(concatBytes(
+    utf8Bytes("clairveil.withdraw-recipient.v1"),
+    writeLengthPrefixed(recipient, "withdraw recipient bytes")
+  ));
+  return { bytes: digest, hex: hexFromBytes(digest), hi: bytesToBigIntBE(digest.slice(0, 16)), lo: bytesToBigIntBE(digest.slice(16)) };
+}
+
 export function computeTransferIntentV2({ chainDomain, root, assetId, nullifiers, commitments, userDisclosureDigest, fullDisclosureDigest, payloadDigest, expiresAtUnix } = {}) {
   if (!chainDomain || !payloadDigest) throw new Error("transfer chain and payload digests are required");
   if (!Array.isArray(nullifiers) || nullifiers.length !== 2 || !Array.isArray(commitments) || commitments.length !== 2) {
@@ -971,6 +981,30 @@ export function computeTransferIntentV2({ chainDomain, root, assetId, nullifiers
     uint(payloadDigest.hi, 128, "transfer payload digest hi"),
     uint(payloadDigest.lo, 128, "transfer payload digest lo"),
     expiry
+  );
+}
+
+export function computeSpendIntentV2({ chainDomain, root, nullifier, amount, assetId, recipientDigest, expiresAtUnix } = {}) {
+  if (!chainDomain || !recipientDigest) throw new Error("withdraw chain and recipient digests are required");
+  const expiry = uint(expiresAtUnix, 63, "withdraw intent expiry");
+  if (!expiry) throw new Error("withdraw intent expiry must be positive");
+  const required = [
+    [chainDomain.hi, "withdraw chain digest hi"], [chainDomain.lo, "withdraw chain digest lo"],
+    [recipientDigest.hi, "withdraw recipient digest hi"], [recipientDigest.lo, "withdraw recipient digest lo"]
+  ];
+  for (const [value, label] of required) {
+    field(value, label);
+    if (BigInt(value) >= (1n << 128n)) throw new Error(`${label} must be an unsigned 128-bit integer`);
+  }
+  return mimcHash(
+    hashStringToField("CLAIRVEIL_SPEND_INTENT_V2"),
+    BigInt(chainDomain.hi), BigInt(chainDomain.lo),
+    hashStringToField("CLAIRVEIL_SPEND_V2"),
+    field(root, "withdraw intent root", { nonZero: true }),
+    field(nullifier, "withdraw intent nullifier", { nonZero: true }),
+    uint(amount, 64, "withdraw intent amount"),
+    field(assetId, "withdraw intent asset ID", { nonZero: true }),
+    BigInt(recipientDigest.hi), BigInt(recipientDigest.lo), expiry
   );
 }
 

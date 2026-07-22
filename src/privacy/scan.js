@@ -28,7 +28,8 @@ import {
   encryptedEnvelopeKindV1,
   fieldHexV1,
   privacyFixedV1,
-  unwrapEncryptedEnvelopeV1
+  unwrapEncryptedEnvelopeV1,
+  unmarshalNotePlaintextV1
 } from "./protocol-v1.js";
 
 export const privacyScanSchemaVersionV2 = "privacy-scan-v2";
@@ -80,6 +81,12 @@ function parseStringField(text, key) {
 }
 
 export function parseNoteBytes(bytes) {
+  try {
+    return unmarshalNotePlaintextV1(bytes);
+  } catch {
+    // Historical scan events can be retained locally, but all current
+    // Clairveil 0.2.0 network payloads take the fixed-binary branch above.
+  }
   const text = utf8String(bytes).trim();
   return normalizeNote({
     rsx: parseBigIntField(text, "rsx"),
@@ -96,7 +103,7 @@ export function parseNoteBytes(bytes) {
 function foundNoteFromEvent(note, event) {
   return {
     note,
-    nullifier: computeNoteNullifierHex(note).toLowerCase(),
+    nullifier: fieldHexV1(computeNoteNullifierV1(note)).toLowerCase(),
     isSpent: false,
     nullifierStatus: "unverified",
     txHash: String(event?.tx_hash_hex ?? event?.txHashHex ?? "").toUpperCase(),
@@ -113,7 +120,7 @@ function noteCommitmentMatches(note, commitmentHex) {
   const text = String(commitmentHex || "").trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(text)) return false;
   try {
-    return computeNoteCommitmentHex(note).toLowerCase() === text;
+    return fieldHexV1(computeNoteCommitmentV1(note)).toLowerCase() === text;
   } catch {
     return false;
   }
@@ -124,8 +131,7 @@ function processDepositEvent(event, rootSeed) {
   const commitmentHex = stripQuotes(eventAttribute(event, "commitment"));
   if (!encryptedNoteHex || !commitmentHex) return [];
   try {
-    const noteBytes = decryptWithRootSeed(bytesFromHex(encryptedNoteHex, "encrypted note"), rootSeed);
-    const note = parseNoteBytes(noteBytes);
+    const note = decryptDepositNoteV1(bytesFromHex(encryptedNoteHex, "encrypted note"), rootSeed);
     return noteCommitmentMatches(note, commitmentHex)
       ? [foundNoteFromEvent(note, event)]
       : [];
@@ -141,20 +147,19 @@ function processTransferEvent(event, spendScalar, viewScalar) {
     const commitmentHex = stripQuotes(eventAttribute(event, commitmentKey));
     if (!cipherTextHex || !commitmentHex) continue;
 
-    let noteBytes;
+    let note;
     try {
-      noteBytes = asymDecryptHex(cipherTextHex, viewScalar);
+      note = decryptTransferNoteV1(bytesFromHex(cipherTextHex, "transfer ciphertext"), viewScalar);
     } catch {
       if (spendScalar == null || spendScalar === viewScalar) continue;
       try {
-        noteBytes = asymDecryptHex(cipherTextHex, spendScalar);
+        note = decryptTransferNoteV1(bytesFromHex(cipherTextHex, "transfer ciphertext"), spendScalar);
       } catch {
         continue;
       }
     }
 
     try {
-      const note = parseNoteBytes(noteBytes);
       if (noteCommitmentMatches(note, commitmentHex)) {
         found.push(foundNoteFromEvent(note, event));
       }
@@ -172,8 +177,7 @@ function processScanProjectionEvent(event, rootSeed, spendScalar, viewScalar) {
       const encryptedNoteHex = outputField(output, "encrypted_note_hex", "encryptedNoteHex");
       if (!encryptedNoteHex) continue;
       try {
-        const noteBytes = decryptWithRootSeed(bytesFromHex(encryptedNoteHex, "encrypted note"), rootSeed);
-        const note = parseNoteBytes(noteBytes);
+        const note = decryptDepositNoteV1(bytesFromHex(encryptedNoteHex, "encrypted note"), rootSeed);
         if (!noteCommitmentMatches(note, outputField(output, "commitment_hex", "commitmentHex"))) continue;
         found.push(foundNoteFromEvent(note, event));
       } catch {
@@ -186,21 +190,20 @@ function processScanProjectionEvent(event, rootSeed, spendScalar, viewScalar) {
       const cipherTextHex = outputField(output, "cipher_text_hex", "cipherTextHex");
       if (!cipherTextHex) continue;
 
-      let noteBytes;
+      let note;
       try {
         // View tags are untrusted scan hints. Safe default is full trial decrypt.
-        noteBytes = asymDecryptHex(cipherTextHex, viewScalar);
+        note = decryptTransferNoteV1(bytesFromHex(cipherTextHex, "transfer ciphertext"), viewScalar);
       } catch {
         if (spendScalar == null || spendScalar === viewScalar) continue;
         try {
-          noteBytes = asymDecryptHex(cipherTextHex, spendScalar);
+          note = decryptTransferNoteV1(bytesFromHex(cipherTextHex, "transfer ciphertext"), spendScalar);
         } catch {
           continue;
         }
       }
 
       try {
-        const note = parseNoteBytes(noteBytes);
         if (!noteCommitmentMatches(note, outputField(output, "commitment_hex", "commitmentHex"))) continue;
         found.push(foundNoteFromEvent(note, event));
       } catch {
