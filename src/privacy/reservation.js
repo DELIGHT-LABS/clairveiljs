@@ -13,6 +13,17 @@ import {
 import {
   canonicalizeShieldedAddressForOperationHash
 } from "../core/crypto.js";
+import {
+  activeCircuitSetIdV1,
+  privacyFixedV1
+} from "./protocol-v1.js";
+
+/** Persistent-reservation identity for the incompatible privacy-note-v1 fresh-genesis boundary. */
+export const privacyReservationStateVersionV1 = "privacy-note-v1-reservation-v1";
+export const privacyReservationStateIdentityV1 = Object.freeze({
+  circuit_set_id: activeCircuitSetIdV1,
+  payload_version: privacyFixedV1
+});
 
 export const reservationStatuses = Object.freeze({
   Discovered: "Discovered",
@@ -642,12 +653,39 @@ function activeKey(reservation) {
   return `${reservation.owner_key_id}\x00${reservation.nullifier_lookup_key}`;
 }
 
+function emptyState() {
+  return {
+    version: privacyReservationStateVersionV1,
+    circuit_set_id: privacyReservationStateIdentityV1.circuit_set_id,
+    payload_version: privacyReservationStateIdentityV1.payload_version,
+    reservations: []
+  };
+}
+
+function isCurrentReservationState(state) {
+  return Boolean(state && typeof state === "object" && !Array.isArray(state)) &&
+    state.version === privacyReservationStateVersionV1 &&
+    state.circuit_set_id === privacyReservationStateIdentityV1.circuit_set_id &&
+    state.payload_version === privacyReservationStateIdentityV1.payload_version;
+}
+
+/**
+ * There is deliberately no migration path from pre-v0.2 reservation records:
+ * an old active lease can otherwise lock or contaminate a fresh privacy-note-v1
+ * operation.  Treat known legacy/current-but-incompatible envelopes as empty.
+ */
+function isFreshGenesisIncompatibleReservationState(state) {
+  const version = state?.version;
+  return version === undefined || version === 1 || version === privacyReservationStateVersionV1;
+}
+
 function normalizeState(state = {}) {
   if (!state || typeof state !== "object" || Array.isArray(state)) {
     throw new Error("reservation state must be an object");
   }
-  const version = state.version ?? 1;
-  if (version !== 1) {
+  if (!isCurrentReservationState(state)) {
+    if (isFreshGenesisIncompatibleReservationState(state)) return emptyState();
+    const version = state.version;
     throw new Error(`unsupported reservation state version: ${version}`);
   }
   if (state.reservations !== undefined && !Array.isArray(state.reservations)) {
@@ -679,7 +717,9 @@ function normalizeState(state = {}) {
     }
   }
   return {
-    version,
+    version: privacyReservationStateVersionV1,
+    circuit_set_id: privacyReservationStateIdentityV1.circuit_set_id,
+    payload_version: privacyReservationStateIdentityV1.payload_version,
     reservations
   };
 }
@@ -2761,7 +2801,13 @@ export class IndexedDbReservationStore extends MemoryReservationStore {
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
       throw new Error("IndexedDB reservation state decoder returned an invalid state");
     }
-    return normalizeState(decoded);
+    const normalized = normalizeState(decoded);
+    // Make the fresh-genesis reset durable as well as behavioral.  A later
+    // tab must never be able to decode and revive a legacy active lease.
+    if (!isCurrentReservationState(decoded)) {
+      await this.#writeState(normalized);
+    }
+    return normalized;
   }
 
   async #writeState(state) {

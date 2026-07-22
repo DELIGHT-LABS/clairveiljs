@@ -14,6 +14,8 @@ import {
   noteReservationIdentity,
   operationStatuses,
   preparePlanReservation,
+  privacyReservationStateIdentityV1,
+  privacyReservationStateVersionV1,
   reservationHeartbeatIntervalMs,
   reservationStatuses,
   rollbackPlanReservation,
@@ -22,6 +24,14 @@ import {
 
 const canonicalRecipient = "clairs19x5u4mf4l4zqcpvr7d809fh4tjy5j50p2mwgky0nj38jpqpj7svndu3hqshu5e3s8w6pea5p30xek5p9flxjf7f44xh7cnfrlsd84pc7upgh3";
 const lowOrderRecipient = "clairs1qqqqpuyn7hs58ytsh9u536pn9pw43qvpkez4pwpf5qc7zujwvscqqqqq7zfltc2rj9ctj72gaqejsh2csxqmv32shq56qv0pwf8xgvqkr7743";
+
+function reservationState(reservations = []) {
+  return {
+    version: privacyReservationStateVersionV1,
+    ...privacyReservationStateIdentityV1,
+    reservations
+  };
+}
 
 function noteFixture({
   nullifier = "11".repeat(32),
@@ -221,22 +231,33 @@ test("reservation stores expose raw replacement only through explicit unsafe API
   assert.equal(typeof store.unsafeReplaceReservation, "function");
 });
 
-test("reservation state fails closed on unsupported versions and statuses", async () => {
+test("reservation state clears pre-v0.2 records and fails closed on unsupported current records", async () => {
   assert.throws(
     () => new MemoryReservationStore({ state: { version: 2, reservations: [] } }),
     /unsupported reservation state version/
   );
+  const legacyActive = {
+    reservation_id: "legacy-active-reservation",
+    owner_key_id: "owner-a",
+    nullifier_lookup_key: "lookup-a",
+    status: reservationStatuses.Reserved
+  };
+  const legacy = new MemoryReservationStore({
+    state: { version: 1, reservations: [legacyActive] }
+  });
+  assert.deepEqual(await legacy.load(), reservationState());
+  const incompatibleIdentity = new MemoryReservationStore({
+    state: { ...reservationState([legacyActive]), payload_version: "legacy-payload-v1" }
+  });
+  assert.deepEqual(await incompatibleIdentity.load(), reservationState());
   assert.throws(
     () => new MemoryReservationStore({
-      state: {
-        version: 1,
-        reservations: [{
+      state: reservationState([{
           reservation_id: "future-reservation",
           owner_key_id: "owner-a",
           nullifier_lookup_key: "lookup-a",
           status: "FutureProofReady"
-        }]
-      }
+        }])
     }),
     /unsupported reservation status/
   );
@@ -249,29 +270,23 @@ test("reservation state fails closed on unsupported versions and statuses", asyn
   };
   assert.throws(
     () => new MemoryReservationStore({
-      state: { version: 1, reservations: [active, { ...active }] }
+      state: reservationState([active, { ...active }])
     }),
     /duplicate reservation_id/
   );
   assert.throws(
     () => new MemoryReservationStore({
-      state: {
-        version: 1,
-        reservations: [active, { ...active, reservation_id: "state-reservation-b" }]
-      }
+      state: reservationState([active, { ...active, reservation_id: "state-reservation-b" }])
     }),
     /duplicate active reservation/
   );
   assert.throws(
     () => new MemoryReservationStore({
-      state: {
-        version: 1,
-        reservations: [active, {
+      state: reservationState([active, {
           ...active,
           reservation_id: "state-reservation-spent",
           status: reservationStatuses.ConfirmedSpent
-        }]
-      }
+        }])
     }),
     /confirmed spent reservation conflicts/
   );
@@ -281,7 +296,7 @@ test("reservation state fails closed on unsupported versions and statuses", asyn
     () => store.unsafeReplaceState({ version: 99, reservations: [] }),
     /unsupported reservation state version/
   );
-  assert.deepEqual(await store.load(), { version: 1, reservations: [] });
+  assert.deepEqual(await store.load(), reservationState());
 });
 
 test("browser IndexedDB reservation storage requires encryption or an explicit demo opt-in", () => {
@@ -336,10 +351,32 @@ test("IndexedDB reservation codecs reject nullish decoded and encoded state", as
   });
   encodeStore.dbPromise = Promise.resolve(encodeHarness.db);
   await assert.rejects(
-    () => encodeStore.unsafeReplaceState({ version: 1, reservations: [] }),
+    () => encodeStore.unsafeReplaceState(reservationState()),
     /encoder returned an invalid value/
   );
   assert.equal(encodeHarness.storedValue, undefined);
+});
+
+test("IndexedDB reservation storage durably clears legacy active leases", async () => {
+  const legacyState = {
+    version: 1,
+    reservations: [{
+      reservation_id: "legacy-indexeddb-active",
+      owner_key_id: "owner-a",
+      nullifier_lookup_key: "lookup-a",
+      status: reservationStatuses.Proving
+    }]
+  };
+  const harness = indexedDbHarness(legacyState);
+  const store = new IndexedDbReservationStore({
+    indexedDB: {},
+    locks: null,
+    requireLocks: false,
+    unsafeAllowPlaintext: true
+  });
+  store.dbPromise = Promise.resolve(harness.db);
+  assert.deepEqual(await store.load(), reservationState());
+  assert.deepEqual(harness.storedValue, reservationState());
 });
 
 test("browser reservation storage fails closed when IndexedDB is unavailable", () => {
@@ -1336,7 +1373,7 @@ test("reservation identity and persisted batch index are immutable", async () =>
 
 test("persisted reservation safety fields reject malformed values and conflicting aliases", async () => {
   const baseState = {
-    version: 1,
+    ...reservationState(),
     reservations: [{
       reservation_id: "reservation-persisted-validation",
       owner_key_id: "chain:clair1owner",

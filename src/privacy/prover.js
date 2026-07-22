@@ -26,6 +26,8 @@ export const transferProofRequestVersion = "v2";
 export const transferProofResponseVersion = "v2";
 export const withdrawProofRequestVersion = "v2";
 export const withdrawProofResponseVersion = "v2";
+/** Match the bounded Go prover transport response policy. */
+export const defaultProverResponseMaxBytes = 1 << 20;
 
 function normalizeBaseURL(baseURL) {
   const url = new URL(String(baseURL || ""));
@@ -154,7 +156,58 @@ function parseStrictJSON(source) {
   return parsed;
 }
 
-async function postJSON({ baseURL, path, body, serializedBody, bearerToken, timeoutMs, fetchImpl }) {
+function responseContentLength(response) {
+  const raw = response?.headers?.get?.("content-length");
+  if (!raw || !/^(0|[1-9][0-9]*)$/.test(raw.trim())) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+async function readBoundedResponseText(response, maxResponseBytes) {
+  const declaredLength = responseContentLength(response);
+  if (declaredLength !== null && declaredLength > maxResponseBytes) {
+    throw new Error(`prover response exceeds ${maxResponseBytes} byte limit`);
+  }
+  if (!response?.body || typeof response.body.getReader !== "function") {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > maxResponseBytes) {
+      throw new Error(`prover response exceeds ${maxResponseBytes} byte limit`);
+    }
+    return text;
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      total += chunk.byteLength;
+      if (total > maxResponseBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The response was already rejected; cancellation is best effort.
+        }
+        throw new Error(`prover response exceeds ${maxResponseBytes} byte limit`);
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function postJSON({ baseURL, path, body, serializedBody, bearerToken, timeoutMs, maxResponseBytes, fetchImpl }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const headers = new Headers();
@@ -171,7 +224,7 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
       redirect: "error",
       signal: controller.signal
     });
-    const text = await response.text();
+    const text = await readBoundedResponseText(response, maxResponseBytes);
     if (!response.ok) {
       throw new Error(`prover request failed with status ${response.status}: ${text}`);
     }
@@ -285,6 +338,7 @@ export function createHttpProverAdapter({
   baseURL,
   bearerToken = "",
   timeoutMs = 120000,
+  maxResponseBytes = defaultProverResponseMaxBytes,
   fetchImpl = fetch
 } = {}) {
   if (!fetchImpl) {
@@ -292,6 +346,9 @@ export function createHttpProverAdapter({
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error("timeoutMs must be positive");
+  }
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
+    throw new Error("maxResponseBytes must be a positive safe integer");
   }
   const normalizedBaseURL = normalizeBaseURL(baseURL);
 
@@ -314,6 +371,7 @@ export function createHttpProverAdapter({
           body: normalizedRequest,
           bearerToken,
           timeoutMs,
+          maxResponseBytes,
           fetchImpl
         });
         return unwrapTransferProof(normalizedRequest, response);
@@ -337,6 +395,7 @@ export function createHttpProverAdapter({
           body: normalizedRequest,
           bearerToken,
           timeoutMs,
+          maxResponseBytes,
           fetchImpl
         });
         return unwrapWithdrawProof(normalizedRequest, response);
@@ -365,6 +424,7 @@ export function createHttpProverAdapter({
           serializedBody: serializeBatchTransferProofRequest(normalizedRequest.payload),
           bearerToken,
           timeoutMs,
+          maxResponseBytes,
           fetchImpl
         });
         return unwrapBatchTransferProof(normalizedRequest, response);

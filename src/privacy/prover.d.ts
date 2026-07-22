@@ -19,11 +19,14 @@ export const transferProofRequestVersion: "v2";
 export const transferProofResponseVersion: "v2";
 export const withdrawProofRequestVersion: "v2";
 export const withdrawProofResponseVersion: "v2";
+export const defaultProverResponseMaxBytes: number;
 
 export function createHttpProverAdapter(input?: {
   baseURL: string;
   bearerToken?: string;
   timeoutMs?: number;
+  /** Maximum decoded HTTP response size. Defaults to 1 MiB. */
+  maxResponseBytes?: number;
   fetchImpl?: typeof fetch;
 }): ProverAdapter & BatchTransferProverAdapter;
 

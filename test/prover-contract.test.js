@@ -215,3 +215,33 @@ test("HTTP prover adapter requires HTTPS remotely, denies redirects, and strict-
     );
   }
 });
+
+test("HTTP prover adapter bounds response bytes before parsing", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  assert.throws(
+    () => createHttpProverAdapter({ baseURL: "http://127.0.0.1", maxResponseBytes: 0 }),
+    /maxResponseBytes must be a positive safe integer/
+  );
+  const adapter = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    maxResponseBytes: 16,
+    fetchImpl: async () => new Response("x".repeat(17), { status: 200 })
+  });
+  await assert.rejects(
+    () => adapter.proveTransfer(examples.transfer.request),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /response exceeds 16 byte limit/.test(error.message)
+  );
+
+  const declaredOversize = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    maxResponseBytes: 16,
+    fetchImpl: async () => new Response("{}", {
+      status: 200,
+      headers: { "content-length": "17" }
+    })
+  });
+  await assert.rejects(
+    () => declaredOversize.proveTransfer(examples.transfer.request),
+    /response exceeds 16 byte limit/
+  );
+});

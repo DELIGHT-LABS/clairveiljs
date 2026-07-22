@@ -100,3 +100,31 @@ test("protocol preflight binds the consensus circuit identity and authoritative 
   assert.equal(preflight.circuit_config.circuit_set_identity.circuits.length, 4);
   assert.equal(preflight.asset.asset_id_hex, assetID);
 });
+
+test("low-level proof builders cannot bypass consensus protocol preflight", async () => {
+  const client = createClairveilClient({
+    rpc: "http://rpc.example",
+    rest: "http://rest.example",
+    chainId: "clairveil-test-1",
+    defaultDenom: "uclair"
+  });
+  const denoms = [];
+  client.assertProtocolPreflight = async denom => {
+    denoms.push(denom);
+    throw new Error(`preflight blocked ${denom}`);
+  };
+
+  for (const [method, input, expectedDenom] of [
+    ["buildPreparedTransferPayload", { denom: "uasset" }, "uasset"],
+    ["buildTransferMessage", { transferDenom: "uasset" }, "uasset"],
+    ["buildPreparedWithdrawProverPayload", { denom: "uasset" }, "uasset"],
+    ["buildRelayWithdrawPayload", { assetDenom: "uasset" }, "uasset"],
+    ["buildWithdrawMessage", { denom: "uasset" }, "uasset"]
+  ]) {
+    await assert.rejects(
+      () => client[method](input),
+      /preflight blocked uasset/
+    );
+    assert.equal(denoms.at(-1), expectedDenom, method);
+  }
+});

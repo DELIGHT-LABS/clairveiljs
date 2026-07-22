@@ -41,6 +41,26 @@ export type ReservationMetadataValue =
   | { readonly [key: string]: ReservationMetadataValue };
 export type ReservationMetadata = Record<string, ReservationMetadataValue>;
 
+export const privacyReservationStateVersionV1: "privacy-note-v1-reservation-v1";
+export const privacyReservationStateIdentityV1: Readonly<{
+  circuit_set_id: "privacy-note-v1";
+  payload_version: "privacy-fixed-v1";
+}>;
+
+export interface ReservationStoreState {
+  version: typeof privacyReservationStateVersionV1;
+  circuit_set_id: "privacy-note-v1";
+  payload_version: "privacy-fixed-v1";
+  reservations: NoteReservationRecord[];
+}
+
+export interface ReservationStoreStateInput {
+  version?: string | number;
+  circuit_set_id?: string;
+  payload_version?: string;
+  reservations?: Partial<NoteReservationRecord>[];
+}
+
 export declare const activeReservationStatuses: readonly ReservationStatus[];
 
 export interface NoteReservationRecord {
@@ -170,7 +190,7 @@ export type SpentNoteEvidence = (object | FoundNote) & (
 );
 
 export interface ReservationStore {
-  load?: () => Promise<{ version: number; reservations: NoteReservationRecord[] }>;
+  load?: () => Promise<ReservationStoreState>;
   listReservations(filter?: { statuses?: readonly string[]; ownerKeyId?: string; owner_key_id?: string; limit?: number }): Promise<NoteReservationRecord[]>;
   getReservation(reservationID: string): Promise<NoteReservationRecord>;
   createReservationBatch(reservations: readonly InitialNoteReservationRecord[]): Promise<NoteReservationRecord[]>;
@@ -241,13 +261,13 @@ export declare function selectedReservationNotesFromPlan(plan?: TransferPlan | T
 
 export declare class MemoryReservationStore implements ReservationStore {
   constructor(input?: {
-    state?: { version?: number; reservations?: Partial<NoteReservationRecord>[] };
+    state?: ReservationStoreStateInput;
     /** Store-local clock used when validating lease state inside atomic mutations. */
     now?: () => Date;
   });
-  load(): Promise<{ version: number; reservations: NoteReservationRecord[] }>;
+  load(): Promise<ReservationStoreState>;
   /** Unsafe test/migration API. Application code must use CAS transitions. */
-  unsafeReplaceState(state: { version?: number; reservations?: Partial<NoteReservationRecord>[] }): Promise<{ version: number; reservations: NoteReservationRecord[] }>;
+  unsafeReplaceState(state: ReservationStoreStateInput): Promise<ReservationStoreState>;
   listReservations(filter?: { statuses?: readonly string[]; ownerKeyId?: string; owner_key_id?: string; limit?: number }): Promise<NoteReservationRecord[]>;
   getReservation(reservationID: string): Promise<NoteReservationRecord>;
   createReservationBatch(reservations?: readonly InitialNoteReservationRecord[]): Promise<NoteReservationRecord[]>;
@@ -283,11 +303,11 @@ export declare class IndexedDbReservationStore extends MemoryReservationStore {
     requireLocks?: boolean;
     require_locks?: boolean;
     /** Encodes the full reservation state before writing it to IndexedDB. Provide with decodeState in production. */
-    encodeState?: (state: { version: number; reservations: NoteReservationRecord[] }) => object | string | number | boolean | bigint | Promise<object | string | number | boolean | bigint>;
-    encode_state?: (state: { version: number; reservations: NoteReservationRecord[] }) => object | string | number | boolean | bigint | Promise<object | string | number | boolean | bigint>;
+    encodeState?: (state: ReservationStoreState) => object | string | number | boolean | bigint | Promise<object | string | number | boolean | bigint>;
+    encode_state?: (state: ReservationStoreState) => object | string | number | boolean | bigint | Promise<object | string | number | boolean | bigint>;
     /** Decodes the value read from IndexedDB. Provide with encodeState in production. */
-    decodeState?: (value: unknown) => { version?: number; reservations?: Partial<NoteReservationRecord>[] } | Promise<{ version?: number; reservations?: Partial<NoteReservationRecord>[] }>;
-    decode_state?: (value: unknown) => { version?: number; reservations?: Partial<NoteReservationRecord>[] } | Promise<{ version?: number; reservations?: Partial<NoteReservationRecord>[] }>;
+    decodeState?: (value: unknown) => ReservationStoreStateInput | Promise<ReservationStoreStateInput>;
+    decode_state?: (value: unknown) => ReservationStoreStateInput | Promise<ReservationStoreStateInput>;
     /** Explicit demo/test-only opt-in for plaintext IndexedDB state. */
     unsafeAllowPlaintext?: boolean;
     unsafe_allow_plaintext?: boolean;
@@ -303,17 +323,17 @@ export declare function createBrowserReservationStore(options?: {
   locks?: ReservationLockManager | null;
   requireLocks?: boolean;
   require_locks?: boolean;
-  encodeState?: (state: { version: number; reservations: NoteReservationRecord[] }) => object | string | number | boolean | bigint | Promise<object | string | number | boolean | bigint>;
-  encode_state?: (state: { version: number; reservations: NoteReservationRecord[] }) => object | string | number | boolean | bigint | Promise<object | string | number | boolean | bigint>;
-  decodeState?: (value: unknown) => { version?: number; reservations?: Partial<NoteReservationRecord>[] } | Promise<{ version?: number; reservations?: Partial<NoteReservationRecord>[] }>;
-  decode_state?: (value: unknown) => { version?: number; reservations?: Partial<NoteReservationRecord>[] } | Promise<{ version?: number; reservations?: Partial<NoteReservationRecord>[] }>;
+  encodeState?: (state: ReservationStoreState) => object | string | number | boolean | bigint | Promise<object | string | number | boolean | bigint>;
+  encode_state?: (state: ReservationStoreState) => object | string | number | boolean | bigint | Promise<object | string | number | boolean | bigint>;
+  decodeState?: (value: unknown) => ReservationStoreStateInput | Promise<ReservationStoreStateInput>;
+  decode_state?: (value: unknown) => ReservationStoreStateInput | Promise<ReservationStoreStateInput>;
   unsafeAllowPlaintext?: boolean;
   unsafe_allow_plaintext?: boolean;
   /** Explicit demo/test-only opt-in when IndexedDB is unavailable. */
   unsafeAllowMemoryFallback?: boolean;
   unsafe_allow_memory_fallback?: boolean;
   now?: () => Date;
-  state?: { version?: number; reservations?: Partial<NoteReservationRecord>[] };
+  state?: ReservationStoreStateInput;
 }): ReservationStore;
 
 type NoteReservationOwnerInput =

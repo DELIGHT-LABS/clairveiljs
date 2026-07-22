@@ -3193,20 +3193,24 @@ export class ClairveilJS {
   }
 
   async buildPreparedTransferPayload(input) {
+    const transferDenom = input?.transferDenom ?? input?.denom ?? this.defaultDenom;
+    await this.assertProtocolPreflight(transferDenom);
     return buildPreparedTransferPayloadCore({
       merklePathProvider: this,
       shieldedPrefix: this.shieldedPrefix,
-      transferDenom: input?.transferDenom ?? input?.denom ?? this.defaultDenom,
+      transferDenom,
       ...input,
       chainId: input?.chainId ?? this.chainId
     });
   }
 
   async buildTransferMessage(input) {
+    const transferDenom = input?.transferDenom ?? input?.denom ?? this.defaultDenom;
+    await this.assertProtocolPreflight(transferDenom);
     return buildTransferMessageCore({
       merklePathProvider: this,
       shieldedPrefix: this.shieldedPrefix,
-      transferDenom: input?.transferDenom ?? input?.denom ?? this.defaultDenom,
+      transferDenom,
       ...input,
       chainId: input?.chainId ?? this.chainId,
       checkNullifiers: input?.checkNullifiers ?? (nullifiers => this.checkNullifiers(nullifiers))
@@ -3214,20 +3218,24 @@ export class ClairveilJS {
   }
 
   async buildPreparedWithdrawProverPayload(input) {
+    const assetDenom = input?.assetDenom ?? input?.denom ?? this.defaultDenom;
+    await this.assertProtocolPreflight(assetDenom);
     return buildPreparedWithdrawProverPayloadCore({
       merklePathProvider: this,
       accountPrefix: this.accountPrefix,
-      assetDenom: input?.assetDenom ?? input?.denom ?? this.defaultDenom,
+      assetDenom,
       ...input,
       chainId: input?.chainId ?? this.chainId
     });
   }
 
   async buildRelayWithdrawPayload(input) {
+    const assetDenom = input?.assetDenom ?? input?.denom ?? this.defaultDenom;
+    await this.assertProtocolPreflight(assetDenom);
     return buildRelayWithdrawPayloadCore({
       merklePathProvider: this,
       accountPrefix: this.accountPrefix,
-      assetDenom: input?.assetDenom ?? input?.denom ?? this.defaultDenom,
+      assetDenom,
       ...input,
       chainId: input?.chainId ?? this.chainId,
       checkNullifiers: input?.checkNullifiers ?? (nullifiers => this.checkNullifiers(nullifiers))
@@ -3235,10 +3243,12 @@ export class ClairveilJS {
   }
 
   async buildWithdrawMessage(input) {
+    const assetDenom = input?.assetDenom ?? input?.denom ?? this.defaultDenom;
+    await this.assertProtocolPreflight(assetDenom);
     return buildWithdrawMessageCore({
       merklePathProvider: this,
       accountPrefix: this.accountPrefix,
-      assetDenom: input?.assetDenom ?? input?.denom ?? this.defaultDenom,
+      assetDenom,
       ...input,
       chainId: input?.chainId ?? this.chainId,
       checkNullifiers: input?.checkNullifiers ?? (nullifiers => this.checkNullifiers(nullifiers))
