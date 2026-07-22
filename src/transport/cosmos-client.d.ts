@@ -3,6 +3,7 @@ export * from "../core/disclosure.js";
 export * from "../core/errors.js";
 export * from "../core/note.js";
 export * from "../privacy/payload.js";
+export * from "../privacy/circuit-config.js";
 export * from "../privacy/planner.js";
 export * from "../privacy/prover.js";
 export * from "../privacy/reservation.js";
@@ -82,6 +83,10 @@ import type {
   NormalizedAssetRegistryEntryV1,
   NormalizedAssetRegistryQueryResponseV1
 } from "../privacy/asset-registry.js";
+import type {
+  CircuitSetIdentityV1,
+  ValidatedCircuitConfigV1
+} from "../privacy/circuit-config.js";
 import type {
   MsgBatchTransfer as MsgBatchTransferMessage,
   MsgDeposit as MsgDepositMessage
@@ -377,6 +382,7 @@ export interface ClairveilClientOptions {
   fetchTimeoutMs?: number;
   queryRetry?: QueryRetryOptions | false;
   nullifierFailover?: boolean;
+  expectedCircuitIdentity?: CircuitSetIdentityV1;
 }
 
 export interface QueryRetryOptions {
@@ -685,7 +691,8 @@ export class ClairveilJS {
   fetchCommitmentInfo(commitmentHex: Hex): Promise<object>;
   fetchAuditConfig(): Promise<object>;
   fetchDisclosureConfig(): Promise<object>;
-  fetchCircuitConfig(): Promise<object>;
+  fetchCircuitConfig(): Promise<ValidatedCircuitConfigV1>;
+  assertCircuitConfig(): Promise<ValidatedCircuitConfigV1>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
   fetchAssetByDenom(denom: string): Promise<object>;
   fetchAssetByID(assetIdHex: Hex): Promise<object>;
@@ -956,6 +963,7 @@ export function createClairveilClient(options: {
   fetchTimeoutMs?: number;
   queryRetry?: QueryRetryOptions | false;
   nullifierFailover?: boolean;
+  expectedCircuitIdentity?: CircuitSetIdentityV1;
 }): ClairveilJS;
 
 export function nextPrivacyScanOptions(scanOrCursor?: object, defaults?: PrivacyScanOptions & {

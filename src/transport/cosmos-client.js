@@ -41,6 +41,10 @@ import {
   normalizeAssetRegistryQueryResponseV1
 } from "../privacy/asset-registry.js";
 import {
+  validateCircuitConfigV1,
+  validateExpectedCircuitIdentityV1
+} from "../privacy/circuit-config.js";
+import {
   assertPlanCanBuildTx,
   planTransferBatchNotes,
   planTransferNotes,
@@ -1472,7 +1476,8 @@ export class ClairveilJS {
     queryTimeoutMs = defaultFetchTimeoutMs,
     fetchTimeoutMs,
     queryRetry,
-    nullifierFailover = false
+    nullifierFailover = false,
+    expectedCircuitIdentity
   } = {}) {
     this.rpc = normalizeRpcEndpoint(rpc);
     this.restEndpoints = normalizeRestEndpoints(rest, restEndpoints);
@@ -1487,6 +1492,9 @@ export class ClairveilJS {
     this.queryTimeoutMs = normalizeTimeoutMs(fetchTimeoutMs ?? queryTimeoutMs, "queryTimeoutMs");
     this.queryRetry = normalizeQueryRetry(queryRetry);
     this.nullifierFailover = Boolean(nullifierFailover);
+    this.expectedCircuitIdentity = expectedCircuitIdentity == null
+      ? null
+      : validateExpectedCircuitIdentityV1(expectedCircuitIdentity);
     this.clientPromise = null;
   }
 
@@ -1641,7 +1649,15 @@ export class ClairveilJS {
   }
 
   async fetchCircuitConfig() {
-    return this.fetchJson("/clairveil/privacy/v1/circuit_config", { failover: true });
+    return validateCircuitConfigV1(
+      await this.fetchJson("/clairveil/privacy/v1/circuit_config", { failover: true }),
+      { expectedCircuitIdentity: this.expectedCircuitIdentity || undefined }
+    );
+  }
+
+  /** Fetch and fail-closed validate the consensus identity used by every proof circuit. */
+  async assertCircuitConfig() {
+    return this.fetchCircuitConfig();
   }
 
   async fetchReserve(denom) {
