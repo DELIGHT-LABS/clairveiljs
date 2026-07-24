@@ -3,6 +3,8 @@ import type { ValidatedPrivacyScanOutputV2 } from "../privacy/scan.js";
 
 export interface DisclosureDecodeOptions {
   shieldedPrefix?: string;
+  /** Optional display denom; its derived asset ID is checked against the disclosure field. */
+  assetDenom?: string;
 }
 
 export const payloadVersion: "v4";

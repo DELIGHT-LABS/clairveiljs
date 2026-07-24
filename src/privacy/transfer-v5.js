@@ -29,6 +29,7 @@ import {
   computeChainDomainV1,
   computeNoteCommitmentV1,
   computeNoteNullifierV1,
+  computeNoteTreeNodeV1,
   computeTransferFullDisclosureDigestV2,
   computeTransferIntentV2,
   computeTransferPayloadDigestV1,
@@ -50,6 +51,7 @@ export const transferV5ProofResponseVersion = "v2";
 export const joinSplitOwnerIntentSigningRequestV1Version = "joinsplit-owner-intent-signing-request-v1";
 
 const maxShieldedAmount = (1n << 64n) - 1n;
+const transferV5MerklePathDepth = 32;
 
 const transferPrivacyPolicies = Object.freeze({
   "all-private": 0,
@@ -131,15 +133,27 @@ function positiveAmount(value, label) {
   return amount;
 }
 
-function normalizedMerklePath(result, label) {
+function normalizedMerklePath(result, label, commitmentHex) {
   const root = canonicalFieldHex(bytesToBigIntBE(decodeCanonicalFieldHex(result?.root ?? result?.Root ?? "", `${label} root`)));
-  const path = [...(result?.path ?? result?.Path ?? [])].map((entry, index) => opaqueHex(entry, `${label} path ${index}`));
+  const path = [...(result?.path ?? result?.Path ?? [])].map((entry, index) => canonicalFieldHex(
+    bytesToBigIntBE(decodeCanonicalFieldHex(entry, `${label} path ${index}`))
+  ));
   const helper = [...(result?.path_helper ?? result?.pathHelper ?? result?.PathHelper ?? [])].map((entry, index) => {
     const value = Number(entry);
     if (value !== 0 && value !== 1) throw new Error(`${label} path helper ${index} must be 0 or 1`);
     return value;
   });
-  if (path.length !== helper.length) throw new Error(`${label} merkle path and helper lengths must match`);
+  if (path.length !== transferV5MerklePathDepth || helper.length !== transferV5MerklePathDepth) {
+    throw new Error(`${label} merkle path must be ${transferV5MerklePathDepth} levels`);
+  }
+  let current = bytesToBigIntBE(decodeCanonicalFieldHex(commitmentHex, `${label} commitment`));
+  for (let level = 0; level < transferV5MerklePathDepth; level += 1) {
+    const sibling = bytesToBigIntBE(decodeCanonicalFieldHex(path[level], `${label} path ${level}`));
+    current = helper[level] === 0
+      ? computeNoteTreeNodeV1(level, current, sibling)
+      : computeNoteTreeNodeV1(level, sibling, current);
+  }
+  if (canonicalFieldHex(current) !== root) throw new Error(`${label} merkle path does not reconstruct its root`);
   return { root, path, helper };
 }
 
@@ -240,7 +254,8 @@ function optionalOpaqueHex(value, label) {
 function pointHex(value, label) {
   const canonical = opaqueHex(value, label, { exactLength: 32 });
   try {
-    unpackPointHex(canonical);
+    const point = unpackPointHex(canonical);
+    if (point.x === 0n && point.y === 1n) throw new Error("point identity is not allowed");
   } catch (error) {
     throw new Error(`${label} must be a canonical prime-subgroup point: ${error.message}`);
   }
@@ -266,8 +281,12 @@ function validateOwnerSignature(value) {
 
 function normalizeV5Input(input, index) {
   if (!input || typeof input !== "object") throw new Error(`transfer v5 input ${index} is required`);
-  if (!Array.isArray(input.merkle_path) || !Array.isArray(input.merkle_path_helper) || input.merkle_path.length !== input.merkle_path_helper.length) {
-    throw new Error(`transfer v5 input ${index} merkle path and helper lengths must match`);
+  if (!Array.isArray(input.merkle_path) || !Array.isArray(input.merkle_path_helper)) throw new Error(`transfer v5 input ${index} merkle path and helper arrays are required`);
+  if (input.merkle_path.length !== input.merkle_path_helper.length) {
+    throw new Error(`transfer v5 input ${index} merkle path and helper arrays must have matching lengths`);
+  }
+  if (input.merkle_path.length > transferV5MerklePathDepth) {
+    throw new Error(`transfer v5 input ${index} merkle path exceeds depth ${transferV5MerklePathDepth}`);
   }
   input.merkle_path_helper.forEach((entry, pathIndex) => {
     if (entry !== 0 && entry !== 1) throw new Error(`transfer v5 input ${index} path helper ${pathIndex} must be 0 or 1`);
@@ -277,6 +296,9 @@ function normalizeV5Input(input, index) {
     randomness_hex: fieldHex(input.randomness_hex, `transfer v5 input ${index} randomness`),
     spend_pubkey_hex: pointHex(input.spend_pubkey_hex, `transfer v5 input ${index} spend public key`),
     view_pubkey_hex: pointHex(input.view_pubkey_hex, `transfer v5 input ${index} view public key`),
+    // V5's wire contract permits abbreviated paths: the Go circuit adapter
+    // zero-fills omitted levels.  Request construction remains stricter in
+    // normalizedMerklePath, which requires and verifies all 32 live levels.
     merkle_path: [...input.merkle_path].map((entry, pathIndex) => opaqueHex(entry, `transfer v5 input ${index} merkle path ${pathIndex}`)),
     merkle_path_helper: [...input.merkle_path_helper],
     nullifier_hex: fieldHex(input.nullifier_hex, `transfer v5 input ${index} nullifier`, { nonZero: true })
@@ -775,7 +797,7 @@ export async function buildPreparedTransferV5Payload({
   for (const [index, found] of foundInputs.entries()) {
     const note = normalizeNote(found.note);
     const commitmentHex = canonicalFieldHex(computeNoteCommitmentV1(note));
-    const merkle = normalizedMerklePath(await lookupMerklePath(merklePathProvider, commitmentHex), `transfer input ${index}`);
+    const merkle = normalizedMerklePath(await lookupMerklePath(merklePathProvider, commitmentHex), `transfer input ${index}`, commitmentHex);
     if (!rootHex) rootHex = merkle.root;
     else if (rootHex !== merkle.root) throw new Error("merkle root mismatch across transfer inputs");
     preparedInputs.push({
@@ -807,7 +829,7 @@ export async function buildPreparedTransferV5Payload({
     disclosedFieldBitmap: 7,
     ...disclosureFields(first, recipientNote, outputCommitments[0], fullBlinding, { policy: 7, full: true })
   };
-  const auditTarget = unpackPointHex(auditDisclosureTargetPubKeyHex);
+  const auditTarget = unpackPointHex(pointHex(auditDisclosureTargetPubKeyHex, "transfer audit disclosure target public key"));
   const auditPayload = encryptDisclosureV1(fullDisclosure, auditTarget, encryptedEnvelopeKindV1.auditDisclosure);
 
   let userDigestHex = "";

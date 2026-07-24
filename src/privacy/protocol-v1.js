@@ -874,7 +874,8 @@ function normalizeBatchOutput(output, index) {
     } else {
       if (normalized.userDisclosureTargetPubkey.length !== 32 || !normalized.userDisclosurePayload.length) throw new Error(`batch output ${index} encrypted disclosure is incomplete`);
       try {
-        unpackPoint(normalized.userDisclosureTargetPubkey);
+        const target = unpackPoint(normalized.userDisclosureTargetPubkey);
+        if (target.x === 0n && target.y === 1n) throw new Error("point identity is not allowed");
       } catch (error) {
         throw new Error(`batch output ${index} encrypted disclosure target is invalid: ${error.message}`);
       }
@@ -906,7 +907,8 @@ export function validateBatchTransferEffectsV1(message) {
   const auditDisclosureTargetPubkey = bytes(message.auditDisclosureTargetPubkey ?? message.audit_disclosure_target_pubkey, "batch audit disclosure target public key");
   if (auditDisclosureTargetPubkey.length !== 32) throw new Error("batch audit disclosure target public key must be exactly 32 bytes");
   try {
-    unpackPoint(auditDisclosureTargetPubkey);
+    const target = unpackPoint(auditDisclosureTargetPubkey);
+    if (target.x === 0n && target.y === 1n) throw new Error("point identity is not allowed");
   } catch (error) {
     throw new Error(`batch audit disclosure target public key is invalid: ${error.message}`);
   }

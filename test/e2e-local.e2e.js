@@ -756,10 +756,10 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       latestChainBlock(config)
     ]);
     const auditKeyId = String(auditConfig?.audit_key_id ?? auditConfig?.auditKeyId ?? "").trim();
-    const auditKeyEpoch = Number(auditConfig?.audit_key_epoch ?? auditConfig?.auditKeyEpoch);
+    const auditKeyEpoch = String(auditConfig?.audit_key_epoch ?? auditConfig?.auditKeyEpoch ?? "").trim();
     const auditTarget = String(auditConfig?.audit_master_pubkey_hex ?? auditConfig?.auditMasterPubkeyHex ?? "").trim();
     assert.ok(auditKeyId, "audit config must expose an audit key id");
-    assert.ok(Number.isSafeInteger(auditKeyEpoch) && auditKeyEpoch > 0, "audit config must expose a positive audit key epoch");
+    assert.match(auditKeyEpoch, /^[1-9][0-9]*$/, "audit config must expose a positive audit key epoch");
     assert.match(auditTarget, /^[0-9a-f]{64}$/i, "audit config must expose a compressed audit disclosure key");
     const noteHashSigner = createSpendNoteHashSigner(material.rootSeed);
     const prepared = await prepareOneProofPayrollOperation({

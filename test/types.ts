@@ -44,6 +44,7 @@ import {
   type DisclosureReport
 } from "clairveiljs/disclosure";
 import type { NullifierStatusReader, PreparedWithdrawPayload, WithdrawMessage } from "clairveiljs/payload";
+import { buildPreparedTransferV5Payload } from "clairveiljs/transfer-v5";
 import { scanNotes } from "clairveiljs/scan";
 import { runClairveilConformanceFixtures } from "clairveiljs/conformance";
 import {
@@ -115,6 +116,8 @@ import {
 } from "clairveiljs/prover";
 
 const rootSeed = new Uint8Array(32);
+// @ts-expect-error V5 preparation requires the fixed-circuit input contract.
+buildPreparedTransferV5Payload({});
 const batchOnlyAsyncProver = createAsyncJobProverAdapter({
   submitBatchTransferJob: async () => ({ job_id: "batch-job" }),
   getJob: async () => ({ status: "completed" })
@@ -341,18 +344,21 @@ const cosmosScanEventLookup: Promise<object> = cosmos.findPrivacyEventByTxHash("
 const cosmosUserDisclosureLookup: Promise<DisclosureReport> = cosmos.decodeUserDisclosure({
   txHash: "aa",
   afterSequence: 7,
-  scanSource: "scan_events"
+  scanSource: "scan_events",
+  assetDenom: "udemo"
 });
 const cosmosSelfViewDisclosureLookup: Promise<DisclosureReport> = cosmos.decodeSelfViewDisclosure({
   tx_hash: "aa",
   after_sequence: 7,
-  scan_source: "scan_events"
+  scan_source: "scan_events",
+  asset_denom: "udemo"
 });
 const cosmosAuditDisclosureLookup: Promise<DisclosureReport> = cosmos.decodeAuditDisclosure({
   tx_hash: "aa",
   disclosure_privkey_hex: "01".repeat(32),
   after_sequence: 7,
-  scan_source: "scan_events"
+  scan_source: "scan_events",
+  assetDenom: "udemo"
 });
 const batchScanDisclosureOutput = {} as BatchPrivacyScanDisclosureOutputV2;
 const batchUserDisclosureReport: DisclosureReport = decodeBatchUserDisclosureFromScanOutput(batchScanDisclosureOutput, {
@@ -791,12 +797,14 @@ const nullifierBatchResult: Promise<Map<string, boolean>> = dappClient.checkNull
 const dappReserveResult: Promise<ReserveResponse> = dappClient.fetchReserve("udemo");
 const auditDisclosureInput: DecodeAuditDisclosureInput = {
   txHash: "aa",
-  disclosurePrivKeyHex: "01".repeat(32)
+  disclosurePrivKeyHex: "01".repeat(32),
+  assetDenom: "udemo"
 };
 const auditDisclosureResult: Promise<DisclosureReport> = dappClient.decodeAuditDisclosure(auditDisclosureInput);
 const selfViewDisclosureInput: DecodeSelfViewDisclosureInput = {
   txHash: "aa",
-  disclosureScalarHex: "01".repeat(32)
+  disclosureScalarHex: "01".repeat(32),
+  asset_denom: "udemo"
 };
 const selfViewDisclosureResult: Promise<DisclosureReport> = dappClient.decodeSelfViewDisclosure(selfViewDisclosureInput);
 const batchPlan = planTransferBatchNotes({ notes: [], amounts: ["1udemo"], denom: "udemo" });

@@ -8,7 +8,13 @@ import {
   publicPayloadReport,
   userDisclosureModeRecipientEncrypted
 } from "clairveiljs/disclosure";
-import { computeAssetIdV1 } from "clairveiljs/protocol-v1";
+import {
+  computeAssetIdV1,
+  encryptedEnvelopeKindV1,
+  encryptDisclosureV1,
+  marshalDisclosurePlaintextV1
+} from "clairveiljs/protocol-v1";
+import { derivePubKeyFromScalar } from "clairveiljs/core";
 import {
   fixtureTestOptions,
   readFixture
@@ -27,6 +33,42 @@ const policyLabels = new Map([
   [6, "from-to"],
   [7, "amount-from-to"]
 ]);
+
+function fixedDisclosure({ plane, policy, disclosedFieldBitmap, assetDenom = "uclair" }) {
+  const senderSpend = derivePubKeyFromScalar(17n);
+  const senderView = derivePubKeyFromScalar(19n);
+  const recipientSpend = derivePubKeyFromScalar(23n);
+  const recipientView = derivePubKeyFromScalar(29n);
+  return {
+    plane,
+    outputIndex: 0,
+    policy,
+    disclosedFieldBitmap,
+    commitment: 101n,
+    amount: 7n,
+    assetID: computeAssetIdV1(assetDenom),
+    senderSpendKeyX: plane === 1 && (policy & 4) === 0 ? 0n : senderSpend.x,
+    senderSpendKeyY: plane === 1 && (policy & 4) === 0 ? 0n : senderSpend.y,
+    senderViewKeyX: plane === 1 && (policy & 4) === 0 ? 0n : senderView.x,
+    senderViewKeyY: plane === 1 && (policy & 4) === 0 ? 0n : senderView.y,
+    recipientSpendKeyX: plane === 1 && (policy & 2) === 0 ? 0n : recipientSpend.x,
+    recipientSpendKeyY: plane === 1 && (policy & 2) === 0 ? 0n : recipientSpend.y,
+    recipientViewKeyX: plane === 1 && (policy & 2) === 0 ? 0n : recipientView.x,
+    recipientViewKeyY: plane === 1 && (policy & 2) === 0 ? 0n : recipientView.y,
+    disclosureBlinding: 13n
+  };
+}
+
+test("fixed public disclosure rejects a full plane and an unbound asset denomination", () => {
+  const full = fixedDisclosure({ plane: 2, policy: 0xffffffff, disclosedFieldBitmap: 7 });
+  assert.throws(() => publicPayloadReport(Buffer.from(marshalDisclosurePlaintextV1(full)).toString("hex")));
+
+  const user = fixedDisclosure({ plane: 1, policy: 1, disclosedFieldBitmap: 1 });
+  assert.throws(
+    () => publicPayloadReport(Buffer.from(marshalDisclosurePlaintextV1(user)).toString("hex"), "", "", { assetDenom: "uatom" }),
+    /asset denom/
+  );
+});
 
 function transferDisclosureEvent(payload, txHash = "AABBCC") {
   return {
@@ -168,4 +210,53 @@ test("Cosmos client decodes self-view disclosure through the high-level API", fi
     ...expectedDisclosure(flow.transfer.self_view_disclosure),
     asset_denom: "uclair"
   });
+});
+
+test("Cosmos legacy disclosure wrappers retain an explicitly verified non-default asset denom", async () => {
+  const assetDenom = "uatom";
+  const user = fixedDisclosure({ plane: 1, policy: 1, disclosedFieldBitmap: 1, assetDenom });
+  const full = fixedDisclosure({ plane: 2, policy: 0xffffffff, disclosedFieldBitmap: 7, assetDenom });
+  const selfScalar = 43n;
+  const auditScalar = 47n;
+  const events = new Map([
+    ["USER", {
+      event_type: "shielded_transfer",
+      attributes: [
+        { key: "user_disclosure_mode", value: "USER_DISCLOSURE_MODE_PUBLIC" },
+        { key: "user_disclosure_payload", value: Buffer.from(marshalDisclosurePlaintextV1(user)).toString("hex") }
+      ]
+    }],
+    ["SELF", {
+      event_type: "shielded_transfer",
+      attributes: [{
+        key: "self_view_disclosure_payload",
+        value: Buffer.from(encryptDisclosureV1(full, derivePubKeyFromScalar(selfScalar), encryptedEnvelopeKindV1.selfViewDisclosure)).toString("hex")
+      }]
+    }],
+    ["AUDIT", {
+      event_type: "shielded_transfer",
+      attributes: [{
+        key: "audit_disclosure_payload",
+        value: Buffer.from(encryptDisclosureV1(full, derivePubKeyFromScalar(auditScalar), encryptedEnvelopeKindV1.auditDisclosure)).toString("hex")
+      }]
+    }]
+  ]);
+  const client = createClairveilClient({
+    rest: "http://127.0.0.1:1317",
+    rpc: "http://127.0.0.1:26657",
+    chainId: "clairveil-local-1",
+    defaultDenom: "uclair"
+  });
+  client.findPrivacyEventByTxHash = async txHash => events.get(txHash);
+
+  const [userReport, selfReport, auditReport] = await Promise.all([
+    client.decodeUserDisclosure({ txHash: "USER", assetDenom }),
+    client.decodeSelfViewDisclosure({ txHash: "SELF", disclosureScalar: selfScalar, asset_denom: assetDenom }),
+    client.decodeAuditDisclosure({ txHash: "AUDIT", disclosurePrivKeyHex: auditScalar.toString(16).padStart(64, "0"), assetDenom })
+  ]);
+  assert.deepEqual([userReport.asset_denom, selfReport.asset_denom, auditReport.asset_denom], [assetDenom, assetDenom, assetDenom]);
+  await assert.rejects(
+    () => client.decodeUserDisclosure({ txHash: "USER", assetDenom, asset_denom: "uclair" }),
+    /assetDenom aliases conflict/
+  );
 });

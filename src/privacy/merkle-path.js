@@ -5,6 +5,8 @@ export const commitmentPathSnapshotDepthV1 = 32;
 export const commitmentPathSnapshotMaxCommitmentsV1 = 16;
 
 function sameValues(left, right) {
+  if (left === right) return true;
+  if (typeof left === "bigint" || typeof right === "bigint") return typeof left === "bigint" && typeof right === "bigint" && left === right;
   if (left instanceof Uint8Array && right instanceof Uint8Array) {
     return left.length === right.length && left.every((value, index) => value === right[index]);
   }
@@ -142,6 +144,10 @@ export function normalizeCommitmentPathsAtRootResponse(response, request) {
     throw new Error("commitment path response count does not match the request");
   }
   const leafCountBigInt = uint64(leafCount, "commitment path response leaf count");
+  const treeCapacity = 1n << BigInt(commitmentPathSnapshotDepthV1);
+  if (leafCountBigInt > treeCapacity) {
+    throw new Error(`commitment path response leaf count exceeds the depth-${commitmentPathSnapshotDepthV1} tree capacity`);
+  }
   const paths = responsePaths.map((path, index) => {
     if (!path || typeof path !== "object" || Array.isArray(path)) {
       throw new Error(`commitment path ${index} is required`);
@@ -158,7 +164,8 @@ export function normalizeCommitmentPathsAtRootResponse(response, request) {
       aliasedValue(path, ["leafIndex", "leaf_index"], `commitment path ${index} leaf index`),
       `commitment path ${index} leaf index`
     );
-    if (uint64(leafIndex, `commitment path ${index} leaf index`) >= leafCountBigInt) {
+    const leafIndexBigInt = uint64(leafIndex, `commitment path ${index} leaf index`);
+    if (leafIndexBigInt >= leafCountBigInt) {
       throw new Error(`commitment path ${index} leaf index is outside the snapshot`);
     }
     const siblings = aliasedArray(path, ["path"], `commitment path ${index} siblings`);
@@ -166,16 +173,22 @@ export function normalizeCommitmentPathsAtRootResponse(response, request) {
     if (siblings.length !== commitmentPathSnapshotDepthV1 || helpers.length !== commitmentPathSnapshotDepthV1) {
       throw new Error(`commitment path ${index} must be ${commitmentPathSnapshotDepthV1} levels`);
     }
+    const normalizedHelpers = helpers.map((value, level) => helperBit(value, `commitment path ${index} helper ${level}`));
+    for (let level = 0; level < commitmentPathSnapshotDepthV1; level += 1) {
+      const expectedHelper = Number((leafIndexBigInt >> BigInt(level)) & 1n);
+      if (normalizedHelpers[level] !== expectedHelper) {
+        throw new Error(`commitment path ${index} helper ${level} does not match leaf index`);
+      }
+    }
     let current = canonicalFieldHex(commitmentHex, `commitment path ${index} commitment`, { nonZero: true }).field;
     const normalizedPath = siblings.map((value, level) => {
       const sibling = canonicalFieldHex(value, `commitment path ${index} sibling ${level}`).field;
-      const helper = helperBit(helpers[level], `commitment path ${index} helper ${level}`);
+      const helper = normalizedHelpers[level];
       current = helper === 0
         ? computeNoteTreeNodeV1(level, current, sibling)
         : computeNoteTreeNodeV1(level, sibling, current);
       return fieldHexV1(sibling);
     });
-    const normalizedHelpers = helpers.map((value, level) => helperBit(value, `commitment path ${index} helper ${level}`));
     if (fieldHexV1(current) !== rootHex) {
       throw new Error(`commitment path ${index} does not reconstruct the requested snapshot root`);
     }

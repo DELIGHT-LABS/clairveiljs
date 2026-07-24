@@ -5,6 +5,7 @@ import { base64FromBytes, bytesFromBase64, hexFromBytes } from "clairveiljs/brow
 import {
   buildPreparedBatchTransferPayload,
   buildMsgBatchTransferFromPrepared,
+  computePreparedBatchTransferPayloadHash,
   preparedBatchTransferProofVersion,
   signValidatedBatchTransferIntentV1,
   serializeBatchTransferProofRequest,
@@ -68,7 +69,10 @@ async function batchPayload({
   paymentAmounts = [7],
   disclosureModes = [],
   outputRoles = [],
-  selfViewEnabled = true
+  selfViewEnabled = true,
+  auditDisclosureTargetPubKey = derivePubKeyFromScalar(31n),
+  auditKeyEpoch = 1,
+  disclosureTargetPubKey
 } = {}) {
   const ownerSpend = derivePubKeyFromScalar(17n);
   const ownerView = derivePubKeyFromScalar(19n);
@@ -97,7 +101,7 @@ async function batchPayload({
       },
       privacyPolicy: outputPolicy,
       disclosureMode: outputMode,
-      ...(outputMode === 2 ? { disclosureTargetPubKey: derivePubKeyFromScalar(BigInt(401 + index)) } : {}),
+      ...(outputMode === 2 ? { disclosureTargetPubKey: disclosureTargetPubKey ?? derivePubKeyFromScalar(BigInt(401 + index)) } : {}),
       userDisclosureBlinding: outputPolicy ? BigInt(2001 + index) : 0n,
       fullDisclosureBlinding: BigInt(1001 + index)
     };
@@ -136,8 +140,8 @@ async function batchPayload({
     inputs: inputs.map((note, index) => ({ note, merklePath: merkle.paths[index], merklePathHelper: merkle.helpers[index] })),
     outputs,
     auditKeyId: "audit-key-1",
-    auditKeyEpoch: 1,
-    auditDisclosureTargetPubKey: derivePubKeyFromScalar(31n),
+    auditKeyEpoch,
+    auditDisclosureTargetPubKey,
     ...(selfViewEnabled ? { selfViewDisclosureTargetPubKey: derivePubKeyFromScalar(47n) } : { disableSelfViewDisclosure: true }),
     signer: {
       signBatchTransfer: request => signNoteHash(request.expectedIntent, { spendScalar: 17n, spendPubKey: ownerSpend })
@@ -226,6 +230,18 @@ test("one-proof batch prover uses the Clairveil main route and binds the respons
   assert.equal(message.creator, "clair1creator");
 });
 
+test("one-proof batch rejects identity disclosure targets before encryption", async () => {
+  const identity = { x: 0n, y: 1n };
+  await assert.rejects(
+    () => batchPayload({ auditDisclosureTargetPubKey: identity }),
+    /identity is not allowed/
+  );
+  await assert.rejects(
+    () => batchPayload({ privacyPolicy: 1, disclosureMode: 2, disclosureTargetPubKey: identity }),
+    /identity is not allowed/
+  );
+});
+
 test("async prover job adapter supports a batch-only one-proof prover", async () => {
   const payload = await batchPayload();
   const proof = new Uint8Array(164).fill(13);
@@ -307,6 +323,22 @@ test("one-proof batch preparation binds public disclosure and rejects post-signa
   );
 });
 
+test("one-proof batch preserves uint64 audit epochs and rejects expired payloads by default", async () => {
+  const payload = await batchPayload({ auditKeyEpoch: "9007199254740993" });
+  assert.equal(payload.audit_key_epoch, "9007199254740993");
+  assert.equal(validatePreparedBatchTransferPayloadEnvelope(payload), true);
+  const message = buildMsgBatchTransferFromPrepared(payload, {
+    version: preparedBatchTransferProofVersion,
+    request_payload_hash: payload.payload_hash,
+    proof: base64FromBytes(new Uint8Array(164).fill(7))
+  });
+  assert.equal(message.auditKeyEpoch, 9007199254740993n);
+
+  const expired = { ...payload, expires_at_unix: 1, payload_hash: "" };
+  expired.payload_hash = computePreparedBatchTransferPayloadHash(expired);
+  assert.throws(() => validatePreparedBatchTransferPayloadEnvelope(expired), /payload expired/);
+});
+
 test("Batch V1 typed-scan disclosure decoders bind output index, commitment, policy, digest, and blinding", async () => {
   const payload = await batchPayload({
     inputAmounts: [5, 7, 9],
@@ -333,6 +365,10 @@ test("Batch V1 typed-scan disclosure decoders bind output index, commitment, pol
   assert.equal(publicUser.policy, "amount");
   assert.equal(publicUser.amount, "5");
   assert.equal(publicUser.verification.plaintext_blinding_bound, true);
+  assert.throws(
+    () => decodeBatchUserDisclosureFromScanOutput(output(1), { assetDenom: "uatom" }),
+    /asset denom/
+  );
 
   const recipientScalar = 403n;
   const recipientUser = decodeBatchUserDisclosureFromScanOutput(output(2), {
@@ -382,6 +418,32 @@ test("Batch V1 typed-scan disclosure decoders bind output index, commitment, pol
     assetDenom: "uclair"
   });
   assert.equal(wrappedAudit.digest_hex, audit.digest_hex);
+  await assert.rejects(
+    () => client.decodeBatchUserDisclosure({
+      output: output(1),
+      assetDenom: "uclair",
+      asset_denom: "uatom"
+    }),
+    /assetDenom aliases conflict/
+  );
+  await assert.rejects(
+    () => client.decodeBatchSelfViewDisclosure({
+      output: output(2),
+      disclosureScalar: 47n,
+      assetDenom: "uclair",
+      asset_denom: "uatom"
+    }),
+    /assetDenom aliases conflict/
+  );
+  await assert.rejects(
+    () => client.decodeBatchAuditDisclosure({
+      output: output(2),
+      disclosureScalar: 31n,
+      assetDenom: "uclair",
+      asset_denom: "uatom"
+    }),
+    /assetDenom aliases conflict/
+  );
 
   assert.throws(
     () => decodeBatchUserDisclosureFromScanOutput({ ...output(2), output_index: 1 }, {

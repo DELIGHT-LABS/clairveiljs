@@ -44,6 +44,7 @@ export const privacyScanValidationStateVersionV2 = "privacy-scan-validation-v2";
 // Kept module-private: a batch disclosure decoder may only consume an output
 // produced by this validator, never an arbitrary protobuf-shaped object.
 const validatedPrivacyScanOutputBrandV2 = Symbol("validatedPrivacyScanOutputV2");
+const validatedPrivacyScanPageBrandV2 = Symbol("validatedPrivacyScanPageV2");
 
 const maxUint64 = (1n << 64n) - 1n;
 
@@ -855,7 +856,7 @@ export function validatePrivacyScanPageV2(response, request = {}) {
   if (scanUint64(normalizedRequest.max_encoded_bytes, "privacy scan request byte limit") > 0n && scanUint64(encodedBytes, "privacy scan encoded bytes") > scanUint64(normalizedRequest.max_encoded_bytes, "privacy scan request byte limit")) {
     throw new Error("privacy scan response exceeds the requested byte limit");
   }
-  const page = Object.freeze({
+  const page = {
     scan_schema_version: schemaVersion,
     summaries: Object.freeze(summaries),
     outputs: Object.freeze(outputs),
@@ -863,7 +864,9 @@ export function validatePrivacyScanPageV2(response, request = {}) {
     has_more: hasMore,
     scanned_event_count: scannedEventCount,
     encoded_bytes: encodedBytes
-  });
+  };
+  Object.defineProperty(page, validatedPrivacyScanPageBrandV2, { value: true });
+  Object.freeze(page);
   validatePrivacyScanNextCursor(normalizedRequest, page, summariesByEvent);
   validateCompletedPrivacyScanPage(normalizedRequest, page);
   if (hasMore && compareScanCursor(nextCursor, normalizedRequest.after) <= 0) throw new Error("privacy scan has_more page did not advance the cursor");
@@ -873,8 +876,10 @@ export function validatePrivacyScanPageV2(response, request = {}) {
 
 /** Trial-decrypt one already-validated privacy-scan-v2 output. Returns null when it is not owned. */
 export function processPrivacyScanOutputV2(output, { rootSeed, spendScalar, viewScalar } = {}) {
-  if (!output || typeof output !== "object") throw new Error("validated privacy scan output is required");
+  if (!isValidatedPrivacyScanOutputV2(output)) throw new Error("privacy scan output must be issued by validatePrivacyScanPageV2");
   if (!rootSeed) throw new Error("rootSeed is required for privacy scan output decryption");
+  const spend = spendScalar ?? deriveSpendKeys(rootSeed).scalar;
+  const view = viewScalar ?? deriveViewKeys(rootSeed).scalar;
   let note;
   if (output.event_type === privacyScanEventTypeV2.deposit) {
     try {
@@ -885,12 +890,12 @@ export function processPrivacyScanOutputV2(output, { rootSeed, spendScalar, view
   } else if (output.event_type === privacyScanEventTypeV2.shieldedTransfer || output.event_type === privacyScanEventTypeV2.batchTransfer) {
     let viewError;
     try {
-      note = decryptTransferNoteV1(output.ciphertext, viewScalar);
+      note = decryptTransferNoteV1(output.ciphertext, view);
     } catch (error) {
       viewError = error;
-      if (spendScalar == null || spendScalar === viewScalar) return null;
+      if (spend === view) return null;
       try {
-        note = decryptTransferNoteV1(output.ciphertext, spendScalar);
+        note = decryptTransferNoteV1(output.ciphertext, spend);
       } catch {
         // An authenticated ciphertext for another recipient is indistinguishable
         // from a trial-decrypt miss at this boundary; the page framing was
@@ -919,7 +924,9 @@ export function processPrivacyScanOutputV2(output, { rootSeed, spendScalar, view
 
 /** Decrypt the owned notes from one validated unified scan page. */
 export function processPrivacyScanPageV2(page, { rootSeed, spendScalar, viewScalar } = {}) {
-  if (!page || typeof page !== "object" || !Array.isArray(page.outputs)) throw new Error("validated privacy scan page is required");
+  if (!page || typeof page !== "object" || page[validatedPrivacyScanPageBrandV2] !== true || !Array.isArray(page.outputs)) {
+    throw new Error("privacy scan page must be issued by validatePrivacyScanPageV2");
+  }
   const spend = spendScalar ?? deriveSpendKeys(rootSeed).scalar;
   const view = viewScalar ?? deriveViewKeys(rootSeed).scalar;
   const found = [];

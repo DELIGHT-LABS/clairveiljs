@@ -941,6 +941,10 @@ export class ClairveilJS {
     signature_base64?: Base64;
     skipSignerPubKeyCheck?: boolean;
     skip_signer_pubkey_check?: boolean;
+    /** Optional denom override, independently verified against the disclosure asset field. */
+    assetDenom?: string;
+    /** Alias for `assetDenom`. */
+    asset_denom?: string;
   } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
   decodeSelfViewDisclosure(input: {
     txHash?: Hex;
@@ -956,12 +960,20 @@ export class ClairveilJS {
     disclosure_scalar?: bigint | string | number;
     disclosureScalarHex?: Hex;
     disclosure_scalar_hex?: Hex;
+    /** Optional denom override, independently verified against the disclosure asset field. */
+    assetDenom?: string;
+    /** Alias for `assetDenom`. */
+    asset_denom?: string;
   } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
   decodeAuditDisclosure(input: {
     txHash?: Hex;
     tx_hash?: Hex;
     disclosurePrivKeyHex?: Hex;
     disclosure_privkey_hex?: Hex;
+    /** Optional denom override, independently verified against the disclosure asset field. */
+    assetDenom?: string;
+    /** Alias for `assetDenom`. */
+    asset_denom?: string;
   } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
   decodeBatchUserDisclosure(input: {
     /** One output from `validatePrivacyScanPageV2`, never a lossy ABCI event. */

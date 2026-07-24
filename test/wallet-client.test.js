@@ -83,6 +83,39 @@ test("browser client delegates signDirectAndBroadcast to the Cosmos client", asy
   assert.deepEqual(await client.signDirectAndBroadcast(input), { ok: true });
 });
 
+test("browser disclosure wrappers forward an explicit asset denom", async () => {
+  const client = browserClient();
+  const received = [];
+  client.cosmos.decodeUserDisclosure = async input => received.push(input) && input;
+  client.cosmos.decodeSelfViewDisclosure = async input => received.push(input) && input;
+  client.cosmos.decodeAuditDisclosure = async input => received.push(input) && input;
+
+  await client.decodeUserDisclosure({ txHash: "user", assetDenom: "uatom" });
+  await client.decodeSelfViewDisclosure({ tx_hash: "self", asset_denom: "uatom", disclosureScalar: 3n });
+  await client.decodeAuditDisclosure({ txHash: "audit", assetDenom: "uatom", asset_denom: "uatom", disclosurePrivKeyHex: "01".repeat(32) });
+
+  assert.deepEqual(received.map(input => input.assetDenom), ["uatom", undefined, "uatom"]);
+  assert.deepEqual(received.map(input => input.asset_denom), [undefined, "uatom", "uatom"]);
+});
+
+test("browser disclosure wrappers preserve conflicting denom aliases for transport validation", async () => {
+  const client = browserClient();
+  client.cosmos.decodeAuditDisclosure = async input => {
+    if (input.assetDenom !== input.asset_denom) throw new Error("assetDenom aliases conflict");
+    return input;
+  };
+
+  await assert.rejects(
+    () => client.decodeAuditDisclosure({
+      txHash: "audit",
+      assetDenom: "uatom",
+      asset_denom: "uosmo",
+      disclosurePrivKeyHex: "01".repeat(32)
+    }),
+    /aliases conflict/
+  );
+});
+
 test("browser relay cleanup preserves a frozen transaction build error", async () => {
   const client = browserClient();
   client.privacyMaterial = () => ({});

@@ -31,7 +31,7 @@ import {
   serializeOneProofPayrollArtifact,
   validateOneProofPayrollOperationEvidence
 } from "clairveiljs/reference-payroll";
-import { canonicalFieldBytes, derivePubKeyFromScalar, signNoteHash } from "clairveiljs/core";
+import { canonicalFieldBytes, derivePubKeyFromScalar, packPoint, signNoteHash } from "clairveiljs/core";
 import { computeAssetIdV1, emptyNoteTreeRootsV1 } from "clairveiljs/protocol-v1";
 import { base64FromBytes } from "clairveiljs/browser-crypto";
 import { MemoryReservationStore, createNoteReservationManager } from "clairveiljs/reservation";
@@ -39,7 +39,7 @@ import { preparedBatchTransferProofVersion } from "clairveiljs/batch-transfer";
 import { privacyNoteV1CircuitOrder, privacyNoteV1PublicInputSchemaSHA256 } from "clairveiljs/circuit-config";
 
 const recipient = "clairs19x5u4mf4l4zqcpvr7d809fh4tjy5j50p2mwgky0nj38jpqpj7svndu3hqshu5e3s8w6pea5p30xek5p9flxjf7f44xh7cnfrlsd84pc7upgh3";
-const key = "11".repeat(32);
+const key = Buffer.from(packPoint(derivePubKeyFromScalar(7n))).toString("hex");
 
 function payroll(items = [{ item_id: "salary-001", employee_id: "employee-001", recipient_address: recipient, amount: "70" }]) {
   return {
@@ -92,6 +92,14 @@ test("reference payroll validates disclosure policy and active disclosure regist
   }]);
   assert.equal(registry.lookupDisclosureKey("employee", "employee-001").key_id, "employee-disclosure-v1");
   assert.throws(() => registry.lookupDisclosureKey("employee", "employee-002"), /not found/);
+  assert.throws(() => new MemoryDisclosureKeyRegistry([{
+    key_id: "identity-key", scope: "employee", subject_id: "employee-002",
+    public_key_hex: Buffer.from(packPoint({ x: 0n, y: 1n })).toString("hex"), version: "v1", active: true
+  }]), /canonical non-identity prime-subgroup point/);
+  assert.throws(() => new MemoryDisclosureKeyRegistry([{
+    key_id: "invalid-key", scope: "employee", subject_id: "employee-003",
+    public_key_hex: "ff".repeat(32), version: "v1", active: true
+  }]), /canonical non-identity prime-subgroup point/);
 });
 
 test("reference payroll blocks legacy preparation when reserved notes are the only funding source", () => {
@@ -147,6 +155,60 @@ test("reference payroll plans current one-proof batches without using legacy tra
     () => planOneProofPayroll(input, [{ note_id: "wrong-owner", owner_key_id: "other", nullifier_lookup_key: "n4", denom: "uclair", amount: "20" }]),
     /preparation is required/
   );
+});
+
+test("reference payroll candidate search gives every owner a bounded share before choosing a plan", () => {
+  const input = payroll([
+    { item_id: "salary-001", employee_id: "employee-001", recipient_address: recipient, amount: "8" },
+    { item_id: "salary-002", employee_id: "employee-002", recipient_address: recipient, amount: "105" }
+  ]);
+  const planForOwners = (largeOwner, exactOwner) => planOneProofPayroll(input, [
+    ...Array.from({ length: 16 }, (_, index) => ({
+      note_id: `large-${index}`, owner_key_id: largeOwner, nullifier_lookup_key: `large-${index}`, denom: "uclair", amount: "7"
+    })),
+    { note_id: "exact-8", owner_key_id: exactOwner, nullifier_lookup_key: "exact-8", denom: "uclair", amount: "8" }
+  ]);
+
+  for (const [largeOwner, exactOwner] of [["owner-a", "owner-b"], ["owner-z", "owner-a"]]) {
+    const plan = planForOwners(largeOwner, exactOwner);
+    assert.equal(plan.operations.length, 2);
+    assert.equal(plan.operations[0].items[0].amount, 8n);
+    assert.deepEqual(plan.operations[0].input_notes.map(note => note.note_id), ["exact-8"]);
+    assert.equal(plan.operations[1].items[0].amount, 105n);
+  }
+
+  const crowdedInput = payroll([
+    { item_id: "salary-exact", employee_id: "employee-exact", recipient_address: recipient, amount: "8" },
+    ...Array.from({ length: 64 }, (_, index) => ({ item_id: `salary-${index}`, employee_id: `employee-${index}`, recipient_address: recipient, amount: "105" }))
+  ]);
+  const crowdedNotes = [
+    ...Array.from({ length: 64 }, (_, owner) => Array.from({ length: 15 }, (_, note) => ({
+      note_id: `large-${String(owner).padStart(2, "0")}-${note}`,
+      owner_key_id: `owner-${String(owner).padStart(2, "0")}`,
+      nullifier_lookup_key: `large-${owner}-${note}`,
+      denom: "uclair",
+      amount: "7"
+    }))).flat(),
+    { note_id: "exact-8", owner_key_id: "owner-z-exact", nullifier_lookup_key: "exact-8", denom: "uclair", amount: "8" }
+  ];
+  const crowdedPlan = planOneProofPayroll(crowdedInput, crowdedNotes);
+  assert.equal(crowdedPlan.operations.length, 65);
+  assert.deepEqual(crowdedPlan.operations[0].input_notes.map(note => note.note_id), ["exact-8"]);
+});
+
+test("reference payroll candidate search retains exact funding across more owners than its DFS visit budget", () => {
+  const ownerCount = 2049;
+  const plan = planOneProofPayroll(payroll([{ item_id: "salary-large-treasury", employee_id: "employee-large-treasury", recipient_address: recipient, amount: "8" }]),
+    Array.from({ length: ownerCount }, (_, index) => ({
+      note_id: `exact-${String(index).padStart(4, "0")}`,
+      owner_key_id: `owner-${String(index).padStart(4, "0")}`,
+      nullifier_lookup_key: `lookup-${index}`,
+      denom: "uclair",
+      amount: "8"
+    }))
+  );
+  assert.equal(plan.operations.length, 1);
+  assert.deepEqual(plan.operations[0].input_notes.map(note => note.note_id), ["exact-0000"]);
 });
 
 test("reference payroll plans every representative one-proof batch shape", () => {
@@ -223,7 +285,7 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
       "salary-001": { randomness: 13n, full_disclosure_blinding: 15n }
     },
     signer: {
-      signBatchTransfer: request => signNoteHash(request.expectedIntent, { spendScalar: 17n, spendPubKey: ownerSpend })
+      signNoteHash: intent => signNoteHash(intent, { spendScalar: 17n, spendPubKey: ownerSpend })
     }
   });
   assert.equal(prepared.payload.circuit_set_id, oneProofPayrollCircuitSetId);
@@ -389,6 +451,13 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   assert.deepEqual(retryCalls.map(call => call[0]), ["tx", "nullifiers"]);
   assert.equal(retryInspection.next_action, "retransmit-signed-transaction");
   assert.equal(retryInspection.transaction_state, "not-found");
+  const failedInspection = await inspectOneProofPayrollArtifactRetry(serializedArtifact, {
+    nowUnix: 1_700_000_000,
+    queryTransaction: async () => "failed",
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(value => [value, false]))
+  });
+  assert.equal(failedInspection.next_action, "manual-review");
+  assert.match(failedInspection.reason, /cannot be retried/);
   const succeededInspection = await inspectOneProofPayrollArtifactRetry(serializedArtifact, {
     nowUnix: 1_700_000_000,
     queryTransaction: async () => "succeeded",
@@ -401,6 +470,29 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     checkNullifiers: async nullifiers => new Map(nullifiers.map((value, index) => [value, index === 0]))
   });
   assert.equal(spentInspection.next_action, "manual-review");
+  const expiry = Number(prepared.payload.expires_at_unix);
+  const expiredArtifact = parseOneProofPayrollArtifact(serializedArtifact, { nowUnix: expiry });
+  assert.equal(expiredArtifact.artifact_hash, artifact.artifact_hash);
+  assert.equal(resumeOneProofPayrollArtifact(serializedArtifact, { nowUnix: expiry }).next_action, "manual-review");
+  const expiredSucceededInspection = await inspectOneProofPayrollArtifactRetry(serializedArtifact, {
+    nowUnix: expiry,
+    queryTransaction: async () => "succeeded",
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(value => [value, true]))
+  });
+  assert.equal(expiredSucceededInspection.next_action, "reconcile-succeeded");
+  const expiredAbsentInspection = await inspectOneProofPayrollArtifactRetry(serializedArtifact, {
+    nowUnix: expiry,
+    queryTransaction: async () => "not-found",
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(value => [value, false]))
+  });
+  assert.equal(expiredAbsentInspection.next_action, "manual-review");
+  await assert.rejects(
+    () => retransmitOneProofPayrollArtifact(serializedArtifact, {
+      nowUnix: expiry,
+      broadcastSignedTx: async () => ({})
+    }),
+    /payload expired/
+  );
   await assert.rejects(
     () => inspectOneProofPayrollArtifactRetry(serializedArtifact, {
       nowUnix: 1_700_000_000,

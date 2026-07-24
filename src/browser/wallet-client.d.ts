@@ -550,6 +550,8 @@ export type ScanWalletNotesResult = ScanResult & {
 export interface DecodeUserDisclosureInput extends Partial<BrowserWalletIdentityInput>, PrivacyScanOptions {
   txHash?: Hex;
   tx_hash?: Hex;
+  assetDenom?: string;
+  asset_denom?: string;
   skipSignerPubKeyCheck?: boolean;
   skip_signer_pubkey_check?: boolean;
 }
@@ -564,6 +566,8 @@ export interface DecodeSelfViewDisclosureInput extends DecodeUserDisclosureInput
 export interface DecodeAuditDisclosureInput extends PrivacyScanOptions {
   txHash?: Hex;
   tx_hash?: Hex;
+  assetDenom?: string;
+  asset_denom?: string;
   disclosurePrivKeyHex?: Hex;
   disclosure_privkey_hex?: Hex;
 }

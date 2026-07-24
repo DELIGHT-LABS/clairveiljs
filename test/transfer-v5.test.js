@@ -12,6 +12,9 @@ import {
 import { createNote } from "clairveiljs/note";
 import {
   computeAssetIdV1,
+  computeNoteCommitmentV1,
+  computeNoteTreeNodeV1,
+  emptyNoteTreeRootsV1,
   encryptedEnvelopeKindV1,
   marshalDisclosurePlaintextV1,
   unmarshalDisclosurePlaintextV1,
@@ -36,6 +39,30 @@ function signature(point) {
   return `${Buffer.from(packPoint(point)).toString("hex")}${field(1n)}`;
 }
 
+function pairedMerklePathProvider(notes) {
+  const commitments = notes.map(computeNoteCommitmentV1);
+  const emptyRoots = emptyNoteTreeRootsV1(32);
+  const paths = commitments.map((commitment, index) => {
+    const path = [commitments[index ^ 1]];
+    const helper = [index & 1];
+    let current = index === 0
+      ? computeNoteTreeNodeV1(0, commitment, commitments[1])
+      : computeNoteTreeNodeV1(0, commitments[0], commitment);
+    for (let level = 1; level < 32; level += 1) {
+      path.push(emptyRoots[level]);
+      helper.push(0);
+      current = computeNoteTreeNodeV1(level, current, emptyRoots[level]);
+    }
+    return { root: field(current), path: path.map(field), path_helper: helper };
+  });
+  const byCommitment = new Map(commitments.map((commitment, index) => [field(commitment), paths[index]]));
+  return commitmentHex => {
+    const path = byCommitment.get(commitmentHex);
+    if (!path) throw new Error("unexpected transfer test commitment");
+    return path;
+  };
+}
+
 function validPayload() {
   const spend = derivePubKeyFromScalar(17n);
   const view = derivePubKeyFromScalar(19n);
@@ -52,8 +79,8 @@ function validPayload() {
     root_hex: field(1n),
     asset_id_hex: field(2n),
     inputs: [
-      { amount: "7", randomness_hex: field(3n), spend_pubkey_hex: Buffer.from(packPoint(spend)).toString("hex"), view_pubkey_hex: Buffer.from(packPoint(view)).toString("hex"), merkle_path: ["01"], merkle_path_helper: [0], nullifier_hex: field(4n) },
-      { amount: "5", randomness_hex: field(5n), spend_pubkey_hex: Buffer.from(packPoint(spend)).toString("hex"), view_pubkey_hex: Buffer.from(packPoint(view)).toString("hex"), merkle_path: ["02"], merkle_path_helper: [1], nullifier_hex: field(6n) }
+      { amount: "7", randomness_hex: field(3n), spend_pubkey_hex: Buffer.from(packPoint(spend)).toString("hex"), view_pubkey_hex: Buffer.from(packPoint(view)).toString("hex"), merkle_path: Array(32).fill(field(1n)), merkle_path_helper: Array(32).fill(0), nullifier_hex: field(4n) },
+      { amount: "5", randomness_hex: field(5n), spend_pubkey_hex: Buffer.from(packPoint(spend)).toString("hex"), view_pubkey_hex: Buffer.from(packPoint(view)).toString("hex"), merkle_path: Array(32).fill(field(2n)), merkle_path_helper: Array(32).fill(1), nullifier_hex: field(6n) }
     ],
     outputs: [
       { amount: "7", randomness_hex: field(7n), spend_pubkey_hex: Buffer.from(packPoint(recipientSpend)).toString("hex"), view_pubkey_hex: Buffer.from(packPoint(recipientView)).toString("hex"), commitment_hex: field(8n) },
@@ -111,6 +138,47 @@ test("transfer v5 rejects stale or tampered prepared effects before MsgTransfer 
   assert.throws(() => validatePreparedTransferV5PayloadMetadata({ ...payload, creator: "clair1altered" }));
 });
 
+test("transfer v5 metadata rejects identity disclosure targets before message construction", () => {
+  const payload = validPayload();
+  const identityHex = Buffer.from(packPoint({ x: 0n, y: 1n })).toString("hex");
+  const identityTarget = { ...payload, audit_disclosure_target_pubkey_hex: identityHex, payload_hash: "" };
+  identityTarget.payload_hash = computePreparedTransferV5PayloadHash(identityTarget);
+  const proof = { version: "v2", payload_hash: identityTarget.payload_hash, proof_hex: `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}` };
+  assert.throws(() => validatePreparedTransferV5PayloadMetadata(identityTarget), /identity is not allowed/);
+  assert.throws(() => buildTransferV5MsgFromPayloadAndProof(identityTarget, proof, { nowUnix: 1_700_000_000 }), /identity is not allowed/);
+});
+
+test("transfer v5 metadata accepts Go-compatible abbreviated paths while rejecting malformed witnesses", () => {
+  const payload = validPayload();
+  const abbreviated = structuredClone(payload);
+  abbreviated.inputs[0].merkle_path = ["01", "02"];
+  abbreviated.inputs[0].merkle_path_helper = [0, 1];
+  abbreviated.payload_hash = computePreparedTransferV5PayloadHash(abbreviated);
+  assert.equal(validatePreparedTransferV5PayloadMetadata(abbreviated), true);
+
+  const malformed = structuredClone(payload);
+  malformed.inputs[0].merkle_path[0] = "not-hex";
+  malformed.payload_hash = computePreparedTransferV5PayloadHash(malformed);
+  assert.throws(() => validatePreparedTransferV5PayloadMetadata(malformed), /valid hex/);
+
+  const invalidHelper = structuredClone(payload);
+  invalidHelper.inputs[0].merkle_path_helper[0] = 2;
+  invalidHelper.payload_hash = computePreparedTransferV5PayloadHash(invalidHelper);
+  assert.throws(() => validatePreparedTransferV5PayloadMetadata(invalidHelper), /must be 0 or 1/);
+
+  const mismatchedPath = structuredClone(payload);
+  mismatchedPath.inputs[0].merkle_path = [field(1n)];
+  mismatchedPath.inputs[0].merkle_path_helper = [];
+  mismatchedPath.payload_hash = computePreparedTransferV5PayloadHash(mismatchedPath);
+  assert.throws(() => validatePreparedTransferV5PayloadMetadata(mismatchedPath), /matching lengths/);
+
+  const oversizedPath = structuredClone(payload);
+  oversizedPath.inputs[0].merkle_path.push(field(1n));
+  oversizedPath.inputs[0].merkle_path_helper.push(0);
+  oversizedPath.payload_hash = computePreparedTransferV5PayloadHash(oversizedPath);
+  assert.throws(() => validatePreparedTransferV5PayloadMetadata(oversizedPath), /exceeds depth 32/);
+});
+
 test("transfer v5 proof and message builders reject expired payloads by default", () => {
   const payload = validPayload();
   payload.expires_at_unix = 1;
@@ -153,7 +221,7 @@ test("standard transfer builder emits the Clairveil 0.2 V5 fixed-envelope contra
     recipient: encodeShieldedAddress(recipientSpend, recipientView, { prefix: "clairs" }),
     amount: "7uclair",
     rootSeed,
-    merklePathProvider: () => ({ root: field(1n), path: [], path_helper: [] }),
+    merklePathProvider: pairedMerklePathProvider(inputs.map(input => input.note)),
     auditDisclosureTargetPubKeyHex: Buffer.from(packPoint(audit)).toString("hex")
   });
 
@@ -175,7 +243,7 @@ test("standard transfer builder emits the Clairveil 0.2 V5 fixed-envelope contra
     recipient: encodeShieldedAddress(recipientSpend, recipientView, { prefix: "clairs" }),
     amount: "7uclair",
     rootSeed,
-    merklePathProvider: () => ({ root: field(1n), path: [], path_helper: [] }),
+    merklePathProvider: pairedMerklePathProvider(inputs.map(input => input.note)),
     auditDisclosureTargetPubKeyHex: Buffer.from(packPoint(audit)).toString("hex"),
     userPrivacyPolicy: "amount-from-to",
     userDisclosureMode: "public"
@@ -194,6 +262,29 @@ test("standard transfer builder emits the Clairveil 0.2 V5 fixed-envelope contra
     () => validatePreparedTransferV5PayloadMetadata(tampered),
     /public transfer disclosure digest does not match plaintext/
   );
+
+  let signerCalls = 0;
+  await assert.rejects(
+    () => buildPreparedTransferPayload({
+      creator: "clair1creator",
+      chainId: "clairveil-test-1",
+      chainNowUnix: 1_700_000_000,
+      inputs,
+      recipient: encodeShieldedAddress(recipientSpend, recipientView, { prefix: "clairs" }),
+      amount: "7uclair",
+      rootSeed,
+      merklePathProvider: () => ({ root: field(1n), path: [], path_helper: [] }),
+      auditDisclosureTargetPubKeyHex: Buffer.from(packPoint(audit)).toString("hex"),
+      ownerIntentSigner: {
+        signJoinSplitOwnerIntent() {
+          signerCalls += 1;
+          return new Uint8Array(64);
+        }
+      }
+    }),
+    /merkle path must be 32 levels/
+  );
+  assert.equal(signerCalls, 0);
 });
 
 test("external transfer signer receives a validated full JoinSplit request before callback", async () => {
@@ -229,7 +320,7 @@ test("external transfer signer receives a validated full JoinSplit request befor
     recipient: encodeShieldedAddress(recipientSpend, recipientView, { prefix: "clairs" }),
     amount: "7uclair",
     rootSeed,
-    merklePathProvider: () => ({ root: field(1n), path: [], path_helper: [] }),
+    merklePathProvider: pairedMerklePathProvider(inputs.map(input => input.note)),
     auditDisclosureTargetPubKeyHex: Buffer.from(packPoint(audit)).toString("hex"),
     ownerIntentSigner: {
       async signJoinSplitOwnerIntent(candidate) {

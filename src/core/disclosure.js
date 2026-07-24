@@ -28,6 +28,7 @@ import {
   unwrapEncryptedEnvelopeV1,
   unmarshalDisclosurePlaintextV1
 } from "../privacy/protocol-v1.js";
+import { canonicalAssetDenomV1 } from "../privacy/asset-registry.js";
 import { isValidatedPrivacyScanOutputV2 } from "../privacy/scan.js";
 
 export const payloadVersion = "v4";
@@ -96,9 +97,24 @@ export function decryptPayloadHex(ciphertextHex, disclosureScalar) {
 }
 
 function fixedDisclosurePlaneName(value, expectedPlane) {
-  if (value.plane === 1) return planeUser;
-  if (value.plane !== 2) throw new Error(`unsupported DisclosurePlaintextV1 plane ${value.plane}`);
-  return expectedPlane === planeSelfView ? planeSelfView : planeAudit;
+  if (expectedPlane === planeUser) {
+    if (value.plane !== 1) throw new Error(`DisclosurePlaintextV1 plane ${value.plane} is not a user disclosure`);
+    return planeUser;
+  }
+  if (expectedPlane !== planeAudit && expectedPlane !== planeSelfView) {
+    throw new Error(`unsupported expected disclosure plane ${JSON.stringify(expectedPlane)}`);
+  }
+  if (value.plane !== 2) throw new Error(`DisclosurePlaintextV1 plane ${value.plane} is not a full disclosure`);
+  return expectedPlane;
+}
+
+function verifiedAssetDenom(value, assetDenom) {
+  if (!assetDenom) return "";
+  const denom = canonicalAssetDenomV1(assetDenom);
+  if (computeAssetIdV1(denom) !== value.assetID) {
+    throw new Error(`disclosure asset denom ${JSON.stringify(denom)} does not match the committed asset ID`);
+  }
+  return denom;
 }
 
 function fixedDisclosureDigest(value) {
@@ -144,6 +160,7 @@ function optionalFixedRecipientAddress(value, prefix) {
 
 function fixedDisclosureReport(value, onChainDigestHex, txHash, { expectedPlane = planeUser, source, delivery, shieldedPrefix, assetDenom = "" } = {}) {
   const plane = fixedDisclosurePlaneName(value, expectedPlane);
+  const verifiedDenom = verifiedAssetDenom(value, assetDenom);
   const expectedDigestHex = fieldHexV1(fixedDisclosureDigest(value));
   const onChain = String(onChainDigestHex || "").trim().toLowerCase();
   if (onChain && onChain !== expectedDigestHex) throw new Error(`on-chain disclosure digest mismatch: event has ${onChainDigestHex}, expected ${expectedDigestHex}`);
@@ -158,7 +175,7 @@ function fixedDisclosureReport(value, onChainDigestHex, txHash, { expectedPlane 
     disclosure_digest_hex: expectedDigestHex,
     disclosure_blinding_hex: fieldHexV1(value.disclosureBlinding),
     asset_id_hex: fieldHexV1(value.assetID),
-    ...(full || (policy & transferPrivacyPolicyDiscloseAmount) !== 0 ? { amount: value.amount.toString(), asset_denom: assetDenom } : {}),
+    ...(full || (policy & transferPrivacyPolicyDiscloseAmount) !== 0 ? { amount: value.amount.toString(), asset_denom: verifiedDenom } : {}),
     ...(full || (policy & transferPrivacyPolicyDiscloseFrom) !== 0 ? { from_shielded_address: optionalFixedAddress(value, shieldedPrefix) } : {}),
     ...(full || (policy & transferPrivacyPolicyDiscloseTo) !== 0 ? { to_shielded_address: optionalFixedRecipientAddress(value, shieldedPrefix) } : {})
   };
@@ -699,6 +716,7 @@ function unpackBatchDisclosureTarget(value) {
 function batchDisclosurePlaintextPayload(value, digest, { plane, shieldedPrefix, assetDenom = "" }) {
   const full = plane === planeAudit || plane === planeSelfView;
   const policy = full ? 7 : value.policy;
+  const verifiedDenom = verifiedAssetDenom(value, assetDenom);
   const payload = {
     version: "privacy-fixed-v1",
     plane,
@@ -708,7 +726,7 @@ function batchDisclosurePlaintextPayload(value, digest, { plane, shieldedPrefix,
     disclosure_digest_hex: fieldHexV1(digest),
     disclosure_blinding_hex: fieldHexV1(value.disclosureBlinding),
     asset_id_hex: fieldHexV1(value.assetID),
-    ...(full || (policy & transferPrivacyPolicyDiscloseAmount) !== 0 ? { amount: value.amount.toString(), asset_denom: assetDenom } : {}),
+    ...(full || (policy & transferPrivacyPolicyDiscloseAmount) !== 0 ? { amount: value.amount.toString(), asset_denom: verifiedDenom } : {}),
     ...(full || (policy & transferPrivacyPolicyDiscloseFrom) !== 0 ? { from_shielded_address: optionalFixedAddress(value, shieldedPrefix) } : {}),
     ...(full || (policy & transferPrivacyPolicyDiscloseTo) !== 0 ? { to_shielded_address: optionalFixedRecipientAddress(value, shieldedPrefix) } : {})
   };
@@ -1033,13 +1051,9 @@ export function disclosureScalarFromHex(value) {
 }
 
 export function publicPayloadReport(payloadHex, onChainDigestHex = "", txHash = "", options = {}) {
+  let plaintext;
   try {
-    return fixedDisclosureReport(
-      unmarshalDisclosurePlaintextV1(bytesFromHex(payloadHex, "public disclosure payload")),
-      onChainDigestHex,
-      txHash,
-      { ...options, expectedPlane: planeUser, source: "public", delivery: "public" }
-    );
+    plaintext = unmarshalDisclosurePlaintextV1(bytesFromHex(payloadHex, "public disclosure payload"));
   } catch {
     const payload = decodePublicPayloadHex(payloadHex);
     return buildDisclosureReport({
@@ -1051,6 +1065,12 @@ export function publicPayloadReport(payloadHex, onChainDigestHex = "", txHash = 
       shieldedPrefix: options.shieldedPrefix
     });
   }
+  return fixedDisclosureReport(
+    plaintext,
+    onChainDigestHex,
+    txHash,
+    { ...options, expectedPlane: planeUser, source: "public", delivery: "public" }
+  );
 }
 
 export function payloadHex(payload) {

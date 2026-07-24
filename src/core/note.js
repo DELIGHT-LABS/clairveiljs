@@ -31,6 +31,7 @@ import {
 import {
   computeAssetIdV1,
   computeNoteCommitmentV1,
+  computeNoteNullifierV1,
   encryptDepositNoteV1
 } from "../privacy/protocol-v1.js";
 
@@ -191,16 +192,7 @@ export function noteToGoJSONBytes(noteLike) {
 }
 
 export function computeNoteCommitment(noteLike) {
-  const note = normalizeNote(noteLike);
-  return mimcHash(
-    note.receiverSpendPubKeyX,
-    note.receiverSpendPubKeyY,
-    note.receiverViewPubKeyX,
-    note.receiverViewPubKeyY,
-    note.amount,
-    note.assetID,
-    note.randomness
-  );
+  return computeNoteCommitmentV1(normalizeNote(noteLike));
 }
 
 export function computeNoteCommitmentHex(noteLike) {
@@ -212,12 +204,7 @@ export function computeNoteCommitmentBytes(noteLike) {
 }
 
 export function computeNoteNullifier(noteLike) {
-  const note = normalizeNote(noteLike);
-  return mimcHash(
-    note.randomness,
-    note.receiverSpendPubKeyX,
-    note.receiverSpendPubKeyY
-  );
+  return computeNoteNullifierV1(normalizeNote(noteLike));
 }
 
 export function computeNoteNullifierHex(noteLike) {

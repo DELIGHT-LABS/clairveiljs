@@ -5,6 +5,18 @@ import {
   packPoint
 } from "clairveiljs/core";
 import {
+  computeNoteCommitment,
+  computeNoteCommitmentBytes,
+  computeNoteCommitmentHex,
+  computeNoteNullifier,
+  computeNoteNullifierHex,
+  normalizeFoundNote
+} from "clairveiljs/note";
+import {
+  deserializeFoundNote,
+  serializeFoundNote
+} from "clairveiljs/note-store";
+import {
   canonicalBatchTransferPayloadBytesV1,
   computeAssetIdV1,
   computeBatchFullDisclosureDigestV1,
@@ -66,6 +78,19 @@ test("privacy-fixed-v1 note primitives match the Clairveil main golden vector", 
     computeNoteNullifierV1(note).toString(16).padStart(64, "0"),
     "13b50fceae57ce77eee3f686abc1563aadc27ff6d1e32ce2fcc599463d28585b"
   );
+  assert.equal(computeNoteCommitment(note), computeNoteCommitmentV1(note));
+  assert.equal(computeNoteCommitmentHex(note), computeNoteCommitmentV1(note).toString(16).padStart(64, "0"));
+  assert.deepEqual(computeNoteCommitmentBytes(note), new Uint8Array(Buffer.from(computeNoteCommitmentHex(note), "hex")));
+  assert.equal(computeNoteNullifier(note), computeNoteNullifierV1(note));
+  assert.equal(computeNoteNullifierHex(note), computeNoteNullifierV1(note).toString(16).padStart(64, "0"));
+  assert.equal(normalizeFoundNote({ note }).nullifier, computeNoteNullifierHex(note));
+
+  const persisted = serializeFoundNote({ note, nullifier: "00".repeat(32) });
+  assert.equal(persisted.nullifier, computeNoteNullifierHex(note));
+  assert.equal(persisted.nullifier_hex, computeNoteNullifierHex(note));
+  const restored = deserializeFoundNote({ ...persisted, nullifier: "00".repeat(32), nullifier_hex: "00".repeat(32) });
+  assert.equal(restored.nullifier, computeNoteNullifierHex(note));
+  assert.equal(restored.nullifier_hex, computeNoteNullifierHex(note));
   assert.deepEqual(
     emptyNoteTreeRootsV1(2).map(value => value.toString(16).padStart(64, "0")),
     [

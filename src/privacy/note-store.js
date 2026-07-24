@@ -11,6 +11,7 @@ import {
   activeCircuitSetIdV1,
   computeAssetIdV1,
   computeNoteCommitmentV1,
+  computeNoteNullifierV1,
   privacyFixedV1,
   validateNoteV1
 } from "./protocol-v1.js";
@@ -66,6 +67,10 @@ function commitmentHexForStorage(note) {
   return canonicalFieldHex(computeNoteCommitmentV1(validateNoteV1(note)));
 }
 
+function nullifierHexForStorage(note) {
+  return canonicalFieldHex(computeNoteNullifierV1(validateNoteV1(note)));
+}
+
 function assertOptionalDerivedHex(value, expected, label) {
   const supplied = String(value ?? "").trim().toLowerCase();
   if (supplied && supplied !== expected) throw new Error(`${label} does not match NoteV1`);
@@ -80,6 +85,7 @@ export function serializeFoundNote(foundLike) {
     commitmentHexForStorage(note),
     "stored note commitment"
   );
+  const nullifierHex = nullifierHexForStorage(note);
   const assetIdHex = assertOptionalDerivedHex(
     foundLike?.asset_id_hex ?? foundLike?.assetIdHex,
     canonicalFieldHex(note.assetID),
@@ -107,14 +113,14 @@ export function serializeFoundNote(foundLike) {
       memo: note.memo || ""
     },
     commitment_hex: commitmentHex,
-    nullifier_hex: String((foundLike?.nullifier_hex ?? found.nullifier) || "").toLowerCase(),
+    nullifier_hex: nullifierHex,
     amount: bigintToString(note.amount),
     asset_denom: assetDenom,
     asset_id_hex: assetIdHex,
     randomness_hex: assertOptionalDerivedHex(foundLike?.randomness_hex ?? foundLike?.randomnessHex, canonicalFieldHex(note.randomness), "stored note randomness_hex"),
     spend_pubkey_hex: assertOptionalDerivedHex(foundLike?.spend_pubkey_hex ?? foundLike?.spendPubKeyHex, noteSpendPubKeyHex(note).toLowerCase(), "stored note spend_pubkey_hex"),
     view_pubkey_hex: assertOptionalDerivedHex(foundLike?.view_pubkey_hex ?? foundLike?.viewPubKeyHex, noteViewPubKeyHex(note).toLowerCase(), "stored note view_pubkey_hex"),
-    nullifier: String(found.nullifier || "").toLowerCase(),
+    nullifier: nullifierHex,
     isSpent: spent,
     nullifier_status: found.nullifierStatus,
     nullifierStatus: found.nullifierStatus,
@@ -145,6 +151,7 @@ export function deserializeFoundNote(serialized) {
     note
   });
   const commitmentHex = assertOptionalDerivedHex(serialized.commitment_hex, commitmentHexForStorage(note), "stored note commitment");
+  const nullifierHex = nullifierHexForStorage(note);
   const assetIdHex = assertOptionalDerivedHex(serialized.asset_id_hex, canonicalFieldHex(note.assetID), "stored note asset_id_hex");
   const randomnessHex = assertOptionalDerivedHex(serialized.randomness_hex, canonicalFieldHex(note.randomness), "stored note randomness_hex");
   const spendPubkeyHex = assertOptionalDerivedHex(serialized.spend_pubkey_hex, noteSpendPubKeyHex(note).toLowerCase(), "stored note spend_pubkey_hex");
@@ -154,7 +161,8 @@ export function deserializeFoundNote(serialized) {
     ...found,
     note,
     commitment_hex: commitmentHex,
-    nullifier_hex: String(serialized.nullifier_hex || found.nullifier || "").toLowerCase(),
+    nullifier_hex: nullifierHex,
+    nullifier: nullifierHex,
     amount: String(serialized.amount ?? note.amount.toString()),
     asset_denom: String(serialized.asset_denom || ""),
     asset_id_hex: assetIdHex,

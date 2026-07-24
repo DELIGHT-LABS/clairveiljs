@@ -90,7 +90,9 @@ function pointValue(value, label) {
     if (raw.length !== 32) throw new Error(`${label} must be exactly 32 bytes`);
   }
   try {
-    return { point: unpackPoint(raw), bytes: raw };
+    const point = unpackPoint(raw);
+    if (point.x === 0n && point.y === 1n) throw new Error("point identity is not allowed");
+    return { point, bytes: raw };
   } catch (error) {
     throw new Error(`${label} must be a canonical prime-subgroup point: ${error.message}`);
   }
@@ -202,6 +204,12 @@ function safePositiveInteger(value, label) {
   return value;
 }
 
+function positiveUint64(value, label) {
+  const parsed = integer(value, label, { bits: 64, nonZero: true });
+  if (parsed < 0n) throw new Error(`${label} must be a positive uint64`);
+  return parsed;
+}
+
 function goString(value) {
   return JSON.stringify(String(value)).replace(/[<>&\u2028\u2029]/g, character => ({ "<": "\\u003c", ">": "\\u003e", "&": "\\u0026", "\u2028": "\\u2028", "\u2029": "\\u2029" })[character]);
 }
@@ -276,7 +284,7 @@ function parsedBatchEffect(payload, { creator = "", proof = new Uint8Array() } =
     nullifiers: payload.inputs.map((input, index) => exactBase64(input?.nullifier, `prepared batch transfer input ${index} nullifier`, 32)),
     outputs: payload.message_outputs.map(parseMessageOutput),
     auditKeyId: String(payload.audit_key_id ?? ""),
-    auditKeyEpoch: BigInt(safePositiveInteger(payload.audit_key_epoch, "prepared batch transfer audit key epoch")),
+    auditKeyEpoch: positiveUint64(payload.audit_key_epoch, "prepared batch transfer audit key epoch"),
     auditDisclosureTargetPubkey: exactBase64(payload.audit_disclosure_target_pubkey, "prepared batch transfer audit disclosure target", 32),
     expiresAtUnix: BigInt(expiresAtUnix)
   };
@@ -558,7 +566,7 @@ function serializePreparedBatchTransferPayloadJson(payload, { forHash = false } 
   }
   const root = serializedBase64(payload.root, "prepared batch transfer root", 32);
   const assetID = decimalField(payload.asset_id, "prepared batch transfer asset ID", { nonZero: true });
-  const auditEpoch = safePositiveInteger(payload.audit_key_epoch, "prepared batch transfer audit key epoch");
+  const auditEpoch = positiveUint64(payload.audit_key_epoch, "prepared batch transfer audit key epoch");
   const auditTarget = serializedBase64(payload.audit_disclosure_target_pubkey, "prepared batch transfer audit disclosure target", 32);
   const signature = canonicalOwnerSignature(payload.owner_signature);
   const payloadHash = forHash ? "" : fieldHex(payload.payload_hash, "prepared batch transfer payload hash");
@@ -574,7 +582,7 @@ function serializePreparedBatchTransferPayloadJson(payload, { forHash = false } 
     ["outputs", goArray(payload.outputs.map(serializePreparedOutput))],
     ["message_outputs", goArray(payload.message_outputs.map(serializeMessageOutput))],
     ["audit_key_id", goString(payload.audit_key_id ?? "")],
-    ["audit_key_epoch", String(auditEpoch)],
+    ["audit_key_epoch", auditEpoch.toString()],
     ["audit_disclosure_target_pubkey", auditTarget],
     ["nullifier_root", decimalField(payload.nullifier_root, "prepared batch transfer nullifier root")],
     ["commitment_root", decimalField(payload.commitment_root, "prepared batch transfer commitment root")],
@@ -728,7 +736,7 @@ export function validateBatchTransferSigningRequestV1(request) {
   validateSecretIndependence(inputs, outputs);
   const selfViewEnabled = normalizedEffect.outputs[0].selfViewDisclosurePayload.length !== 0;
   if (Boolean(request.selfViewEnabled) !== selfViewEnabled) throw new Error("batch transfer structured self-view all-or-none mismatch");
-  if (String(request.auditKeyId ?? "") !== normalizedEffect.auditKeyId || safePositiveInteger(request.auditKeyEpoch, "batch transfer structured audit key epoch") !== Number(normalizedEffect.auditKeyEpoch) || !sameBytes(structuredPointBytes(request.auditDisclosureTargetPubKey, "batch transfer structured audit target"), normalizedEffect.auditDisclosureTargetPubkey)) {
+  if (String(request.auditKeyId ?? "") !== normalizedEffect.auditKeyId || positiveUint64(request.auditKeyEpoch, "batch transfer structured audit key epoch") !== normalizedEffect.auditKeyEpoch || !sameBytes(structuredPointBytes(request.auditDisclosureTargetPubKey, "batch transfer structured audit target"), normalizedEffect.auditDisclosureTargetPubkey)) {
     throw new Error("batch transfer structured audit identity mismatch");
   }
   const nullifierRoot = computeBatchVectorRootV1("nullifier", inputs.length, [...inputs.map(input => bytesToBigIntBE(input.nullifier)), ...Array(16 - inputs.length).fill(0n)]);
@@ -874,7 +882,7 @@ export async function buildPreparedBatchTransferPayload(input) {
   if (!chainId) throw new Error("prepared batch transfer chain ID is required");
   const expiresAtUnix = safePositiveInteger(input.expiresAtUnix ?? input.expires_at_unix, "prepared batch transfer expires_at_unix");
   const auditKeyId = String(input.auditKeyId ?? input.audit_key_id ?? "");
-  const auditKeyEpoch = safePositiveInteger(input.auditKeyEpoch ?? input.audit_key_epoch, "prepared batch transfer audit key epoch");
+  const auditKeyEpoch = positiveUint64(input.auditKeyEpoch ?? input.audit_key_epoch, "prepared batch transfer audit key epoch");
   const auditTarget = pointValue(input.auditDisclosureTargetPubKey ?? input.audit_disclosure_target_pubkey, "prepared batch transfer audit disclosure target");
   const disableSelfViewDisclosure = input.disableSelfViewDisclosure === true;
   const selfViewTarget = disableSelfViewDisclosure ? null : pointValue(input.selfViewDisclosureTargetPubKey ?? input.self_view_disclosure_target_pubkey, "prepared batch transfer self-view target");
@@ -936,7 +944,9 @@ export async function buildPreparedBatchTransferPayload(input) {
     auditKeyId, auditKeyEpoch, auditTarget, nullifierRoot, commitmentRoot,
     userDisclosureRoot, fullDisclosureRoot, digest, expectedIntent
   });
-  const ownerSignature = await signValidatedBatchTransferIntentV1(input.signer, signingRequest);
+  const ownerSignature = await signValidatedBatchTransferIntentV1(input.signer, signingRequest, {
+    allowLegacyNoteHashSigner: input.allowLegacyNoteHashSigner === true
+  });
   const payload = {
     version: preparedBatchTransferPayloadVersion,
     circuit_set_id: batchTransferCircuitSetId,
@@ -954,7 +964,7 @@ export async function buildPreparedBatchTransferPayload(input) {
       full_disclosure_digest: base64FromBytes(output.fullDisclosureDigest), audit_disclosure_payload: base64FromBytes(output.auditDisclosurePayload), self_view_disclosure_payload: base64FromBytes(output.selfViewDisclosurePayload)
     })),
     audit_key_id: auditKeyId,
-    audit_key_epoch: auditKeyEpoch,
+    audit_key_epoch: auditKeyEpoch.toString(),
     audit_disclosure_target_pubkey: base64FromBytes(auditTarget.bytes),
     nullifier_root: nullifierRoot.toString(),
     commitment_root: commitmentRoot.toString(),
@@ -977,10 +987,9 @@ export function validatePreparedBatchTransferPayloadEnvelope(payload, { nowUnix 
   if (payload.payload_hash !== computePreparedBatchTransferPayloadHash(payload)) {
     throw new Error("prepared batch transfer payload hash mismatch; the payload may have been modified after preparation");
   }
-  if (nowUnix != null) {
-    if (!Number.isSafeInteger(nowUnix)) throw new Error("prepared batch transfer validation time must be a safe integer");
-    if (nowUnix >= payload.expires_at_unix) throw new Error("prepared batch transfer payload expired; regenerate it before requesting a proof");
-  }
+  const validationNow = nowUnix ?? Math.floor(Date.now() / 1000);
+  if (!Number.isSafeInteger(validationNow)) throw new Error("prepared batch transfer validation time must be a safe integer");
+  if (validationNow >= payload.expires_at_unix) throw new Error("prepared batch transfer payload expired; regenerate it before requesting a proof");
   return true;
 }
 

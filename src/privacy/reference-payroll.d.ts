@@ -284,7 +284,7 @@ export interface ExpectedPayrollOutputEvidence {
   user_privacy_policy: number;
   user_disclosure_mode: 0 | 1 | 2;
   audit_key_id: string;
-  audit_key_epoch: number;
+  audit_key_epoch: string;
 }
 
 export interface OneProofPayrollOutputSecret {
@@ -329,8 +329,8 @@ export interface PrepareOneProofPayrollOperationInput {
   root?: Uint8Array | string | bigint | number;
   audit_key_id?: string;
   auditKeyId?: string;
-  audit_key_epoch?: number;
-  auditKeyEpoch?: number;
+  audit_key_epoch?: bigint | number | string;
+  auditKeyEpoch?: bigint | number | string;
   audit_disclosure_target_pubkey?: Uint8Array | string | object;
   auditDisclosureTargetPubKey?: Uint8Array | string | object;
   self_view_disclosure_target_pubkey?: Uint8Array | string | object;
@@ -425,7 +425,7 @@ export interface ResumedOneProofPayrollArtifact {
   reservation_batch?: OneProofPayrollReservationBatch;
   sign_doc?: object;
   signed_tx_bytes?: Uint8Array;
-  next_action: "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction";
+  next_action: "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction" | "manual-review";
 }
 
 /** Fail-closed retry decision after a tx-hash-first, then nullifier, lookup. */

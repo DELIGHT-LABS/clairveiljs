@@ -97,6 +97,8 @@ export * from "../core/disclosure.js";
 export * from "../core/errors.js";
 export * from "../core/note.js";
 export * from "../privacy/payload.js";
+export * from "../privacy/circuit-config.js";
+export * from "../privacy/network-config.js";
 export * from "../privacy/planner.js";
 export * from "../privacy/prover.js";
 
@@ -628,6 +630,23 @@ async function fetchJsonWithRetry(urlForEndpoint, endpoints, { timeoutMs, retry,
     }
   }
   throw lastError;
+}
+
+function unwrapBaseAccount(value) {
+  let current = value;
+  const seen = new Set();
+  // Auth QueryAccount returns BaseAccount fields directly for common accounts,
+  // but vesting/module account Any values wrap those fields one or two levels
+  // below base_vesting_account/base_account. Keep this bounded and accept only
+  // the exact account-number/sequence pair needed by direct signing.
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) return null;
+    seen.add(current);
+    if (current.account_number != null && current.sequence != null) return current;
+    current = current.base_account ?? current.baseAccount ??
+      current.base_vesting_account ?? current.baseVestingAccount ?? null;
+  }
+  return null;
 }
 
 function privacyEventsQuery({
@@ -1337,6 +1356,10 @@ function resolveOperationEvidenceAlias(camelValue, snakeValue, name) {
   return String(camelProvided ? camelValue : snakeProvided ? snakeValue : "");
 }
 
+function resolveDisclosureAssetDenom(assetDenom, asset_denom, defaultDenom) {
+  return resolveOperationEvidenceAlias(assetDenom, asset_denom, "assetDenom") || defaultDenom;
+}
+
 function resolveOperationEvidenceArrayAlias(camelValue, snakeValue, name) {
   const camelProvided = camelValue !== undefined && camelValue !== null;
   const snakeProvided = snakeValue !== undefined && snakeValue !== null;
@@ -1744,7 +1767,7 @@ export class ClairveilJS {
 
   async getAccountInfo(address) {
     const data = await this.fetchJson(`/cosmos/auth/v1beta1/accounts/${address}`, { failover: true });
-    const info = data.account ?? data.info;
+    const info = unwrapBaseAccount(data.account ?? data.info);
     if (info?.account_number == null || info.sequence == null) {
       throw new Error("account not found on-chain; fund it first");
     }
@@ -3565,17 +3588,20 @@ export class ClairveilJS {
     signature_base64,
     skipSignerPubKeyCheck,
     skip_signer_pubkey_check,
+    assetDenom,
+    asset_denom,
     ...eventQuery
   }) {
     const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
     const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+    const disclosureAssetDenom = resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom);
     if (eventAttribute(event, "user_disclosure_mode") === "USER_DISCLOSURE_MODE_PUBLIC") {
       return decodeUserDisclosureFromEvent(
         event,
         1n,
         "",
         normalizedTxHash,
-        { shieldedPrefix: this.shieldedPrefix, assetDenom: this.defaultDenom }
+        { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
       );
     }
     const signerPubKeyHex = pubKeyHex ?? pub_key_hex;
@@ -3594,7 +3620,7 @@ export class ClairveilJS {
       material.disclosureScalar,
       material.disclosurePubKeyHex,
       normalizedTxHash,
-      { shieldedPrefix: this.shieldedPrefix, assetDenom: this.defaultDenom }
+      { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
     );
   }
 
@@ -3612,10 +3638,13 @@ export class ClairveilJS {
     disclosure_scalar,
     disclosureScalarHex,
     disclosure_scalar_hex,
+    assetDenom,
+    asset_denom,
     ...eventQuery
   }) {
     const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
     const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+    const disclosureAssetDenom = resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom);
     const directScalar = disclosureScalar ?? disclosure_scalar;
     const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
     if (directScalar != null || directScalarHex != null) {
@@ -3623,7 +3652,7 @@ export class ClairveilJS {
         event,
         directScalar != null ? directScalar : disclosureScalarFromHex(directScalarHex),
         normalizedTxHash,
-        { shieldedPrefix: this.shieldedPrefix, assetDenom: this.defaultDenom }
+        { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
       );
     }
     const signerPubKeyHex = pubKeyHex ?? pub_key_hex;
@@ -3641,18 +3670,27 @@ export class ClairveilJS {
       event,
       material.disclosureScalar,
       normalizedTxHash,
-      { shieldedPrefix: this.shieldedPrefix, assetDenom: this.defaultDenom }
+      { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
     );
   }
 
-  async decodeAuditDisclosure({ txHash, tx_hash, disclosurePrivKeyHex, disclosure_privkey_hex, ...eventQuery }) {
+  async decodeAuditDisclosure({
+    txHash,
+    tx_hash,
+    disclosurePrivKeyHex,
+    disclosure_privkey_hex,
+    assetDenom,
+    asset_denom,
+    ...eventQuery
+  }) {
     const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
     const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+    const disclosureAssetDenom = resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom);
     return decodeAuditDisclosureFromEvent(
       event,
       disclosureScalarFromHex(disclosurePrivKeyHex ?? disclosure_privkey_hex),
       normalizedTxHash,
-      { shieldedPrefix: this.shieldedPrefix, assetDenom: this.defaultDenom }
+      { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
     );
   }
 
@@ -3690,7 +3728,7 @@ export class ClairveilJS {
     const common = {
       txHash: txHash ?? tx_hash,
       shieldedPrefix: this.shieldedPrefix,
-      assetDenom: assetDenom ?? asset_denom ?? this.defaultDenom
+      assetDenom: resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom)
     };
     if (isPublic) return decodeBatchUserDisclosureFromScanOutput(selectedOutput, common);
 
@@ -3745,7 +3783,7 @@ export class ClairveilJS {
     const common = {
       txHash: txHash ?? tx_hash,
       shieldedPrefix: this.shieldedPrefix,
-      assetDenom: assetDenom ?? asset_denom ?? this.defaultDenom
+      assetDenom: resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom)
     };
     const directScalar = disclosureScalar ?? disclosure_scalar;
     const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
@@ -3792,7 +3830,7 @@ export class ClairveilJS {
     return decodeBatchAuditDisclosureFromScanOutput(selectedOutput, {
       txHash: txHash ?? tx_hash,
       shieldedPrefix: this.shieldedPrefix,
-      assetDenom: assetDenom ?? asset_denom ?? this.defaultDenom,
+      assetDenom: resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom),
       disclosureScalar: directScalar != null
         ? directScalar
         : disclosureScalarFromHex(directScalarHex ?? disclosurePrivKeyHex ?? disclosure_privkey_hex)

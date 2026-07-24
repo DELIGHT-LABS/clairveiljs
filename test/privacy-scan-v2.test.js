@@ -4,6 +4,8 @@ import {
   canonicalFieldBytes,
   computeNoteCommitmentV1,
   derivePubKeyFromScalar,
+  deriveSpendKeys,
+  deriveViewKeys,
   packPoint
 } from "clairveiljs/core";
 import {
@@ -16,6 +18,8 @@ import {
 } from "clairveiljs/protocol-v1";
 import {
   createPrivacyScanValidationStateV2,
+  processPrivacyScanOutputV2,
+  processPrivacyScanPageV2,
   validatePrivacyScanPageV2
 } from "clairveiljs/scan";
 import { createClairveilClient } from "clairveiljs/cosmos";
@@ -79,8 +83,7 @@ function validDepositPage() {
   };
 }
 
-function validBatchOutput(index, auditTarget, selfViewEnabled) {
-  const note = noteForScan(index + 1);
+function validBatchOutput(index, auditTarget, selfViewEnabled, note = noteForScan(index + 1)) {
   const commitmentValue = computeNoteCommitmentV1(note);
   const commitment = canonicalFieldBytes(commitmentValue);
   const encrypted = encryptNoteForTransferV1(note, commitment, index);
@@ -118,7 +121,7 @@ function validBatchOutput(index, auditTarget, selfViewEnabled) {
   };
 }
 
-function validBatchPage({ selfViewEnabled = true } = {}) {
+function validBatchPage({ selfViewEnabled = true, notes = null } = {}) {
   const auditTarget = derivePubKeyFromScalar(97n);
   const summary = baseSummary("batch_transfer", 2, {
     nullifiers: [canonicalFieldBytes(53n)],
@@ -140,7 +143,7 @@ function validBatchPage({ selfViewEnabled = true } = {}) {
     auditKeyId: summary.auditKeyId,
     auditKeyEpoch: summary.auditKeyEpoch,
     auditTargetPubkey: summary.auditTargetPubkey,
-    ...validBatchOutput(index, auditTarget, selfViewEnabled)
+    ...validBatchOutput(index, auditTarget, selfViewEnabled, notes?.[index])
   }));
   return {
     scanSchemaVersion,
@@ -188,6 +191,38 @@ test("typed privacy scan rejects event-specific audit and disclosure sentinel vi
     hasMore: false
   };
   assert.throws(() => validatePrivacyScanPageV2(shieldedTransfer), /canonical non-identity point/);
+});
+
+test("typed privacy scan decryptors only accept validator-issued outputs and pages", () => {
+  const rawPage = validDepositPage();
+  const rootSeed = new Uint8Array(32).fill(5);
+  assert.throws(
+    () => processPrivacyScanOutputV2(rawPage.outputs[0], { rootSeed }),
+    /must be issued by validatePrivacyScanPageV2/
+  );
+  assert.throws(
+    () => processPrivacyScanPageV2(rawPage, { rootSeed }),
+    /must be issued by validatePrivacyScanPageV2/
+  );
+
+  const page = validatePrivacyScanPageV2(rawPage);
+  assert.equal(processPrivacyScanOutputV2(page.outputs[0], { rootSeed })?.note.amount, 5n);
+  assert.equal(processPrivacyScanPageV2(page, { rootSeed }).length, 1);
+});
+
+test("direct typed scan transfer decryption derives missing root-seed scalars", () => {
+  const rootSeed = new Uint8Array(32).fill(23);
+  const spend = deriveSpendKeys(rootSeed).pubKey;
+  const view = deriveViewKeys(rootSeed).pubKey;
+  const owned = {
+    ...noteForScan(7),
+    receiverSpendPubKeyX: spend.x,
+    receiverSpendPubKeyY: spend.y,
+    receiverViewPubKeyX: view.x,
+    receiverViewPubKeyY: view.y
+  };
+  const page = validatePrivacyScanPageV2(validBatchPage({ notes: [owned, noteForScan(8)] }));
+  assert.equal(processPrivacyScanOutputV2(page.outputs[0], { rootSeed })?.note.amount, owned.amount);
 });
 
 test("typed privacy scan rejects mixed batch self-view records and terminal output prefixes", () => {

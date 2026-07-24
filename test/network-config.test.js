@@ -53,12 +53,30 @@ test("network config validators normalize canonical Query responses", () => {
 
 test("network config validators reject malformed, incompatible, and non-conserving responses", () => {
   assert.throws(
+    () => normalizeAuditConfigV1({ ...auditConfig(), audit_master_pubkey_hex: packPointHex({ x: 0n, y: 1n }) }),
+    /canonical non-identity point/
+  );
+  assert.throws(
     () => normalizeAuditConfigV1({ ...auditConfig(), audit_key_id: "Master" }),
     /audit config key ID/
   );
   assert.throws(
     () => normalizeAuditConfigV1({ ...auditConfig(), audit_key_epoch: "0" }),
     /positive/
+  );
+  const roundedUnsafeUint64 = 9_007_199_254_740_993;
+  assert.equal(Number.isSafeInteger(roundedUnsafeUint64), false);
+  assert.throws(
+    () => normalizeAuditConfigV1({ ...auditConfig(), audit_key_epoch: roundedUnsafeUint64 }),
+    /safe integer/
+  );
+  assert.throws(
+    () => normalizeReserveResponseV1({ ...reserve(), module_balance: roundedUnsafeUint64 }, "uclair"),
+    /safe integer/
+  );
+  assert.equal(
+    normalizeAuditConfigV1({ ...auditConfig(), audit_key_epoch: 9_007_199_254_740_993n }).audit_key_epoch,
+    "9007199254740993"
   );
   assert.throws(
     () => normalizeDisclosureConfigV1({ ...disclosureConfig(), audit_disclosure_required: false }),

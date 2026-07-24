@@ -1,5 +1,5 @@
 import { base64FromBytes, bytesFromBase64, hexFromBytes, randomBytes, sha256Hex, utf8Bytes } from "../core/browser-crypto.js";
-import { FIELD_MODULUS, bytesToBigIntBE, decodeShieldedAddress } from "../core/crypto.js";
+import { FIELD_MODULUS, bytesFromHex, bytesToBigIntBE, decodeShieldedAddress, unpackPoint } from "../core/crypto.js";
 import {
   buildPreparedBatchTransferPayload,
   buildMsgBatchTransferFromPrepared,
@@ -103,6 +103,12 @@ function canonicalDigest(value, label) {
 function canonicalDisclosurePubKey(value, label) {
   const normalized = text(value).toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(normalized)) throw new Error(`${label} must be 32-byte compressed pubkey hex`);
+  try {
+    const point = unpackPoint(bytesFromHex(normalized, label));
+    if (point.x === 0n && point.y === 1n) throw new Error("point identity is not allowed");
+  } catch (error) {
+    throw new Error(`${label} must be a canonical non-identity prime-subgroup point: ${error.message}`);
+  }
   return normalized;
 }
 
@@ -482,19 +488,30 @@ function selectOneProofCandidates(available, target) {
     list.push(note);
     byOwner.set(note.owner_key_id, list);
   }
-  const candidates = [];
-  for (const ownerID of [...byOwner.keys()].sort()) {
+  const candidateLists = [];
+  const ownerIDs = [...byOwner.keys()].sort();
+  const perOwnerLimit = Math.max(1, Math.ceil(maxInputCandidates / ownerIDs.length));
+  // This limit applies to the whole payroll-planning attempt, not once per
+  // owner.  Per-owner slices retain deterministic fairness while preventing a
+  // large cache of owner keys from multiplying the bounded DFS work.
+  const perOwnerVisitLimit = Math.max(1, Math.floor(maxInputCandidateSearch / ownerIDs.length));
+  let remainingVisits = maxInputCandidateSearch;
+  for (const ownerID of ownerIDs) {
+    if (remainingVisits <= 0) break;
     const notes = [...byOwner.get(ownerID)].sort((left, right) => left.amount === right.amount ? left.note_id.localeCompare(right.note_id) : left.amount > right.amount ? -1 : 1);
+    const ownerCandidates = [];
     const selected = [];
     let visited = 0;
     const visit = (index, total) => {
-      if (visited >= maxInputCandidateSearch || candidates.length >= maxInputCandidates) return;
-      visited += 1;
       if (total >= target) {
+        if (ownerCandidates.length >= perOwnerLimit) return;
         const copy = [...selected].sort((left, right) => left.note_id.localeCompare(right.note_id));
-        candidates.push({ notes: copy, total });
+        ownerCandidates.push({ notes: copy, total });
         return;
       }
+      if (remainingVisits <= 0 || visited >= perOwnerVisitLimit || ownerCandidates.length >= perOwnerLimit) return;
+      visited += 1;
+      remainingVisits -= 1;
       if (index >= notes.length || selected.length >= oneProofPayrollMaxInputs) return;
       let maxReachable = total;
       for (let cursor = index; cursor < notes.length && cursor < index + (oneProofPayrollMaxInputs - selected.length); cursor += 1) maxReachable += notes[cursor].amount;
@@ -505,16 +522,19 @@ function selectOneProofCandidates(available, target) {
       visit(index + 1, total);
     };
     visit(0, 0n);
+    candidateLists.push(ownerCandidates);
   }
   const unique = new Map();
-  for (const candidate of candidates) unique.set(candidate.notes.map(note => note.note_id).join("\x00"), candidate);
+  for (const ownerCandidates of candidateLists) {
+    for (const candidate of ownerCandidates) unique.set(candidate.notes.map(note => note.note_id).join("\x00"), candidate);
+  }
   return [...unique.values()].sort((left, right) => {
     const leftWaste = left.total - target;
     const rightWaste = right.total - target;
     if (leftWaste !== rightWaste) return leftWaste < rightWaste ? -1 : 1;
     if (left.notes.length !== right.notes.length) return left.notes.length - right.notes.length;
     return left.notes.map(note => note.note_id).join("\x00").localeCompare(right.notes.map(note => note.note_id).join("\x00"));
-  });
+  }).slice(0, maxInputCandidates);
 }
 
 function planOneProofSearch(input, available, itemOffset, operationIndex, state, options) {
@@ -875,7 +895,8 @@ export async function prepareOneProofPayrollOperation(input = {}) {
     auditDisclosureTargetPubKey: input.audit_disclosure_target_pubkey ?? input.auditDisclosureTargetPubKey,
     selfViewDisclosureTargetPubKey: input.self_view_disclosure_target_pubkey ?? input.selfViewDisclosureTargetPubKey,
     disableSelfViewDisclosure: input.disable_self_view_disclosure ?? input.disableSelfViewDisclosure,
-    signer: input.signer
+    signer: input.signer,
+    allowLegacyNoteHashSigner: true
   });
   const expectedEvidence = buildExpectedPayrollEvidence(operation, payload, input);
   const effects = preparedBatchTransferEffectHex(payload);
@@ -1324,7 +1345,7 @@ export function oneProofPayrollOperationEvidenceHash(evidence) {
         user_privacy_policy: Number(item.user_privacy_policy),
         user_disclosure_mode: Number(item.user_disclosure_mode),
         audit_key_id: text(item.audit_key_id),
-        audit_key_epoch: Number(item.audit_key_epoch)
+        audit_key_epoch: canonicalUint64(item.audit_key_epoch, `one-proof payroll expected evidence ${index} audit key epoch`, { positive: true }).toString()
       };
     }),
     ...(evidence.proof_payload_hash === undefined ? {} : {
@@ -1339,7 +1360,7 @@ export function oneProofPayrollOperationEvidenceHash(evidence) {
     !item.expected_recipient_hash || !item.expected_amount_hash || !item.expected_denom ||
     !item.asset_id_hex || !Number.isSafeInteger(item.user_privacy_policy) ||
     !Number.isSafeInteger(item.user_disclosure_mode) || !item.audit_key_id ||
-    !Number.isSafeInteger(item.audit_key_epoch) || item.audit_key_epoch < 0
+    !/^[1-9][0-9]*$/.test(item.audit_key_epoch)
   )) {
     throw new Error("one-proof payroll operation evidence is incomplete for its reconciliation hash");
   }
@@ -1436,17 +1457,18 @@ function artifactSignedTransactionBytes(value) {
   throw new Error("one-proof payroll artifact signed transaction must be bytes");
 }
 
-function normalizeOneProofPayrollArtifact(artifact, { nowUnix } = {}) {
+function normalizeOneProofPayrollArtifact(artifact, { nowUnix, allowExpired = false } = {}) {
   if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) throw new Error("one-proof payroll artifact is required");
   if (artifact.version !== oneProofPayrollArtifactVersion) {
     throw new Error(`unsupported one-proof payroll artifact version ${JSON.stringify(artifact.version)}`);
   }
   const prepared = cloneArtifactValue(artifact.prepared);
-  const preparedNormalized = expectedPayrollEvidenceForPreparedOperation(prepared, nowUnix == null ? {} : { nowUnix });
+  const validationOptions = allowExpired ? { nowUnix: 0 } : nowUnix == null ? {} : { nowUnix };
+  const preparedNormalized = expectedPayrollEvidenceForPreparedOperation(prepared, validationOptions);
   const execution = artifact.execution == null ? null : cloneArtifactValue(artifact.execution);
   if (execution) {
     const executionPrepared = preparedFromPayrollExecution(execution).prepared;
-    validateOneProofPayrollOperationEvidence(execution.operation_evidence, prepared, nowUnix == null ? {} : { nowUnix });
+    validateOneProofPayrollOperationEvidence(execution.operation_evidence, prepared, validationOptions);
     if (executionPrepared.payload.payload_hash !== preparedNormalized.payload.payload_hash ||
         executionPrepared.operation.operation_id !== preparedNormalized.operation.operation_id ||
         !text(execution.message?.creator)) {
@@ -1522,7 +1544,7 @@ export function createOneProofPayrollArtifact(input = {}) {
 
 /** Serialize a verified artifact to deterministic typed JSON for private durable storage. */
 export function serializeOneProofPayrollArtifact(artifact) {
-  return canonicalArtifactJSON(normalizeOneProofPayrollArtifact(artifact));
+  return canonicalArtifactJSON(normalizeOneProofPayrollArtifact(artifact, { allowExpired: true }));
 }
 
 /** Parse and validate a versioned private artifact restored from durable storage. */
@@ -1537,7 +1559,7 @@ export function parseOneProofPayrollArtifact(serialized, { nowUnix } = {}) {
   if (!decoded || typeof decoded !== "object" || typeof decoded.artifact_hash !== "string" || !decoded.artifact_hash.trim()) {
     throw new Error("serialized one-proof payroll artifact is missing its integrity hash");
   }
-  return normalizeOneProofPayrollArtifact(decoded, { nowUnix });
+  return normalizeOneProofPayrollArtifact(decoded, { nowUnix, allowExpired: true });
 }
 
 /**
@@ -1550,8 +1572,11 @@ export function resumeOneProofPayrollArtifact(value, { nowUnix } = {}) {
   }
   const artifact = typeof value === "string"
     ? parseOneProofPayrollArtifact(value, { nowUnix })
-    : normalizeOneProofPayrollArtifact(value, { nowUnix });
-  const nextAction = artifact.signed_tx_bytes ? "retransmit-signed-transaction"
+    : normalizeOneProofPayrollArtifact(value, { nowUnix, allowExpired: true });
+  const resolvedNowUnix = nowUnix ?? Math.floor(Date.now() / 1000);
+  const isExpired = Number(artifact.prepared.payload.expires_at_unix) <= resolvedNowUnix;
+  const nextAction = isExpired ? "manual-review"
+    : artifact.signed_tx_bytes ? "retransmit-signed-transaction"
     : artifact.execution ? (artifact.sign_doc ? "sign-transaction" : "create-sign-doc")
       : "prove";
   return Object.freeze({
@@ -1588,9 +1613,11 @@ export async function inspectOneProofPayrollArtifactRetry(value, {
   if (typeof checkNullifiers !== "function") {
     throw new Error("a batch nullifier status reader is required before one-proof payroll retry");
   }
-  const resumed = resumeOneProofPayrollArtifact(value, { nowUnix: nowUnix ?? Math.floor(Date.now() / 1000) });
+  const resolvedNowUnix = nowUnix ?? Math.floor(Date.now() / 1000);
+  const resumed = resumeOneProofPayrollArtifact(value, { nowUnix: resolvedNowUnix });
   const artifact = resumed.artifact;
-  const prepared = expectedPayrollEvidenceForPreparedOperation(artifact.prepared, { nowUnix: nowUnix ?? Math.floor(Date.now() / 1000) });
+  const prepared = expectedPayrollEvidenceForPreparedOperation(artifact.prepared, { nowUnix: 0 });
+  const isExpired = Number(prepared.payload.expires_at_unix) <= resolvedNowUnix;
   let transactionState = "not-checked";
   if (artifact.tx_hash) {
     if (typeof queryTransaction !== "function") {
@@ -1618,16 +1645,20 @@ export async function inspectOneProofPayrollArtifactRetry(value, {
       nextAction = "reconcile-succeeded";
       reason = "transaction is confirmed and every input nullifier is spent";
     }
+  } else if (transactionState === "failed") {
+    nextAction = "manual-review";
+    reason = anySpent
+      ? "failed transaction has spent input nullifier evidence"
+      : "failed transaction cannot be retried with its exact signed bytes";
   } else if (anySpent) {
     nextAction = "manual-review";
-    reason = transactionState === "failed"
-      ? "failed transaction has spent input nullifier evidence"
-      : "input nullifier is spent without a confirmed successful transaction";
+    reason = "input nullifier is spent without a confirmed successful transaction";
+  } else if (isExpired) {
+    nextAction = "manual-review";
+    reason = "prepared payload expired before an unobserved transaction could be retransmitted";
   } else if (resumed.signed_tx_bytes) {
     nextAction = "retransmit-signed-transaction";
-    reason = transactionState === "failed"
-      ? "transaction failed and every input nullifier is explicitly unspent"
-      : "transaction is absent and every input nullifier is explicitly unspent";
+    reason = "transaction is absent and every input nullifier is explicitly unspent";
   } else {
     nextAction = resumed.next_action;
     reason = "every input nullifier is explicitly unspent";
@@ -1647,8 +1678,10 @@ export async function retransmitOneProofPayrollArtifact(value, {
   nowUnix
 } = {}) {
   if (typeof broadcastSignedTx !== "function") throw new Error("a broadcastSignedTx callback is required to retransmit a one-proof payroll artifact");
-  const resumed = resumeOneProofPayrollArtifact(value, { nowUnix: nowUnix ?? Math.floor(Date.now() / 1000) });
+  const resolvedNowUnix = nowUnix ?? Math.floor(Date.now() / 1000);
+  const resumed = resumeOneProofPayrollArtifact(value, { nowUnix: resolvedNowUnix });
   if (!resumed.signed_tx_bytes) throw new Error("one-proof payroll artifact does not contain exact signed transaction bytes");
+  expectedPayrollEvidenceForPreparedOperation(resumed.artifact.prepared, { nowUnix: resolvedNowUnix });
   return broadcastSignedTx(Uint8Array.from(resumed.signed_tx_bytes), {
     artifact: resumed.artifact,
     tx_bytes_hash: resumed.artifact.tx_bytes_hash

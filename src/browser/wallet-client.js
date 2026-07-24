@@ -1460,6 +1460,8 @@ export class ClairveilBrowserClient {
     addIfPresent(request, "maxPages", body.maxPages ?? body.max_pages);
     addIfPresent(request, "eventTypes", body.eventTypes ?? body.event_types);
     addIfPresent(request, "scanSource", body.scanSource ?? body.scan_source);
+    addIfPresent(request, "assetDenom", body.assetDenom);
+    addIfPresent(request, "asset_denom", body.asset_denom);
     if (body.address && (body.pubKeyHex || body.pub_key_hex) && (body.signatureBase64 || body.signature_base64)) {
       const walletType = this.walletTypeFromBody(body);
       Object.assign(request, walletType === "evm"
@@ -1478,6 +1480,8 @@ export class ClairveilBrowserClient {
     addIfPresent(request, "maxPages", body.maxPages ?? body.max_pages);
     addIfPresent(request, "eventTypes", body.eventTypes ?? body.event_types);
     addIfPresent(request, "scanSource", body.scanSource ?? body.scan_source);
+    addIfPresent(request, "assetDenom", body.assetDenom);
+    addIfPresent(request, "asset_denom", body.asset_denom);
     addIfPresent(request, "disclosureScalar", body.disclosureScalar ?? body.disclosure_scalar);
     addIfPresent(request, "disclosureScalarHex", body.disclosureScalarHex ?? body.disclosure_scalar_hex);
     if (body.address && (body.pubKeyHex || body.pub_key_hex) && (body.signatureBase64 || body.signature_base64)) {
@@ -1501,6 +1505,8 @@ export class ClairveilBrowserClient {
     addIfPresent(request, "maxPages", body.maxPages ?? body.max_pages);
     addIfPresent(request, "eventTypes", body.eventTypes ?? body.event_types);
     addIfPresent(request, "scanSource", body.scanSource ?? body.scan_source);
+    addIfPresent(request, "assetDenom", body.assetDenom);
+    addIfPresent(request, "asset_denom", body.asset_denom);
     return this.cosmos.decodeAuditDisclosure(request);
   }
 

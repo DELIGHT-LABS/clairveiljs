@@ -38,6 +38,9 @@ function strictText(value, label) {
 }
 
 function uint64(value, label, { positive = false } = {}) {
+  if (typeof value === "number" && !Number.isSafeInteger(value)) {
+    throw new Error(`${label} must be a safe integer when supplied as a number`);
+  }
   const text = typeof value === "bigint" ? value.toString() : String(value ?? "");
   if (!/^(0|[1-9][0-9]*)$/.test(text)) throw new Error(`${label} must be a canonical uint64 decimal string`);
   const parsed = BigInt(text);
@@ -64,7 +67,8 @@ export function normalizeAuditConfigV1(response) {
     const text = strictText(value, "audit config master public key");
     if (!/^[0-9a-fA-F]{64}$/.test(text)) throw new Error("audit config master public key must be canonical 32-byte hex");
     const bytes = bytesFromHex(text, "audit config master public key");
-    unpackPoint(bytes);
+    const point = unpackPoint(bytes);
+    if (point.x === 0n && point.y === 1n) throw new Error("audit config master public key must be a canonical non-identity point");
     return hexFromBytes(bytes);
   });
   const keyID = alias(source, ["audit_key_id", "auditKeyId"], "audit config key ID", value => {

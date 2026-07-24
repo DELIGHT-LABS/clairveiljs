@@ -71,6 +71,7 @@ import {
   computeChainDomainV1,
   computeNoteCommitmentV1,
   computeNoteNullifierV1,
+  computeNoteTreeNodeV1,
   computeSpendIntentV2,
   computeWithdrawRecipientDigestV1
 } from "./protocol-v1.js";
@@ -764,16 +765,36 @@ async function lookupMerklePath(provider, commitmentHex) {
   throw new Error("merkle path provider must expose lookupMerklePath(commitmentHex)");
 }
 
-function normalizeMerklePathResult(result, label) {
-  const rootHex = String(result?.root ?? result?.Root ?? "").trim();
-  if (!rootHex) {
+function normalizeMerklePathResult(result, label, commitmentHex) {
+  const rootText = String(result?.root ?? result?.Root ?? "").trim();
+  if (!rootText) {
     throw new Error(`${label} merkle path result missing root`);
   }
-  return {
-    rootHex: hexFromBytes(decodeCanonicalFieldHex(rootHex, `${label} root`)),
-    path: [...(result?.path ?? result?.Path ?? [])].map(value => String(value)),
-    pathHelper: [...(result?.path_helper ?? result?.pathHelper ?? result?.PathHelper ?? [])].map(value => Number(value))
-  };
+  const rootHex = canonicalFieldHex(bytesToBigIntBE(decodeCanonicalFieldHex(rootText, `${label} root`)));
+  const path = [...(result?.path ?? result?.Path ?? [])].map((value, index) => canonicalFieldHex(
+    bytesToBigIntBE(decodeCanonicalFieldHex(value, `${label} merkle path ${index}`))
+  ));
+  const pathHelper = [...(result?.path_helper ?? result?.pathHelper ?? result?.PathHelper ?? [])].map((value, index) => {
+    const helper = Number(value);
+    if (!Number.isSafeInteger(helper) || (helper !== 0 && helper !== 1)) {
+      throw new Error(`${label} merkle path helper ${index} must be 0 or 1`);
+    }
+    return helper;
+  });
+  if (path.length !== 32 || pathHelper.length !== 32) {
+    throw new Error(`${label} merkle path must be 32 levels`);
+  }
+  let current = bytesToBigIntBE(decodeCanonicalFieldHex(commitmentHex, `${label} commitment`));
+  for (let level = 0; level < 32; level += 1) {
+    const sibling = bytesToBigIntBE(decodeCanonicalFieldHex(path[level], `${label} merkle path ${level}`));
+    current = pathHelper[level] === 0
+      ? computeNoteTreeNodeV1(level, current, sibling)
+      : computeNoteTreeNodeV1(level, sibling, current);
+  }
+  if (canonicalFieldHex(current) !== rootHex) {
+    throw new Error(`${label} merkle path does not reconstruct its root`);
+  }
+  return { rootHex, path, pathHelper };
 }
 
 function transferPayloadHashIncludesSelfView(version) {
@@ -898,7 +919,7 @@ async function buildLegacyPreparedTransferPayload({
   for (let i = 0; i < foundInputs.length; i += 1) {
     const found = foundInputs[i];
     const commitmentHex = computeNoteCommitmentHex(found.note);
-    const merkle = normalizeMerklePathResult(await lookupMerklePath(merklePathProvider, commitmentHex), `input ${i}`);
+    const merkle = normalizeMerklePathResult(await lookupMerklePath(merklePathProvider, commitmentHex), `input ${i}`, commitmentHex);
     if (!commonRootHex) {
       commonRootHex = merkle.rootHex;
     } else if (commonRootHex !== merkle.rootHex) {
@@ -1120,7 +1141,6 @@ export async function buildPreparedWithdrawProverPayload({
     throw new Error(`withdraw requires one exact-match note for ${coin.raw}; spendable ${coin.denom} total is ${total}${coin.denom} across ${sameDenom.length} notes`);
   }
   const commitmentHex = canonicalFieldHex(computeNoteCommitmentV1(selected.note));
-  const merkle = normalizeMerklePathResult(await lookupMerklePath(merklePathProvider, commitmentHex), "withdraw selected note");
   const recipientDecoded = fromBech32(recipient);
   const expectedAccountPrefix = normalizeBech32Prefix(accountPrefix ?? defaultAccountPrefix, "accountPrefix");
   if (recipientDecoded.prefix !== expectedAccountPrefix) {
@@ -1136,6 +1156,11 @@ export async function buildPreparedWithdrawProverPayload({
     authoritativeNowUnix,
     "withdraw prover payload expired",
     "withdraw prover payload expires_at_unix"
+  );
+  const merkle = normalizeMerklePathResult(
+    await lookupMerklePath(merklePathProvider, commitmentHex),
+    "withdraw selected note",
+    commitmentHex
   );
   const nullifier = computeNoteNullifierV1(selected.note);
   const intent = computeSpendIntentV2({

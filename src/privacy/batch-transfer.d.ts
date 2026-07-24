@@ -41,7 +41,8 @@ export interface PreparedBatchTransferPayload {
   outputs: PreparedBatchTransferOutput[];
   message_outputs: Array<Record<string, unknown>>;
   audit_key_id: string;
-  audit_key_epoch: number;
+  /** Canonical positive uint64 decimal, preserved without JavaScript number loss. */
+  audit_key_epoch: string;
   audit_disclosure_target_pubkey: string;
   nullifier_root: string;
   commitment_root: string;
@@ -95,7 +96,7 @@ export interface BatchTransferSigningRequestV1 {
   assetID: bigint;
   inputTotal: bigint;
   auditKeyId: string;
-  auditKeyEpoch: number;
+  auditKeyEpoch: bigint;
   auditDisclosureTargetPubKey: Uint8Array;
   selfViewEnabled: boolean;
   nullifierRoot: bigint;
@@ -112,6 +113,11 @@ export interface BatchTransferSigningRequestV1 {
 
 export interface BatchTransferSignerV1 {
   signBatchTransfer(request: BatchTransferSigningRequestV1): Promise<Uint8Array> | Uint8Array;
+}
+
+export interface LegacyBatchTransferNoteHashSignerV1 {
+  signSpendNoteHash?(intent: bigint): Promise<Uint8Array> | Uint8Array;
+  signNoteHash?(intent: bigint): Promise<Uint8Array> | Uint8Array;
 }
 
 export interface BuildPreparedBatchTransferInput {
@@ -138,14 +144,16 @@ export interface BuildPreparedBatchTransferInput {
   }>;
   auditKeyId?: string;
   audit_key_id?: string;
-  auditKeyEpoch?: number;
-  audit_key_epoch?: number;
+  auditKeyEpoch?: BatchField;
+  audit_key_epoch?: BatchField;
   auditDisclosureTargetPubKey?: Point | Uint8Array | string;
   audit_disclosure_target_pubkey?: Point | Uint8Array | string;
   selfViewDisclosureTargetPubKey?: Point | Uint8Array | string;
   self_view_disclosure_target_pubkey?: Point | Uint8Array | string;
   disableSelfViewDisclosure?: boolean;
-  signer: BatchTransferSignerV1;
+  /** Enables the validated legacy note-hash callback for compatibility adapters. */
+  allowLegacyNoteHashSigner?: boolean;
+  signer: BatchTransferSignerV1 | LegacyBatchTransferNoteHashSignerV1;
 }
 
 export interface PreparedBatchTransferProof {
@@ -162,7 +170,7 @@ export function computePreparedBatchTransferPayloadHash(payload: PreparedBatchTr
 export function serializePreparedBatchTransferPayload(payload: PreparedBatchTransferPayload): string;
 export function serializeBatchTransferProofRequest(payload: PreparedBatchTransferPayload): string;
 export function validateBatchTransferSigningRequestV1(request: BatchTransferSigningRequestV1): { expected_intent: bigint };
-export function signValidatedBatchTransferIntentV1(signer: BatchTransferSignerV1, request: BatchTransferSigningRequestV1, options?: { allowLegacyNoteHashSigner?: false }): Promise<Uint8Array>;
+export function signValidatedBatchTransferIntentV1(signer: BatchTransferSignerV1 | LegacyBatchTransferNoteHashSignerV1, request: BatchTransferSigningRequestV1, options?: { allowLegacyNoteHashSigner?: boolean }): Promise<Uint8Array>;
 export function buildPreparedBatchTransferPayload(input: BuildPreparedBatchTransferInput): Promise<PreparedBatchTransferPayload>;
 export function normalizePreparedBatchTransferProof(payload: PreparedBatchTransferPayload, proof: PreparedBatchTransferProof, options?: { nowUnix?: number }): PreparedBatchTransferProof & { proof_bytes: Uint8Array };
 export function buildMsgBatchTransferFromPrepared(payload: PreparedBatchTransferPayload, proof: PreparedBatchTransferProof, options?: { creator?: string; nowUnix?: number }): MsgBatchTransfer;

@@ -1,6 +1,11 @@
-import type { Hex } from "../core/crypto.js";
-import type { Note, NoteHashSigner } from "../core/note.js";
+import type { BytesLike, ClairAddress, Hex, Point, ShieldedAddress } from "../core/crypto.js";
+import type { CoinString, FoundNote, Note, NoteHashSigner } from "../core/note.js";
 import type { MsgTransfer } from "../generated/clairveil/privacy/v1/tx.js";
+import type {
+  MerklePathProviderLike,
+  TransferPrivacyPolicy,
+  TransferUserDisclosureMode
+} from "./payload.js";
 
 export const preparedTransferV5PayloadVersion: "v5";
 export const preparedTransferV5ProofVersion: "v2";
@@ -102,7 +107,36 @@ export interface JoinSplitOwnerIntentSignerV1 {
   signOwnerIntent?(request: JoinSplitOwnerIntentSigningRequestV1): Promise<Uint8Array> | Uint8Array;
 }
 
-export function buildPreparedTransferV5Payload(input: object): Promise<PreparedTransferV5Payload>;
+/** Required value inputs for a V5 2-in/2-out transfer payload. */
+export type BuildPreparedTransferV5PayloadInput = {
+  creator: ClairAddress | string;
+  chainId: string;
+  expiresAtUnix?: number;
+  chainNowUnix?: number;
+  /** V5 is a fixed 2-in/2-out circuit. */
+  inputs: readonly [FoundNote, FoundNote];
+  recipient: ShieldedAddress;
+  transferDenom?: string;
+  denom?: string;
+  merklePathProvider: MerklePathProviderLike;
+  auditDisclosureTargetPubKeyHex: Hex;
+  senderSpendPubKey?: Point;
+  senderViewPubKey?: Point;
+  rootSeed?: BytesLike;
+  ownerIntentSigner?: JoinSplitOwnerIntentSignerV1;
+  noteHashSigner?: NoteHashSigner;
+  userPrivacyPolicy?: TransferPrivacyPolicy;
+  userDisclosureMode?: TransferUserDisclosureMode;
+  userDisclosureTargetPubKeyHex?: Hex;
+  disableSelfViewDisclosure?: boolean;
+  selfViewDisclosureTargetPubKeyHex?: Hex;
+  shieldedPrefix?: string;
+} & (
+  | { amount: CoinString; transferAmount?: string | number | bigint }
+  | { amount?: never; transferAmount: string | number | bigint }
+);
+
+export function buildPreparedTransferV5Payload(input: BuildPreparedTransferV5PayloadInput): Promise<PreparedTransferV5Payload>;
 export function buildJoinSplitOwnerIntentSigningRequestV1(input: {
   payload: JoinSplitOwnerIntentSigningRequestV1["payload"];
   inputNotes: [Note, Note];
