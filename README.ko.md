@@ -116,7 +116,8 @@ const clairveil = createClairveilBrowserDappClient({
   accountPrefix: "clair",
   shieldedPrefix: "clairs",
   denom: "uclair",
-  proverUrl: "https://prover.example"
+  proverUrl: "https://prover.example",
+  evmRpc: "https://evm-rpc.example"
 });
 
 const deposit = await clairveil.prepareDeposit({
@@ -133,6 +134,15 @@ const deposit = await clairveil.prepareDeposit({
 // 이 Cosmos-style client는 wallet signDirect용 deposit.signDoc을 반환합니다.
 // EVM은 profile: { transport: "evm", ... }로 client를 만들면
 // prepareDeposit이 EIP-1193 제출용 deposit.transaction을 반환합니다.
+```
+
+`waitForEvmTransaction(...)`이 일반적인 EVM confirmation API입니다. 더 높은 수준의 ClairveilJS wrapper가 없는 read-only EVM JSON-RPC method에는 browser client의 `evmJsonRpc<TResult>(method, params)`를 사용할 수 있습니다. 이 API는 설정된 `evmRpc` endpoint와 client query timeout을 사용하며 injected wallet provider를 사용하지 않고 read-only allowlist 밖의 method와 비어 있는 `evmRpc` endpoint를 거부합니다. account 접근, 서명, subscription, transaction 제출에는 사용하면 안 됩니다.
+
+```ts
+const receipt = await clairveil.evmJsonRpc<{ blockNumber: string } | null>(
+  "eth_getTransactionReceipt",
+  [txHash]
+);
 ```
 
 로컬 single-node 데모에서는 faucet, local signer, auditor admin, CORS/proxy convenience를 위해 helper server를 둘 수 있습니다. 그래도 DApp의 핵심 privacy logic은 `clairveiljs/browser-dapp` API를 호출하는 형태를 유지하는 것이 좋습니다.

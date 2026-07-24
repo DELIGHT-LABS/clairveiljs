@@ -212,7 +212,7 @@ async function provePayrollOperationTypes(): Promise<void> {
     signedTxBytes: new Uint8Array([1, 2, 3])
   });
   const restoredArtifact: OneProofPayrollArtifact = parseOneProofPayrollArtifact(serializeOneProofPayrollArtifact(artifact));
-  const resumedAction: "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction" = resumeOneProofPayrollArtifact(restoredArtifact).next_action;
+  const resumedAction: "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction" | "manual-review" = resumeOneProofPayrollArtifact(restoredArtifact).next_action;
   const retryInspection: InspectedOneProofPayrollArtifactRetry = await inspectOneProofPayrollArtifactRetry(restoredArtifact, {
     queryTransaction: async (): Promise<"not-found"> => "not-found",
     checkNullifiers: async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]))
@@ -426,6 +426,19 @@ const evmProfileDappClient = createClairveilBrowserDappClient({
   },
   proverUrl: "http://127.0.0.1:8080"
 });
+const typedEvmReceipt = evmProfileDappClient.evmJsonRpc<{ blockNumber: string } | null>(
+  "eth_getTransactionReceipt",
+  ["0x".padEnd(66, "0")]
+);
+const typedBrowserCircuitConfig = evmProfileDappClient.assertCircuitConfig();
+const typedBrowserTransferConfig = evmProfileDappClient.assertTransferProtocolConfig("uclair");
+const typedBrowserAsset = evmProfileDappClient.queryAssetByDenom("uclair");
+const typedBrowserTree = evmProfileDappClient.fetchTreeState();
+void typedEvmReceipt;
+void typedBrowserCircuitConfig;
+void typedBrowserTransferConfig;
+void typedBrowserAsset;
+void typedBrowserTree;
 const evmDirectDappClient = new ClairveilBrowserDappClient({
   profile: {
     transport: "evm",

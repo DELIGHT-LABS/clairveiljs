@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ClairveilBrowserClient } from "clairveiljs/browser-dapp";
 
-function browserClient() {
+function browserClient(options = {}) {
   return new ClairveilBrowserClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
@@ -10,6 +10,7 @@ function browserClient() {
     accountPrefix: "clair",
     shieldedPrefix: "clairs",
     denom: "uclair",
+    ...options
   });
 }
 
@@ -32,6 +33,86 @@ test("waitForEvmTransaction keeps missing receipt status ambiguous", async () =>
   assert.equal(result.ok, false);
   assert.match(result.error, /explicit successful receipt status/);
   assert.doesNotMatch(result.error, /failed with receipt status/);
+});
+
+test("evmJsonRpc forwards only allowlisted read-only methods", async () => {
+  const client = browserClient();
+  client.evmRpc = "http://evm.local";
+  const originalFetch = globalThis.fetch;
+  const methods = [];
+  globalThis.fetch = async (_url, options) => {
+    methods.push(JSON.parse(options.body).method);
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x1" }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    assert.equal(await client.evmJsonRpc("eth_blockNumber"), "0x1");
+    await assert.rejects(
+      () => client.evmJsonRpc("eth_sendRawTransaction", ["0xdeadbeef"]),
+      /not permitted for read-only queries/
+    );
+    assert.deepEqual(methods, ["eth_blockNumber"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("evmJsonRpc rejects a missing EVM RPC endpoint before fetch", async () => {
+  const client = browserClient();
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not be called");
+  };
+
+  try {
+    await assert.rejects(
+      () => client.evmJsonRpc("eth_blockNumber"),
+      /evmRpc is required for EVM JSON-RPC queries/
+    );
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("evmJsonRpc rejects HTTP failures and times out while reading the response body", async () => {
+  const client = browserClient({ evmRpc: "http://evm.local", queryTimeoutMs: 5 });
+  const originalFetch = globalThis.fetch;
+
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ message: "unavailable" }), {
+      status: 503,
+      headers: { "content-type": "application/json" }
+    });
+    await assert.rejects(
+      () => client.evmJsonRpc("eth_blockNumber"),
+      /EVM RPC eth_blockNumber failed: unavailable/
+    );
+
+    globalThis.fetch = async (_url, options) => ({
+      ok: true,
+      async json() {
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          }, { once: true });
+        });
+      }
+    });
+    await assert.rejects(
+      () => client.evmJsonRpc("eth_blockNumber"),
+      /EVM RPC eth_blockNumber timed out after 5ms/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("browser preparation rejects conflicting operation-evidence aliases", async () => {

@@ -22,6 +22,11 @@ import type {
   ValidatedDisclosureConfigV1,
   ValidatedReserveResponseV1
 } from "../privacy/network-config.js";
+import type { ValidatedCircuitConfigV1 } from "../privacy/circuit-config.js";
+import type {
+  NormalizedAssetRegistryEntryV1,
+  NormalizedAssetRegistryQueryResponseV1
+} from "../privacy/asset-registry.js";
 import type { EvmPrivacyTransactionOptions, EvmTransactionRequest, EvmWithdrawMessage } from "../transport/evm.js";
 import type { CoinString } from "../core/note.js";
 import type { DisclosureReport } from "../core/disclosure.js";
@@ -584,8 +589,19 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   fetchDisclosureConfig(): Promise<object>;
   queryAuditConfig(): Promise<ValidatedAuditConfigV1>;
   queryDisclosureConfig(): Promise<ValidatedDisclosureConfigV1>;
+  fetchCircuitConfig(options?: { expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<ValidatedCircuitConfigV1>;
+  assertCircuitConfig(options?: { expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<ValidatedCircuitConfigV1>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
   queryReserve(denom: string): Promise<ValidatedReserveResponseV1>;
+  fetchAssetByDenom(denom: string): Promise<object>;
+  queryAssetByDenom(denom: string): Promise<NormalizedAssetRegistryQueryResponseV1>;
+  assertTransferProtocolConfig(denom: string): Promise<{
+    circuit_config: ValidatedCircuitConfigV1;
+    asset: NormalizedAssetRegistryEntryV1;
+    audit_config: ValidatedAuditConfigV1;
+    disclosure_config: ValidatedDisclosureConfigV1;
+  }>;
+  fetchTreeState(): Promise<object>;
   buildRootSigningMessage(address: ClairAddress, pubKeyHex: Hex): string;
   verifySignerPubKey(address: ClairAddress, pubKeyHex: Hex): object;
   evmAccountIdentity(address: string): { evmAddress: string; address: ClairAddress; pubKeyHex: Hex };
@@ -593,6 +609,13 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   getBalances(address: ClairAddress): Promise<BrowserBalancesResponse>;
   waitForTx(txHash: Hex, options?: { attempts?: number; intervalMs?: number }): Promise<TxSearchResult | null>;
   waitForEvmTransaction(txHash: Hex): Promise<BrowserEvmTransactionWaitResult>;
+  /**
+   * Executes an allowlisted read request against the configured EVM JSON-RPC endpoint.
+   * Prefer a higher-level browser-client method when one is available; this
+   * method requires evmRpc, does not use the injected wallet provider, and must not be used to
+   * request accounts, signatures, subscriptions, or transaction submission.
+   */
+  evmJsonRpc<TResult = unknown>(method: string, params?: readonly unknown[]): Promise<TResult>;
   evmNativeSendTransaction(input: { to: string; amount: CoinString }): BrowserEvmNativeSendTransaction;
   buildBankSendSignDoc(input: { from: ClairAddress; pubKeyHex: Hex; to: ClairAddress; amount: CoinString }): Promise<SignDocBase64>;
   broadcastTxRawBytes(txRawBytes: Uint8Array, waitOptions?: ReservationBroadcastOptions): Promise<BroadcastSignedTxResult>;

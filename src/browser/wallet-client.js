@@ -41,6 +41,48 @@ import {
 
 const defaultPrepareScanMaxPages = 1000;
 const defaultFetchTimeoutMs = 30000;
+const readOnlyEvmJsonRpcMethods = new Set([
+  "eth_blockNumber",
+  "eth_call",
+  "eth_chainId",
+  "eth_coinbase",
+  "eth_estimateGas",
+  "eth_feeHistory",
+  "eth_gasPrice",
+  "eth_getBalance",
+  "eth_getBlockByHash",
+  "eth_getBlockByNumber",
+  "eth_getBlockTransactionCountByHash",
+  "eth_getBlockTransactionCountByNumber",
+  "eth_getCode",
+  "eth_getLogs",
+  "eth_getProof",
+  "eth_getStorageAt",
+  "eth_getTransactionByBlockHashAndIndex",
+  "eth_getTransactionByBlockNumberAndIndex",
+  "eth_getTransactionByHash",
+  "eth_getTransactionCount",
+  "eth_getTransactionReceipt",
+  "eth_maxPriorityFeePerGas",
+  "eth_protocolVersion",
+  "eth_syncing",
+  "net_listening",
+  "net_peerCount",
+  "net_version",
+  "web3_clientVersion",
+  "web3_sha3"
+]);
+
+function assertReadOnlyEvmJsonRpcMethod(method) {
+  if (typeof method !== "string") {
+    throw new Error("EVM JSON-RPC method must be a permitted read-only string");
+  }
+  const normalizedMethod = method.trim();
+  if (!readOnlyEvmJsonRpcMethods.has(normalizedMethod)) {
+    throw new Error(`EVM JSON-RPC method ${normalizedMethod || "<empty>"} is not permitted for read-only queries`);
+  }
+  return normalizedMethod;
+}
 
 function appendReservationCleanupErrors(error, cleanupErrors = []) {
   if (!cleanupErrors.length || !error || typeof error !== "object") return;
@@ -716,12 +758,42 @@ export class ClairveilBrowserClient {
     return this.cosmos.queryDisclosureConfig();
   }
 
+  /** Fetch and fail-closed validate the active consensus circuit set. */
+  async fetchCircuitConfig(options) {
+    return this.cosmos.fetchCircuitConfig(options);
+  }
+
+  /** Assert the browser profile is using the active consensus circuit set. */
+  async assertCircuitConfig(options) {
+    return this.cosmos.assertCircuitConfig(options);
+  }
+
   async fetchReserve(denom) {
     return this.cosmos.fetchReserve(denom);
   }
 
   async queryReserve(denom) {
     return this.cosmos.queryReserve(denom);
+  }
+
+  async fetchAssetByDenom(denom) {
+    return this.cosmos.fetchAssetByDenom(denom);
+  }
+
+  async queryAssetByDenom(denom) {
+    return this.cosmos.queryAssetByDenom(denom);
+  }
+
+  /**
+   * Read and validate all immutable protocol settings required by ordinary
+   * single-transfer browser flows before constructing a proof request.
+   */
+  async assertTransferProtocolConfig(denom) {
+    return this.cosmos.assertTransferProtocolConfig(denom);
+  }
+
+  async fetchTreeState() {
+    return this.cosmos.fetchTreeState();
   }
 
   buildRootSigningMessage(address, pubKeyHex) {
@@ -781,34 +853,42 @@ export class ClairveilBrowserClient {
   }
 
   async evmJsonRpc(method, params = []) {
+    const readOnlyMethod = assertReadOnlyEvmJsonRpcMethod(method);
+    const evmRpc = String(this.evmRpc || "").trim();
+    if (!evmRpc) {
+      throw new Error("evmRpc is required for EVM JSON-RPC queries");
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.queryTimeoutMs);
-    let response;
     try {
-      response = await fetch(this.evmRpc, {
+      const response = await fetch(evmRpc, {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: controller.signal,
         body: JSON.stringify({
           jsonrpc: "2.0",
           id: Date.now(),
-          method,
+          method: readOnlyMethod,
           params
         })
       });
+      const data = await response.json();
+      if (!response.ok) {
+        const message = data?.error?.message || data?.message || response.statusText || `HTTP ${response.status}`;
+        throw new Error(`EVM RPC ${readOnlyMethod} failed: ${message}`);
+      }
+      if (data?.error) {
+        throw new Error(data.error.message || `EVM RPC ${readOnlyMethod} failed`);
+      }
+      return data?.result;
     } catch (error) {
       if (error?.name === "AbortError") {
-        throw new Error(`EVM RPC ${method} timed out after ${this.queryTimeoutMs}ms`);
+        throw new Error(`EVM RPC ${readOnlyMethod} timed out after ${this.queryTimeoutMs}ms`);
       }
       throw error;
     } finally {
       clearTimeout(timeout);
     }
-    const data = await response.json();
-    if (data.error) {
-      throw new Error(data.error.message || `EVM RPC ${method} failed`);
-    }
-    return data.result;
   }
 
   async waitForEvmTransaction(txHash) {

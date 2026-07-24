@@ -269,7 +269,8 @@ const clairveil = createClairveilBrowserDappClient({
   accountPrefix: "example",
   shieldedPrefix: "examples",
   denom: "uexample",
-  proverUrl: "https://prover.example.invalid"
+  proverUrl: "https://prover.example.invalid",
+  evmRpc: "https://evm-rpc.example-chain.invalid"
 });
 
 const deposit = await clairveil.prepareDeposit({
@@ -286,6 +287,21 @@ const deposit = await clairveil.prepareDeposit({
 // This Cosmos-style client returns deposit.signDoc for the wallet signDirect flow.
 // For EVM, create the client with profile: { transport: "evm", ... };
 // then prepareDeposit returns deposit.transaction for EIP-1193 submission.
+```
+
+`waitForEvmTransaction(...)` is the normal EVM confirmation API. For a
+read-only EVM JSON-RPC method that has no higher-level ClairveilJS wrapper,
+the browser client also exposes `evmJsonRpc<TResult>(method, params)`. It
+uses the configured `evmRpc` endpoint and the client's query timeout; it does
+not use the injected wallet provider and rejects methods outside its read-only
+allowlist. It rejects a missing `evmRpc` endpoint. Do not use it for account access, signing, subscriptions, or
+transaction submission.
+
+```ts
+const receipt = await clairveil.evmJsonRpc<{ blockNumber: string } | null>(
+  "eth_getTransactionReceipt",
+  [txHash]
+);
 ```
 
 For a local single-node demo, it is fine to run a helper server for faucet funding, local signer setup, auditor admin tools, or CORS/proxy convenience. Keep that helper out of the production privacy boundary: the DApp should still call ClairveilJS for root material derivation, note scanning, deposit preparation, transfer preparation, withdraw preparation, and user disclosure decoding.

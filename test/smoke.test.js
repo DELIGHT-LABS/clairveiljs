@@ -104,6 +104,52 @@ function transferProtocolConfig({ policies = ["all-private"], modes = ["none"] }
   };
 }
 
+function strictMerklePathProvider(notes) {
+  const commitments = notes.map(note => computeNoteCommitmentV1(note));
+  const capacity = 1 << Math.ceil(Math.log2(Math.max(commitments.length, 2)));
+  const leaves = [...commitments];
+  while (leaves.length < capacity) leaves.push(BigInt(leaves.length + 1));
+  const paths = commitments.map(() => []);
+  const helpers = commitments.map(() => []);
+  let nodes = leaves;
+
+  for (let level = 0; nodes.length > 1; level += 1) {
+    for (let index = 0; index < commitments.length; index += 1) {
+      const nodeIndex = index >> level;
+      paths[index].push(fieldHexV1(nodes[nodeIndex ^ 1]));
+      helpers[index].push(nodeIndex & 1);
+    }
+    const next = [];
+    for (let index = 0; index < nodes.length; index += 2) {
+      next.push(computeNoteTreeNodeV1(level, nodes[index], nodes[index + 1]));
+    }
+    nodes = next;
+  }
+
+  let root = nodes[0];
+  for (let level = Math.log2(capacity); level < 32; level += 1) {
+    const sibling = BigInt(level + 1);
+    for (let index = 0; index < commitments.length; index += 1) {
+      paths[index].push(fieldHexV1(sibling));
+      helpers[index].push(0);
+    }
+    root = computeNoteTreeNodeV1(level, root, sibling);
+  }
+
+  const byCommitment = new Map(commitments.map((commitment, index) => [fieldHexV1(commitment), {
+    root: fieldHexV1(root),
+    path: paths[index],
+    path_helper: helpers[index]
+  }]));
+  return {
+    async lookupMerklePath(commitmentHex) {
+      const result = byCommitment.get(String(commitmentHex).toLowerCase());
+      if (!result) throw new Error("unexpected commitment requested from strict merkle path provider");
+      return result;
+    }
+  };
+}
+
 async function readyBroadcastReservation(suffix = "01", options = {}) {
   const store = new MemoryReservationStore();
   const reservationManager = createNoteReservationManager({
@@ -177,6 +223,11 @@ test("browser-dapp entrypoint instantiates a DApp client", async () => {
   assert.equal(typeof client.scanWalletNotes, "function");
   assert.equal(typeof client.fetchReserve, "function");
   assert.equal(typeof client.checkNullifier, "function");
+  assert.equal(typeof client.evmJsonRpc, "function");
+  assert.equal(typeof client.assertCircuitConfig, "function");
+  assert.equal(typeof client.assertTransferProtocolConfig, "function");
+  assert.equal(typeof client.queryAssetByDenom, "function");
+  assert.equal(typeof client.fetchTreeState, "function");
   assert.equal(typeof browserDapp.ClairveilBrowserDappClient, "function");
 });
 
@@ -1283,8 +1334,8 @@ test("cosmos wallet note store refreshes cached spent statuses", async () => {
     shieldedPrefix: "clairs",
     defaultDenom: "uclair"
   });
-  const nullifier = "01".padStart(64, "0");
-  const missingBatchNullifier = "02".padStart(64, "0");
+  const suppliedNullifier = "01".padStart(64, "0");
+  const suppliedMissingBatchNullifier = "02".padStart(64, "0");
   const store = new MemoryNoteStore({ owner: "clair1example" });
   await store.mergeScanResult({
     foundNotes: [
@@ -1293,7 +1344,7 @@ test("cosmos wallet note store refreshes cached spent statuses", async () => {
         txHash: "AA01",
         isSpent: false,
         nullifierStatus: "unspent",
-        nullifier,
+        nullifier: suppliedNullifier,
         note: {
           receiverSpendPubKeyX: CURVE_BASE.x,
           receiverSpendPubKeyY: CURVE_BASE.y,
@@ -1310,7 +1361,7 @@ test("cosmos wallet note store refreshes cached spent statuses", async () => {
         txHash: "AA02",
         isSpent: false,
         nullifierStatus: "unspent",
-        nullifier: missingBatchNullifier,
+        nullifier: suppliedMissingBatchNullifier,
         note: {
           receiverSpendPubKeyX: CURVE_BASE.x,
           receiverSpendPubKeyY: CURVE_BASE.y,
@@ -1324,6 +1375,11 @@ test("cosmos wallet note store refreshes cached spent statuses", async () => {
       }
     ]
   });
+  const [cachedNote, missingBatchNote] = (await store.load()).notes;
+  const nullifier = cachedNote.nullifier;
+  const missingBatchNullifier = missingBatchNote.nullifier;
+  assert.notEqual(nullifier, suppliedNullifier);
+  assert.notEqual(missingBatchNullifier, suppliedMissingBatchNullifier);
   client.fetchScanEvents = async request => ({
     events: [],
     next_height: request.afterHeight ?? 0,
@@ -1723,7 +1779,7 @@ test("cached spent notes are rechecked and restored when a reorg makes them unsp
 });
 
 test("memory note store normalizes nullifier status keys before applying them", async () => {
-  const nullifier = "ab".repeat(32);
+  const suppliedNullifier = "ab".repeat(32);
   const store = new MemoryNoteStore({ owner: "clair1statuscase" });
   await store.mergeScanResult({
     foundNotes: [{
@@ -1731,7 +1787,7 @@ test("memory note store normalizes nullifier status keys before applying them", 
       txHash: "STATUS-CASE",
       isSpent: false,
       nullifierStatus: "unspent",
-      nullifier,
+      nullifier: suppliedNullifier,
       note: {
         receiverSpendPubKeyX: CURVE_BASE.x,
         receiverSpendPubKeyY: CURVE_BASE.y,
@@ -1745,7 +1801,9 @@ test("memory note store normalizes nullifier status keys before applying them", 
     }]
   });
 
-  await store.setNullifierStatuses(new Map([[nullifier.toUpperCase(), "spent"]]));
+  const [stored] = (await store.load()).notes;
+  assert.notEqual(stored.nullifier, suppliedNullifier);
+  await store.setNullifierStatuses(new Map([[stored.nullifier.toUpperCase(), "spent"]]));
   const [updated] = (await store.load()).notes;
   assert.equal(updated.isSpent, true);
   assert.equal(updated.nullifierStatus, "spent");
@@ -5048,7 +5106,7 @@ test("same-root Merkle path snapshots are batch-verified before use by the prove
   let current = 73n;
   for (let level = 0; level < 32; level += 1) {
     const sibling = BigInt(level + 101);
-    const helper = level % 2;
+    const helper = Number((5n >> BigInt(level)) & 1n);
     siblings.push(fieldHexV1(sibling));
     helpers.push(helper);
     current = helper === 0
@@ -5298,11 +5356,7 @@ test("withdraw prover payload rejects invalid expiry before proof handoff", asyn
     recipient: "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
     chainId: "clairveil-local-1",
     rootSeed,
-    merklePathProvider: {
-      async lookupMerklePath() {
-        return { root: "01".padStart(64, "0"), path: [], path_helper: [] };
-      }
-    }
+    merklePathProvider: strictMerklePathProvider([note])
   };
 
   await assert.rejects(
@@ -5337,11 +5391,7 @@ test("relay withdraw keeps authoritative chain time through proof finalization",
     chainId: "clairveil-local-1",
     expiresAtUnix: 2_000,
     rootSeed,
-    merklePathProvider: {
-      async lookupMerklePath() {
-        return { root: "01".padStart(64, "0"), path: [], path_helper: [] };
-      },
-    },
+    merklePathProvider: strictMerklePathProvider([note]),
     checkNullifiers: async (nullifiers) =>
       new Map(nullifiers.map((nullifier) => [nullifier, false])),
     proverAdapter: {
@@ -5411,11 +5461,7 @@ test("prepared transfer requires explicit self-view opt-out when signer material
     senderViewPubKey: senderView,
     noteHashSigner: createSpendNoteHashSigner(senderRootSeed),
     auditDisclosureTargetPubKeyHex: recipientMaterial.disclosurePubKeyHex,
-    merklePathProvider: {
-      async lookupMerklePath() {
-        return { root: "01".padStart(64, "0"), path: [], path_helper: [] };
-      }
-    },
+    merklePathProvider: strictMerklePathProvider(inputs.map(input => input.note)),
     shieldedPrefix: "clairs"
   };
 
@@ -5575,11 +5621,14 @@ test("EVM client verifies nullifiers in direct transfer and withdraw preparation
     isSpent: false,
     nullifierStatus: "unspent"
   });
-  const merklePathProvider = {
-    async lookupMerklePath() {
-      return { root: "01".padStart(64, "0"), path: [], path_helper: [] };
-    }
-  };
+  const contradictoryNote = foundNote(100n);
+  const transferNotes = [foundNote(101n), foundNote(102n)];
+  const withdrawNote = foundNote(103n);
+  const merklePathProvider = strictMerklePathProvider([
+    contradictoryNote.note,
+    ...transferNotes.map(found => found.note),
+    withdrawNote.note
+  ]);
   const checkedBatches = [];
   const checkNullifiers = async nullifiers => {
     checkedBatches.push([...nullifiers]);
@@ -5594,7 +5643,7 @@ test("EVM client verifies nullifiers in direct transfer and withdraw preparation
 
   await assert.rejects(
     () => client.buildWithdrawTransaction({
-      notes: [foundNote(100n)],
+      notes: [contradictoryNote],
       amount: "1udemo",
       recipient: "0x2222222222222222222222222222222222222222",
       rootSeed,
@@ -5618,7 +5667,7 @@ test("EVM client verifies nullifiers in direct transfer and withdraw preparation
 
   const transfer = await client.buildTransferTransaction({
     creator: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
-    inputs: [foundNote(101n), foundNote(102n)],
+    inputs: transferNotes,
     recipient: recipientMaterial.shieldedAddress,
     amount: "1udemo",
     rootSeed,
@@ -5633,7 +5682,7 @@ test("EVM client verifies nullifiers in direct transfer and withdraw preparation
     }
   });
   const withdraw = await client.buildWithdrawTransaction({
-    notes: [foundNote(103n)],
+    notes: [withdrawNote],
     amount: "1udemo",
     recipient: "0x2222222222222222222222222222222222222222",
     rootSeed,
