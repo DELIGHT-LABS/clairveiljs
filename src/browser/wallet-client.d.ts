@@ -1,6 +1,7 @@
 import type { Base64, ClairAddress, Hex, PrivacyMaterial, ShieldedAddress } from "../core/crypto.js";
 import type {
   DerivedPrivacyAccount,
+  ClairveilJS,
   PrivacyAccountSummary,
   PrivacyEventsQuery,
   PrivacyEventsCursor,
@@ -10,6 +11,10 @@ import type {
   ReservationReconciliationState,
   ReserveResponse,
   BatchOperationEvidenceHashes,
+  BatchTransferOperationEvidence,
+  PreparedBatchTransferPayloadCheckpoint,
+  PreparedBatchTransferProofCheckpoint,
+  TransferBatchPaymentInput,
   BroadcastSignedTxResult,
   ReservationBroadcastOptions,
   SignedTxBase64,
@@ -40,6 +45,8 @@ import type {
   TransferUserDisclosureMode,
   WithdrawMessage,
 } from "../privacy/payload.js";
+import type { PreparedBatchTransferPayload, PreparedBatchTransferProof } from "../privacy/batch-transfer.js";
+import type { MsgBatchTransfer as MsgBatchTransferMessage } from "../generated/clairveil/privacy/v1/tx.js";
 import type { TransferBatchPlan, TransferPlan, WithdrawPlan } from "../privacy/planner.js";
 import type { NoteReservationManager, ReservationBatch } from "../privacy/reservation.js";
 import type { ScanResult } from "../privacy/scan.js";
@@ -63,6 +70,8 @@ export interface BrowserWalletProfile {
   evmPrivacyPrecompileAddress?: string;
   evmGasLimit?: string;
   evmSendGasLimit?: string;
+  enableExperimentalBatchTransfer?: boolean;
+  enable_experimental_batch_transfer?: boolean;
 }
 
 export type BrowserWalletType = "cosmos" | "evm";
@@ -87,6 +96,8 @@ export interface ClairveilBrowserClientOptions {
   evmPrivacyPrecompileAddress?: string;
   evmGasLimit?: string;
   evmSendGasLimit?: string;
+  enableExperimentalBatchTransfer?: boolean;
+  enable_experimental_batch_transfer?: boolean;
 }
 
 export interface BrowserHealthResult {
@@ -319,23 +330,68 @@ export interface PreparedEvmTransfer extends ReservationReconciliationState {
 
 export type PreparedTransfer = PreparedCosmosTransfer | PreparedEvmTransfer;
 
-export type PrepareTransferBatchInput = BrowserWalletIdentityInput & BatchOperationEvidenceHashes & {
-  amounts: CoinString[];
-  recipient: ShieldedAddress;
+type BrowserPrepareTransferBatchPaymentShape =
+  | { payments: readonly TransferBatchPaymentInput[]; amounts?: never; recipient?: never }
+  | { payments?: never; amounts: CoinString[]; recipient: ShieldedAddress };
+
+type BrowserBatchReservationManagerBinding =
+  | { reservationManager: NoteReservationManager; reservation_manager?: NoteReservationManager | null }
+  | { reservationManager?: NoteReservationManager | null; reservation_manager: NoteReservationManager };
+
+type BrowserBatchPayloadCheckpointBinding =
+  | {
+      onPreparedPayload: PreparedBatchTransferPayloadCheckpoint;
+      on_prepared_payload?: PreparedBatchTransferPayloadCheckpoint;
+    }
+  | {
+      onPreparedPayload?: PreparedBatchTransferPayloadCheckpoint;
+      on_prepared_payload: PreparedBatchTransferPayloadCheckpoint;
+    };
+
+type BrowserBatchProofCheckpointBinding =
+  | {
+      onPreparedProof: PreparedBatchTransferProofCheckpoint;
+      on_prepared_proof?: PreparedBatchTransferProofCheckpoint;
+    }
+  | {
+      onPreparedProof?: PreparedBatchTransferProofCheckpoint;
+      on_prepared_proof: PreparedBatchTransferProofCheckpoint;
+    };
+
+export type PrepareTransferBatchInput = BrowserWalletIdentityInput &
+  BatchOperationEvidenceHashes &
+  BrowserPrepareTransferBatchPaymentShape &
+  BrowserBatchReservationManagerBinding &
+  BrowserBatchPayloadCheckpointBinding &
+  BrowserBatchProofCheckpointBinding & {
+  outputMode?: "compact" | "exact32" | "exact-32";
+  output_mode?: "compact" | "exact32" | "exact-32";
   limit?: number;
   maxPages?: number;
   max_pages?: number;
   scan?: PrivacyScanOptions;
   gasLimit?: number;
   gas_limit?: number;
+  expiresAtUnix?: number;
+  expires_at_unix?: number;
+  chainNowUnix?: number;
+  chain_now_unix?: number;
+  rootHex?: Hex;
+  root_hex?: Hex;
+  snapshotHeight?: number | bigint | string;
+  snapshot_height?: number | bigint | string;
+  disableSelfViewDisclosure?: boolean;
+  disable_self_view_disclosure?: boolean;
+  selfViewDisclosureTargetPubKeyHex?: Hex;
+  self_view_disclosure_target_pubkey?: Hex;
   privacyPolicy?: TransferPrivacyPolicy;
   privacy_policy?: TransferPrivacyPolicy;
   disclosureMode?: TransferUserDisclosureMode;
   disclosure_mode?: TransferUserDisclosureMode;
   disclosurePubKeyHex?: Hex;
   disclosure_pubkey_hex?: Hex;
-  reservationManager?: NoteReservationManager | null;
-  reservation_manager?: NoteReservationManager | null;
+  auditDisclosureTargetPubKeyHex?: Hex;
+  audit_disclosure_target_pubkey_hex?: Hex;
 };
 
 export type PrepareCosmosTransferBatchInput = DistributiveOmit<PrepareTransferBatchInput, "walletType" | "wallet_type"> & {
@@ -353,16 +409,28 @@ export type PrepareTransferBatchInputForDefault<TDefaultWalletType extends Brows
 
 export interface PreparedTransferBatchSummary {
   shieldedAddress: ShieldedAddress;
+  payments: Array<{
+    itemId: string;
+    amount: CoinString;
+    recipient: ShieldedAddress;
+    privacyPolicy: string;
+    disclosureMode: string;
+  }>;
   amounts: CoinString[];
-  recipient: ShieldedAddress;
-  privacyPolicy: TransferPrivacyPolicy;
-  disclosureMode: TransferUserDisclosureMode;
+  recipient?: ShieldedAddress;
+  privacyPolicy?: TransferPrivacyPolicy;
+  disclosureMode?: TransferUserDisclosureMode;
+  outputMode: "compact" | "exact32";
   planStatus: string;
   planAction: string;
-  selectedInputTotals?: string[];
-  payloads?: PreparedTransferPayload[];
-  proofs?: PreparedTransferProof[];
-  messages?: TransferMessage[];
+  selectedInputTotal?: string;
+  inputCount?: number;
+  outputCount?: number;
+  payload?: PreparedBatchTransferPayload;
+  proof?: PreparedBatchTransferProof;
+  message?: MsgBatchTransferMessage;
+  operationEvidence?: BatchTransferOperationEvidence;
+  operationEvidenceHash?: Hex;
   reservation?: ReservationBatch | null;
 }
 
@@ -585,6 +653,7 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   fetchPrivacyEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchScanEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
+  fetchAuditableBatchTransfers(options?: Parameters<ClairveilJS["fetchAuditableBatchTransfers"]>[0]): ReturnType<ClairveilJS["fetchAuditableBatchTransfers"]>;
   fetchAuditConfig(): Promise<object>;
   fetchDisclosureConfig(): Promise<object>;
   queryAuditConfig(): Promise<ValidatedAuditConfigV1>;
@@ -639,6 +708,11 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   prepareTransfer(input: PrepareCosmosTransferInput): Promise<PreparedCosmosTransfer>;
   prepareTransfer(input: PrepareTransferInput): Promise<PreparedTransfer>;
   prepareTransferBatch(input: PrepareTransferBatchInputForDefault<TDefaultWalletType>): Promise<PreparedCosmosTransferBatch>;
+  provePreparedBatchTransfer(input: Omit<Parameters<ClairveilJS["provePreparedBatchTransfer"]>[0], "proverAdapter"> & {
+    proverAdapter?: Parameters<ClairveilJS["provePreparedBatchTransfer"]>[0]["proverAdapter"];
+    prover_adapter?: Parameters<ClairveilJS["provePreparedBatchTransfer"]>[0]["proverAdapter"];
+    address?: ClairAddress | string;
+  }): ReturnType<ClairveilJS["provePreparedBatchTransfer"]>;
   prepareWithdraw(input: TDefaultWalletType extends "evm" ? PrepareDefaultEvmProfileWithdrawInput : never): Promise<PreparedEvmWithdraw>;
   prepareWithdraw(input: PrepareEvmWithdrawInput): Promise<PreparedEvmWithdraw>;
   prepareWithdraw(input: PrepareCosmosWithdrawInput): Promise<PreparedCosmosWithdraw>;
@@ -655,6 +729,15 @@ export class ClairveilBrowserClient<TDefaultWalletType extends BrowserWalletType
   decodeUserDisclosure(input: DecodeUserDisclosureInput): Promise<DisclosureReport>;
   decodeSelfViewDisclosure(input: DecodeSelfViewDisclosureInput): Promise<DisclosureReport>;
   decodeAuditDisclosure(input: DecodeAuditDisclosureInput): Promise<DisclosureReport>;
+  decodeBatchUserDisclosure(input: Parameters<ClairveilJS["decodeBatchUserDisclosure"]>[0] & {
+    walletType?: BrowserWalletType;
+    wallet_type?: BrowserWalletType;
+  }): ReturnType<ClairveilJS["decodeBatchUserDisclosure"]>;
+  decodeBatchSelfViewDisclosure(input: Parameters<ClairveilJS["decodeBatchSelfViewDisclosure"]>[0] & {
+    walletType?: BrowserWalletType;
+    wallet_type?: BrowserWalletType;
+  }): ReturnType<ClairveilJS["decodeBatchSelfViewDisclosure"]>;
+  decodeBatchAuditDisclosure(input: Parameters<ClairveilJS["decodeBatchAuditDisclosure"]>[0]): ReturnType<ClairveilJS["decodeBatchAuditDisclosure"]>;
   txRawBytesBase64(input: SignedTxBase64): Base64;
 }
 

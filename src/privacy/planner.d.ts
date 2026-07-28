@@ -32,11 +32,12 @@ export interface TransferPlan {
 }
 
 export interface TransferBatchPlan {
-  status: "batch_transfer_ready" | "batch_note_preparation_required" | "mixed_denom_unsupported" | "insufficient_balance" | "invalid_amount" | "invalid_batch";
+  status: "batch_transfer_ready" | "batch_note_preparation_required" | "batch_capacity_exceeded" | "mixed_denom_unsupported" | "insufficient_balance" | "invalid_amount" | "invalid_batch";
   canBuildTx: boolean;
   action: string;
   message: string;
   facts: PlannerFacts;
+  selection?: TransferSelection;
   selections: TransferSelection[];
 }
 

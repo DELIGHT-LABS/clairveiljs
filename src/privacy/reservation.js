@@ -3748,10 +3748,10 @@ export async function rollbackPlanReservation(reservationManager, batch) {
       throw error;
     }
     await reservationManager.markManualReview(batch.reservation_ids, {
-      error: error?.message || "rollback failed because reservation lease expired",
+      error: "rollback_lease_expired",
       metadata: {
         reconcile_reason: "rollback_lease_expired",
-        rollback_error: error?.message || "reservation lease expired"
+        rollback_error: "rollback_lease_expired"
       }
     });
   }

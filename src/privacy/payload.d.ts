@@ -1,5 +1,5 @@
 import type { BytesLike, ClairAddress, Hex, Point, ShieldedAddress } from "../core/crypto.js";
-import type { CoinString, FoundNote, Note, NoteHashSigner } from "../core/note.js";
+import type { CoinString, FoundNote, NoteHashSigner } from "../core/note.js";
 import type { ProverAdapter } from "./prover.js";
 import type { JoinSplitOwnerIntentSignerV1 } from "./transfer-v5.js";
 import type {
@@ -45,28 +45,6 @@ export type MerklePathProviderLike =
 
 export type TransferPrivacyPolicy = "all-private" | "amount" | "to" | "amount-to" | "from" | "amount-from" | "from-to" | "to-from" | "amount-from-to" | "amount-to-from" | number;
 export type TransferUserDisclosureMode = "none" | "public" | "recipient-encrypted" | UserDisclosureMode | number;
-
-export interface TransferDisclosurePayload {
-  version: "v4";
-  plane: "user" | "audit" | "self-view" | string;
-  policy: number;
-  output_index: number;
-  commitment_hex: Hex;
-  disclosure_digest_hex: Hex;
-  amount?: string;
-  asset_id_hex?: Hex;
-  asset_denom?: string;
-  from_shielded_address?: ShieldedAddress;
-  to_shielded_address?: ShieldedAddress;
-}
-
-export interface TransferDisclosureData {
-  payload: TransferDisclosurePayload;
-  digest_hex: Hex;
-  target_pubkey_hex: Hex | "";
-  payload_hex: Hex;
-  mode: number;
-}
 
 export interface PreparedTransferPayloadInput {
   creator?: ClairAddress | string;
@@ -153,34 +131,8 @@ export interface TransferMessageBuildResult {
 
 export function summarizeSpendableNotesByDenom(notes: FoundNote[], denom?: string): { notes: FoundNote[]; total: bigint };
 export function selectTransferInputs(notes: FoundNote[], denom: string, targetAmount: string | number | bigint): TransferInputSelection;
-export function selectTransferInputBatch(notes: FoundNote[], denom: string, targetAmounts: Array<string | number | bigint>): TransferInputSelection[];
+export function selectBatchTransferInputs(notes: FoundNote[], denom: string, targetAmount: string | number | bigint): TransferInputSelection;
 export function validatePreparedTransferPayloadMetadata(payload: PreparedTransferPayload): true;
-export function buildUserDisclosureData(input: {
-  policy?: TransferPrivacyPolicy;
-  mode?: TransferUserDisclosureMode;
-  outputCommitmentHex: Hex;
-  transferDenom?: string;
-  fromNote: Note;
-  recipientNote: Note;
-  targetPubKeyHex?: Hex;
-  shieldedPrefix?: string;
-}): TransferDisclosureData | null;
-export function buildAuditDisclosureData(input: {
-  outputCommitmentHex: Hex;
-  transferDenom?: string;
-  fromNote: Note;
-  recipientNote: Note;
-  auditPubKeyHex?: Hex;
-  shieldedPrefix?: string;
-}): TransferDisclosureData;
-export function buildSelfViewDisclosureData(input: {
-  outputCommitmentHex: Hex;
-  transferDenom?: string;
-  fromNote: Note;
-  recipientNote: Note;
-  targetPubKeyHex?: Hex;
-  shieldedPrefix?: string;
-}): Omit<TransferDisclosureData, "target_pubkey_hex">;
 export function computePreparedTransferPayloadHash(payload: PreparedTransferPayload): Hex;
 export function buildPreparedTransferPayload(input: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;
 export function validatePreparedTransferProof(payload: PreparedTransferPayload, proof: PreparedTransferProof, options?: { nowUnix?: number }): true;

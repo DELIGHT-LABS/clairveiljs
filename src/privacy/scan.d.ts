@@ -113,6 +113,7 @@ export interface ValidatedPrivacyScanPageV2 {
   encoded_bytes: number | string;
 }
 
+/** Strict privacy-fixed-v1 NotePlaintextV1 decoder; legacy JSON/plaintext is rejected. */
 export function parseNoteBytes(bytes: BytesLike): object;
 export function parseNullifierUsage(value: unknown): boolean | null;
 export function processPrivacyEvent(event: object, input: { rootSeed?: BytesLike; spendScalar?: bigint; viewScalar?: bigint }): NormalizedFoundNote[];

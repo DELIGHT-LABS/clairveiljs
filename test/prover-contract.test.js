@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  createAsyncJobProverAdapter,
   createHttpProverAdapter,
   createStaticProverAdapter
 } from "clairveiljs/prover";
@@ -182,7 +183,46 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
   });
   await assert.rejects(
     () => unavailable.proveWithdraw(examples.withdraw.request),
-    error => error?.code === ClairveilErrorCode.PROVER_UNAVAILABLE && /status 503/.test(error.message)
+    error => error?.code === ClairveilErrorCode.PROVER_UNAVAILABLE &&
+      /status 503/.test(error.message) &&
+      !error.message.includes("down")
+  );
+});
+
+test("prover failures preserve only safe error metadata and never echo server or solver text", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const busy = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    fetchImpl: async () => jsonResponse({
+      version: "v1",
+      code: "busy",
+      message: "private witness solver details",
+      retryable: true
+    }, 429)
+  });
+  await assert.rejects(
+    () => busy.proveTransfer(examples.transfer.request),
+    error => error?.code === ClairveilErrorCode.PROVER_UNAVAILABLE &&
+      error?.status === 429 &&
+      error?.proverCode === "busy" &&
+      error?.retryable === true &&
+      error?.details?.retryable === true &&
+      !error.message.includes("private witness")
+  );
+
+  const job = createAsyncJobProverAdapter({
+    submitTransferJob: async () => ({ job_id: "job-1" }),
+    getJob: async () => ({
+      status: "failed",
+      error: "sensitive gnark solver output"
+    }),
+    intervalMs: 0
+  });
+  await assert.rejects(
+    () => job.proveTransfer(examples.transfer.request),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+      /prover job job-1 failed/.test(error.message) &&
+      !error.message.includes("sensitive gnark")
   );
 });
 

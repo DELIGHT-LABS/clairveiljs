@@ -5,12 +5,7 @@ import { fileURLToPath } from "node:url";
 export const conformanceFixtureRelativePath = "x/privacy/client/sdk/conformance/testdata";
 export const defaultConformanceFixtureDir = `../clairveil/${conformanceFixtureRelativePath}`;
 
-/**
- * Clairveil v0.2.0 called the one-proof fixture "session3b". Current main
- * intentionally removed session terminology while retaining the wire contract.
- */
 export const batchTransferConformanceFixtureName = "privacy_batch_transfer_v1_contract.json";
-export const legacyBatchTransferConformanceFixtureName = "privacy_batch_transfer_session3b_contract.json";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -29,19 +24,8 @@ export const defaultConformanceFixtureNames = Object.freeze([
   "privacy_relay_withdraw_contract.json"
 ]);
 
-function fixtureNameCandidates(name) {
-  if (name === batchTransferConformanceFixtureName) {
-    return [batchTransferConformanceFixtureName, legacyBatchTransferConformanceFixtureName];
-  }
-  if (name === legacyBatchTransferConformanceFixtureName) {
-    return [legacyBatchTransferConformanceFixtureName, batchTransferConformanceFixtureName];
-  }
-  return [name];
-}
-
 function resolveConformanceFixturePath(fixtureDir, name) {
-  const candidate = fixtureNameCandidates(name).find(entry => existsSync(join(fixtureDir, entry)));
-  return join(fixtureDir, candidate || name);
+  return join(fixtureDir, name);
 }
 
 export function suggestClairveilConformanceFixtureDirs({ cwd = process.cwd() } = {}) {

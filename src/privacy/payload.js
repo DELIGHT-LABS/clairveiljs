@@ -5,57 +5,27 @@ import {
   canonicalFieldHex,
   defaultAccountPrefix,
   decodeCanonicalFieldHex,
-  decodeShieldedAddress,
-  deriveDisclosureKeys,
-  deriveSpendKeys,
-  deriveViewKeys,
-  encodeShieldedAddress,
-  hashStringToField,
   hexFromBytes,
   normalizeHex,
-  normalizeBech32Prefix,
-  unpackPointHex
+  normalizeBech32Prefix
 } from "../core/crypto.js";
 import {
-  computeAuditTransferDisclosureDigestHex,
-  computeSelfViewTransferDisclosureDigestHex,
-  computeTransferDisclosureDigestHex,
-  payloadVersion,
-  planeAudit,
-  planeSelfView,
-  planeUser,
-  transferDisclosureRecipientOutputIndex,
   transferPrivacyPolicyAllPrivate,
-  transferPrivacyPolicyDiscloseAmount,
-  transferPrivacyPolicyDiscloseFrom,
-  transferPrivacyPolicyDiscloseTo,
   userDisclosureModeNone,
   userDisclosureModePublic,
   userDisclosureModeRecipientEncrypted
 } from "../core/disclosure.js";
 import {
-  computeNoteCommitmentHex,
-  computeNoteNullifierHex,
-  computeTransferNoteHash,
-  computeWithdrawNoteHash,
-  createNote,
   createSpendNoteHashSigner,
   defaultAssetDenom,
-  encryptNoteForReceiverWithViewTag,
   isVerifiedUnspentFoundNote,
   normalizeFoundNote,
-  normalizeNote,
   noteSpendPubKeyHex,
   noteViewPubKeyHex,
   parseCoin,
-  resolveTransferSignature,
-  resolveWithdrawSignature,
-  asymEncrypt
+  resolveWithdrawSignature
 } from "../core/note.js";
-import {
-  sha256Hex as digestSha256Hex,
-  utf8Bytes
-} from "../core/browser-crypto.js";
+import { sha256Hex as digestSha256Hex } from "../core/browser-crypto.js";
 import {
   buildPreparedTransferV5Payload,
   buildTransferV5MsgFromPayloadAndProof,
@@ -183,25 +153,6 @@ function normalizeDisclosureMode(value, policy) {
   return mode;
 }
 
-function normalizeDisclosurePubKey(value, label) {
-  const text = String(value || "").trim();
-  if (!text) return { point: null, hex: "" };
-  const normalized = normalizeHex(text, label);
-  return {
-    point: unpackPointHex(normalized),
-    hex: normalized
-  };
-}
-
-function noteAddress(noteLike, shieldedPrefix) {
-  const note = normalizeNote(noteLike);
-  return encodeShieldedAddress(
-    { x: note.receiverSpendPubKeyX, y: note.receiverSpendPubKeyY },
-    { x: note.receiverViewPubKeyX, y: note.receiverViewPubKeyY },
-    { shieldedPrefix }
-  );
-}
-
 function foundNoteIdentityKey(found) {
   const nullifier = String(found?.nullifier || "").trim().toLowerCase();
   if (nullifier) return `nullifier:${nullifier}`;
@@ -209,10 +160,6 @@ function foundNoteIdentityKey(found) {
 }
 
 const maxShieldedAmount = (1n << 64n) - 1n;
-const exactInputBatchFullNoteLimit = 32;
-const exactInputBatchCandidateNoteLimit = 48;
-const exactInputBatchCandidatePairLimit = 16;
-const exactInputBatchSearchStepLimit = 250000;
 
 function foundNotePlannerLess(left, right) {
   if (left.note.amount !== right.note.amount) return left.note.amount < right.note.amount;
@@ -234,11 +181,6 @@ function finalTransferOutputsWithinBound(total, target) {
   if (target < 0n || target > maxShieldedAmount) return false;
   if (total < target) return false;
   return total - target <= maxShieldedAmount;
-}
-
-function orderedInputPair(left, right) {
-  if (left.note.amount === 0n && right.note.amount > 0n) return [right, left];
-  return [left, right];
 }
 
 function betterSufficientPairCandidate(left, right, total, bestLeft, bestRight, bestTotal) {
@@ -355,398 +297,83 @@ export function selectTransferInputs(notes, denom, targetAmount) {
   return { inputs, total: 0n, isFinal: false, needsZeroDummy: false };
 }
 
-function targetOrderDescending(targets) {
-  return targets.map((_, index) => index).sort((left, right) => {
-    if (targets[left] !== targets[right]) return targets[left] > targets[right] ? -1 : 1;
-    return left - right;
+const batchTransferMaxInputs = 16;
+const batchTransferSearchStepLimit = 250000;
+
+function betterBatchInputSelection(candidate, current, target) {
+  if (!current) return true;
+  const candidateExact = candidate.total === target;
+  const currentExact = current.total === target;
+  if (candidateExact !== currentExact) return candidateExact;
+  if (candidate.total !== current.total) return candidate.total < current.total;
+  if (candidate.inputs.length !== current.inputs.length) return candidate.inputs.length < current.inputs.length;
+  return candidate.inputs.map(foundNoteIdentityKey).join("\0") < current.inputs.map(foundNoteIdentityKey).join("\0");
+}
+
+/** Select one non-overlapping 1..16-input witness for one-proof batch transfer. */
+export function selectBatchTransferInputs(notes, denom, targetAmount) {
+  const target = BigInt(bigintDecimal(targetAmount, "batch transfer total amount"));
+  if (target <= 0n) throw new Error("batch transfer total amount must be positive");
+  // Individual NoteV1 amounts are uint64, but a 16x32 batch total is not.
+  // Only the optional single change output must remain within uint64.
+  const maxSelectedTotal = target + maxShieldedAmount;
+  const available = summarizeSpendableNotesByDenom(notes, denom).notes;
+  if (!available.length) return { inputs: [], total: 0n, isFinal: false, needsZeroDummy: false };
+
+  const candidates = [...available].sort((left, right) => {
+    if (left.note.amount !== right.note.amount) return left.note.amount > right.note.amount ? -1 : 1;
+    return foundNotePlannerCompare(left, right);
   });
-}
-
-function noteIndexUsed(usedMask, index) {
-  return (usedMask & (1n << BigInt(index))) !== 0n;
-}
-
-function pairCandidates(notes, usedMask, target) {
-  const candidates = [];
-  for (let i = 0; i < notes.length; i += 1) {
-    if (noteIndexUsed(usedMask, i)) continue;
-    for (let j = i + 1; j < notes.length; j += 1) {
-      if (noteIndexUsed(usedMask, j)) continue;
-      const total = notes[i].note.amount + notes[j].note.amount;
-      if (!finalTransferOutputsWithinBound(total, target)) continue;
-      candidates.push({ left: i, right: j, total });
-    }
-  }
-  candidates.sort((a, b) => {
-    if (a.total !== b.total) return a.total < b.total ? -1 : 1;
-    const leftAmount = notes[a.left].note.amount;
-    const otherLeftAmount = notes[b.left].note.amount;
-    if (leftAmount !== otherLeftAmount) return leftAmount < otherLeftAmount ? -1 : 1;
-    const rightAmount = notes[a.right].note.amount;
-    const otherRightAmount = notes[b.right].note.amount;
-    if (rightAmount !== otherRightAmount) return rightAmount < otherRightAmount ? -1 : 1;
-    if (foundNotePlannerLess(notes[a.left], notes[b.left])) return -1;
-    if (foundNotePlannerLess(notes[b.left], notes[a.left])) return 1;
-    return foundNotePlannerCompare(notes[a.right], notes[b.right]);
-  });
-  return candidates;
-}
-
-function zeroCandidateIndexes(notes, limit) {
-  const indexes = [];
-  for (let i = 0; i < notes.length; i += 1) {
-    if (notes[i].note.amount > 0n) break;
-    indexes.push(i);
-    if (indexes.length >= limit) break;
-  }
-  return indexes;
-}
-
-function lowerBoundNoteAmount(notes, target) {
-  let low = 0;
-  let high = notes.length;
-  while (low < high) {
-    const mid = Math.floor((low + high) / 2);
-    if (notes[mid].note.amount >= target) high = mid;
-    else low = mid + 1;
-  }
-  return low;
-}
-
-function singleCandidateIndexes(notes, target, limit) {
-  const indexes = [];
-  for (let i = lowerBoundNoteAmount(notes, target); i < notes.length; i += 1) {
-    if (finalTransferOutputsWithinBound(notes[i].note.amount, target)) {
-      indexes.push(i);
-    }
-    if (indexes.length >= limit) break;
-  }
-  return indexes;
-}
-
-function boundedPairCandidateIndexes(notes, target, limit) {
-  if (limit <= 0) return [];
-  const leftIndexes = [];
-  for (let i = lowerBoundNoteAmount(notes, 1n); i < notes.length; i += 1) {
-    leftIndexes.push(i);
-    if (leftIndexes.length >= limit * 4) break;
-  }
-
-  const candidates = [];
-  const seen = new Set();
-  for (const left of leftIndexes) {
-    let needed = target - notes[left].note.amount;
-    if (needed <= 0n) needed = 1n;
-    let addedForLeft = 0;
-    for (let right = lowerBoundNoteAmount(notes, needed); right < notes.length && addedForLeft < 4; right += 1) {
-      if (right === left || notes[right].note.amount <= 0n) continue;
-      const i = Math.min(left, right);
-      const j = Math.max(left, right);
-      const key = `${i}:${j}`;
-      if (seen.has(key)) continue;
-      const total = notes[i].note.amount + notes[j].note.amount;
-      if (!finalTransferOutputsWithinBound(total, target)) continue;
-      seen.add(key);
-      candidates.push({ left: i, right: j, total });
-      addedForLeft += 1;
-    }
-  }
-
-  candidates.sort((a, b) => {
-    if (a.total !== b.total) return a.total < b.total ? -1 : 1;
-    const leftAmount = notes[a.left].note.amount;
-    const otherLeftAmount = notes[b.left].note.amount;
-    if (leftAmount !== otherLeftAmount) return leftAmount < otherLeftAmount ? -1 : 1;
-    const rightAmount = notes[a.right].note.amount;
-    const otherRightAmount = notes[b.right].note.amount;
-    if (rightAmount !== otherRightAmount) return rightAmount < otherRightAmount ? -1 : 1;
-    if (foundNotePlannerLess(notes[a.left], notes[b.left])) return -1;
-    if (foundNotePlannerLess(notes[b.left], notes[a.left])) return 1;
-    return foundNotePlannerCompare(notes[a.right], notes[b.right]);
-  });
-  return candidates.slice(0, limit);
-}
-
-function exactInputBatchCandidateNotes(notes, targets, order) {
-  if (notes.length <= exactInputBatchFullNoteLimit) return [...notes];
-
-  const selected = new Set();
-  const candidates = [];
-  const addIndex = index => {
-    if (index < 0 || index >= notes.length) return true;
-    if (selected.has(index)) return true;
-    if (candidates.length >= exactInputBatchCandidateNoteLimit) return false;
-    selected.add(index);
-    candidates.push(notes[index]);
-    return true;
-  };
-
-  for (const targetIndex of order) {
-    const target = targets[targetIndex];
-    for (const index of zeroCandidateIndexes(notes, exactInputBatchCandidatePairLimit)) {
-      if (!addIndex(index)) break;
-    }
-    for (const index of singleCandidateIndexes(notes, target, exactInputBatchCandidatePairLimit)) {
-      if (!addIndex(index)) break;
-    }
-    for (const candidate of boundedPairCandidateIndexes(notes, target, exactInputBatchCandidatePairLimit)) {
-      if (!addIndex(candidate.left) || !addIndex(candidate.right)) break;
-    }
-    if (candidates.length >= exactInputBatchCandidateNoteLimit) break;
-  }
-
-  return [...candidates].sort(foundNotePlannerCompare);
-}
-
-function exactSelectTransferInputBatch(notes, targets, order) {
-  if (notes.length > exactInputBatchCandidateNoteLimit) return null;
-  if (targets.length * 2 > notes.length) return null;
-  const selections = Array.from({ length: targets.length }, () => null);
-  const failed = new Set();
+  let best = null;
   let steps = 0;
 
-  function search(position, usedMask) {
-    steps += 1;
-    if (steps > exactInputBatchSearchStepLimit) return false;
-    if (position === order.length) return true;
-    const key = `${position}:${usedMask.toString(16)}`;
-    if (failed.has(key)) return false;
-    const targetIndex = order[position];
-    for (const candidate of pairCandidates(notes, usedMask, targets[targetIndex])) {
-      const nextMask = usedMask | (1n << BigInt(candidate.left)) | (1n << BigInt(candidate.right));
-      selections[targetIndex] = {
-        inputs: orderedInputPair(notes[candidate.left], notes[candidate.right]),
-        total: candidate.total,
-        isFinal: true,
-        needsZeroDummy: false
-      };
-      if (search(position + 1, nextMask)) return true;
-      selections[targetIndex] = null;
-    }
-    failed.add(key);
-    return false;
-  }
-
-  return search(0, 0n) ? selections : null;
-}
-
-function removeSelectedInputNotes(notes, inputs) {
-  const used = new Map();
-  for (const input of inputs || []) {
-    const key = foundNoteIdentityKey(input);
-    used.set(key, (used.get(key) || 0) + 1);
-  }
-  return notes.filter(note => {
-    const key = foundNoteIdentityKey(note);
-    const count = used.get(key) || 0;
-    if (!count) return true;
-    used.set(key, count - 1);
-    return false;
-  });
-}
-
-export function selectTransferInputBatch(notes, denom, targetAmounts = []) {
-  const targets = [...(targetAmounts || [])].map((amount, index) => {
-    const target = BigInt(bigintDecimal(amount, `batch item ${index} transfer amount`));
-    if (target <= 0n) {
-      throw new Error(`batch item ${index} target amount must be positive`);
-    }
-    return target;
-  });
-  if (!targets.length) return [];
-
-  const sameDenomNotes = summarizeSpendableNotesByDenom(notes, denom).notes;
-  const order = targetOrderDescending(targets);
-  const candidates = exactInputBatchCandidateNotes(sameDenomNotes, targets, order);
-  const exact = exactSelectTransferInputBatch(candidates, targets, order);
-  if (exact) return exact;
-
-  let available = [...sameDenomNotes];
-  const selections = Array.from({ length: targets.length }, () => null);
-  for (const targetIndex of order) {
-    const selection = selectTransferInputs(available, denom, targets[targetIndex].toString());
-    if (selection.needsZeroDummy || !selection.isFinal || selection.total === 0n) {
-      throw new Error(`batch item ${targetIndex} needs note preparation before batching`);
-    }
-    selections[targetIndex] = selection;
-    available = removeSelectedInputNotes(available, selection.inputs);
-  }
-  return selections;
-}
-
-function disclosureCommon({ outputCommitmentHex, fromNote, recipientNote }) {
-  const from = normalizeNote(fromNote);
-  const to = normalizeNote(recipientNote);
-  return {
-    outputIndex: transferDisclosureRecipientOutputIndex,
-    commitment: outputCommitmentHex,
-    amount: to.amount,
-    assetId: to.assetID,
-    fromSpendPubKeyX: from.receiverSpendPubKeyX,
-    fromSpendPubKeyY: from.receiverSpendPubKeyY,
-    fromViewPubKeyX: from.receiverViewPubKeyX,
-    fromViewPubKeyY: from.receiverViewPubKeyY,
-    toSpendPubKeyX: to.receiverSpendPubKeyX,
-    toSpendPubKeyY: to.receiverSpendPubKeyY,
-    toViewPubKeyX: to.receiverViewPubKeyX,
-    toViewPubKeyY: to.receiverViewPubKeyY
-  };
-}
-
-function buildDisclosurePayload({
-  plane,
-  policy,
-  outputCommitmentHex,
-  digestHex,
-  transferDenom,
-  fromNote,
-  recipientNote,
-  shieldedPrefix
-}) {
-  const payload = {
-    version: payloadVersion,
-    plane,
-    policy,
-    output_index: transferDisclosureRecipientOutputIndex,
-    commitment_hex: outputCommitmentHex,
-    disclosure_digest_hex: digestHex
-  };
-
-  if (plane === planeAudit || (policy & transferPrivacyPolicyDiscloseAmount) !== 0) {
-    payload.amount = normalizeNote(recipientNote).amount.toString();
-    payload.asset_id_hex = canonicalFieldHex(normalizeNote(recipientNote).assetID);
-    payload.asset_denom = transferDenom;
-  }
-  if (plane === planeAudit || (policy & transferPrivacyPolicyDiscloseFrom) !== 0) {
-    payload.from_shielded_address = noteAddress(fromNote, shieldedPrefix);
-  }
-  if (plane === planeAudit || (policy & transferPrivacyPolicyDiscloseTo) !== 0) {
-    payload.to_shielded_address = noteAddress(recipientNote, shieldedPrefix);
-  }
-
-  return payload;
-}
-
-export function buildUserDisclosureData({
-  policy,
-  mode,
-  outputCommitmentHex,
-  transferDenom = defaultAssetDenom,
-  fromNote,
-  recipientNote,
-  targetPubKeyHex,
-  shieldedPrefix
-}) {
-  const numericPolicy = normalizePolicy(policy);
-  if (numericPolicy === transferPrivacyPolicyAllPrivate) return null;
-  const numericMode = normalizeDisclosureMode(mode, numericPolicy);
-  const digestHex = computeTransferDisclosureDigestHex({
-    ...disclosureCommon({ outputCommitmentHex, fromNote, recipientNote }),
-    policy: numericPolicy
-  });
-  const payload = buildDisclosurePayload({
-    plane: planeUser,
-    policy: numericPolicy,
-    outputCommitmentHex,
-    digestHex,
-    transferDenom,
-    fromNote,
-    recipientNote,
-    shieldedPrefix
-  });
-  const payloadBytes = utf8Bytes(JSON.stringify(payload));
-
-  if (numericMode === userDisclosureModeValue.public) {
-    return {
-      payload,
-      digest_hex: digestHex,
-      target_pubkey_hex: "",
-      payload_hex: hexFromBytes(payloadBytes),
-      mode: numericMode
+  const consider = selected => {
+    const total = selected.reduce((sum, found) => sum + found.note.amount, 0n);
+    if (total < target || total > maxSelectedTotal) return false;
+    const candidate = {
+      inputs: [...selected].sort(foundNotePlannerCompare),
+      total,
+      isFinal: true,
+      needsZeroDummy: false
     };
-  }
-
-  const target = normalizeDisclosurePubKey(targetPubKeyHex, "user disclosure target pubkey");
-  if (!target.point) {
-    throw new Error("recipient-encrypted disclosure requires a target pubkey");
-  }
-  const cipherText = asymEncrypt(payloadBytes, target.point);
-  return {
-    payload,
-    digest_hex: digestHex,
-    target_pubkey_hex: target.hex,
-    payload_hex: hexFromBytes(cipherText),
-    mode: numericMode
+    if (betterBatchInputSelection(candidate, best, target)) best = candidate;
+    return total === target;
   };
-}
 
-export function buildAuditDisclosureData({
-  outputCommitmentHex,
-  transferDenom = defaultAssetDenom,
-  fromNote,
-  recipientNote,
-  auditPubKeyHex,
-  shieldedPrefix
-}) {
-  const target = normalizeDisclosurePubKey(auditPubKeyHex, "audit disclosure target pubkey");
-  if (!target.point) {
-    throw new Error("audit disclosure target pubkey is required");
-  }
-  const digestHex = computeAuditTransferDisclosureDigestHex(
-    disclosureCommon({ outputCommitmentHex, fromNote, recipientNote })
-  );
-  const payload = buildDisclosurePayload({
-    plane: planeAudit,
-    policy: 7,
-    outputCommitmentHex,
-    digestHex,
-    transferDenom,
-    fromNote,
-    recipientNote,
-    shieldedPrefix
-  });
-  const cipherText = asymEncrypt(utf8Bytes(JSON.stringify(payload)), target.point);
-  return {
-    payload,
-    digest_hex: digestHex,
-    target_pubkey_hex: target.hex,
-    payload_hex: hexFromBytes(cipherText),
-    mode: userDisclosureModeValue["recipient-encrypted"]
+  const search = (index, selected, total) => {
+    steps += 1;
+    if (steps > batchTransferSearchStepLimit || best?.total === target) return;
+    if (total >= target) {
+      consider(selected);
+      return;
+    }
+    if (index >= candidates.length || selected.length >= batchTransferMaxInputs) return;
+    const remainingSlots = batchTransferMaxInputs - selected.length;
+    let maxReachable = total;
+    for (let offset = index; offset < candidates.length && offset < index + remainingSlots; offset += 1) {
+      maxReachable += candidates[offset].note.amount;
+    }
+    if (maxReachable < target) return;
+    const candidate = candidates[index];
+    if (total + candidate.note.amount <= maxSelectedTotal) {
+      search(index + 1, [...selected, candidate], total + candidate.note.amount);
+    }
+    search(index + 1, selected, total);
   };
-}
+  search(0, [], 0n);
 
-export function buildSelfViewDisclosureData({
-  outputCommitmentHex,
-  transferDenom = defaultAssetDenom,
-  fromNote,
-  recipientNote,
-  targetPubKeyHex,
-  shieldedPrefix
-}) {
-  const target = normalizeDisclosurePubKey(targetPubKeyHex, "self-view disclosure target pubkey");
-  if (!target.point) {
-    throw new Error("self-view disclosure target pubkey is required");
+  if (!best) {
+    const greedy = [];
+    let total = 0n;
+    for (const candidate of candidates) {
+      if (greedy.length >= batchTransferMaxInputs || total >= target) break;
+      if (total + candidate.note.amount > maxSelectedTotal) continue;
+      greedy.push(candidate);
+      total += candidate.note.amount;
+    }
+    if (total >= target) consider(greedy);
   }
-  const digestHex = computeSelfViewTransferDisclosureDigestHex(
-    disclosureCommon({ outputCommitmentHex, fromNote, recipientNote })
-  );
-  const payload = buildDisclosurePayload({
-    plane: planeSelfView,
-    policy: 7,
-    outputCommitmentHex,
-    digestHex,
-    transferDenom,
-    fromNote,
-    recipientNote,
-    shieldedPrefix
-  });
-  const cipherText = asymEncrypt(utf8Bytes(JSON.stringify(payload)), target.point);
-  return {
-    payload,
-    digest_hex: digestHex,
-    payload_hex: hexFromBytes(cipherText),
-    mode: userDisclosureModeValue["recipient-encrypted"]
-  };
+  return best || { inputs: [], total: 0n, isFinal: false, needsZeroDummy: false };
 }
 
 async function lookupMerklePath(provider, commitmentHex) {
@@ -797,182 +424,12 @@ function normalizeMerklePathResult(result, label, commitmentHex) {
   return { rootHex, path, pathHelper };
 }
 
-function transferPayloadHashIncludesSelfView(version) {
-  return String(version || "") !== "v1";
-}
-
-function transferPayloadHashIncludesViewTags(version) {
-  return String(version || "") === preparedTransferPayloadVersion;
-}
-
 export function validatePreparedTransferPayloadMetadata(payload) {
   return validatePreparedTransferV5PayloadMetadata(payload);
 }
 
 export function computePreparedTransferPayloadHash(payload) {
   return computePreparedTransferV5PayloadHash(payload);
-}
-
-async function buildLegacyPreparedTransferPayload({
-  creator,
-  inputs,
-  recipient,
-  amount,
-  transferAmount,
-  transferDenom,
-  rootSeed,
-  senderSpendPubKey,
-  senderViewPubKey,
-  merklePathProvider,
-  noteHashSigner,
-  userPrivacyPolicy = "all-private",
-  userDisclosureMode,
-  userDisclosureTargetPubKeyHex = "",
-  auditDisclosureTargetPubKeyHex,
-  disableSelfViewDisclosure = false,
-  selfViewDisclosureTargetPubKeyHex,
-  shieldedPrefix
-} = {}) {
-  const coin = parseCoin(amount ?? transferAmount, transferDenom || defaultAssetDenom);
-  const targetAmount = positiveBigInt(coin.amount, "transfer amount");
-  const foundInputs = [...(inputs || [])].map(normalizeFoundNote);
-  if (foundInputs.length !== 2) {
-    throw new Error(`transfer prepared payload requires exactly 2 input notes; got ${foundInputs.length}`);
-  }
-  const targetAssetIdHex = canonicalFieldHex(computeAssetIdV1(coin.denom));
-  foundInputs.forEach((found, index) => {
-    const inputAssetIdHex = canonicalFieldHex(found.note.assetID);
-    if (inputAssetIdHex !== targetAssetIdHex) {
-      throw new Error(`transfer input ${index} asset does not match requested denom ${coin.denom}`);
-    }
-  });
-  const totalInput = foundInputs.reduce((sum, input) => sum + input.note.amount, 0n);
-  const changeAmount = totalInput - targetAmount;
-  if (changeAmount < 0n) {
-    throw new Error(`insufficient selected input total ${totalInput} for transfer amount ${targetAmount}`);
-  }
-
-  const recipientBundle = decodeShieldedAddress(recipient, { shieldedPrefix });
-  const senderSpend = senderSpendPubKey || (rootSeed ? deriveSpendKeys(rootSeed).pubKey : null);
-  const senderView = senderViewPubKey || (rootSeed ? deriveViewKeys(rootSeed).pubKey : null);
-  if (!senderSpend || !senderView) {
-    throw new Error("sender spend/view public keys or rootSeed are required");
-  }
-  const signer = noteHashSigner || (rootSeed ? createSpendNoteHashSigner(rootSeed) : null);
-  if (!signer) {
-    throw new Error("noteHashSigner or rootSeed is required");
-  }
-
-  const recipientNote = createNote({
-    spendPubKey: recipientBundle.spendPubKey,
-    viewPubKey: recipientBundle.viewPubKey,
-    amount: targetAmount,
-    assetId: foundInputs[0].note.assetID,
-    memo: "Transfer"
-  });
-  const changeNote = createNote({
-    spendPubKey: senderSpend,
-    viewPubKey: senderView,
-    amount: changeAmount,
-    assetId: foundInputs[0].note.assetID,
-    memo: "Change"
-  });
-  const outputNotes = [recipientNote, changeNote];
-  const outputCommitmentHexes = outputNotes.map(computeNoteCommitmentHex);
-  const recipientCommitmentHex = outputCommitmentHexes[0];
-  const policy = normalizePolicy(userPrivacyPolicy);
-  const mode = normalizeDisclosureMode(userDisclosureMode, policy);
-  const userDisclosure = buildUserDisclosureData({
-    policy,
-    mode,
-    outputCommitmentHex: recipientCommitmentHex,
-    transferDenom: coin.denom,
-    fromNote: foundInputs[0].note,
-    recipientNote,
-    targetPubKeyHex: userDisclosureTargetPubKeyHex,
-    shieldedPrefix
-  });
-  const auditDisclosure = buildAuditDisclosureData({
-    outputCommitmentHex: recipientCommitmentHex,
-    transferDenom: coin.denom,
-    fromNote: foundInputs[0].note,
-    recipientNote,
-    auditPubKeyHex: auditDisclosureTargetPubKeyHex,
-    shieldedPrefix
-  });
-  const explicitSelfViewTargetPubKeyHex = String(selfViewDisclosureTargetPubKeyHex || "").trim();
-  const selfViewTargetPubKeyHex = explicitSelfViewTargetPubKeyHex
-    || (rootSeed ? deriveDisclosureKeys(rootSeed).pubKeyHex : "");
-  const selfViewDisclosure = !disableSelfViewDisclosure && selfViewTargetPubKeyHex
-    ? buildSelfViewDisclosureData({
-      outputCommitmentHex: recipientCommitmentHex,
-      transferDenom: coin.denom,
-      fromNote: foundInputs[0].note,
-      recipientNote,
-      targetPubKeyHex: selfViewTargetPubKeyHex,
-      shieldedPrefix
-    })
-    : null;
-
-  const preparedInputs = [];
-  let commonRootHex = "";
-  for (let i = 0; i < foundInputs.length; i += 1) {
-    const found = foundInputs[i];
-    const commitmentHex = computeNoteCommitmentHex(found.note);
-    const merkle = normalizeMerklePathResult(await lookupMerklePath(merklePathProvider, commitmentHex), `input ${i}`, commitmentHex);
-    if (!commonRootHex) {
-      commonRootHex = merkle.rootHex;
-    } else if (commonRootHex !== merkle.rootHex) {
-      throw new Error("merkle root mismatch across input notes");
-    }
-    const signature = await resolveTransferSignature(signer, computeTransferNoteHash(found.note));
-    preparedInputs.push({
-      amount: found.note.amount.toString(),
-      randomness_hex: canonicalFieldHex(found.note.randomness),
-      spend_pubkey_hex: noteSpendPubKeyHex(found.note),
-      view_pubkey_hex: noteViewPubKeyHex(found.note),
-      merkle_path: merkle.path,
-      merkle_path_helper: merkle.pathHelper,
-      note_hash_signature_hex: hexFromBytes(signature),
-      nullifier_hex: computeNoteNullifierHex(found.note)
-    });
-  }
-
-  const encryptedOutputs = outputNotes.map((note, index) => (
-    encryptNoteForReceiverWithViewTag(
-      note,
-      hexToBytes(outputCommitmentHexes[index], `transfer output ${index} commitment`),
-      index
-    )
-  ));
-  const payload = {
-    version: preparedTransferPayloadVersion,
-    creator: String(creator || ""),
-    root_hex: commonRootHex,
-    asset_id_hex: canonicalFieldHex(foundInputs[0].note.assetID),
-    inputs: preparedInputs,
-    outputs: outputNotes.map((note, i) => ({
-      amount: note.amount.toString(),
-      randomness_hex: canonicalFieldHex(note.randomness),
-      spend_pubkey_hex: noteSpendPubKeyHex(note),
-      view_pubkey_hex: noteViewPubKeyHex(note),
-      commitment_hex: outputCommitmentHexes[i]
-    })),
-    cipher_text_hexes: encryptedOutputs.map(output => hexFromBytes(output.cipherText)),
-    view_tag_hexes: encryptedOutputs.map(output => hexFromBytes(output.viewTag)),
-    user_privacy_policy: policy,
-    user_disclosure_mode: mode,
-    user_disclosure_digest_hex: userDisclosure?.digest_hex || "",
-    user_disclosure_target_pubkey_hex: userDisclosure?.target_pubkey_hex || "",
-    user_disclosure_payload_hex: userDisclosure?.payload_hex || "",
-    audit_disclosure_digest_hex: auditDisclosure.digest_hex,
-    audit_disclosure_target_pubkey_hex: auditDisclosure.target_pubkey_hex,
-    audit_disclosure_payload_hex: auditDisclosure.payload_hex,
-    self_view_disclosure_digest_hex: selfViewDisclosure?.digest_hex || "",
-    self_view_disclosure_payload_hex: selfViewDisclosure?.payload_hex || ""
-  };
-  payload.payload_hash = computePreparedTransferPayloadHash(payload);
-  return payload;
 }
 
 export function validatePreparedTransferProof(payload, proof, options) {
@@ -1010,8 +467,8 @@ async function assertProverNullifiersUnspent(nullifierHexes, checkNullifiers) {
   let result;
   try {
     result = await checkNullifiers(nullifiers);
-  } catch (error) {
-    throw new Error(`verify nullifiers before proof generation: ${error?.message || "query failed"}`);
+  } catch {
+    throw new Error("verify nullifiers before proof generation: query failed");
   }
   const statuses = new Map();
   const invalidStatuses = new Set();
@@ -1449,12 +906,12 @@ export function createRestMerklePathProvider({ rest, fetchImpl = fetch, timeoutM
           signal: controller.signal
         });
         if (!response.ok) {
-          throw new Error(`merkle path query failed with status ${response.status}: ${await response.text()}`);
+          throw new Error(`merkle path query failed with status ${response.status}`);
         }
         return response.json();
       } catch (error) {
         if (error?.name === "AbortError") {
-          throw new Error(`merkle path query timed out after ${resolvedTimeoutMs}ms: ${url}`);
+          throw new Error(`merkle path query timed out after ${resolvedTimeoutMs}ms`);
         }
         throw error;
       } finally {

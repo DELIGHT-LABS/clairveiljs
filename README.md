@@ -6,7 +6,7 @@ Korean documentation: [README.ko.md](./README.ko.md)
 
 It uses CosmJS as the transport/signing foundation and provides Clairveil-specific privacy primitives and DApp-friendly APIs:
 
-- Telescope-generated `MsgDeposit`, `MsgTransfer`, `MsgWithdraw`, and privacy query protobuf bindings
+- Telescope-generated `MsgDeposit`, `MsgTransfer`, `MsgBatchTransfer`, `MsgWithdraw`, and privacy query protobuf bindings
 - Clairveil transaction type URLs
 - Clairveil registry creation for CosmJS `Registry`
 - root signing message helpers
@@ -26,6 +26,7 @@ It uses CosmJS as the transport/signing foundation and provides Clairveil-specif
 - planner results for transfer and withdraw UX states
 - stable `ClairveilError` codes for planner/prover/wallet failures
 - prepared transfer payload building
+- experimental, feature-gated v0.2 one-proof batch transfer preparation (`MsgBatchTransfer`, 1–16 inputs, 1–32 outputs)
 - prepared withdraw and relay withdraw prover/final payload building
 - HTTP prover adapter for `/v1/prover/transfer`, `/v1/prover/withdraw`, and `/v1/proofs/batch-transfer`
 - async job prover adapter for remote queue/poll prover deployments
@@ -75,6 +76,67 @@ Public consumers should import through the package export map (`clairveiljs`, `c
 
 Minimal SDK usage examples live in [`examples/`](https://github.com/DELIGHT-LABS/clairveiljs/tree/main/examples). Start with [`examples/minimal-keplr-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-keplr-flow.js) for Keplr/Cosmos and [`examples/minimal-metamask-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-metamask-flow.js) for MetaMask/EVM. Both examples derive wallet privacy material, prepare a deposit, scan notes, prepare a transfer, and broadcast through the SDK surface. The Keplr/Cosmos example requires a `depositProofProvider` because Cosmos `MsgDeposit` includes a `DepositCircuit` proof.
 
+## Experimental v0.2 One-Proof Batch Transfer
+
+This surface is experimental and disabled by default. Enable it only after the downstream application has independently passed the required Go-fixture conformance suite and the five-shape localnet matrix:
+
+```js
+const clairveil = createClairveilClient({
+  rpc,
+  rest,
+  chainId,
+  enableExperimentalBatchTransfer: true
+});
+```
+
+`prepareTransferBatch(...)` implements the Clairveil v0.2 `BatchTransfer` contract. It plans and atomically reserves 1–16 inputs, builds 1–32 ordered payment/change/padding outputs, calls one explicitly selected `proverAdapter.proveBatchTransfer(payload)` exactly once, and returns one Cosmos `MsgBatchTransfer`. It never expands the payments into multiple `MsgTransfer` proofs and does not perform automatic prover failover.
+
+The ordinary `prepareTransfer(...)` API remains the supported native 2×2 `MsgTransfer` path; native 2×2 is not deprecated. Clairveil's older multi-message `transfer-batch` orchestration remains a separate protocol meaning and is not aliased to `prepareTransferBatch(...)`.
+
+Use `payments` for multiple recipients and per-output disclosure. `outputMode: "compact"` emits payments plus optional change; `outputMode: "exact32"` appends explicit zero-value padding after payment/change outputs.
+
+```js
+const prepared = await clairveil.prepareTransferBatch({
+  material,
+  payments: [
+    {
+      itemId: "invoice-1",
+      amount: "5uclair",
+      recipient: recipientA,
+      userPrivacyPolicy: "all-private",
+      userDisclosureMode: "none"
+    },
+    {
+      itemId: "invoice-2",
+      amount: "7uclair",
+      recipient: recipientB,
+      userPrivacyPolicy: "amount",
+      userDisclosureMode: "recipient-encrypted",
+      userDisclosureTargetPubKeyHex: recipientDisclosurePubKeyHex
+    }
+  ],
+  outputMode: "exact32",
+  proverAdapter,
+  reservationManager,
+  chainNowUnix: latestChainBlockTimeUnix,
+  expiresAtUnix: latestChainBlockTimeUnix + 1800,
+  async onPreparedPayload(payload) {
+    await privateStore.write("batch-payload", payload, { mode: 0o600 });
+  },
+  async onPreparedProof(proof) {
+    await privateStore.write("batch-proof", proof, { mode: 0o600 });
+  }
+});
+
+// Exactly one proof and one MsgBatchTransfer.
+console.log(prepared.prepared.inputCount, prepared.prepared.outputCount);
+console.log(prepared.operationEvidence.expected_outputs);
+```
+
+`reservationManager`, `onPreparedPayload`, and `onPreparedProof` are required for every executable batch. The callback storage implementation is caller-owned and must keep private artifacts encrypted; local files must be mode `0600`. Once either checkpoint callback starts, a later prepare failure quarantines the whole reservation set as `ManualReview` instead of releasing potentially reusable inputs. `provePreparedBatchTransfer(...)` is a proof-stage recovery primitive: after a restart it requires the exact checkpointed payload, original operation ID and reservation batch, plus a proof checkpoint callback. Its returned message is not authorization to broadcast; the caller must restore the original operation and atomically complete the same sign-doc/evidence and `ProofReady` reservation finalization first. Use the reference-payroll artifact/retry APIs for the complete restart-safe signed-transaction workflow. Query the stored transaction hash and every input nullifier before any retry; retransmit only previously checkpointed exact TxRaw bytes and never rebuild or retry part of an atomic output list.
+
+Batch preparation requires unified `privacy-scan-v2`; it fails closed rather than falling back to ciphertext-free legacy events. The SDK validates one same-root Merkle snapshot, rechecks the active circuit, authoritative asset mapping, audit identity, and disclosure capabilities when proving or recovering the proof stage, checks all input nullifiers before and after proving, and verifies proof version/request hash/circuit identity. The uninterrupted `prepareTransferBatch(...)` flow then atomically advances reservations to `ProofReady`; proof-stage recovery deliberately returns `reservationFinalizationRequired: true` until the caller completes the restored operation workflow. `operationEvidence` records output index, commitment, recipient hash, amount/asset, and user/audit/self-view disclosure digests per payment. Use `fetchAuditableBatchTransfers(...)` plus `decodeBatchUserDisclosure(...)`, `decodeBatchSelfViewDisclosure(...)`, and `decodeBatchAuditDisclosure(...)` for typed output reconciliation; retain one `createPrivacyScanValidationStateV2()` object across consecutive audit-query cursor pages.
+
 Current boundary:
 
 - This package does not modify the chain module or generated Go code.
@@ -117,7 +179,7 @@ For release handoff or CI, use the strict command. It sets `CLAIRVEIL_CONFORMANC
 npm run test:conformance:required
 ```
 
-`prepublishOnly` runs the strict conformance command.
+`prepublishOnly` runs `verify:release:integration`: package checks, required conformance fixtures, and the required five-shape localnet one-proof matrix. Missing wallet, deposit-proof, node, or prover configuration fails instead of skipping.
 
 These tests verify root seed/key/address derivation, note primitives and disclosure-blinding rules, browser signer adapter behavior, note scan results, prepared transfer and one-proof batch payload/prover contracts, withdraw payload hashes, disclosure decoding, and relay withdraw message handoff behavior against the Go-generated fixtures.
 
@@ -136,9 +198,9 @@ if (!result.skipped) {
 }
 ```
 
-## Optional Local Node E2E
+## Local Node E2E and Release Gate
 
-The handoff e2e item is intentionally not part of `prepublishOnly`. Running a Clairveil node and prover is the chain repository's responsibility; this package only proves that the published SDK surface can attach to those services and execute the full wallet flow.
+Local-node E2E remains opt-in for ordinary development, but it is mandatory for `npm publish`. The release environment must provide a Clairveil node, one explicitly selected prover, wallet credentials, and a deposit-proof provider.
 
 Current local e2e scope is deposit, wallet note scan, shielded transfer, disclosure decode, direct withdraw, and an opt-in one-proof payroll batch with its reservation lifecycle. Relay withdraw payload/signDoc construction is covered by SDK tests and Go conformance fixtures; full relayer service e2e depends on the product's relayer transport and deployment.
 
@@ -148,7 +210,7 @@ Run the optional smoke/e2e command with a local Clairveil node:
 CLAIRVEIL_E2E_LOCAL=1 npm run test:e2e:local
 ```
 
-By default this only checks that the local REST/RPC privacy endpoints respond. The command is skipped unless `CLAIRVEIL_E2E_LOCAL=1` is set, so normal package tests and publish checks do not require a node.
+By default this only checks that the local REST/RPC privacy endpoints respond. The command is skipped unless `CLAIRVEIL_E2E_LOCAL=1` is set, so normal package tests do not require a node; the strict publish gate sets the required flags and rejects missing configuration.
 
 To run the tx flow, explicitly opt in:
 
@@ -684,7 +746,7 @@ await relayerClient.signDirectAndBroadcast({
 
 ### Note Reservations
 
-Wallets and DApps that can prepare multiple private transactions concurrently should pass a reservation manager into `prepareTransfer(...)`, `prepareWithdraw(...)`, and `prepareRelayWithdraw(...)`. The manager filters already-reserved notes before planning, records the selected notes while proofs are being built, renews leases during SDK proof/payload construction, and returns reservation metadata on prepared results. After a prepared result is handed back to wallet UI or a relayer flow, callers can keep the lease fresh with `heartbeatLease(...)`/`renewLease(...)`.
+Wallets and DApps that can prepare multiple private transactions concurrently should pass a reservation manager into `prepareTransfer(...)`, `prepareWithdraw(...)`, and `prepareRelayWithdraw(...)`; `prepareTransferBatch(...)` requires one unconditionally. The manager filters already-reserved notes before planning, records the selected notes while proofs are being built, renews leases during SDK proof/payload construction, and returns reservation metadata on prepared results. After a prepared result is handed back to wallet UI or a relayer flow, callers can keep the lease fresh with `heartbeatLease(...)`/`renewLease(...)`.
 
 ```js
 import {
@@ -772,7 +834,7 @@ The SDK moves reservations through `Reserved -> Proving -> ProofReady` while it 
 - Relay payload validation and relay signing require `chainNowUnix` from the latest chain block time. Do not substitute browser time; fetch it again immediately before relay broadcast and reject submission if it is unavailable.
 - For submitted EVM transactions with a failed receipt, check nullifier status before deciding between `ConfirmedSpent`, `ReplanRequired`, or `ManualReview`. `Submitted` or `Unknown` reservations can only move to `ReplanRequired` when `markReplanRequired(...)` proves both `nullifierUnspentConfirmed: true` and `txAbsentOrFailedConfirmed: true`; retain `checkedHeight` and `txHashChecked` as the audit trail for that tx lookup.
 
-Reservations can also carry operation success evidence. Nullifier spent proves that the input note was consumed, but payroll/payment success requires a matching persisted transaction identity plus the expected output commitment, audit disclosure digest, recipient hash, amount hash, denom, and, when relevant, item index. `markProofReady(...)` accepts `expectedOutputCommitment`, `expectedDisclosureDigest`, `expectedRecipientHash`, `expectedAmount`, `expectedAmountHash`, `expectedDenom`, `batchItemIndex`, `batchItemIndexKnown`, and `operationSuccessEvidenceRequired`. A payroll or batch transfer sets `batchItemIndexKnown: true`; a direct integration may leave it false when position is not part of its success predicate. High-level transfer prepares fill note-lock evidence automatically, but operation success checking is enabled only when the complete success predicate, including recipient and amount hashes, is available. Use `hashRecipient(recipient, { shieldedPrefix })` and `hashAmount(denom, amount)` from `clairveiljs/reservation`; both reject empty identity fields, and the latter accepts only non-negative uint64 minimal-denom amounts before computing SHA-256 over canonical `denom:amount`.
+Reservations can also carry operation success evidence. Nullifier spent proves that an input note was consumed, but payroll/payment success additionally requires matching persisted transaction identity and output evidence. `markProofReady(...)` accepts direct-item fields such as `expectedOutputCommitment`, `expectedDisclosureDigest`, `expectedRecipientHash`, `expectedAmount`, `expectedAmountHash`, `expectedDenom`, `batchItemIndex`, and `batchItemIndexKnown`. The one-proof high-level batch path instead stores one `expectedOperationEvidenceHash` on every input reservation and returns the full `operationEvidence.expected_outputs` list separately; each entry binds item ID, output index, commitment, recipient hash, amount/asset, and user/audit/self-view disclosure digests. Reconciliation must validate the aggregate hash and every per-item entry before reporting item success. Use `hashRecipient(recipient, { shieldedPrefix })` and `hashAmount(denom, amount)` from `clairveiljs/reservation`; both reject empty identity fields, and the latter accepts only non-negative uint64 minimal-denom amounts before computing SHA-256 over canonical `denom:amount`.
 
 Scan migrations must treat a note as spendable only when its latest nullifier check explicitly records `nullifierStatus: "unspent"`. Older cached `isSpent: false` entries, missing responses, malformed responses, and query failures are unverified and must stay out of the planner until revalidated.
 

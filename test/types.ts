@@ -45,10 +45,16 @@ import {
 } from "clairveiljs/disclosure";
 import type { NullifierStatusReader, PreparedWithdrawPayload, WithdrawMessage } from "clairveiljs/payload";
 import { buildPreparedTransferV5Payload } from "clairveiljs/transfer-v5";
-import { scanNotes } from "clairveiljs/scan";
+import {
+  createPrivacyScanValidationStateV2,
+  scanNotes,
+  type ValidatedPrivacyScanPageV2
+} from "clairveiljs/scan";
+import type { PreparedBatchTransferPayload } from "clairveiljs/batch-transfer";
 import { runClairveilConformanceFixtures } from "clairveiljs/conformance";
 import {
   createClairveilClient,
+  type BatchTransferOperationEvidence,
   type PreparedTransfer as CosmosPreparedTransfer,
   type BatchOperationEvidenceHashes,
   type DirectOperationEvidenceHashes as CosmosDirectOperationEvidenceHashes,
@@ -288,7 +294,8 @@ const cosmos = createClairveilClient({
     jitter: true,
     retryStatuses: [408, 429, 502, 503, 504]
   },
-  nullifierFailover: false
+  nullifierFailover: false,
+  enableExperimentalBatchTransfer: true
 });
 const publicClient = createClairveilPublicClient({
   rest: "http://127.0.0.1:1317",
@@ -325,6 +332,11 @@ publicClient.fetchScanEvents({
   limit: 10
 });
 publicClient.fetchAuditableTransfers({ eventTypes: ["shielded_transfer"] });
+const publicBatchAuditPage: Promise<ValidatedPrivacyScanPageV2> =
+  publicClient.fetchAuditableBatchTransfers({
+    eventTypes: ["batch_transfer"],
+    validationState: createPrivacyScanValidationStateV2()
+  });
 const publicNullifierBatch: Promise<Map<string, boolean>> = publicClient.checkNullifiers(["00".repeat(32)]);
 const publicReserveResult: Promise<{ invariant_holds: boolean }> = publicClient.fetchReserve("udemo");
 const publicFetchJsonResult: Promise<{ events?: object[] }> = publicClient.fetchJson<{ events?: object[] }>("/clairveil/privacy/v1/events");
@@ -470,6 +482,11 @@ const reservationManager = createNoteReservationManager({
   ownerKeyId: "demo-1:demo1example",
   indexKey: rootSeed
 });
+const batchSafetyBindings = {
+  reservationManager,
+  onPreparedPayload() {},
+  onPreparedProof() {}
+};
 // @ts-expect-error reservation metadata is JSON-only and cannot persist bigint values.
 reservationManager.reserveNotes({ metadata: { requestedAmount: 5n } });
 // @ts-expect-error reservation managers require one owner identity alias.
@@ -716,6 +733,7 @@ const evmDirectTransferResult: Promise<PreparedEvmTransfer> = evmDirectDappClien
 const transferResult: Promise<PreparedTransfer> = dappClient.prepareTransfer(transferInput);
 const transferBatchInput: PrepareCosmosTransferBatchInput = {
   ...walletIdentity,
+  ...batchSafetyBindings,
   amounts: ["1udemo", "2udemo"],
   recipient: "demos1recipient",
   expectedRecipientHash: "recipient-hash",
@@ -724,13 +742,50 @@ const transferBatchInput: PrepareCosmosTransferBatchInput = {
 // @ts-expect-error Cosmos batch evidence requires recipient and amount hash inputs together.
 const invalidCosmosBatchEvidence: PrepareCosmosTransferBatchInput = {
   ...walletIdentity,
+  ...batchSafetyBindings,
   amounts: ["1udemo"],
   recipient: "demos1recipient",
   expectedRecipientHash: "recipient-hash"
 };
 const cosmosTransferBatchResult: Promise<PreparedCosmosTransferBatch> = dappClient.prepareTransferBatch(transferBatchInput);
+const mixedCosmosTransferBatchResult: Promise<PreparedCosmosTransferBatch> = dappClient.prepareTransferBatch({
+  ...walletIdentity,
+  ...batchSafetyBindings,
+  payments: [
+    {
+      itemId: "payment-a",
+      amount: "1udemo",
+      recipient: "demos1recipient-a",
+      userPrivacyPolicy: "all-private",
+      userDisclosureMode: "none"
+    },
+    {
+      itemId: "payment-b",
+      amount: "2udemo",
+      recipient: "demos1recipient-b",
+      userPrivacyPolicy: "amount",
+      userDisclosureMode: "recipient-encrypted",
+      userDisclosureTargetPubKeyHex: "01".repeat(32)
+    }
+  ],
+  outputMode: "exact32",
+  audit_disclosure_target_pubkey_hex: "02".repeat(32),
+  onPreparedPayload(payload, context) {
+    const payloadHash: string = payload.payload_hash;
+    const operationID: string = context.operationId;
+    void payloadHash;
+    void operationID;
+  },
+  onPreparedProof(proof, context) {
+    const requestHash: string = proof.request_payload_hash;
+    const operationID: string = context.operationId;
+    void requestHash;
+    void operationID;
+  }
+});
 const explicitCosmosTransferBatchInput: PrepareExplicitCosmosTransferBatchInput = {
   ...walletIdentity,
+  ...batchSafetyBindings,
   walletType: "cosmos",
   amounts: ["1udemo"],
   recipient: "demos1recipient",
@@ -740,6 +795,7 @@ const explicitCosmosTransferBatchInput: PrepareExplicitCosmosTransferBatchInput 
 // @ts-expect-error Explicit Cosmos batch evidence requires recipient and amount hashes together.
 const invalidExplicitCosmosBatchEvidence: PrepareExplicitCosmosTransferBatchInput = {
   ...walletIdentity,
+  ...batchSafetyBindings,
   walletType: "cosmos",
   amounts: ["1udemo"],
   recipient: "demos1recipient",
@@ -749,6 +805,7 @@ const evmProfileExplicitCosmosBatchResult: Promise<PreparedCosmosTransferBatch> 
 // @ts-expect-error EVM-default browser clients require explicit walletType: "cosmos" for batch transfer.
 evmProfileDappClient.prepareTransferBatch({
   ...walletIdentity,
+  ...batchSafetyBindings,
   amounts: ["1udemo"],
   recipient: "demos1recipient"
 });
@@ -858,7 +915,29 @@ const cosmosPreparedTransferBatch = cosmos.prepareTransferBatch({
   afterSequence: 11,
   expectedRecipientHash: "recipient-hash",
   expectedAmountHashes: ["amount-hash-0", "amount-hash-1"],
-  reservationManager
+  reservationManager,
+  onPreparedPayload() {},
+  onPreparedProof() {}
+});
+const checkpointedBatchPayload = undefined as unknown as PreparedBatchTransferPayload;
+const resumedCosmosBatch = cosmos.provePreparedBatchTransfer({
+  payload: checkpointedBatchPayload,
+  proverAdapter: batchOnlyAsyncProver,
+  creator: "demo1sender",
+  operationId: "batch-operation-1",
+  reservationBatch: {} as ReservationBatch,
+  chainNowUnix: 4102444800,
+  onPreparedProof(_proof, context) {
+    const operationID: string = context.operationId;
+    const reservation: ReservationBatch | null = context.reservation;
+    void operationID;
+    void reservation;
+  }
+});
+// @ts-expect-error proof-stage recovery must preserve operation/reservation context and durably checkpoint the proof.
+cosmos.provePreparedBatchTransfer({
+  payload: checkpointedBatchPayload,
+  proverAdapter: batchOnlyAsyncProver
 });
 cosmos.prepareTransfer({
   material,
@@ -1095,6 +1174,12 @@ async function browserDappTypeSmoke() {
   const cosmosTransferSignChain: string = cosmosTransfer.signDoc.chainId;
   const cosmosInlineTransfer = await cosmosInlineTransferResult;
   const cosmosInlineTransferSignChain: string = cosmosInlineTransfer.signDoc.chainId;
+  const mixedBatch = await mixedCosmosTransferBatchResult;
+  const batchEvidence: BatchTransferOperationEvidence | undefined =
+    mixedBatch.prepared.operationEvidence;
+  const batchOutputMode: "compact" | "exact32" = mixedBatch.prepared.outputMode;
+  void batchEvidence;
+  void batchOutputMode;
   const evmProfileTransfer = await evmProfileTransferResult;
   const evmProfileTransferTo: string = evmProfileTransfer.transaction.to;
   const evmDirectTransfer = await evmDirectTransferResult;

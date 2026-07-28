@@ -1,4 +1,7 @@
-import { parseNullifierUsage } from "../privacy/scan.js";
+import {
+  parseNullifierUsage,
+  validatePrivacyScanPageV2
+} from "../privacy/scan.js";
 import {
   createCommitmentPathSnapshotProvider,
   normalizeCommitmentPathsAtRootRequest,
@@ -402,6 +405,27 @@ export class ClairveilPublicClient {
       ...data,
       events: (data.events || []).filter(isAuditableTransfer)
     };
+  }
+
+  async fetchAuditableBatchTransfers(options = {}) {
+    const requestedTypes = options.eventTypes ?? options.event_types;
+    if (requestedTypes != null && (
+      !Array.isArray(requestedTypes) ||
+      requestedTypes.some(value => String(value || "").trim() !== "batch_transfer")
+    )) {
+      throw new Error("auditable batch transfer query only accepts the batch_transfer event type");
+    }
+    const request = { ...options, eventTypes: ["batch_transfer"] };
+    delete request.event_types;
+    const page = validatePrivacyScanPageV2(
+      await this.fetchPrivacyScan(request),
+      request
+    );
+    if (page.summaries.some(summary => summary.event_type !== "batch_transfer") ||
+        page.outputs.some(output => output.event_type !== "batch_transfer")) {
+      throw new Error("auditable batch transfer response contains a non-batch event");
+    }
+    return page;
   }
 
   async fetchReserve(denom) {

@@ -2974,7 +2974,8 @@ test("rollback with an expired lease moves proving reservations to manual review
   const record = await store.getReservation(batch.reservation_ids[0]);
   assert.equal(record.status, reservationStatuses.ManualReview);
   assert.equal(record.metadata.reconcile_reason, "rollback_lease_expired");
-  assert.match(record.last_broadcast_error, /lease expired/);
+  assert.equal(record.last_broadcast_error, "rollback_lease_expired");
+  assert.equal(record.metadata.rollback_error, "rollback_lease_expired");
   assert.equal((await manager.reservationForNote(note)).status, reservationStatuses.ManualReview);
   await assert.rejects(
     () => preparePlanReservation(manager, {

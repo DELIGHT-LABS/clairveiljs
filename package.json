@@ -54,7 +54,7 @@
     "verify:release": "npm run verify:package && npm run test:conformance:required",
     "verify:release:integration": "npm run verify:release && npm run test:e2e:local:one-proof-all",
     "prepack": "npm run verify:package",
-    "prepublishOnly": "npm run verify:release"
+    "prepublishOnly": "npm run verify:release:integration"
   },
   "exports": {
     ".": {

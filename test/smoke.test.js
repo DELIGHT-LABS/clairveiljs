@@ -28,6 +28,8 @@ import {
   deriveViewTag,
   deriveViewKeys,
   encryptDepositNoteV1,
+  encryptNoteForTransferV1,
+  encryptedEnvelopeKindV1,
   fieldHexV1,
   hashStringToField,
   hexFromBytes,
@@ -38,6 +40,7 @@ import {
   plannerStatusToErrorCode,
   unpackPoint,
   validatePreparedTransferPayloadMetadata,
+  wrapEncryptedEnvelopeV1,
   activeCircuitSetIdV1,
   privacyFixedV1
 } from "clairveiljs/core";
@@ -51,6 +54,7 @@ import {
   MsgWithdraw,
   nextPrivacyScanOptions,
   normalizeFoundNotes,
+  parseNoteBytes,
   scanNotes,
   userDisclosureModeRecipientEncrypted
 } from "clairveiljs/cosmos";
@@ -71,7 +75,10 @@ import {
   evmPrivacyPrecompileAddress,
   markEvmTransactionReservationRequired
 } from "clairveiljs/evm";
-import { createWalletAdapter } from "clairveiljs/wallet-adapter";
+import {
+  createKeplrWalletAdapter,
+  createWalletAdapter
+} from "clairveiljs/wallet-adapter";
 import { createClairveilPublicClient } from "clairveiljs/browser-public";
 import { createClairveilBrowserDappClient } from "clairveiljs/browser-dapp";
 import {
@@ -79,7 +86,10 @@ import {
   planTransferNotes,
   planWithdrawNotes
 } from "clairveiljs/planner";
-import { summarizeSpendableNotesByDenom } from "clairveiljs/payload";
+import {
+  createRestMerklePathProvider,
+  summarizeSpendableNotesByDenom
+} from "clairveiljs/payload";
 import {
   deserializeFoundNote,
   privacyNoteCacheStateVersionV1,
@@ -96,11 +106,55 @@ const validV2ProofHex = `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0
 
 function transferProtocolConfig({ policies = ["all-private"], modes = ["none"] } = {}) {
   return {
-    audit_config: { audit_master_pubkey_hex: Buffer.from(packPoint(CURVE_BASE)).toString("hex") },
+    audit_config: {
+      audit_key_id: "audit-key-1",
+      audit_key_epoch: 1,
+      audit_master_pubkey_hex: Buffer.from(packPoint(CURVE_BASE)).toString("hex")
+    },
+    circuit_config: { circuit_set_id: "privacy-note-v1" },
     disclosure_config: {
       supported_user_policies: policies,
       supported_user_modes: modes
     }
+  };
+}
+
+function validBatchTransferMessage(creator = "clair1batch") {
+  const note = createNote({
+    spendPubKey: CURVE_BASE,
+    viewPubKey: CURVE_BASE,
+    amount: 1n,
+    assetDenom: "uclair",
+    randomness: 19n,
+    memo: "batch-sign-doc"
+  });
+  const commitment = canonicalFieldBytes(computeNoteCommitmentV1(note));
+  const encrypted = encryptNoteForTransferV1(note, commitment, 0);
+  return {
+    creator,
+    proof: new Uint8Array(164).fill(7),
+    root: canonicalFieldBytes(1n),
+    nullifiers: [canonicalFieldBytes(2n)],
+    outputs: [{
+      commitment,
+      ciphertext: encrypted.ciphertext,
+      viewTag: encrypted.viewTag,
+      userPrivacyPolicy: 0,
+      userDisclosureMode: 0,
+      userDisclosureDigest: new Uint8Array(),
+      userDisclosureTargetPubkey: new Uint8Array(),
+      userDisclosurePayload: new Uint8Array(),
+      fullDisclosureDigest: canonicalFieldBytes(4n),
+      auditDisclosurePayload: wrapEncryptedEnvelopeV1(
+        encryptedEnvelopeKindV1.auditDisclosure,
+        new Uint8Array(452)
+      ),
+      selfViewDisclosurePayload: new Uint8Array()
+    }],
+    auditKeyId: "audit-key-1",
+    auditKeyEpoch: 1n,
+    auditDisclosureTargetPubkey: packPoint(CURVE_BASE),
+    expiresAtUnix: 4_102_448_400n
   };
 }
 
@@ -307,6 +361,21 @@ test("view tag derivation matches the Go reference vector", () => {
 
   assert.equal(hexFromBytes(deriveViewTag(CURVE_BASE, commitmentHex, 1)), "0d26");
   assert.equal(hexFromBytes(deriveViewTag(CURVE_BASE, commitmentBytes, 1)), "0d26");
+});
+
+test("public note decoding rejects the removed legacy JSON plaintext format", () => {
+  const legacyJson = Buffer.from(JSON.stringify({
+    receiver_spend_pubkey_x: "1",
+    receiver_spend_pubkey_y: "2",
+    receiver_view_pubkey_x: "3",
+    receiver_view_pubkey_y: "4",
+    amount: "5",
+    asset_id: "6",
+    randomness: "7",
+    memo: "legacy"
+  }));
+
+  assert.throws(() => parseNoteBytes(legacyJson), /NoteV1|plaintext|length|version/i);
 });
 
 test("scan projection events decrypt notes and use batch nullifier status", async () => {
@@ -713,6 +782,48 @@ test("wallet adapter accepts hex privacy root signatures", async () => {
 
   assert.equal(Buffer.from(signature).toString("hex"), signatureHex);
   assert.equal(Buffer.from(signatureBase64, "base64").toString("hex"), signatureHex);
+});
+
+test("Keplr wallet adapter preserves the prepared fee and memo during direct signing", async () => {
+  const calls = [];
+  const address = "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2";
+  const signDoc = {
+    bodyBytes: new Uint8Array(),
+    authInfoBytes: new Uint8Array(),
+    chainId: "clairveil-local-3",
+    accountNumber: 1n
+  };
+  const adapter = createKeplrWalletAdapter({
+    chainId: "clairveil-local-3",
+    address,
+    keplr: {
+      async enable() {},
+      async getKey() {
+        return {
+          bech32Address: address,
+          pubKey: new Uint8Array([2, ...new Uint8Array(32)])
+        };
+      },
+      async signDirect(...input) {
+        calls.push(input);
+        return {
+          signed: signDoc,
+          signature: { signature: "AQ==" }
+        };
+      }
+    }
+  });
+
+  await adapter.signDirect(signDoc);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "clairveil-local-3");
+  assert.equal(calls[0][1], address);
+  assert.equal(calls[0][2], signDoc);
+  assert.deepEqual(calls[0][3], {
+    preferNoSetFee: true,
+    preferNoSetMemo: true
+  });
 });
 
 test("wallet adapter rejects ambiguous unprefixed hex privacy root signatures", async () => {
@@ -1813,7 +1924,8 @@ test("Cosmos prepare methods forward top-level scan sequence cursors", async () 
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
-    chainId: "clairveil-local-3"
+    chainId: "clairveil-local-3",
+    enableExperimentalBatchTransfer: true
   });
   const scans = [];
   client.scanNotes = async input => {
@@ -1841,6 +1953,9 @@ test("Cosmos prepare methods forward top-level scan sequence cursors", async () 
       amounts: ["1uclair"],
       recipient: "clairs1recipient",
       proverAdapter,
+      reservationManager: {},
+      onPreparedPayload() {},
+      onPreparedProof() {},
       after_height: 20,
       after_sequence: 21,
       after: { height: 22, globalSequence: 23, outputIndex: 1 },
@@ -1995,7 +2110,7 @@ test("browser-dapp EVM prepareTransfer enables full operation success evidence",
     summary: { total_spendable: "1", spendable_count: 3, spent_count: 0, total_count: 3 },
     diagnostics: { scanned_events: 0, new_notes_found: 0 },
     foundNotes: [helperNote(99, 99n), helperNote(100, 100n), selectedNote],
-    scanCursor: { has_more: false }
+    scanCursor: { source: "privacy_scan", has_more: false }
   });
   client.cosmos.fetchAuditConfig = async () => ({ audit_master_pubkey_hex: "aa".repeat(32) });
   client.proverAdapter = () => null;
@@ -2065,7 +2180,7 @@ test("browser-dapp EVM prepareTransfer enables full operation success evidence",
       selfMergeNote(1, 202, 202),
       selfMergeNote(8, 203, 203)
     ],
-    scanCursor: { has_more: false }
+    scanCursor: { source: "privacy_scan", has_more: false }
   });
   client.cosmos.buildTransferMessage = async input => ({
     payload: {
@@ -2455,7 +2570,7 @@ test("Cosmos prepareTransfer rejects partial operation evidence hashes before sc
   );
 });
 
-test("planner selects non-overlapping notes for batch transfer", () => {
+test("planner selects one aggregate input witness for batch transfer", () => {
   const note = (amount, randomness, height) => ({
     note: createNote({
       spendPubKey: CURVE_BASE,
@@ -2482,14 +2597,13 @@ test("planner selects non-overlapping notes for batch transfer", () => {
 
   assert.equal(plan.status, "batch_transfer_ready");
   assert.equal(plan.canBuildTx, true);
-  assert.equal(plan.selections.length, 2);
-  const inputKeys = plan.selections.flatMap(selection => (
-    selection.inputs.map(input => `${input.height}:${input.note.amount}`)
-  ));
-  assert.equal(new Set(inputKeys).size, 4);
+  assert.equal(plan.action, "build_one_proof_batch_transfer");
+  assert.equal(plan.selections.length, 1);
+  assert.equal(plan.selection.inputs.length, 2);
+  assert.equal(plan.selection.total, 12n);
 });
 
-test("planner backtracks batch transfers beyond the small-item exact limit", () => {
+test("planner finds one bounded witness for a larger batch payment list", () => {
   const note = (amount, randomness, height) => ({
     note: createNote({
       spendPubKey: CURVE_BASE,
@@ -2513,15 +2627,10 @@ test("planner backtracks batch transfers beyond the small-item exact limit", () 
   });
 
   assert.equal(plan.status, "batch_transfer_ready");
-  assert.equal(plan.selections.length, targetAmounts.length);
-  const inputKeys = plan.selections.flatMap(selection => (
-    selection.inputs.map(input => `${input.height}:${input.note.amount}`)
-  ));
-  assert.equal(new Set(inputKeys).size, inputKeys.length);
-  assert.deepEqual(
-    plan.selections.map((selection, index) => selection.total >= BigInt(targetAmounts[index])),
-    targetAmounts.map(() => true)
-  );
+  assert.equal(plan.selections.length, 1);
+  assert.equal(plan.selection.isFinal, true);
+  assert.ok(plan.selection.inputs.length <= 16);
+  assert.ok(plan.selection.total >= BigInt(targetAmounts.reduce((sum, amount) => sum + amount, 0)));
 });
 
 test("planner sorts spendable notes before batch candidate search", () => {
@@ -2580,7 +2689,7 @@ test("planner does not propose overflow self-merge notes", () => {
   assert.equal(plan.selection.total, 0n);
 });
 
-test("planner batch transfer uses bounded exact candidates for large note sets", () => {
+test("planner batch transfer uses bounded candidates for large note sets", () => {
   const note = (amount, randomness, height) => ({
     note: createNote({
       spendPubKey: CURVE_BASE,
@@ -2614,24 +2723,14 @@ test("planner batch transfer uses bounded exact candidates for large note sets",
   });
 
   assert.equal(plan.status, "batch_transfer_ready");
-  assert.equal(plan.selections.length, 4);
-  assert.equal(plan.selections.every(selection => selection.isFinal), true);
-  const inputKeys = plan.selections.flatMap(selection => (
-    selection.inputs.map(input => `${input.height}:${input.note.amount}`)
-  ));
-  assert.equal(new Set(inputKeys).size, inputKeys.length);
+  assert.equal(plan.selections.length, 1);
+  assert.equal(plan.selection.isFinal, true);
+  assert.ok(plan.selection.inputs.length <= 16);
+  assert.ok(plan.selection.total >= 406n);
 });
 
-test("cosmos prepareTransferBatch accepts reservation_manager and builds one sign doc with multiple transfer messages", async () => {
-  const client = createClairveilClient({
-    rpc: "http://127.0.0.1:26657",
-    rest: "http://127.0.0.1:1317",
-    chainId: "clairveil-local-3",
-    accountPrefix: "clair",
-    shieldedPrefix: "clairs",
-    defaultDenom: "uclair"
-  });
-  client.assertTransferProtocolConfig = async () => transferProtocolConfig();
+test("planner permits aggregate batch totals above uint64 when every note and change remain valid", () => {
+  const maxShieldedAmount = (1n << 64n) - 1n;
   const note = (amount, randomness, height) => ({
     note: createNote({
       spendPubKey: CURVE_BASE,
@@ -2645,32 +2744,202 @@ test("cosmos prepareTransferBatch accepts reservation_manager and builds one sig
     txHash: `TX${height}`,
     height
   });
+  const plan = planTransferBatchNotes({
+    notes: [
+      note(maxShieldedAmount, 1, 1),
+      note(1, 2, 2)
+    ],
+    amounts: [`${maxShieldedAmount}uclair`, "1uclair"],
+    denom: "uclair"
+  });
+
+  assert.equal(plan.status, "batch_transfer_ready");
+  assert.equal(plan.selection.inputs.length, 2);
+  assert.equal(plan.selection.total, maxShieldedAmount + 1n);
+});
+
+test("planner considers notes beyond an arbitrary 48-note prefix for exact-32 batches", () => {
+  const note = (amount, randomness, height) => ({
+    note: createNote({
+      spendPubKey: CURVE_BASE,
+      viewPubKey: CURVE_BASE,
+      amount,
+      assetDenom: "uclair",
+      randomness,
+      memo: `candidate-${height}`
+    }),
+    isSpent: false,
+    nullifierStatus: "unspent",
+    txHash: `TX${height}`,
+    height
+  });
+  const notes = [
+    ...Array.from({ length: 48 }, (_, index) => note(99n, BigInt(index + 1), index + 1)),
+    note(1n, 100n, 100)
+  ];
+  const plan = planTransferBatchNotes({
+    notes,
+    amounts: [...Array(31).fill("3uclair"), "7uclair"],
+    denom: "uclair"
+  });
+
+  assert.equal(plan.status, "batch_transfer_ready");
+  assert.equal(plan.selection.total, 100n);
+  assert.deepEqual(plan.selection.inputs.map(found => found.note.amount), [1n, 99n]);
+});
+
+test("planner rejects a batch payment above the uint64 NoteV1 amount bound", () => {
+  const maxShieldedAmount = (1n << 64n) - 1n;
+  const plan = planTransferBatchNotes({
+    notes: [],
+    amounts: [`${maxShieldedAmount + 1n}uclair`],
+    denom: "uclair"
+  });
+
+  assert.equal(plan.status, "invalid_amount");
+  assert.equal(plan.canBuildTx, false);
+});
+
+test("one-proof batch transfer stays disabled until the downstream release gate is explicitly enabled", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      material: {},
+      amounts: ["1uclair"],
+      recipient: "clairs1recipient",
+      proverAdapter: {}
+    }),
+    /one-proof batch transfer is feature-gated/
+  );
+  await assert.rejects(
+    () => client.provePreparedBatchTransfer({
+      payload: {},
+      proverAdapter: {}
+    }),
+    /one-proof batch transfer is feature-gated/
+  );
+  await assert.rejects(
+    () => client.createBatchTransferSignDoc({
+      signer: "clair1sender",
+      pubKeyHex: "02".repeat(33),
+      gasLimit: 1,
+      message: {}
+    }),
+    /one-proof batch transfer is feature-gated/
+  );
+});
+
+test("one-proof batch transfer rejects conflicting safety aliases before scan or proving", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    enableExperimentalBatchTransfer: true
+  });
+  let scanCalls = 0;
+  client.scanNotes = async () => {
+    scanCalls += 1;
+    throw new Error("scan must not be called for conflicting aliases");
+  };
+  const conflicts = [
+    [{ outputMode: "compact", output_mode: "exact32" }, /outputMode aliases conflict/],
+    [{ chainNowUnix: 1, chain_now_unix: 2 }, /chainNowUnix aliases conflict/],
+    [{ expiresAtUnix: 3, expires_at_unix: 4 }, /expiresAtUnix aliases conflict/],
+    [{ rootHex: "01".repeat(32), root_hex: "02".repeat(32) }, /rootHex aliases conflict/],
+    [{ snapshotHeight: 5, snapshot_height: 6 }, /snapshotHeight aliases conflict/],
+    [{ disableSelfViewDisclosure: true, disable_self_view_disclosure: false }, /disableSelfViewDisclosure aliases conflict/],
+    [{
+      selfViewDisclosureTargetPubKeyHex: "03".repeat(32),
+      self_view_disclosure_target_pubkey: "04".repeat(32)
+    }, /selfViewDisclosureTargetPubKeyHex aliases conflict/]
+  ];
+  for (const [input, expected] of conflicts) {
+    await assert.rejects(() => client.prepareTransferBatch(input), expected);
+  }
+  await assert.rejects(
+    () => client.prepareTransferBatch({ disableSelfViewDisclosure: "false" }),
+    /disableSelfViewDisclosure must be a boolean/
+  );
+  assert.equal(scanCalls, 0);
+});
+
+test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchTransfer and supports staged resume", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    defaultDenom: "uclair",
+    enableExperimentalBatchTransfer: true
+  });
+  const activeTransferProtocolConfig = transferProtocolConfig({
+    policies: ["all-private", "amount", "to"],
+    modes: ["none", "public", "recipient-encrypted"]
+  });
+  client.assertTransferProtocolConfig = async () => activeTransferProtocolConfig;
+  const rootSeed = new Uint8Array(32);
+  const ownerSpend = deriveSpendKeys(rootSeed).pubKey;
+  const ownerView = deriveViewKeys(rootSeed).pubKey;
+  const recipients = [3, 4, 5].map(fill => {
+    const recipientRootSeed = new Uint8Array(32).fill(fill);
+    return encodeShieldedAddress(
+      deriveSpendKeys(recipientRootSeed).pubKey,
+      deriveViewKeys(recipientRootSeed).pubKey,
+      { shieldedPrefix: "clairs" }
+    );
+  });
+  const note = (amount, randomness, height) => ({
+    note: createNote({
+      spendPubKey: ownerSpend,
+      viewPubKey: ownerView,
+      amount,
+      assetDenom: "uclair",
+      randomness
+    }),
+    isSpent: false,
+    nullifierStatus: "unspent",
+    txHash: `TX${height}`,
+    height
+  });
+  const inputNote = note(12, 3, 3);
+  const merklePathProvider = strictMerklePathProvider([inputNote.note]);
+  const rootHex = (await merklePathProvider.lookupMerklePath(
+    fieldHexV1(computeNoteCommitmentV1(inputNote.note))
+  )).root;
+  const chainNowUnix = Math.floor(Date.now() / 1000);
   client.scanNotes = async () => ({
     notes: [],
-    summary: { total_spendable: "12", spendable_count: 4, spent_count: 0, total_count: 4 },
+    summary: { total_spendable: "12", spendable_count: 1, spent_count: 0, total_count: 1 },
     diagnostics: { scanned_events: 0, new_notes_found: 0 },
-    foundNotes: [
-      note(0, 1, 1),
-      note(0, 2, 2),
-      note(5, 3, 3),
-      note(7, 4, 4)
-    ],
-    scanCursor: { has_more: false }
+    foundNotes: [inputNote],
+    scanCursor: { source: "privacy_scan", has_more: false }
   });
-  const builtAmounts = [];
-  client.buildTransferMessage = async input => {
-    builtAmounts.push(input.amount);
-    const itemIndex = builtAmounts.length - 1;
-    const outputAmount = input.amount.replace(/[^0-9].*$/, "");
-    return {
-      payload: {
-        payload_hash: `payload-${builtAmounts.length}`,
-        outputs: [{ amount: outputAmount, commitment_hex: `commitment-${itemIndex}` }],
-        audit_disclosure_digest_hex: `audit-digest-${itemIndex}`
-      },
-      proof: { payload_hash: `payload-${builtAmounts.length}`, proof_hex: "01" },
-      message: { creator: input.creator, amount: input.amount }
-    };
+  client.createCommitmentPathSnapshotProvider = async () => merklePathProvider;
+  client.checkNullifiers = async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]));
+  let proveBatchTransferCalls = 0;
+  const checkpointOrder = [];
+  let checkpointedPayload = null;
+  let checkpointedProof = null;
+  const proverAdapter = {
+    async proveBatchTransfer(payload) {
+      checkpointOrder.push("prove");
+      proveBatchTransferCalls += 1;
+      return {
+        version: "v1",
+        proof: {
+          version: "batch-transfer-proof-v1",
+          request_payload_hash: payload.payload_hash,
+          proof: Buffer.from(new Uint8Array(164).fill(7)).toString("base64"),
+          circuit_set_id: "privacy-note-v1"
+        }
+      };
+    }
   };
   client.buildDirectSignDoc = async input => ({
     ...input,
@@ -2688,25 +2957,144 @@ test("cosmos prepareTransferBatch accepts reservation_manager and builds one sig
     ownerKeyId: "chain:clair1sender",
     indexKey: "index-key-v1"
   });
-
-  const result = await client.prepareTransferBatch({
+  const safetyInput = {
     material: {
-      rootSeed: new Uint8Array(32),
+      rootSeed,
       address: "clair1sender",
       pubKeyHex: "02".padEnd(66, "0"),
       shieldedAddress: "clairs1sender"
     },
-    amounts: ["5uclair", "7uclair"],
-    recipient: "clairs1recipient",
-    proverAdapter: null,
-    expectedRecipientHash: "recipient-hash",
-    expectedAmountHashes: ["amount-hash-0", "amount-hash-1"],
-    reservation_manager: reservationManager
+    amounts: ["12uclair"],
+    recipient: recipients[0],
+    proverAdapter,
+    rootHex,
+    snapshotHeight: 3,
+    chainNowUnix,
+    expiresAtUnix: chainNowUnix + 1_800
+  };
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      ...safetyInput,
+      onPreparedPayload() {},
+      onPreparedProof() {}
+    }),
+    /requires a reservationManager/
+  );
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      ...safetyInput,
+      reservationManager,
+      onPreparedProof() {}
+    }),
+    /requires onPreparedPayload/
+  );
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      ...safetyInput,
+      reservationManager,
+      onPreparedPayload() {}
+    }),
+    /requires onPreparedProof/
+  );
+
+  const result = await client.prepareTransferBatch({
+    material: {
+      rootSeed,
+      address: "clair1sender",
+      pubKeyHex: "02".padEnd(66, "0"),
+      shieldedAddress: "clairs1sender"
+    },
+    payments: [
+      {
+        itemId: "private-payment",
+        amount: "3uclair",
+        recipient: recipients[0],
+        userPrivacyPolicy: "all-private",
+        userDisclosureMode: "none"
+      },
+      {
+        itemId: "public-amount-payment",
+        amount: "4uclair",
+        recipient: recipients[1],
+        userPrivacyPolicy: "amount",
+        userDisclosureMode: "public"
+      },
+      {
+        itemId: "recipient-encrypted-payment",
+        amount: "5uclair",
+        recipient: recipients[2],
+        userPrivacyPolicy: "to",
+        userDisclosureMode: "recipient-encrypted",
+        userDisclosureTargetPubKeyHex: Buffer.from(packPoint(CURVE_BASE)).toString("hex")
+      }
+    ],
+    outputMode: "exact32",
+    proverAdapter,
+    audit_disclosure_target_pubkey_hex: activeTransferProtocolConfig.audit_config.audit_master_pubkey_hex,
+    rootHex,
+    snapshotHeight: 3,
+    chainNowUnix,
+    expiresAtUnix: chainNowUnix + 1_800,
+    reservation_manager: reservationManager,
+    async onPreparedPayload(payload) {
+      checkpointOrder.push("payload");
+      checkpointedPayload = payload;
+    },
+    async onPreparedProof(proof) {
+      checkpointOrder.push("proof");
+      checkpointedProof = proof;
+    }
   });
 
   assert.equal(result.status, "ready");
-  assert.equal(result.signDoc.messages.length, 2);
-  const serializedReservedSignDoc = JSON.parse(JSON.stringify(result.signDoc));
+  assert.equal(proveBatchTransferCalls, 1);
+  assert.deepEqual(checkpointOrder, ["payload", "prove", "proof"]);
+  assert.equal(checkpointedPayload.payload_hash, result.payload.payload_hash);
+  assert.equal(checkpointedProof.request_payload_hash, result.payload.payload_hash);
+  assert.equal(result.signDoc.messages.length, 1);
+  assert.equal(result.signDoc.messages[0].typeUrl, MsgBatchTransfer.typeUrl);
+  assert.equal(result.message.nullifiers.length, 1);
+  assert.equal(result.message.outputs.length, 32);
+  assert.deepEqual(result.payload.outputs.slice(0, 3).map(output => output.kind), [
+    "payment",
+    "payment",
+    "payment"
+  ]);
+  assert.equal(result.payload.outputs.slice(3).every(output => output.kind === "padding"), true);
+  const mismatchReservationManager = createNoteReservationManager({
+    store: new MemoryReservationStore(),
+    ownerKeyId: "chain:clair1sender-mismatch",
+    indexKey: "index-key-v1"
+  });
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      material: {
+        rootSeed,
+        address: "clair1sender",
+        pubKeyHex: "02".padEnd(66, "0"),
+        shieldedAddress: "clairs1sender"
+      },
+      payments: [{
+        amount: "12uclair",
+        recipient: recipients[0],
+        expectedRecipientHash: "00".repeat(32)
+      }],
+      proverAdapter,
+      rootHex,
+      snapshotHeight: 3,
+      chainNowUnix,
+      expiresAtUnix: chainNowUnix + 1_800,
+      reservationManager: mismatchReservationManager,
+      onPreparedPayload() {},
+      onPreparedProof() {}
+    }),
+    /expected recipient hash does not match its recipient/
+  );
+  assert.equal(proveBatchTransferCalls, 1);
+  const serializedReservedSignDoc = JSON.parse(JSON.stringify(
+    result.signDoc,
+    (_key, value) => typeof value === "bigint" ? value.toString() : value
+  ));
   let directBroadcastCalls = 0;
   client.connect = async () => {
     directBroadcastCalls += 1;
@@ -2841,36 +3229,163 @@ test("cosmos prepareTransferBatch accepts reservation_manager and builds one sig
     });
   }
   assert.deepEqual(forwardedReservations, [result.reservation, result.reservation]);
-  assert.deepEqual(builtAmounts, ["5uclair", "7uclair"]);
-  assert.equal(result.messages.length, 2);
-  assert.deepEqual(result.prepared.selectedInputTotals, ["5", "7"]);
-  assert.equal(result.reservation.reservations.length, 4);
+  assert.equal(result.prepared.selectedInputTotal, "12");
+  assert.equal(result.prepared.inputCount, 1);
+  assert.equal(result.prepared.outputCount, 32);
+  assert.equal(result.prepared.outputMode, "exact32");
+  assert.equal(result.prepared.recipient, undefined);
+  assert.deepEqual(result.prepared.payments.map(payment => payment.recipient), recipients);
+  assert.deepEqual(result.prepared.payments.map(payment => payment.privacyPolicy), [
+    "all-private",
+    "amount",
+    "to"
+  ]);
+  assert.deepEqual(result.prepared.payments.map(payment => payment.disclosureMode), [
+    "none",
+    "public",
+    "recipient-encrypted"
+  ]);
+  assert.equal(result.operationEvidence.expected_outputs.length, 3);
+  assert.equal(result.operationEvidence.expected_outputs[0].batch_item_index, 0);
+  assert.equal(result.operationEvidence.expected_outputs[1].batch_item_index, 1);
+  assert.equal(result.operationEvidence.expected_outputs[2].batch_item_index, 2);
+  assert.match(result.operationEvidenceHash, /^[0-9a-f]{64}$/);
+  assert.equal(result.reservation.reservations.length, 1);
   for (const reservation of result.reservation.reservations) {
     assert.equal(reservation.status, reservationStatuses.ProofReady);
-    assert.equal(reservation.expected_recipient_hash, "recipient-hash");
-    assert.equal(reservation.expected_denom, "uclair");
-    assert.equal(reservation.batch_item_index_known, true);
+    assert.equal(reservation.expected_recipient_hash, "");
+    assert.equal(reservation.expected_denom, "");
+    assert.equal(reservation.batch_item_index_known, false);
+    assert.equal(reservation.expected_operation_evidence_hash, result.operationEvidenceHash);
     assert.equal(reservation.metadata.operation_success_evidence_required, true);
+    assert.deepEqual(
+      reservation.metadata.batch_transfer_operation_evidence.expected_outputs,
+      result.operationEvidence.expected_outputs
+    );
   }
-  const reservationsByItem = new Map();
-  for (const reservation of result.reservation.reservations) {
-    const group = reservationsByItem.get(reservation.batch_item_index) || [];
-    group.push(reservation);
-    reservationsByItem.set(reservation.batch_item_index, group);
+
+  for (const [overrides, pattern] of [
+    [{ onPreparedProof() {} }, /requires the original operationId/],
+    [{ operationId: result.operationEvidence.operation_id, onPreparedProof() {} }, /requires the original reservation batch/],
+    [{
+      operationId: result.operationEvidence.operation_id,
+      reservation: result.reservation
+    }, /requires onPreparedProof/]
+  ]) {
+    await assert.rejects(
+      () => client.provePreparedBatchTransfer({
+        payload: checkpointedPayload,
+        creator: "clair1sender",
+        nowUnix: chainNowUnix,
+        proverAdapter,
+        ...overrides
+      }),
+      pattern
+    );
   }
-  assert.deepEqual([...reservationsByItem.keys()].sort(), [0, 1]);
-  for (const reservation of reservationsByItem.get(0)) {
-    assert.equal(reservation.expected_output_commitment, "commitment-0");
-    assert.equal(reservation.expected_disclosure_digest, "audit-digest-0");
-    assert.equal(reservation.expected_amount, "5");
-    assert.equal(reservation.expected_amount_hash, "amount-hash-0");
-  }
-  for (const reservation of reservationsByItem.get(1)) {
-    assert.equal(reservation.expected_output_commitment, "commitment-1");
-    assert.equal(reservation.expected_disclosure_digest, "audit-digest-1");
-    assert.equal(reservation.expected_amount, "7");
-    assert.equal(reservation.expected_amount_hash, "amount-hash-1");
-  }
+  assert.equal(proveBatchTransferCalls, 1);
+
+  await assert.rejects(
+    () => client.provePreparedBatchTransfer({
+      payload: checkpointedPayload,
+      creator: "clair1sender",
+      operationId: result.operationEvidence.operation_id,
+      reservation: result.reservation,
+      nowUnix: chainNowUnix,
+      onPreparedProof() {},
+      proverAdapter: {
+        async proveBatchTransfer(payload) {
+          return {
+            version: "v2",
+            proof: {
+              version: "batch-transfer-proof-v1",
+              request_payload_hash: payload.payload_hash,
+              proof: Buffer.from(new Uint8Array(164).fill(8)).toString("base64"),
+              circuit_set_id: "privacy-note-v1"
+            }
+          };
+        }
+      }
+    }),
+    /unsupported batch transfer proof response version/
+  );
+
+  let resumedProverCalls = 0;
+  let resumedProofContext = null;
+  const resumedProverAdapter = {
+    async proveBatchTransfer(payload) {
+      resumedProverCalls += 1;
+      return {
+        version: "batch-transfer-proof-v1",
+        request_payload_hash: payload.payload_hash,
+        proof: Buffer.from(new Uint8Array(164).fill(8)).toString("base64"),
+        circuit_set_id: "privacy-note-v1"
+      };
+    }
+  };
+  client.assertTransferProtocolConfig = async () => ({
+    ...activeTransferProtocolConfig,
+    audit_config: {
+      ...activeTransferProtocolConfig.audit_config,
+      audit_key_id: "rotated-audit-key"
+    }
+  });
+  await assert.rejects(
+    () => client.provePreparedBatchTransfer({
+      payload: checkpointedPayload,
+      creator: "clair1sender",
+      operationId: result.operationEvidence.operation_id,
+      reservation: result.reservation,
+      nowUnix: chainNowUnix,
+      onPreparedProof() {},
+      proverAdapter: resumedProverAdapter
+    }),
+    /audit identity does not match the active chain config/
+  );
+  assert.equal(resumedProverCalls, 0);
+  client.assertTransferProtocolConfig = async () => activeTransferProtocolConfig;
+  const resumed = await client.provePreparedBatchTransfer({
+    payload: checkpointedPayload,
+    creator: "clair1sender",
+    operationId: result.operationEvidence.operation_id,
+    reservation: result.reservation,
+    nowUnix: chainNowUnix,
+    onPreparedProof(_proof, context) {
+      resumedProofContext = context;
+    },
+    proverAdapter: resumedProverAdapter
+  });
+  assert.equal(resumedProverCalls, 1);
+  assert.equal(resumed.payload.payload_hash, result.payload.payload_hash);
+  assert.equal(resumed.proof.request_payload_hash, result.payload.payload_hash);
+  assert.equal(resumed.message.outputs.length, 32);
+  assert.equal(resumed.proofStageOnly, true);
+  assert.equal(resumed.reservationFinalizationRequired, true);
+  assert.equal(resumedProofContext.operationId, result.operationEvidence.operation_id);
+  assert.deepEqual(resumedProofContext.reservation, result.reservation);
+});
+
+test("REST Merkle-path failures do not echo response bodies or commitment URLs", async () => {
+  let responseBodyReads = 0;
+  const provider = createRestMerklePathProvider({
+    rest: "https://privacy.example",
+    fetchImpl: async () => ({
+      ok: false,
+      status: 500,
+      async text() {
+        responseBodyReads += 1;
+        return "private-witness-canary";
+      }
+    })
+  });
+  const commitment = "ab".repeat(32);
+  await assert.rejects(
+    () => provider.lookupMerklePath(commitment),
+    error => error.message === "merkle path query failed with status 500" &&
+      !error.message.includes("private-witness-canary") &&
+      !error.message.includes(commitment)
+  );
+  assert.equal(responseBodyReads, 0);
 });
 
 test("cosmos prepareTransferBatch rejects partial operation evidence arrays", async () => {
@@ -2880,7 +3395,8 @@ test("cosmos prepareTransferBatch rejects partial operation evidence arrays", as
     chainId: "clairveil-local-3",
     accountPrefix: "clair",
     shieldedPrefix: "clairs",
-    defaultDenom: "uclair"
+    defaultDenom: "uclair",
+    enableExperimentalBatchTransfer: true
   });
   const input = {
     material: {
@@ -2891,7 +3407,10 @@ test("cosmos prepareTransferBatch rejects partial operation evidence arrays", as
     },
     amounts: ["5uclair", "7uclair"],
     recipient: "clairs1recipient",
-    proverAdapter: null
+    proverAdapter: null,
+    reservationManager: {},
+    onPreparedPayload() {},
+    onPreparedProof() {}
   };
 
   await assert.rejects(
@@ -2940,22 +3459,39 @@ test("cosmos prepareTransferBatch rejects partial operation evidence arrays", as
     }),
     /expected amount hash is required for batch item 1/
   );
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      ...input,
+      scanSource: "scan_events"
+    }),
+    /only supports the typed privacy_scan source/
+  );
 });
 
-test("cosmos prepareTransferBatch keeps ProofReady transitions atomic across every batch item", async () => {
+test("cosmos prepareTransferBatch keeps the one-proof reservation transition atomic", async () => {
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
     chainId: "clairveil-local-3",
     accountPrefix: "clair",
     shieldedPrefix: "clairs",
-    defaultDenom: "uclair"
+    defaultDenom: "uclair",
+    enableExperimentalBatchTransfer: true
   });
   client.assertTransferProtocolConfig = async () => transferProtocolConfig();
+  const rootSeed = new Uint8Array(32);
+  const ownerSpend = deriveSpendKeys(rootSeed).pubKey;
+  const ownerView = deriveViewKeys(rootSeed).pubKey;
+  const recipientRootSeed = new Uint8Array(32).fill(3);
+  const recipient = encodeShieldedAddress(
+    deriveSpendKeys(recipientRootSeed).pubKey,
+    deriveViewKeys(recipientRootSeed).pubKey,
+    { shieldedPrefix: "clairs" }
+  );
   const note = (amount, randomness, height) => ({
     note: createNote({
-      spendPubKey: CURVE_BASE,
-      viewPubKey: CURVE_BASE,
+      spendPubKey: ownerSpend,
+      viewPubKey: ownerView,
       amount,
       assetDenom: "uclair",
       randomness
@@ -2965,31 +3501,46 @@ test("cosmos prepareTransferBatch keeps ProofReady transitions atomic across eve
     txHash: `TX${height}`,
     height
   });
+  const inputNote = note(12, 3, 3);
+  const merklePathProvider = strictMerklePathProvider([inputNote.note]);
+  const rootHex = (await merklePathProvider.lookupMerklePath(
+    fieldHexV1(computeNoteCommitmentV1(inputNote.note))
+  )).root;
+  const chainNowUnix = Math.floor(Date.now() / 1000);
   client.scanNotes = async () => ({
     notes: [],
-    summary: { total_spendable: "12", spendable_count: 4, spent_count: 0, total_count: 4 },
+    summary: { total_spendable: "12", spendable_count: 1, spent_count: 0, total_count: 1 },
     diagnostics: { scanned_events: 0, new_notes_found: 0 },
-    foundNotes: [
-      note(0, 1, 1),
-      note(0, 2, 2),
-      note(5, 3, 3),
-      note(7, 4, 4)
-    ],
-    scanCursor: { has_more: false }
+    foundNotes: [inputNote],
+    scanCursor: { source: "privacy_scan", has_more: false }
   });
-  client.buildTransferMessage = async input => {
-    const outputAmount = input.amount.replace(/[^0-9].*$/, "");
-    return {
-      payload: {
-        payload_hash: `payload-${outputAmount}`,
-        outputs: [{ amount: outputAmount, commitment_hex: `commitment-${outputAmount}` }],
-        audit_disclosure_digest_hex: `audit-digest-${outputAmount}`
-      },
-      proof: { payload_hash: `payload-${outputAmount}`, proof_hex: "01" },
-      message: { creator: input.creator, amount: input.amount }
-    };
+  client.createCommitmentPathSnapshotProvider = async () => merklePathProvider;
+  client.checkNullifiers = async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]));
+  const proverAdapter = {
+    async proveBatchTransfer(payload) {
+      return {
+        version: "v1",
+        proof: {
+          version: "batch-transfer-proof-v1",
+          request_payload_hash: payload.payload_hash,
+          proof: Buffer.from(new Uint8Array(164).fill(7)).toString("base64"),
+          circuit_set_id: "privacy-note-v1"
+        }
+      };
+    }
   };
-  client.buildDirectSignDoc = async input => input;
+  const persistPreparedPayload = () => {};
+  const persistPreparedProof = () => {};
+  client.buildDirectSignDoc = async input => ({
+    ...input,
+    bodyBytes: Buffer.from(client.registry.encodeTxBody({
+      messages: input.messages,
+      memo: input.memo
+    })).toString("base64"),
+    authInfoBytes: "",
+    chainId: "clairveil-local-3",
+    accountNumber: "0"
+  });
   const store = new MemoryReservationStore();
   const reservationManager = createNoteReservationManager({
     store,
@@ -3005,29 +3556,32 @@ test("cosmos prepareTransferBatch keeps ProofReady transitions atomic across eve
   await assert.rejects(
     () => client.prepareTransferBatch({
       material: {
-        rootSeed: new Uint8Array(32),
+        rootSeed,
         address: "clair1sender",
         pubKeyHex: "02".padEnd(66, "0"),
         shieldedAddress: "clairs1sender"
       },
       amounts: ["5uclair", "7uclair"],
-      recipient: "clairs1recipient",
-      proverAdapter: null,
-      reservation_manager: reservationManager
+      recipient,
+      proverAdapter,
+      rootHex,
+      snapshotHeight: 3,
+      chainNowUnix,
+      expiresAtUnix: chainNowUnix + 1_800,
+      reservation_manager: reservationManager,
+      onPreparedPayload: persistPreparedPayload,
+      onPreparedProof: persistPreparedProof
     }),
     /injected proof-ready failure/
   );
 
   const reservations = await store.listReservations({ ownerKeyId: "chain:clair1sender" });
-  assert.equal(reservations.length, 4);
+  assert.equal(reservations.length, 1);
   assert.equal(markProofReadyBatchCalls, 1);
   assert.equal(reservations.some(reservation => reservation.status === reservationStatuses.ProofReady), false);
   assert.equal(reservations.some(reservation => reservation.status === reservationStatuses.Reserved), false);
   assert.equal(reservations.some(reservation => reservation.status === reservationStatuses.Proving), false);
-  assert.equal(
-    reservations.filter(reservation => reservation.status === reservationStatuses.Released).length,
-    4
-  );
+  assert.equal(reservations[0].status, reservationStatuses.ManualReview);
 
   const cleanupStore = new MemoryReservationStore();
   const cleanupManager = createNoteReservationManager({
@@ -3040,33 +3594,39 @@ test("cosmos prepareTransferBatch keeps ProofReady transitions atomic across eve
     await cleanupMarkProofReadyBatch(...args);
     throw new Error("injected proof-ready failure with cleanup failure");
   };
-  cleanupManager.markReplanRequired = async () => {
-    throw new Error("injected replan cleanup failure");
+  cleanupManager.markManualReview = async () => {
+    throw new Error("injected manual-review cleanup failure");
   };
   await assert.rejects(
     () => client.prepareTransferBatch({
       material: {
-        rootSeed: new Uint8Array(32),
+        rootSeed,
         address: "clair1cleanup",
         pubKeyHex: "02".padEnd(66, "0"),
         shieldedAddress: "clairs1cleanup"
       },
       amounts: ["5uclair", "7uclair"],
-      recipient: "clairs1recipient",
-      proverAdapter: null,
-      reservation_manager: cleanupManager
+      recipient,
+      proverAdapter,
+      rootHex,
+      snapshotHeight: 3,
+      chainNowUnix,
+      expiresAtUnix: chainNowUnix + 1_800,
+      reservation_manager: cleanupManager,
+      onPreparedPayload: persistPreparedPayload,
+      onPreparedProof: persistPreparedProof
     }),
     error =>
       /injected proof-ready failure with cleanup failure/.test(error?.message || "") &&
       Array.isArray(error?.reservationCleanupErrors) &&
-      /injected replan cleanup failure/.test(error.reservationCleanupErrors[0]?.message || "")
+      /injected manual-review cleanup failure/.test(error.reservationCleanupErrors[0]?.message || "")
   );
   const cleanupReservations = await cleanupStore.listReservations({
     ownerKeyId: "chain:clair1cleanup"
   });
   assert.equal(
     cleanupReservations.filter(reservation => reservation.status === reservationStatuses.ProofReady).length,
-    4
+    1
   );
 
   const frozenStore = new MemoryReservationStore();
@@ -3081,24 +3641,126 @@ test("cosmos prepareTransferBatch keeps ProofReady transitions atomic across eve
     await frozenMarkProofReadyBatch(...args);
     throw frozenOriginal;
   };
-  frozenManager.markReplanRequired = async () => {
+  frozenManager.markManualReview = async () => {
     throw new Error("frozen batch cleanup failure");
   };
   await assert.rejects(
     () => client.prepareTransferBatch({
       material: {
-        rootSeed: new Uint8Array(32),
+        rootSeed,
         address: "clair1frozen",
         pubKeyHex: "02".padEnd(66, "0"),
         shieldedAddress: "clairs1frozen"
       },
       amounts: ["5uclair", "7uclair"],
-      recipient: "clairs1recipient",
-      proverAdapter: null,
-      reservation_manager: frozenManager
+      recipient,
+      proverAdapter,
+      rootHex,
+      snapshotHeight: 3,
+      chainNowUnix,
+      expiresAtUnix: chainNowUnix + 1_800,
+      reservation_manager: frozenManager,
+      onPreparedPayload: persistPreparedPayload,
+      onPreparedProof: persistPreparedProof
     }),
     error => error === frozenOriginal
   );
+
+  const checkpointStore = new MemoryReservationStore();
+  const checkpointManager = createNoteReservationManager({
+    store: checkpointStore,
+    ownerKeyId: "chain:clair1checkpoint",
+    indexKey: "index-key-v1"
+  });
+  let checkpointProverCalls = 0;
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      material: {
+        rootSeed,
+        address: "clair1checkpoint",
+        pubKeyHex: "02".padEnd(66, "0"),
+        shieldedAddress: "clairs1checkpoint"
+      },
+      amounts: ["5uclair", "7uclair"],
+      recipient,
+      proverAdapter: {
+        async proveBatchTransfer(payload) {
+          checkpointProverCalls += 1;
+          return proverAdapter.proveBatchTransfer(payload);
+        }
+      },
+      rootHex,
+      snapshotHeight: 3,
+      chainNowUnix,
+      expiresAtUnix: chainNowUnix + 1_800,
+      reservation_manager: checkpointManager,
+      async onPreparedPayload() {
+        throw new Error("injected payload checkpoint failure");
+      },
+      onPreparedProof: persistPreparedProof
+    }),
+    /injected payload checkpoint failure/
+  );
+  assert.equal(checkpointProverCalls, 0);
+  const checkpointReservations = await checkpointStore.listReservations({
+    ownerKeyId: "chain:clair1checkpoint"
+  });
+  assert.equal(checkpointReservations.length, 1);
+  assert.equal(checkpointReservations[0].status, reservationStatuses.ManualReview);
+  assert.equal(
+    checkpointReservations[0].metadata.reconcile_reason,
+    "batch_checkpointed_artifact_requires_recovery"
+  );
+  assert.equal(
+    checkpointReservations[0].last_broadcast_error,
+    "batch_checkpointed_artifact_requires_recovery"
+  );
+  assert.equal(checkpointReservations[0].metadata.batch_payload_checkpoint_started, true);
+  assert.equal(checkpointReservations[0].metadata.batch_proof_checkpoint_started, false);
+
+  const proofCheckpointStore = new MemoryReservationStore();
+  const proofCheckpointManager = createNoteReservationManager({
+    store: proofCheckpointStore,
+    ownerKeyId: "chain:clair1proofcheckpoint",
+    indexKey: "index-key-v1"
+  });
+  let proofCheckpointProverCalls = 0;
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      material: {
+        rootSeed,
+        address: "clair1proofcheckpoint",
+        pubKeyHex: "02".padEnd(66, "0"),
+        shieldedAddress: "clairs1proofcheckpoint"
+      },
+      amounts: ["5uclair", "7uclair"],
+      recipient,
+      proverAdapter: {
+        async proveBatchTransfer(payload) {
+          proofCheckpointProverCalls += 1;
+          return proverAdapter.proveBatchTransfer(payload);
+        }
+      },
+      rootHex,
+      snapshotHeight: 3,
+      chainNowUnix,
+      expiresAtUnix: chainNowUnix + 1_800,
+      reservation_manager: proofCheckpointManager,
+      onPreparedPayload: persistPreparedPayload,
+      async onPreparedProof() {
+        throw new Error("injected proof checkpoint failure");
+      }
+    }),
+    /injected proof checkpoint failure/
+  );
+  assert.equal(proofCheckpointProverCalls, 1);
+  const proofCheckpointReservations = await proofCheckpointStore.listReservations({
+    ownerKeyId: "chain:clair1proofcheckpoint"
+  });
+  assert.equal(proofCheckpointReservations.length, 1);
+  assert.equal(proofCheckpointReservations[0].status, reservationStatuses.ManualReview);
+  assert.equal(proofCheckpointReservations[0].metadata.batch_payload_checkpoint_started, true);
+  assert.equal(proofCheckpointReservations[0].metadata.batch_proof_checkpoint_started, true);
 });
 
 test("planner rejects zero transfer and withdraw amounts before note planning", () => {
@@ -4457,6 +5119,7 @@ test("EVM sendTransaction records Submitted or ManualReview after a durable atte
   );
   assert.equal(reviewed.status, reservationStatuses.ManualReview);
   assert.equal(reviewed.broadcast_in_flight, false);
+  assert.equal(reviewed.last_broadcast_error, "sdk_evm_broadcast_result_unknown");
   await assert.rejects(
     () => ambiguousClient.sendTransaction({
       async sendTransaction() {
@@ -4493,6 +5156,7 @@ test("EVM sendTransaction records Submitted or ManualReview after a durable atte
   );
   assert.equal(rejected.status, reservationStatuses.ReplanRequired);
   assert.equal(rejected.broadcast_in_flight, false);
+  assert.equal(rejected.last_broadcast_error, "wallet_rejected_before_broadcast");
   assert.equal(rejected.metadata.wallet_rejected_before_broadcast, true);
 });
 
@@ -4912,7 +5576,8 @@ test("SDK exposes the typed privacy protocol queries and batch sign-doc boundary
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
-    chainId: "clairveil-local-3"
+    chainId: "clairveil-local-3",
+    enableExperimentalBatchTransfer: true
   });
   const calls = [];
   client.fetchJson = async (path, options = {}) => {
@@ -4953,14 +5618,38 @@ test("SDK exposes the typed privacy protocol queries and batch sign-doc boundary
     signDocInput = input;
     return { bodyBytes: "", authInfoBytes: "", chainId: "clairveil-local-3", accountNumber: "0" };
   };
+  await assert.rejects(
+    () => client.createBatchTransferSignDoc({
+      signer: "clair1batch",
+      pubKeyHex: "02".repeat(33),
+      gasLimit: 1,
+      message: {
+        ...validBatchTransferMessage(),
+        nullifiers: []
+      },
+      chainNowUnix: 1_700_000_000
+    }),
+    /input count must be in 1\.\.16/
+  );
+  await assert.rejects(
+    () => client.createBatchTransferSignDoc({
+      signer: "clair1batch",
+      pubKeyHex: "02".repeat(33),
+      gasLimit: 1,
+      message: {
+        ...validBatchTransferMessage(),
+        proof: new Uint8Array(163)
+      },
+      chainNowUnix: 1_700_000_000
+    }),
+    /proof must be exactly 164 bytes/
+  );
   await client.createBatchTransferSignDoc({
     signer: "clair1batch",
     pubKeyHex: "02".repeat(33),
     gasLimit: 1,
-    message: {
-      creator: "clair1batch",
-      expiresAtUnix: 4_102_448_400n
-    }
+    message: validBatchTransferMessage(),
+    chainNowUnix: 1_700_000_000
   });
   assert.equal(signDocInput.messages[0].typeUrl, MsgBatchTransfer.typeUrl);
   assert.equal(signDocInput.messages[0].value.expiresAtUnix, 4_102_448_400n);
@@ -5227,7 +5916,7 @@ test("package metadata is ready for public npm publishing", () => {
   assert.ok(packageJson.dependencies["cosmjs-types"]);
   assert.ok(packageJson.scripts["test:conformance:required"]?.includes("require-conformance-fixtures.js"));
   assert.equal(packageJson.scripts.prepack, "npm run verify:package");
-  assert.equal(packageJson.scripts.prepublishOnly, "npm run verify:release");
+  assert.equal(packageJson.scripts.prepublishOnly, "npm run verify:release:integration");
   assert.ok(!packageJson.scripts["verify:package"].includes("test:conformance:required"));
   assert.ok(packageJson.scripts["verify:release"].includes("test:conformance:required"));
   assert.equal(conformanceFixtureRelativePath, "x/privacy/client/sdk/conformance/testdata");
@@ -5746,7 +6435,8 @@ test("Cosmos operation evidence rejects conflicting direct and batch aliases", a
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
-    chainId: "clairveil-local-3"
+    chainId: "clairveil-local-3",
+    enableExperimentalBatchTransfer: true
   });
 
   await assert.rejects(
@@ -5761,6 +6451,7 @@ test("Cosmos operation evidence rejects conflicting direct and batch aliases", a
   await assert.rejects(
     () => client.prepareTransferBatch({
       amounts: ["1uclair"],
+      recipient: "clairs1recipient",
       expectedRecipientHashes: ["recipient-a"],
       expected_recipient_hashes: ["recipient-b"],
       expectedAmountHashes: ["amount-a"],

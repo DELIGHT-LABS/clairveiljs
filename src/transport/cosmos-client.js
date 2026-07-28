@@ -11,8 +11,14 @@ import {
 } from "../generated/clairveil/privacy/v1/tx.js";
 import {
   bytesFromHex,
+  bytesToBigIntBE,
+  decodeShieldedAddress,
   defaultAccountPrefix,
+  deriveDisclosureKeys,
   derivePrivacyMaterial,
+  deriveSpendKeys,
+  deriveViewKeys,
+  FIELD_MODULUS,
   normalizeBech32Prefix
 } from "../core/crypto.js";
 import {
@@ -27,6 +33,8 @@ import {
 import {
   buildDepositMaterial as buildDepositMaterialCore,
   defaultAssetDenom,
+  createNote,
+  createSpendNoteHashSigner,
   parseCoin
 } from "../core/note.js";
 import {
@@ -44,6 +52,15 @@ import {
   normalizeAssetRegistryQueryResponseV1
 } from "../privacy/asset-registry.js";
 import {
+  batchTransferProofSize,
+  batchTransferProofResponseVersion,
+  buildMsgBatchTransferFromPrepared,
+  buildPreparedBatchTransferPayload,
+  normalizePreparedBatchTransferProof,
+  preparedBatchTransferEffectHex,
+  validatePreparedBatchTransferPayloadEnvelope
+} from "../privacy/batch-transfer.js";
+import {
   normalizeAuditConfigV1,
   normalizeDisclosureConfigV1,
   normalizeReserveResponseV1
@@ -53,12 +70,20 @@ import {
   validateExpectedCircuitIdentityV1
 } from "../privacy/circuit-config.js";
 import {
+  computeAssetIdV1,
+  computeNoteCommitmentV1,
+  fieldHexV1,
+  validateBatchTransferEffectsV1
+} from "../privacy/protocol-v1.js";
+import {
   assertPlanCanBuildTx,
   planTransferBatchNotes,
   planTransferNotes,
   planWithdrawNotes
 } from "../privacy/planner.js";
 import {
+  hashAmount,
+  hashRecipient,
   preparePlanReservation,
   reservationHeartbeatIntervalMs,
   reservationStatuses,
@@ -88,6 +113,7 @@ import {
   bytesFromBase64,
   bytesFromHex as rawBytesFromHex,
   hash160,
+  randomBytes,
   hexFromBytes,
   sha256Hex
 } from "../core/browser-crypto.js";
@@ -131,6 +157,7 @@ export const msgWithdrawTypeUrl = GeneratedMsgWithdraw.typeUrl;
 const defaultPrepareScanMaxPages = 1000;
 const cosmosSignDocMetadataField = "__clairveilCosmosSignDoc";
 const cosmosReservationRequiredMemoMarker = "[clairveil-reservation-required:v1]";
+const maxBatchTransferMessageBytesV1 = 128 << 10;
 const defaultFetchTimeoutMs = 30000;
 const maxUint64 = (1n << 64n) - 1n;
 const defaultRetryStatuses = Object.freeze([408, 429, 502, 503, 504]);
@@ -165,6 +192,7 @@ const transferDisclosureModeAliases = Object.freeze({
   USER_DISCLOSURE_MODE_PUBLIC: "public",
   USER_DISCLOSURE_MODE_RECIPIENT_ENCRYPTED: "recipient-encrypted"
 });
+export const batchTransferOperationEvidenceVersion = "batch-transfer-operation-evidence-v1";
 
 function canonicalTransferPrivacyPolicyName(value) {
   let policy;
@@ -195,6 +223,272 @@ function canonicalTransferDisclosureModeName(value, policy) {
     throw new Error("disclosure mode must be public or recipient-encrypted when disclosure is enabled");
   }
   return transferDisclosureModeNames[mode];
+}
+
+function randomBatchField({ nonZero = true } = {}) {
+  while (true) {
+    const candidate = bytesToBigIntBE(randomBytes(32));
+    if (candidate < FIELD_MODULUS && (!nonZero || candidate !== 0n)) return candidate;
+  }
+}
+
+function normalizedBatchNowUnix(value) {
+  const nowUnix = Number(value);
+  if (!Number.isSafeInteger(nowUnix) || nowUnix < 0) {
+    throw new Error("batch transfer chainNowUnix must be a non-negative safe integer");
+  }
+  return nowUnix;
+}
+
+function normalizeBatchTransferOutputMode(value) {
+  const mode = String(value ?? "compact").trim() || "compact";
+  if (mode === "compact") return "compact";
+  if (mode === "exact32" || mode === "exact-32") return "exact32";
+  throw new Error("batch transfer outputMode must be compact, exact32, or exact-32");
+}
+
+function comparableBatchHex(value) {
+  return String(value ?? "").trim().toLowerCase().replace(/^0x/, "");
+}
+
+function batchPaymentValue(payment, names, fallback) {
+  const values = names
+    .filter(name => payment?.[name] !== undefined && payment?.[name] !== null)
+    .map(name => payment[name]);
+  if (values.length > 1 && values.some(value => String(value) !== String(values[0]))) {
+    throw new Error(`batch payment ${names[0]} aliases conflict`);
+  }
+  return values.length ? values[0] : fallback;
+}
+
+function normalizeBatchTransferPayments({
+  payments,
+  amounts,
+  recipient,
+  userPrivacyPolicy,
+  userDisclosureMode,
+  userDisclosureTargetPubKeyHex
+} = {}) {
+  if (payments != null) {
+    if (!Array.isArray(payments) || payments.length < 1 || payments.length > 32) {
+      throw new Error("batch transfer payments must contain 1..32 items");
+    }
+    if (amounts != null || recipient != null) {
+      throw new Error("batch transfer payments cannot be combined with legacy amounts/recipient");
+    }
+  } else {
+    if (!Array.isArray(amounts) || amounts.length < 1 || amounts.length > 32) {
+      throw new Error("batch transfer amounts must contain 1..32 items");
+    }
+    if (!String(recipient || "").trim()) throw new Error("batch transfer recipient is required");
+  }
+  const source = payments ?? amounts.map(amount => ({ amount, recipient }));
+  const normalized = source.map((payment, index) => {
+    if (!payment || typeof payment !== "object" || Array.isArray(payment)) {
+      throw new Error(`batch transfer payment ${index} must be an object`);
+    }
+    const amount = batchPaymentValue(payment, ["amount"], "");
+    const paymentRecipient = String(batchPaymentValue(
+      payment,
+      ["recipient", "recipientAddress", "recipient_address"],
+      ""
+    ) || "").trim();
+    if (!amount) throw new Error(`batch transfer payment ${index} amount is required`);
+    if (!paymentRecipient) throw new Error(`batch transfer payment ${index} recipient is required`);
+    const policy = batchPaymentValue(
+      payment,
+      ["userPrivacyPolicy", "user_privacy_policy", "privacyPolicy", "privacy_policy"],
+      userPrivacyPolicy
+    );
+    const mode = batchPaymentValue(
+      payment,
+      ["userDisclosureMode", "user_disclosure_mode", "disclosureMode", "disclosure_mode"],
+      userDisclosureMode
+    );
+    const disclosureTarget = String(batchPaymentValue(
+      payment,
+      [
+        "userDisclosureTargetPubKeyHex",
+        "user_disclosure_target_pubkey_hex",
+        "disclosurePubKeyHex",
+        "disclosure_pubkey_hex"
+      ],
+      userDisclosureTargetPubKeyHex
+    ) || "").trim();
+    return Object.freeze({
+      itemId: String(batchPaymentValue(payment, ["itemId", "item_id"], `batch-item-${index}`) || "").trim() || `batch-item-${index}`,
+      amount,
+      recipient: paymentRecipient,
+      userPrivacyPolicy: policy,
+      userDisclosureMode: mode,
+      userDisclosureTargetPubKeyHex: disclosureTarget,
+      expectedRecipientHash: String(batchPaymentValue(payment, ["expectedRecipientHash", "expected_recipient_hash"], "") || "").trim(),
+      expectedAmountHash: String(batchPaymentValue(payment, ["expectedAmountHash", "expected_amount_hash"], "") || "").trim(),
+      expectedOutputCommitment: String(batchPaymentValue(payment, ["expectedOutputCommitment", "expected_output_commitment"], "") || "").trim(),
+      expectedUserDisclosureDigest: String(batchPaymentValue(payment, ["expectedUserDisclosureDigest", "expected_user_disclosure_digest"], "") || "").trim(),
+      expectedAuditDisclosureDigest: String(batchPaymentValue(payment, ["expectedAuditDisclosureDigest", "expected_audit_disclosure_digest", "expectedDisclosureDigest", "expected_disclosure_digest"], "") || "").trim(),
+      expectedSelfViewDisclosureDigest: String(batchPaymentValue(payment, ["expectedSelfViewDisclosureDigest", "expected_self_view_disclosure_digest"], "") || "").trim(),
+      memo: String(batchPaymentValue(payment, ["memo"], "Transfer") ?? "Transfer")
+    });
+  });
+  if (new Set(normalized.map(payment => payment.itemId)).size !== normalized.length) {
+    throw new Error("batch transfer payment item IDs must be unique");
+  }
+  return normalized;
+}
+
+function canonicalBatchEvidenceDigest(value, label, { optional = false } = {}) {
+  const text = String(value || "").trim().toLowerCase().replace(/^0x/, "");
+  if (optional && !text) return "";
+  if (!/^[0-9a-f]{64}$/.test(text)) throw new Error(`${label} must be exactly 32 bytes of hex`);
+  return text;
+}
+
+function assertExpectedBatchEvidence(expected, actual, label) {
+  const normalized = canonicalBatchEvidenceDigest(expected, label, { optional: true });
+  if (normalized && normalized !== actual) {
+    throw new Error(`${label} does not match the final prepared batch payload`);
+  }
+}
+
+function batchWireDigest(wire, field, label, { optional = false } = {}) {
+  const encoded = String(wire?.[field] || "");
+  if (!encoded && optional) return "";
+  const bytes = bytesFromBase64(encoded, label);
+  if (bytes.length === 0 && optional) return "";
+  if (bytes.length !== 32) throw new Error(`${label} must be exactly 32 bytes`);
+  return hexFromBytes(bytes);
+}
+
+function buildBatchTransferExpectedOutputEvidence({
+  payload,
+  payments,
+  operationId,
+  denom,
+  shieldedPrefix,
+  nowUnix
+}) {
+  validatePreparedBatchTransferPayloadEnvelope(payload, { nowUnix });
+  if (!Array.isArray(payments) || !payments.length ||
+      payload.outputs.length < payments.length ||
+      payload.message_outputs.length !== payload.outputs.length) {
+    throw new Error("batch transfer payment evidence does not match the prepared output shape");
+  }
+  const assetIDHex = BigInt(payload.asset_id).toString(16).padStart(64, "0");
+  const resolvedOperationID = String(operationId || `batch:${payload.payload_hash}`);
+  return Object.freeze(payments.map((payment, index) => {
+    const output = payload.outputs[index];
+    const wire = payload.message_outputs[index];
+    if (output?.kind !== "payment" || String(output?.note?.am ?? "") !== String(payment.coin.amount)) {
+      throw new Error(`prepared batch payment output ${index} does not match its payment`);
+    }
+    const recipient = decodeShieldedAddress(payment.recipient, { shieldedPrefix });
+    if (
+      String(output.note.rsx) !== String(recipient.spendPubKey.x) ||
+      String(output.note.rsy) !== String(recipient.spendPubKey.y) ||
+      String(output.note.rvx) !== String(recipient.viewPubKey.x) ||
+      String(output.note.rvy) !== String(recipient.viewPubKey.y)
+    ) {
+      throw new Error(`prepared batch payment output ${index} recipient keys do not match its payment`);
+    }
+    if (
+      Number(output.privacy_policy) !== Number(payment.privacyPolicy) ||
+      Number(output.disclosure_mode) !== Number(payment.disclosureMode)
+    ) {
+      throw new Error(`prepared batch payment output ${index} disclosure policy does not match its payment`);
+    }
+    const commitment = batchWireDigest(wire, "commitment", `batch output ${index} commitment`);
+    const userDigest = batchWireDigest(wire, "user_disclosure_digest", `batch output ${index} user disclosure digest`, { optional: true });
+    const fullDigest = batchWireDigest(wire, "full_disclosure_digest", `batch output ${index} full disclosure digest`);
+    const selfViewPayload = bytesFromBase64(
+      String(wire?.self_view_disclosure_payload || ""),
+      `batch output ${index} self-view disclosure payload`
+    );
+    const selfViewDigest = selfViewPayload.length ? fullDigest : "";
+    const recipientHash = hashRecipient(payment.recipient, { shieldedPrefix });
+    const amountHash = hashAmount(denom, payment.coin.amount);
+    const assertedRecipientHash = canonicalBatchEvidenceDigest(payment.expectedRecipientHash, `batch payment ${index} expected recipient hash`, { optional: true });
+    const assertedAmountHash = canonicalBatchEvidenceDigest(payment.expectedAmountHash, `batch payment ${index} expected amount hash`, { optional: true });
+    if (assertedRecipientHash && assertedRecipientHash !== recipientHash) {
+      throw new Error(`batch payment ${index} expected recipient hash does not match its recipient`);
+    }
+    if (assertedAmountHash && assertedAmountHash !== amountHash) {
+      throw new Error(`batch payment ${index} expected amount hash does not match its amount`);
+    }
+    assertExpectedBatchEvidence(payment.expectedOutputCommitment, commitment, `batch payment ${index} expected output commitment`);
+    assertExpectedBatchEvidence(payment.expectedUserDisclosureDigest, userDigest, `batch payment ${index} expected user disclosure digest`);
+    assertExpectedBatchEvidence(payment.expectedAuditDisclosureDigest, fullDigest, `batch payment ${index} expected audit disclosure digest`);
+    assertExpectedBatchEvidence(payment.expectedSelfViewDisclosureDigest, selfViewDigest, `batch payment ${index} expected self-view disclosure digest`);
+    return Object.freeze({
+      operation_id: resolvedOperationID,
+      item_id: payment.itemId,
+      batch_item_index: index,
+      role: "payment",
+      expected_output_commitment: commitment,
+      expected_user_disclosure_digest: userDigest,
+      expected_audit_disclosure_digest: fullDigest,
+      expected_self_view_disclosure_digest: selfViewDigest,
+      expected_recipient_hash: recipientHash,
+      expected_amount: String(payment.coin.amount),
+      expected_amount_hash: amountHash,
+      expected_denom: denom,
+      asset_id_hex: assetIDHex,
+      user_privacy_policy: payment.privacyPolicy,
+      user_disclosure_mode: payment.disclosureMode,
+      audit_key_id: payload.audit_key_id,
+      audit_key_epoch: String(payload.audit_key_epoch)
+    });
+  }));
+}
+
+function buildBatchTransferOperationEvidence({
+  payload,
+  proof,
+  payments,
+  expectedOutputs,
+  operationId,
+  denom,
+  shieldedPrefix,
+  nowUnix
+}) {
+  validatePreparedBatchTransferPayloadEnvelope(payload, { nowUnix });
+  const resolvedExpectedOutputs = expectedOutputs || buildBatchTransferExpectedOutputEvidence({
+    payload,
+    payments,
+    operationId,
+    denom,
+    shieldedPrefix,
+    nowUnix
+  });
+  const resolvedOperationID = String(
+    operationId || resolvedExpectedOutputs[0]?.operation_id || `batch:${payload.payload_hash}`
+  );
+  const effects = preparedBatchTransferEffectHex(payload);
+  const evidence = Object.freeze({
+    version: batchTransferOperationEvidenceVersion,
+    operation_id: resolvedOperationID,
+    circuit_set_id: payload.circuit_set_id,
+    payload_hash: payload.payload_hash,
+    proof_payload_hash: proof.request_payload_hash,
+    proof_hash: sha256Hex(proof.proof_bytes),
+    input_nullifier_hexes: Object.freeze([...effects.nullifier_hexes]),
+    expected_outputs: Object.freeze([...resolvedExpectedOutputs])
+  });
+  return Object.freeze({
+    evidence,
+    evidenceHash: sha256Hex(JSON.stringify(evidence))
+  });
+}
+
+function batchTransferNullifiersUnspent(statuses, nullifiers) {
+  const statusFor = nullifier => statuses instanceof Map
+    ? statuses.get(nullifier) ?? statuses.get(`0x${nullifier}`)
+    : statuses?.[nullifier] ?? statuses?.[`0x${nullifier}`];
+  for (const [index, nullifier] of nullifiers.entries()) {
+    if (statusFor(nullifier) !== false) {
+      throw new Error(`batch transfer input nullifier at index ${index} is spent, missing, or has an invalid status`);
+    }
+  }
 }
 
 function assertTransferDisclosureCapabilities(disclosureConfig, {
@@ -1218,7 +1512,7 @@ async function markBroadcastReservationUnknown(context, error, evidence = {}) {
       txHash: evidence.txHash || "",
       txBytesHash: evidence.txBytesHash || "",
       signDocHash: evidence.signDocHash || "",
-      error: String(error?.message || error || "broadcast result is unknown"),
+      error: "sdk_broadcast_result_unknown",
       metadata: { reconcile_reason: "sdk_broadcast_result_unknown" }
     });
   } catch (bookkeepingError) {
@@ -1255,7 +1549,7 @@ async function markSigningReservationRejected(context, error) {
     }
     await context.reservationManager.markBroadcastRejected(context.reservationIDs, {
       leaseToken: context.leaseToken,
-      error: String(error?.message || error || "wallet request rejected"),
+      error: "wallet_rejected_before_broadcast",
       providerCode: "4001",
       metadata: {
         wallet_rejected_before_broadcast: true,
@@ -1557,7 +1851,7 @@ async function replanProofReadyReservations(reservationManager, batch, error, re
   if (!proofReadyIDs.length) return [];
   return reservationManager.markReplanRequired(proofReadyIDs, {
     leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || "",
-    error: error?.message || String(error || "reservation replan required"),
+    error: reason,
     metadata: {
       reconcile_reason: reason,
       no_broadcast_attempt: true,
@@ -1668,7 +1962,9 @@ export class ClairveilJS {
     fetchTimeoutMs,
     queryRetry,
     nullifierFailover = false,
-    expectedCircuitIdentity
+    expectedCircuitIdentity,
+    enableExperimentalBatchTransfer = false,
+    enable_experimental_batch_transfer
   } = {}) {
     this.rpc = normalizeRpcEndpoint(rpc);
     this.restEndpoints = normalizeRestEndpoints(rest, restEndpoints);
@@ -1683,6 +1979,9 @@ export class ClairveilJS {
     this.queryTimeoutMs = normalizeTimeoutMs(fetchTimeoutMs ?? queryTimeoutMs, "queryTimeoutMs");
     this.queryRetry = normalizeQueryRetry(queryRetry);
     this.nullifierFailover = Boolean(nullifierFailover);
+    this.enableExperimentalBatchTransfer = Boolean(
+      enable_experimental_batch_transfer ?? enableExperimentalBatchTransfer
+    );
     this.expectedCircuitIdentity = expectedCircuitIdentity == null
       ? null
       : validateExpectedCircuitIdentityV1(expectedCircuitIdentity);
@@ -2060,6 +2359,9 @@ export class ClairveilJS {
         ? "scan_events"
         : "privacy_scan"
     );
+    if (source !== "privacy_scan" && resolvedEventTypes.some(value => String(value || "").trim() === "batch_transfer")) {
+      throw new Error("batch_transfer outputs require the typed privacy-scan-v2 source");
+    }
 
     if (source === "privacy_scan") {
       if ((event_types ?? eventTypes) != null && (event_types ?? eventTypes).some(value => String(value || "").trim())) {
@@ -2118,6 +2420,9 @@ export class ClairveilJS {
       } catch (error) {
         const canFallback = error?.status === 404 || error?.status === 405 || error?.status === 501 || error?.code === "UNSUPPORTED_PRIVACY_SCAN_VERSION";
         if (!canFallback) throw error;
+        if (this.enableExperimentalBatchTransfer) {
+          throw new Error("typed privacy-scan-v2 is required while one-proof batch transfer support is enabled", { cause: error });
+        }
         // Only an absent typed endpoint may fall back. A malformed or failed
         // privacy-scan-v2 response is terminal because it may contain batch
         // ciphertexts unavailable from a legacy feed.
@@ -2341,6 +2646,27 @@ export class ClairveilJS {
       ...data,
       events: (data.events || []).filter(isAuditableTransfer)
     };
+  }
+
+  async fetchAuditableBatchTransfers(options = {}) {
+    const requestedTypes = options.eventTypes ?? options.event_types;
+    if (requestedTypes != null && (
+      !Array.isArray(requestedTypes) ||
+      requestedTypes.some(value => String(value || "").trim() !== "batch_transfer")
+    )) {
+      throw new Error("auditable batch transfer query only accepts the batch_transfer event type");
+    }
+    const request = { ...options, eventTypes: ["batch_transfer"] };
+    delete request.event_types;
+    const page = validatePrivacyScanPageV2(
+      await this.fetchPrivacyScan(request),
+      request
+    );
+    if (page.summaries.some(summary => summary.event_type !== "batch_transfer") ||
+        page.outputs.some(output => output.event_type !== "batch_transfer")) {
+      throw new Error("auditable batch transfer response contains a non-batch event");
+    }
+    return page;
   }
 
   async findPrivacyEventByTxHash(txHash, {
@@ -2905,6 +3231,7 @@ export class ClairveilJS {
   async prepareTransferBatch({
     wallet,
     material,
+    payments,
     amounts,
     recipient,
     proverAdapter,
@@ -2912,12 +3239,19 @@ export class ClairveilJS {
     userDisclosureMode = "none",
     userDisclosureTargetPubKeyHex = "",
     auditDisclosureTargetPubKeyHex,
+    audit_disclosure_target_pubkey_hex,
     expectedRecipientHash,
     expected_recipient_hash,
     expectedRecipientHashes,
     expected_recipient_hashes,
     expectedAmountHashes,
     expected_amount_hashes,
+    outputMode,
+    output_mode,
+    onPreparedPayload,
+    on_prepared_payload,
+    onPreparedProof,
+    on_prepared_proof,
     denom,
     scan,
     after,
@@ -2940,12 +3274,79 @@ export class ClairveilJS {
     scanSource,
     scan_source,
     gasLimit = 25000000,
+    expiresAtUnix,
+    expires_at_unix,
+    chainNowUnix,
+    chain_now_unix,
+    rootHex,
+    root_hex,
+    snapshotHeight,
+    snapshot_height,
+    disableSelfViewDisclosure,
+    disable_self_view_disclosure,
+    selfViewDisclosureTargetPubKeyHex,
+    self_view_disclosure_target_pubkey,
     reservationManager,
     reservation_manager
   } = {}) {
+    if (!this.enableExperimentalBatchTransfer) {
+      throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
+    }
+    if (outputMode != null && output_mode != null &&
+        normalizeBatchTransferOutputMode(outputMode) !== normalizeBatchTransferOutputMode(output_mode)) {
+      throw new Error("outputMode aliases conflict");
+    }
+    if (chainNowUnix != null && chain_now_unix != null &&
+        normalizedBatchNowUnix(chainNowUnix) !== normalizedBatchNowUnix(chain_now_unix)) {
+      throw new Error("chainNowUnix aliases conflict");
+    }
+    if (expiresAtUnix != null && expires_at_unix != null &&
+        normalizedBatchNowUnix(expiresAtUnix) !== normalizedBatchNowUnix(expires_at_unix)) {
+      throw new Error("expiresAtUnix aliases conflict");
+    }
+    if (rootHex != null && root_hex != null &&
+        comparableBatchHex(rootHex) !== comparableBatchHex(root_hex)) {
+      throw new Error("rootHex aliases conflict");
+    }
+    if (snapshotHeight != null && snapshot_height != null &&
+        String(uint64CursorValue(snapshotHeight, "snapshotHeight")) !==
+          String(uint64CursorValue(snapshot_height, "snapshot_height"))) {
+      throw new Error("snapshotHeight aliases conflict");
+    }
+    for (const [value, label] of [
+      [disableSelfViewDisclosure, "disableSelfViewDisclosure"],
+      [disable_self_view_disclosure, "disable_self_view_disclosure"]
+    ]) {
+      if (value != null && typeof value !== "boolean") {
+        throw new Error(`${label} must be a boolean`);
+      }
+    }
+    if (disableSelfViewDisclosure != null && disable_self_view_disclosure != null &&
+        disableSelfViewDisclosure !== disable_self_view_disclosure) {
+      throw new Error("disableSelfViewDisclosure aliases conflict");
+    }
+    if (selfViewDisclosureTargetPubKeyHex != null &&
+        self_view_disclosure_target_pubkey != null &&
+        comparableBatchHex(selfViewDisclosureTargetPubKeyHex) !==
+          comparableBatchHex(self_view_disclosure_target_pubkey)) {
+      throw new Error("selfViewDisclosureTargetPubKeyHex aliases conflict");
+    }
+    if (reservationManager != null && reservation_manager != null &&
+        reservationManager !== reservation_manager) {
+      throw new Error("reservationManager aliases conflict");
+    }
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
-    const operationEvidence = resolveBatchOperationEvidence({
+    const normalizedPayments = normalizeBatchTransferPayments({
+      payments,
       amounts,
+      recipient,
+      userPrivacyPolicy,
+      userDisclosureMode,
+      userDisclosureTargetPubKeyHex
+    });
+    const normalizedAmounts = normalizedPayments.map(payment => payment.amount);
+    const legacyOperationEvidence = resolveBatchOperationEvidence({
+      amounts: normalizedAmounts,
       expectedRecipientHash,
       expected_recipient_hash,
       expectedRecipientHashes,
@@ -2953,6 +3354,51 @@ export class ClairveilJS {
       expectedAmountHashes,
       expected_amount_hashes
     });
+    const resolvedPayments = normalizedPayments.map((payment, index) => {
+      const legacyRecipientHash = legacyOperationEvidence.recipientHashes[index] || "";
+      const legacyAmountHash = legacyOperationEvidence.amountHashes[index] || "";
+      if (payment.expectedRecipientHash && legacyRecipientHash &&
+          canonicalBatchEvidenceDigest(payment.expectedRecipientHash, `batch payment ${index} expected recipient hash`) !==
+          canonicalBatchEvidenceDigest(legacyRecipientHash, `batch payment ${index} legacy expected recipient hash`)) {
+        throw new Error(`batch payment ${index} expected recipient hash conflicts with the top-level evidence`);
+      }
+      if (payment.expectedAmountHash && legacyAmountHash &&
+          canonicalBatchEvidenceDigest(payment.expectedAmountHash, `batch payment ${index} expected amount hash`) !==
+          canonicalBatchEvidenceDigest(legacyAmountHash, `batch payment ${index} legacy expected amount hash`)) {
+        throw new Error(`batch payment ${index} expected amount hash conflicts with the top-level evidence`);
+      }
+      return Object.freeze({
+        ...payment,
+        expectedRecipientHash: payment.expectedRecipientHash || legacyRecipientHash,
+        expectedAmountHash: payment.expectedAmountHash || legacyAmountHash
+      });
+    });
+    const resolvedOutputMode = normalizeBatchTransferOutputMode(outputMode ?? output_mode);
+    if (onPreparedPayload != null && on_prepared_payload != null &&
+        onPreparedPayload !== on_prepared_payload) {
+      throw new Error("onPreparedPayload aliases conflict");
+    }
+    if (onPreparedProof != null && on_prepared_proof != null &&
+        onPreparedProof !== on_prepared_proof) {
+      throw new Error("onPreparedProof aliases conflict");
+    }
+    const persistPreparedPayload = onPreparedPayload ?? on_prepared_payload;
+    const persistPreparedProof = onPreparedProof ?? on_prepared_proof;
+    if (persistPreparedPayload != null && typeof persistPreparedPayload !== "function") {
+      throw new Error("onPreparedPayload must be a function");
+    }
+    if (persistPreparedProof != null && typeof persistPreparedProof !== "function") {
+      throw new Error("onPreparedProof must be a function");
+    }
+    if (!resolvedReservationManager) {
+      throw new Error("one-proof batch transfer requires a reservationManager for atomic input reservation");
+    }
+    if (typeof persistPreparedPayload !== "function") {
+      throw new Error("one-proof batch transfer requires onPreparedPayload to durably persist the private payload before proving");
+    }
+    if (typeof persistPreparedProof !== "function") {
+      throw new Error("one-proof batch transfer requires onPreparedProof to durably persist the private proof before signing");
+    }
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveScanOptions({
       scan,
@@ -2976,17 +3422,25 @@ export class ClairveilJS {
       scanSource,
       scan_source
     });
+    if (scanOptions.scanSource != null &&
+        String(scanOptions.scanSource).trim() !== "privacy_scan") {
+      throw new Error("one-proof batch transfer only supports the typed privacy_scan source");
+    }
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
       ...scanOptions,
+      scanSource: "privacy_scan",
       limit: scanOptions.limit ?? 200,
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
       includeFoundNotes: true
     });
+    if (scanResult.scanCursor?.source !== "privacy_scan") {
+      throw new Error("one-proof batch transfer requires the typed privacy-scan-v2 source; legacy scan fallback cannot recover batch outputs safely");
+    }
     const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
     const plan = planTransferBatchNotes({
       notes: availableFoundNotes,
-      amounts,
+      amounts: normalizedAmounts,
       denom: denom ?? this.defaultDenom
     });
     if (!plan.canBuildTx) {
@@ -2999,82 +3453,292 @@ export class ClairveilJS {
     }
     assertPlanCanBuildTx(plan);
     const transferProtocolConfig = await this.assertTransferProtocolConfig(denom ?? this.defaultDenom);
-    assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
-      userPrivacyPolicy,
-      userDisclosureMode
+    const paymentPolicies = resolvedPayments.map((payment, index) => {
+      const capabilities = assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
+        userPrivacyPolicy: payment.userPrivacyPolicy,
+        userDisclosureMode: payment.userDisclosureMode
+      });
+      const policy = transferPrivacyPolicyNames.indexOf(capabilities.policy);
+      const disclosureMode = transferDisclosureModeNames.indexOf(capabilities.mode);
+      if (policy !== 0 && disclosureMode === 2 && !payment.userDisclosureTargetPubKeyHex) {
+        throw new Error(`batch transfer payment ${index} recipient-encrypted disclosure requires a disclosure target public key`);
+      }
+      return Object.freeze({ ...payment, policyName: capabilities.policy, modeName: capabilities.mode, privacyPolicy: policy, disclosureMode });
     });
 
-    const auditPubKeyHex = auditDisclosureTargetPubKeyHex
-      || transferProtocolConfig.audit_config.audit_master_pubkey_hex;
+    if (!proverAdapter || typeof proverAdapter.proveBatchTransfer !== "function") {
+      throw new Error("prepareTransferBatch requires a proverAdapter with proveBatchTransfer(payload)");
+    }
+    const batchDenom = denom ?? this.defaultDenom;
+    const resolvedDisableSelfViewDisclosure = disableSelfViewDisclosure ?? disable_self_view_disclosure ?? false;
+    const coins = paymentPolicies.map((payment, index) => {
+      const coin = parseCoin(payment.amount, batchDenom);
+      if (coin.denom !== batchDenom) {
+        throw new Error(`batch transfer payment ${index} denom must equal ${batchDenom}`);
+      }
+      return coin;
+    });
+    const preparedPayments = paymentPolicies.map((payment, index) => Object.freeze({
+      ...payment,
+      coin: coins[index]
+    }));
+    const requestedTotal = coins.reduce((sum, coin) => sum + BigInt(coin.amount), 0n);
+    const selectedInputs = plan.selection?.inputs || plan.selections?.[0]?.inputs || [];
+    if (selectedInputs.length < 1 || selectedInputs.length > 16) {
+      throw new Error("one-proof batch transfer requires 1..16 selected input notes");
+    }
+    const selectedTotal = selectedInputs.reduce((sum, found) => sum + found.note.amount, 0n);
+    const change = selectedTotal - requestedTotal;
+    if (change < 0n) throw new Error("one-proof batch transfer selected input total is insufficient");
+    const compactOutputCount = coins.length + (change > 0n ? 1 : 0);
+    if (compactOutputCount < 1 || compactOutputCount > 32) {
+      throw new Error("one-proof batch transfer requires 1..32 outputs including change");
+    }
+    const outputCount = resolvedOutputMode === "exact32" ? 32 : compactOutputCount;
+
+    const auditConfig = transferProtocolConfig.audit_config;
+    if (auditDisclosureTargetPubKeyHex != null &&
+        audit_disclosure_target_pubkey_hex != null &&
+        String(auditDisclosureTargetPubKeyHex).trim().toLowerCase() !==
+          String(audit_disclosure_target_pubkey_hex).trim().toLowerCase()) {
+      throw new Error("auditDisclosureTargetPubKeyHex aliases conflict");
+    }
+    const requestedAuditPubKeyHex = String(
+      auditDisclosureTargetPubKeyHex ?? audit_disclosure_target_pubkey_hex ?? ""
+    ).trim().toLowerCase();
+    if (requestedAuditPubKeyHex &&
+        requestedAuditPubKeyHex !== String(auditConfig.audit_master_pubkey_hex || "").toLowerCase()) {
+      throw new Error("batch transfer audit disclosure target must exactly match the active chain audit config");
+    }
+    const auditPubKeyHex = auditConfig.audit_master_pubkey_hex;
+    const resolvedNowUnix = normalizedBatchNowUnix(
+      chainNowUnix ?? chain_now_unix ?? Math.floor(Date.now() / 1000)
+    );
+    const resolvedExpiresAtUnix = expiresAtUnix ?? expires_at_unix ?? resolvedNowUnix + 1800;
+    const expiry = normalizedBatchNowUnix(resolvedExpiresAtUnix);
+    if (expiry <= resolvedNowUnix) throw new Error("batch transfer expiresAtUnix must be later than chainNowUnix");
     let reservationBatch = null;
+    let payloadCheckpointStarted = false;
+    let proofCheckpointStarted = false;
+    let checkpointedPayloadHash = "";
     try {
       reservationBatch = await preparePlanReservation(resolvedReservationManager, {
         plan,
         kind: "batch_transfer",
         metadata: {
-          amounts: [...amounts],
-          recipient
+          batch_transfer_payment_count: preparedPayments.length,
+          batch_transfer_output_mode: resolvedOutputMode,
+          circuit_set_id: transferProtocolConfig.circuit_config.circuit_set_id,
+          max_inputs: 16,
+          max_outputs: 32
         }
       });
       const heartbeatResult = await withReservationHeartbeat(resolvedReservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
-        const items = [];
-        for (let i = 0; i < amounts.length; i += 1) {
-          const built = await this.buildTransferMessage({
-            proverAdapter,
-            creator: privacy.address,
-            inputs: plan.selections[i].inputs,
-            recipient,
-            amount: amounts[i],
-            transferDenom: denom ?? this.defaultDenom,
-            rootSeed: privacy.rootSeed,
-            shieldedPrefix: this.shieldedPrefix,
-            userPrivacyPolicy,
-            userDisclosureMode,
-            userDisclosureTargetPubKeyHex,
-            auditDisclosureTargetPubKeyHex: auditPubKeyHex
+        const commitmentHexes = selectedInputs.map(found => fieldHexV1(computeNoteCommitmentV1(found.note)));
+        const treeState = rootHex || root_hex ? null : await this.fetchTreeState();
+        const resolvedRootHex = String(rootHex || root_hex || treeState?.root || treeState?.root_hex || treeState?.rootHex || "").trim();
+        if (!resolvedRootHex) throw new Error("one-proof batch transfer requires a verified current tree root");
+        const resolvedSnapshotHeight = snapshotHeight ?? snapshot_height ?? selectedInputs.reduce((latest, found) => {
+          const height = BigInt(found.height ?? 0);
+          return height > BigInt(latest) ? height.toString() : latest;
+        }, String(selectedInputs[0]?.height ?? 0));
+        const pathProvider = await this.createCommitmentPathSnapshotProvider({
+          commitmentHexes,
+          rootHex: resolvedRootHex,
+          snapshotHeight: resolvedSnapshotHeight
+        });
+        const preparedInputs = await Promise.all(selectedInputs.map(async found => {
+          const path = await pathProvider.lookupMerklePath(fieldHexV1(computeNoteCommitmentV1(found.note)));
+          return {
+            note: found.note,
+            merklePath: path.path,
+            merklePathHelper: path.path_helper
+          };
+        }));
+        const ownerSpend = deriveSpendKeys(privacy.rootSeed).pubKey;
+        const ownerView = deriveViewKeys(privacy.rootSeed).pubKey;
+        const assetID = computeAssetIdV1(batchDenom);
+        const outputs = preparedPayments.map(payment => {
+          const recipientKeys = decodeShieldedAddress(payment.recipient, { shieldedPrefix: this.shieldedPrefix });
+          return {
+            kind: "payment",
+            note: createNote({
+              spendPubKey: recipientKeys.spendPubKey,
+              viewPubKey: recipientKeys.viewPubKey,
+              amount: payment.coin.amount,
+              assetId: assetID,
+              randomness: randomBatchField(),
+              memo: payment.memo
+            }),
+            privacyPolicy: payment.privacyPolicy,
+            disclosureMode: payment.disclosureMode,
+            ...(payment.privacyPolicy !== 0 && payment.disclosureMode === 2
+              ? { disclosureTargetPubKey: payment.userDisclosureTargetPubKeyHex }
+              : {}),
+            userDisclosureBlinding: payment.privacyPolicy === 0 ? 0n : randomBatchField(),
+            fullDisclosureBlinding: randomBatchField()
+          };
+        });
+        if (change > 0n) {
+          outputs.push({
+            kind: "change",
+            note: createNote({
+              spendPubKey: ownerSpend,
+              viewPubKey: ownerView,
+              amount: change,
+              assetId: assetID,
+              randomness: randomBatchField(),
+              memo: "Change"
+            }),
+            privacyPolicy: 0,
+            disclosureMode: 0,
+            userDisclosureBlinding: 0n,
+            fullDisclosureBlinding: randomBatchField()
           });
-          items.push(built);
-          assertHeartbeatHealthy();
         }
+        while (outputs.length < outputCount) {
+          outputs.push({
+            kind: "padding",
+            note: createNote({
+              spendPubKey: ownerSpend,
+              viewPubKey: ownerView,
+              amount: 0n,
+              assetId: assetID,
+              randomness: randomBatchField(),
+              memo: "Padding"
+            }),
+            privacyPolicy: 0,
+            disclosureMode: 0,
+            userDisclosureBlinding: 0n,
+            fullDisclosureBlinding: randomBatchField()
+          });
+        }
+        const spendSigner = createSpendNoteHashSigner(privacy.rootSeed);
+        const selfViewTarget = selfViewDisclosureTargetPubKeyHex
+          || self_view_disclosure_target_pubkey
+          || deriveDisclosureKeys(privacy.rootSeed).pubKey;
+        const payload = await buildPreparedBatchTransferPayload({
+          creator: privacy.address,
+          chainId: this.chainId,
+          expiresAtUnix: expiry,
+          root: resolvedRootHex,
+          inputs: preparedInputs,
+          outputs,
+          auditKeyId: auditConfig.audit_key_id,
+          auditKeyEpoch: auditConfig.audit_key_epoch,
+          auditDisclosureTargetPubKey: auditPubKeyHex,
+          selfViewDisclosureTargetPubKey: selfViewTarget,
+          disableSelfViewDisclosure: resolvedDisableSelfViewDisclosure,
+          signer: {
+            signBatchTransfer: request => spendSigner.signNoteHash(request.expectedIntent)
+          }
+        });
+        validatePreparedBatchTransferPayloadEnvelope(payload, { nowUnix: resolvedNowUnix });
+        const operationId = reservationBatch?.operation_id || `batch:${payload.payload_hash}`;
+        const expectedOutputs = buildBatchTransferExpectedOutputEvidence({
+          payload,
+          payments: preparedPayments,
+          operationId,
+          denom: batchDenom,
+          shieldedPrefix: this.shieldedPrefix,
+          nowUnix: resolvedNowUnix
+        });
+        if (persistPreparedPayload) {
+          payloadCheckpointStarted = true;
+          checkpointedPayloadHash = payload.payload_hash;
+          await persistPreparedPayload(payload, {
+            operationId,
+            reservation: reservationBatchSummary(reservationBatch)
+          });
+        }
+        const {
+          proof,
+          message,
+          effects
+        } = await this.provePreparedBatchTransfer({
+          payload,
+          proverAdapter,
+          creator: privacy.address,
+          denom: batchDenom,
+          operationId,
+          reservation: reservationBatchSummary(reservationBatch),
+          nowUnix: resolvedNowUnix,
+          onPreparedProof: persistPreparedProof
+            ? preparedProof => {
+                proofCheckpointStarted = true;
+                checkpointedPayloadHash = payload.payload_hash;
+                return persistPreparedProof(preparedProof, {
+                  payload,
+                  operationId,
+                  reservation: reservationBatchSummary(reservationBatch)
+                });
+              }
+            : undefined
+        });
+        assertHeartbeatHealthy();
         const signDoc = await this.buildDirectSignDoc({
           signer: privacy.address,
           pubKeyHex: privacy.pubKeyHex,
           gasLimit,
-          messages: items.map(built => ({
-            typeUrl: msgTransferTypeUrl,
-            value: built.message
-          })),
+          messages: [{
+            typeUrl: msgBatchTransferTypeUrl,
+            value: MsgBatchTransfer.fromPartial(message)
+          }],
           memo: reservationBatch
             ? reservationRequiredCosmosMemo("Clairveil batch veiled transfer")
             : "Clairveil batch veiled transfer"
         });
         const signDocHash = cosmosSignDocBindingHash(signDoc);
+        const operationEvidence = buildBatchTransferOperationEvidence({
+          payload,
+          proof,
+          payments: preparedPayments,
+          expectedOutputs,
+          operationId,
+          denom: batchDenom,
+          shieldedPrefix: this.shieldedPrefix,
+          nowUnix: resolvedNowUnix
+        });
         await heartbeatNow();
-        await markReservationProofReadyForBatchItems(
-          resolvedReservationManager,
-          reservationBatch,
-          items.map((built, i) => ({
-            notes: plan.selections[i].inputs,
-            metadata: transferProofReadyMetadata(built, {
-              amount: amounts[i],
-              denom: denom ?? this.defaultDenom,
-              expectedRecipientHash: operationEvidence.recipientHashes[i] || "",
-              expectedAmountHash: operationEvidence.amountHashes[i] || "",
-              batchItemIndex: i,
-              batchItemIndexKnown: true,
-              signDocHash
-            })
-          })),
-        );
+        await markReservationProofReadyForBatchItems(resolvedReservationManager, reservationBatch, [{
+          notes: selectedInputs,
+          metadata: {
+            payloadHash: payload.payload_hash,
+            signDocHash,
+            expectedOperationEvidenceHash: operationEvidence.evidenceHash,
+            operationSuccessEvidenceRequired: true,
+            metadata: {
+              payload_expires_at_unix: String(payload.expires_at_unix),
+              batch_transfer_input_count: selectedInputs.length,
+              batch_transfer_output_count: payload.outputs.length,
+              batch_transfer_output_mode: resolvedOutputMode,
+              batch_transfer_nullifier_hexes: effects.nullifier_hexes,
+              batch_transfer_output_commitment_hexes: effects.output_commitment_hexes,
+              batch_transfer_operation_evidence: operationEvidence.evidence,
+              batch_transfer_operation_evidence_hash: operationEvidence.evidenceHash
+            }
+          }
+        }]);
         return {
-          builtItems: items,
+          payload,
+          proof,
+          message,
+          operationEvidence: operationEvidence.evidence,
+          operationEvidenceHash: operationEvidence.evidenceHash,
           signDoc: markCosmosSignDocReservationRequired(
             signDoc,
             reservationBatch
           )
         };
       });
-      const { builtItems, signDoc } = heartbeatResult;
+      const {
+        payload,
+        proof,
+        message,
+        signDoc,
+        operationEvidence,
+        operationEvidenceHash
+      } = heartbeatResult;
 
       return {
         ...reservationReconciliationFields(heartbeatResult),
@@ -3082,21 +3746,56 @@ export class ClairveilJS {
         plan,
         scan: scanResult,
         signDoc,
-        payloads: builtItems.map(built => built.payload),
-        proofs: builtItems.map(built => built.proof),
-        messages: builtItems.map(built => built.message),
+        payload,
+        proof,
+        message,
+        operationEvidence,
+        operationEvidenceHash,
         reservation: reservationBatchSummary(reservationBatch),
         prepared: {
           planAction: "batch_transfer",
-          amounts: [...amounts],
-          recipient,
-          selectedInputTotals: plan.selections.map(selection => selection.total.toString()),
+          payments: preparedPayments.map(payment => ({
+            itemId: payment.itemId,
+            amount: payment.coin.raw,
+            recipient: payment.recipient,
+            privacyPolicy: payment.policyName,
+            disclosureMode: payment.modeName
+          })),
+          amounts: preparedPayments.map(payment => payment.coin.raw),
+          ...(preparedPayments.every(payment => payment.recipient === preparedPayments[0].recipient)
+            ? { recipient: preparedPayments[0].recipient }
+            : {}),
+          outputMode: resolvedOutputMode,
+          selectedInputTotal: selectedTotal.toString(),
+          inputCount: selectedInputs.length,
+          outputCount: payload.outputs.length,
           reservation: reservationBatchSummary(reservationBatch)
         },
         privacyAccount: publicPrivacyAccount(privacy)
       };
     } catch (error) {
       const cleanupErrors = [];
+      if ((payloadCheckpointStarted || proofCheckpointStarted) && reservationBatch?.reservation_ids?.length) {
+        try {
+          if (typeof resolvedReservationManager?.markManualReview !== "function") {
+            throw new Error("reservationManager.markManualReview is required after a batch artifact checkpoint starts");
+          }
+          await resolvedReservationManager.markManualReview(reservationBatch.reservation_ids, {
+            leaseToken: reservationBatch.lease_token || reservationBatch.reservations?.[0]?.lease_token || "",
+            error: "batch_checkpointed_artifact_requires_recovery",
+            metadata: {
+              reconcile_reason: "batch_checkpointed_artifact_requires_recovery",
+              batch_payload_checkpoint_started: payloadCheckpointStarted,
+              batch_proof_checkpoint_started: proofCheckpointStarted,
+              ...(checkpointedPayloadHash ? { batch_transfer_payload_hash: checkpointedPayloadHash } : {})
+            }
+          });
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+        appendReservationCleanupErrors(error, cleanupErrors);
+        throw error;
+      }
       try {
         await replanProofReadyReservations(resolvedReservationManager, reservationBatch, error, "batch_prepare_failed_after_partial_proof_ready");
       } catch (cleanupError) {
@@ -3110,6 +3809,134 @@ export class ClairveilJS {
       appendReservationCleanupErrors(error, cleanupErrors);
       throw error;
     }
+  }
+
+  /**
+   * Resume only the proof stage of a durably checkpointed batch payload without
+   * rebuilding or re-signing its owner intent. The caller must restore the
+   * original operation/reservations and complete ProofReady finalization before
+   * signing or broadcasting. The same selected prover is called once.
+   */
+  async provePreparedBatchTransfer({
+    payload,
+    proverAdapter,
+    creator,
+    denom,
+    operationId,
+    operation_id,
+    reservation,
+    reservationBatch,
+    reservation_batch,
+    nowUnix,
+    chainNowUnix,
+    chain_now_unix,
+    onPreparedProof,
+    on_prepared_proof
+  } = {}) {
+    if (!this.enableExperimentalBatchTransfer) {
+      throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
+    }
+    if (!proverAdapter || typeof proverAdapter.proveBatchTransfer !== "function") {
+      throw new Error("provePreparedBatchTransfer requires a proverAdapter with proveBatchTransfer(payload)");
+    }
+    if (operationId != null && operation_id != null &&
+        String(operationId) !== String(operation_id)) {
+      throw new Error("operationId aliases conflict");
+    }
+    const reservationAliases = [reservation, reservationBatch, reservation_batch]
+      .filter(value => value != null);
+    if (reservationAliases.length > 1 &&
+        reservationAliases.some(value => value !== reservationAliases[0])) {
+      throw new Error("reservation aliases conflict");
+    }
+    if (onPreparedProof != null && on_prepared_proof != null &&
+        onPreparedProof !== on_prepared_proof) {
+      throw new Error("onPreparedProof aliases conflict");
+    }
+    const persistPreparedProof = onPreparedProof ?? on_prepared_proof;
+    if (typeof persistPreparedProof !== "function") {
+      throw new Error("provePreparedBatchTransfer requires onPreparedProof to durably persist the private proof");
+    }
+    const resolvedOperationID = String(operationId ?? operation_id ?? "").trim();
+    if (!resolvedOperationID) {
+      throw new Error("provePreparedBatchTransfer requires the original operationId");
+    }
+    const resolvedReservation = reservation ?? reservationBatch ?? reservation_batch ?? null;
+    if (!resolvedReservation) {
+      throw new Error("provePreparedBatchTransfer requires the original reservation batch");
+    }
+    const reservationOperationID = String(
+      resolvedReservation.operation_id ?? resolvedReservation.operationId ?? ""
+    ).trim();
+    if (reservationOperationID && reservationOperationID !== resolvedOperationID) {
+      throw new Error("prepared batch transfer operationId does not match the reservation batch");
+    }
+    const resolvedNowUnix = normalizedBatchNowUnix(
+      chainNowUnix ?? chain_now_unix ?? nowUnix ?? Math.floor(Date.now() / 1000)
+    );
+    validatePreparedBatchTransferPayloadEnvelope(payload, { nowUnix: resolvedNowUnix });
+    const resolvedDenom = canonicalAssetDenomV1(denom ?? this.defaultDenom);
+    const transferProtocolConfig = await this.assertTransferProtocolConfig(resolvedDenom);
+    if (String(payload.asset_id) !== computeAssetIdV1(resolvedDenom).toString()) {
+      throw new Error("prepared batch transfer asset ID does not match the authoritative denom");
+    }
+    const activeAuditConfig = transferProtocolConfig.audit_config;
+    if (String(payload.audit_key_id) !== String(activeAuditConfig.audit_key_id) ||
+        String(payload.audit_key_epoch) !== String(activeAuditConfig.audit_key_epoch) ||
+        hexFromBytes(bytesFromBase64(
+          payload.audit_disclosure_target_pubkey,
+          "prepared batch transfer audit disclosure target"
+        )) !== String(activeAuditConfig.audit_master_pubkey_hex).toLowerCase()) {
+      throw new Error("prepared batch transfer audit identity does not match the active chain config");
+    }
+    for (const [index, output] of payload.outputs.entries()) {
+      try {
+        assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
+          userPrivacyPolicy: output.privacy_policy,
+          userDisclosureMode: output.disclosure_mode
+        });
+      } catch (error) {
+        throw new Error(`prepared batch transfer output ${index} is incompatible with the active disclosure config`, {
+          cause: error
+        });
+      }
+    }
+    const effects = preparedBatchTransferEffectHex(payload);
+    batchTransferNullifiersUnspent(
+      await this.checkNullifiers(effects.nullifier_hexes),
+      effects.nullifier_hexes
+    );
+    const proofResponse = await proverAdapter.proveBatchTransfer(payload);
+    if (proofResponse?.proof && typeof proofResponse.proof === "object" &&
+        proofResponse.version !== batchTransferProofResponseVersion) {
+      throw new Error(`unsupported batch transfer proof response version ${JSON.stringify(proofResponse.version)}`);
+    }
+    const proof = normalizePreparedBatchTransferProof(
+      payload,
+      proofResponse?.proof && typeof proofResponse.proof === "object" ? proofResponse.proof : proofResponse,
+      { nowUnix: resolvedNowUnix }
+    );
+    await persistPreparedProof(proof, {
+      payload,
+      operationId: resolvedOperationID,
+      reservation: resolvedReservation
+    });
+    batchTransferNullifiersUnspent(
+      await this.checkNullifiers(effects.nullifier_hexes),
+      effects.nullifier_hexes
+    );
+    const message = buildMsgBatchTransferFromPrepared(payload, proof, {
+      creator,
+      nowUnix: resolvedNowUnix
+    });
+    return {
+      payload,
+      proof,
+      message,
+      effects,
+      proofStageOnly: true,
+      reservationFinalizationRequired: true
+    };
   }
 
   async prepareWithdraw({
@@ -3415,9 +4242,45 @@ export class ClairveilJS {
     return result;
   }
 
-  async createBatchTransferSignDoc({ signer, pubKeyHex, gasLimit, message, memo = "Clairveil batch veiled transfer", expectedCircuitIdentity } = {}) {
+  async createBatchTransferSignDoc({
+    signer,
+    pubKeyHex,
+    gasLimit,
+    message,
+    memo = "Clairveil batch veiled transfer",
+    expectedCircuitIdentity,
+    chainNowUnix,
+    chain_now_unix
+  } = {}) {
+    if (!this.enableExperimentalBatchTransfer) {
+      throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
+    }
     if (!message || typeof message !== "object") {
       throw new Error("MsgBatchTransfer message is required");
+    }
+    if (chainNowUnix != null && chain_now_unix != null &&
+        Number(chainNowUnix) !== Number(chain_now_unix)) {
+      throw new Error("batch transfer chainNowUnix aliases conflict");
+    }
+    const normalizedMessage = MsgBatchTransfer.fromPartial(message);
+    const normalizedSigner = String(signer || "").trim();
+    const creator = String(normalizedMessage.creator || "").trim();
+    if (!normalizedSigner || !creator || creator !== normalizedSigner) {
+      throw new Error("MsgBatchTransfer creator must match the Cosmos sign-doc signer");
+    }
+    if (normalizedMessage.proof.length !== batchTransferProofSize) {
+      throw new Error(`batch proof must be exactly ${batchTransferProofSize} bytes`);
+    }
+    const effects = validateBatchTransferEffectsV1(normalizedMessage);
+    const resolvedNowUnix = normalizedBatchNowUnix(
+      chainNowUnix ?? chain_now_unix ?? Math.floor(Date.now() / 1000)
+    );
+    if (BigInt(resolvedNowUnix) >= effects.expiresAtUnix) {
+      throw new Error("MsgBatchTransfer expired before sign-doc creation");
+    }
+    const encodedMessage = MsgBatchTransfer.encode(normalizedMessage).finish();
+    if (encodedMessage.length > maxBatchTransferMessageBytesV1) {
+      throw new Error(`MsgBatchTransfer exceeds the ${maxBatchTransferMessageBytesV1}-byte hard cap`);
     }
     await this.assertCircuitConfig({ expectedCircuitIdentity });
     return this.buildDirectSignDoc({
@@ -3426,7 +4289,7 @@ export class ClairveilJS {
       gasLimit,
       messages: [{
         typeUrl: msgBatchTransferTypeUrl,
-        value: MsgBatchTransfer.fromPartial(message)
+        value: normalizedMessage
       }],
       memo
     });

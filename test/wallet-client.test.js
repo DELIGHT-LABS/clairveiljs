@@ -116,7 +116,7 @@ test("evmJsonRpc rejects HTTP failures and times out while reading the response 
 });
 
 test("browser preparation rejects conflicting operation-evidence aliases", async () => {
-  const client = browserClient();
+  const client = browserClient({ enableExperimentalBatchTransfer: true });
   client.privacyMaterial = () => ({});
   client.proverAdapter = () => ({});
 
@@ -143,6 +143,17 @@ test("browser preparation rejects conflicting operation-evidence aliases", async
     /expectedRecipientHashes aliases conflict/
   );
   await assert.rejects(
+    () => client.prepareTransferBatch({
+      amounts: ["1uclair"],
+      recipient: "clairs1recipient",
+      reservationManager: {},
+      reservation_manager: {},
+      onPreparedPayload() {},
+      onPreparedProof() {}
+    }),
+    /reservationManager aliases conflict/
+  );
+  await assert.rejects(
     () => client.prepareTransfer({
       amount: "1uclair",
       recipient: "clairs1recipient",
@@ -162,6 +173,40 @@ test("browser client delegates signDirectAndBroadcast to the Cosmos client", asy
   };
 
   assert.deepEqual(await client.signDirectAndBroadcast(input), { ok: true });
+});
+
+test("browser Cosmos transfer preserves the prepared effect for DApp confirmation", async () => {
+  const client = browserClient();
+  client.privacyMaterial = () => ({});
+  client.proverAdapter = () => ({});
+  const payload = { payload_hash: "payload-hash" };
+  const proof = { payload_hash: "payload-hash", proof_hex: "proof" };
+  const message = { creator: "clair1sender" };
+  client.cosmos.prepareTransfer = async () => ({
+    status: "ready",
+    signDoc: { chainId: "clairveil-local-3" },
+    reservation: null,
+    prepared: {
+      planAction: "final_transfer",
+      isFinal: true,
+      amount: "1uclair",
+      recipient: "clairs1recipient",
+    },
+    payload,
+    proof,
+    message,
+    plan: { status: "final_transfer_ready" },
+    privacyAccount: { shielded_address: "clairs1sender" },
+  });
+
+  const prepared = await client.prepareTransfer({
+    amount: "1uclair",
+    recipient: "clairs1recipient",
+  });
+
+  assert.equal(prepared.prepared.payload, payload);
+  assert.equal(prepared.prepared.proof, proof);
+  assert.equal(prepared.prepared.message, message);
 });
 
 test("browser disclosure wrappers forward an explicit asset denom", async () => {
@@ -195,6 +240,45 @@ test("browser disclosure wrappers preserve conflicting denom aliases for transpo
     }),
     /aliases conflict/
   );
+});
+
+test("browser batch disclosure, audit-query, and staged-proof wrappers delegate without dropping fields", async () => {
+  const client = browserClient({ enableExperimentalBatchTransfer: true });
+  const received = [];
+  client.cosmos.decodeBatchUserDisclosure = async input => received.push(["user", input]) && input;
+  client.cosmos.decodeBatchSelfViewDisclosure = async input => received.push(["self", input]) && input;
+  client.cosmos.decodeBatchAuditDisclosure = async input => received.push(["audit", input]) && input;
+  client.cosmos.fetchAuditableBatchTransfers = async input => received.push(["query", input]) && input;
+  client.cosmos.provePreparedBatchTransfer = async input => received.push(["prove", input]) && input;
+
+  const output = { output_index: 2 };
+  await client.decodeBatchUserDisclosure({ output, assetDenom: "uatom", disclosureScalar: 3n });
+  await client.decodeBatchSelfViewDisclosure({ output, asset_denom: "uatom", disclosure_scalar: 4n });
+  await client.decodeBatchAuditDisclosure({ output, assetDenom: "uatom", disclosureScalar: 5n });
+  await client.fetchAuditableBatchTransfers({
+    after: { height: 7, globalSequence: 8, outputIndex: 9 }
+  });
+  const customProver = { proveBatchTransfer: async () => ({}) };
+  await client.provePreparedBatchTransfer({
+    payload: { creator: "clair1sender" },
+    proverAdapter: customProver,
+    operationId: "batch-operation-1",
+    reservation: { reservation_ids: ["reservation-1"] },
+    chainNowUnix: 10,
+    onPreparedProof() {}
+  });
+
+  assert.deepEqual(received.slice(0, 3).map(([, input]) => input.output), [output, output, output]);
+  assert.equal(received[0][1].assetDenom, "uatom");
+  assert.equal(received[1][1].asset_denom, "uatom");
+  assert.equal(received[2][1].disclosureScalar, 5n);
+  assert.deepEqual(received[3][1].after, { height: 7, globalSequence: 8, outputIndex: 9 });
+  assert.equal(received[4][1].proverAdapter, customProver);
+  assert.equal(received[4][1].creator, "clair1sender");
+  assert.equal(received[4][1].operationId, "batch-operation-1");
+  assert.deepEqual(received[4][1].reservation, { reservation_ids: ["reservation-1"] });
+  assert.equal(received[4][1].chainNowUnix, 10);
+  assert.equal(typeof received[4][1].onPreparedProof, "function");
 });
 
 test("browser relay cleanup preserves a frozen transaction build error", async () => {

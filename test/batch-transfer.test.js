@@ -22,7 +22,10 @@ import {
   privacyFixedV1,
   unmarshalDisclosurePlaintextV1
 } from "clairveiljs/protocol-v1";
-import { validatePrivacyScanPageV2 } from "clairveiljs/scan";
+import {
+  createPrivacyScanValidationStateV2,
+  validatePrivacyScanPageV2
+} from "clairveiljs/scan";
 import { createAsyncJobProverAdapter, createHttpProverAdapter } from "clairveiljs/prover";
 import { createClairveilClient } from "clairveiljs/cosmos";
 import {
@@ -149,7 +152,7 @@ async function batchPayload({
   });
 }
 
-function validatedBatchScanOutput(message, payload, index) {
+function validatedBatchScanPage(message, payload) {
   const txHash = new Uint8Array(32).fill(0xab);
   const auditTarget = bytesFromBase64(payload.audit_disclosure_target_pubkey);
   const modeName = mode => [
@@ -172,7 +175,7 @@ function validatedBatchScanOutput(message, payload, index) {
     auditKeyEpoch: payload.audit_key_epoch,
     auditTargetPubkey: auditTarget
   };
-  const page = validatePrivacyScanPageV2({
+  return validatePrivacyScanPageV2({
     scanSchemaVersion: "privacy-scan-v2",
     summaries: [summary],
     outputs: message.outputs.map((entry, outputIndex) => ({
@@ -196,7 +199,10 @@ function validatedBatchScanOutput(message, payload, index) {
     nextCursor: { height: summary.height, globalSequence: summary.globalSequence, outputIndex: message.outputs.length - 1 },
     hasMore: false
   });
-  return page.outputs[index];
+}
+
+function validatedBatchScanOutput(message, payload, index) {
+  return validatedBatchScanPage(message, payload).outputs[index];
 }
 
 test("one-proof batch prover uses the Clairveil main route and binds the response hash", async () => {
@@ -418,6 +424,22 @@ test("Batch V1 typed-scan disclosure decoders bind output index, commitment, pol
     assetDenom: "uclair"
   });
   assert.equal(wrappedAudit.digest_hex, audit.digest_hex);
+  const validatedPage = validatedBatchScanPage(message, payload);
+  let auditableRequest;
+  client.fetchPrivacyScan = async request => {
+    auditableRequest = request;
+    return validatedPage;
+  };
+  const validationState = createPrivacyScanValidationStateV2();
+  const auditablePage = await client.fetchAuditableBatchTransfers({
+    after: { height: 9, globalSequence: 3, outputIndex: 0 },
+    validationState
+  });
+  assert.deepEqual(auditableRequest.eventTypes, ["batch_transfer"]);
+  assert.equal(auditableRequest.validationState, validationState);
+  assert.equal(auditablePage.summaries.length, 1);
+  assert.equal(auditablePage.outputs.length, message.outputs.length);
+  assert.equal(auditablePage.outputs.every(entry => entry.event_type === "batch_transfer"), true);
   await assert.rejects(
     () => client.decodeBatchUserDisclosure({
       output: output(1),
@@ -512,10 +534,7 @@ test("one-proof batch signer validates the complete effect and global secret fre
 
 test("one-proof batch fixture defines the batch boundary and representative E2E", fixtureTestOptions, async () => {
   const contract = readFixture(batchTransferConformanceFixtureName);
-  assert.ok([
-    "clairveil.batch-transfer.contract.v1",
-    "clairveil.batch-transfer.session3b.v1"
-  ].includes(contract.schema_version));
+  assert.equal(contract.schema_version, "clairveil.batch-transfer.contract.v1");
   assert.equal(contract.payload_version, "batch-transfer-payload-v1");
   assert.equal(contract.proof_version, "batch-transfer-proof-v1");
   assert.equal(contract.circuit_set_id, "privacy-note-v1");
@@ -543,6 +562,7 @@ test("one-proof batch fixture defines the batch boundary and representative E2E"
   assert.equal(contract.restart_retry.item_success_requires_output_evidence, true);
 
   for (const vector of contract.cases) {
+    assert.ok(["enabled", "disabled"].includes(vector.self_view), vector.id);
     const inputTotal = vector.input_amounts.reduce((sum, amount) => sum + BigInt(amount), 0n);
     const paymentTotal = vector.payment_amounts.reduce((sum, amount) => sum + BigInt(amount), 0n);
     assert.ok(vector.input_amounts.length >= 1 && vector.input_amounts.length <= contract.max_inputs, vector.id);
@@ -567,7 +587,7 @@ test("one-proof batch fixture defines the batch boundary and representative E2E"
       paymentAmounts: vector.payment_amounts,
       disclosureModes: vector.disclosure_modes,
       outputRoles: vector.expected_output_roles,
-      selfViewEnabled: vector.self_view_disclosure === "enabled"
+      selfViewEnabled: vector.self_view === "enabled"
     });
     const proof = {
       version: preparedBatchTransferProofVersion,
@@ -580,7 +600,7 @@ test("one-proof batch fixture defines the batch boundary and representative E2E"
     assert.equal(message.outputs.length, vector.expected_output_roles.length, vector.id);
     assert.deepEqual(payload.outputs.map(output => output.kind), vector.expected_output_roles, vector.id);
     assert.equal(
-      message.outputs.every(output => output.selfViewDisclosurePayload.length === (vector.self_view_disclosure === "enabled" ? 472 : 0)),
+      message.outputs.every(output => output.selfViewDisclosurePayload.length === (vector.self_view === "enabled" ? 472 : 0)),
       true,
       vector.id
     );

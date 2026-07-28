@@ -28,6 +28,16 @@ export const withdrawProofRequestVersion = "v2";
 export const withdrawProofResponseVersion = "v2";
 /** Match the bounded Go prover transport response policy. */
 export const defaultProverResponseMaxBytes = 1 << 20;
+const proverErrorResponseVersion = "v1";
+const proverErrorCodes = new Set([
+  "invalid_request",
+  "method_not_allowed",
+  "not_found",
+  "unauthorized",
+  "unavailable",
+  "proof_failed",
+  "busy"
+]);
 
 function normalizeBaseURL(baseURL) {
   const url = new URL(String(baseURL || ""));
@@ -37,6 +47,13 @@ function normalizeBaseURL(baseURL) {
   if (url.protocol === "http:" && !isLoopbackProverHost(url.hostname)) {
     throw new Error(`prover transport requires HTTPS for non-loopback endpoint ${JSON.stringify(url.host)}`);
   }
+  return url;
+}
+
+function proverRequestURL(baseURL, path) {
+  const url = new URL(path, baseURL);
+  url.search = "";
+  url.hash = "";
   return url;
 }
 
@@ -217,7 +234,7 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
   }
 
   try {
-    const response = await fetchImpl(new URL(path, baseURL), {
+    const response = await fetchImpl(proverRequestURL(baseURL, path), {
       method: "POST",
       headers,
       body: serializedBody ?? JSON.stringify(body),
@@ -226,7 +243,7 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
     });
     const text = await readBoundedResponseText(response, maxResponseBytes);
     if (!response.ok) {
-      throw new Error(`prover request failed with status ${response.status}: ${text}`);
+      throw proverRequestError(response.status, text);
     }
     try {
       return parseStrictJSON(text);
@@ -256,6 +273,40 @@ function assertOnlyResponseFields(value, label, fields) {
   const unknown = Object.keys(value).filter(key => !allowed.has(key));
   if (unknown.length) throw new Error(`${label} contains unknown JSON field ${JSON.stringify(unknown[0])}`);
   return value;
+}
+
+function proverRequestError(status, responseText) {
+  let code = "";
+  let retryable = false;
+  try {
+    const response = assertOnlyResponseFields(
+      parseStrictJSON(responseText),
+      "prover error response",
+      ["version", "code", "message", "retryable"]
+    );
+    if (response.version !== proverErrorResponseVersion) {
+      throw new Error("unsupported prover error response version");
+    }
+    code = String(response.code || "");
+    if (!proverErrorCodes.has(code)) throw new Error("unsupported prover error response code");
+    if (typeof response.message !== "string" || !response.message.trim()) {
+      throw new Error("prover error response message is required");
+    }
+    retryable = response.retryable === true;
+    if (retryable !== (code === "busy")) {
+      throw new Error("invalid prover error retryability");
+    }
+  } catch {
+    code = "";
+    retryable = false;
+  }
+  const error = new Error(
+    `prover request failed with status ${status}${code ? ` (${code})` : ""}`
+  );
+  error.status = status;
+  error.proverCode = code;
+  error.retryable = retryable;
+  return error;
 }
 
 function normalizeProofShape(proof, kind, expectedVersion) {
@@ -480,7 +531,7 @@ export function createAsyncJobProverAdapter({
         return unwrap(request, response);
       }
       if (status === "failed") {
-        throw wrapProverError(new Error(job.error || job.message || `prover job ${jobId} failed`));
+        throw wrapProverError(new Error(`prover job ${jobId} failed`));
       }
       await sleepImpl(intervalMs);
     }

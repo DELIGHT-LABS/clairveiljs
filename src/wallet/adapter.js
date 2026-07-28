@@ -204,7 +204,15 @@ export function createKeplrWalletAdapter({ keplr, chainId, address, accountPrefi
         throw new Error("Keplr signDirect is required");
       }
       const resolved = await key();
-      return keplr.signDirect(chainId, resolved.bech32Address, signDoc);
+      return keplr.signDirect(
+        chainId,
+        resolved.bech32Address,
+        signDoc,
+        {
+          preferNoSetFee: true,
+          preferNoSetMemo: true
+        }
+      );
     }
   });
 }

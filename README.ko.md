@@ -6,7 +6,7 @@ English documentation: [README.md](./README.md)
 
 이 패키지는 Clairveil 전용 privacy primitive와 DApp 친화적인 API를 제공합니다.
 
-- Telescope로 생성한 `MsgDeposit`, `MsgTransfer`, `MsgWithdraw`, privacy query protobuf binding
+- Telescope로 생성한 `MsgDeposit`, `MsgTransfer`, `MsgBatchTransfer`, `MsgWithdraw`, privacy query protobuf binding
 - Clairveil transaction type URL과 CosmJS `Registry` 생성
 - privacy root signing message helper
 - 브라우저 친화 crypto primitive (`@noble/hashes`, `@noble/ciphers`)
@@ -19,6 +19,7 @@ English documentation: [README.md](./README.md)
 - memory/localStorage 기반 note store
 - transfer/withdraw planner와 안정적인 `ClairveilError` 코드
 - prepared transfer/withdraw/relay withdraw payload builder
+- experimental feature gate가 적용된 v0.2 one-proof batch transfer 준비 (`MsgBatchTransfer`, 입력 1~16개, 출력 1~32개)
 - `/v1/prover/transfer`, `/v1/prover/withdraw`, `/v1/proofs/batch-transfer` HTTP prover adapter
 - Keplr `signDirect`용 sign doc 생성, signed tx 조립, broadcast
 - EIP-1193 wallet용 Clairveil-compatible `IPrivacy` EVM precompile calldata adapter
@@ -65,6 +66,67 @@ Public consumer는 내부 파일 경로를 직접 import하지 말고 package ex
 - MetaMask/EVM: [`examples/minimal-metamask-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-metamask-flow.js)
 
 두 예제는 wallet privacy material derivation, deposit 준비, note scan, transfer 준비, broadcast 흐름을 SDK surface로 수행합니다. Keplr/Cosmos 예제는 Cosmos `MsgDeposit`에 `DepositCircuit` proof가 포함되기 때문에 `depositProofProvider`가 필요합니다.
+
+## Experimental v0.2 One-Proof Batch Transfer
+
+이 API는 experimental이며 기본값이 비활성화되어 있습니다. Downstream 애플리케이션이 required Go fixture conformance와 5-shape localnet matrix를 독립적으로 통과한 뒤에만 활성화하세요.
+
+```js
+const clairveil = createClairveilClient({
+  rpc,
+  rest,
+  chainId,
+  enableExperimentalBatchTransfer: true
+});
+```
+
+`prepareTransferBatch(...)`는 Clairveil v0.2 `BatchTransfer` 계약을 구현합니다. 입력 1~16개를 계획하고 원자적으로 예약하며, 순서가 고정된 payment/change/padding 출력 1~32개를 만들고, 명시적으로 선택한 `proverAdapter.proveBatchTransfer(payload)`를 정확히 한 번 호출해 Cosmos `MsgBatchTransfer` 한 건을 반환합니다. Payment를 여러 `MsgTransfer` proof로 확장하지 않고 prover 자동 failover도 하지 않습니다.
+
+일반 `prepareTransfer(...)`는 공식 native 2×2 `MsgTransfer` 경로로 계속 지원되며 native 2×2는 deprecated가 아닙니다. Clairveil의 기존 multi-message `transfer-batch` orchestration은 별도 protocol 의미를 유지하고 `prepareTransferBatch(...)`의 alias가 아닙니다.
+
+여러 수신자와 출력별 disclosure에는 `payments`를 사용합니다. `outputMode: "compact"`는 payment와 선택적 change만 만들고, `outputMode: "exact32"`는 payment/change 뒤에 명시적인 0-value padding을 추가합니다.
+
+```js
+const prepared = await clairveil.prepareTransferBatch({
+  material,
+  payments: [
+    {
+      itemId: "invoice-1",
+      amount: "5uclair",
+      recipient: recipientA,
+      userPrivacyPolicy: "all-private",
+      userDisclosureMode: "none"
+    },
+    {
+      itemId: "invoice-2",
+      amount: "7uclair",
+      recipient: recipientB,
+      userPrivacyPolicy: "amount",
+      userDisclosureMode: "recipient-encrypted",
+      userDisclosureTargetPubKeyHex: recipientDisclosurePubKeyHex
+    }
+  ],
+  outputMode: "exact32",
+  proverAdapter,
+  reservationManager,
+  chainNowUnix: latestChainBlockTimeUnix,
+  expiresAtUnix: latestChainBlockTimeUnix + 1800,
+  async onPreparedPayload(payload) {
+    await privateStore.write("batch-payload", payload, { mode: 0o600 });
+  },
+  async onPreparedProof(proof) {
+    await privateStore.write("batch-proof", proof, { mode: 0o600 });
+  }
+});
+
+// proof 한 건과 MsgBatchTransfer 한 건입니다.
+console.log(prepared.prepared.inputCount, prepared.prepared.outputCount);
+console.log(prepared.operationEvidence.expected_outputs);
+```
+
+실행 가능한 batch에는 `reservationManager`, `onPreparedPayload`, `onPreparedProof`가 모두 필수입니다. Callback 저장 구현은 caller 책임이며 private artifact를 암호화해야 합니다. Local file은 mode `0600`이어야 합니다. 두 checkpoint callback 중 하나라도 시작된 뒤 prepare가 실패하면 SDK는 재사용 가능한 input을 해제하지 않고 reservation 전체를 `ManualReview`로 격리합니다. `provePreparedBatchTransfer(...)`는 proof 단계만 복구하는 primitive입니다. 재시작 후에는 저장한 정확한 payload, 원래 operation ID와 reservation batch, proof checkpoint callback을 모두 넘겨야 합니다. 이 메서드가 반환한 message만으로 broadcast하면 안 되며, 원래 operation을 복원해 동일한 sign-doc/evidence와 reservation `ProofReady` 전환을 원자적으로 완료해야 합니다. 서명된 transaction까지 포함한 완전한 재시작 안전 흐름에는 reference-payroll artifact/retry API를 사용하세요. Retry 전에는 저장된 transaction hash와 모든 input nullifier를 조회하고, 이전에 저장한 정확한 TxRaw bytes만 재전송하며 atomic output 일부를 다시 만들거나 재시도하면 안 됩니다.
+
+Batch 준비는 통합 `privacy-scan-v2`를 요구하며 ciphertext가 없는 legacy event로 fallback하지 않고 fail-closed합니다. SDK는 같은 root의 Merkle snapshot을 검증하고, proving 또는 proof 단계 복구 시 active circuit, authoritative asset mapping, audit identity, disclosure capability를 다시 확인하며, proving 전후 모든 nullifier를 확인하고 proof version/request hash/circuit identity를 검증합니다. 중단 없이 완료된 `prepareTransferBatch(...)`는 reservation 전체를 원자적으로 `ProofReady`로 전환합니다. 반면 proof 단계 복구 결과는 caller가 복원된 operation workflow를 완료할 때까지 `reservationFinalizationRequired: true`를 유지합니다. `operationEvidence`는 payment별 output index, commitment, recipient hash, amount/asset, user/audit/self-view disclosure digest를 기록합니다. Typed output reconcile에는 `fetchAuditableBatchTransfers(...)`, `decodeBatchUserDisclosure(...)`, `decodeBatchSelfViewDisclosure(...)`, `decodeBatchAuditDisclosure(...)`를 사용하고, 연속 audit-query cursor page 사이에는 같은 `createPrivacyScanValidationStateV2()` 객체를 유지하세요.
 
 ## 주소와 Prefix
 
@@ -335,7 +397,7 @@ await relayerClient.signDirectAndBroadcast({
 
 ### Note reservation
 
-동시에 여러 private transaction을 준비할 수 있는 wallet/DApp은 `prepareTransfer(...)`, `prepareWithdraw(...)`, `prepareRelayWithdraw(...)`에 reservation manager를 넘기세요. Manager는 이미 예약된 note를 planner 입력에서 제외하고, proof 생성 중 선택된 note를 예약하며, SDK proof/payload 생성 중 lease를 갱신하고, prepared result에 reservation metadata를 돌려줍니다. Prepared result가 wallet UI 또는 relayer flow로 넘어간 뒤에는 caller가 `heartbeatLease(...)`/`renewLease(...)`로 lease를 유지할 수 있습니다.
+동시에 여러 private transaction을 준비할 수 있는 wallet/DApp은 `prepareTransfer(...)`, `prepareWithdraw(...)`, `prepareRelayWithdraw(...)`에 reservation manager를 넘기세요. `prepareTransferBatch(...)`에는 항상 필수입니다. Manager는 이미 예약된 note를 planner 입력에서 제외하고, proof 생성 중 선택된 note를 예약하며, SDK proof/payload 생성 중 lease를 갱신하고, prepared result에 reservation metadata를 돌려줍니다. Prepared result가 wallet UI 또는 relayer flow로 넘어간 뒤에는 caller가 `heartbeatLease(...)`/`renewLease(...)`로 lease를 유지할 수 있습니다.
 
 ```js
 import {
@@ -423,7 +485,7 @@ SDK는 payload 준비 중 reservation을 `Reserved -> Proving -> ProofReady`로 
 - Relay payload 검증과 relay signing에는 최신 chain block time에서 얻은 `chainNowUnix`가 필수입니다. 브라우저 시간을 대신 쓰지 말고 relay broadcast 직전에 다시 조회하며, 값을 얻지 못하면 제출을 거부하세요.
 - Submitted EVM transaction receipt가 실패하면 nullifier 상태를 확인한 뒤 `ConfirmedSpent`, `ReplanRequired`, `ManualReview` 중 하나로 정리하세요. `Submitted` 또는 `Unknown` reservation은 `markReplanRequired(...)`에 `nullifierUnspentConfirmed: true`와 `txAbsentOrFailedConfirmed: true`를 모두 넣어야 `ReplanRequired`로 이동할 수 있습니다. `checkedHeight`와 `txHashChecked`에는 해당 tx 조회의 audit trail을 남기세요.
 
-Reservation은 operation success evidence도 저장할 수 있습니다. Nullifier spent는 입력 note가 소비됐다는 뜻이지만, payroll/payment 성공은 저장된 tx identity와 일치하는 증거 및 expected output commitment, audit disclosure digest, recipient hash, amount hash, denom, 그리고 필요한 경우 item index가 모두 일치해야 합니다. `markProofReady(...)`는 `expectedOutputCommitment`, `expectedDisclosureDigest`, `expectedRecipientHash`, `expectedAmount`, `expectedAmountHash`, `expectedDenom`, `batchItemIndex`, `batchItemIndexKnown`, `operationSuccessEvidenceRequired`를 받습니다. Payroll/batch transfer는 `batchItemIndexKnown: true`로 두고, direct integration은 item position이 success predicate가 아닐 때만 false로 둘 수 있습니다. High-level transfer prepare는 note-lock evidence를 자동으로 채우지만, recipient hash와 amount hash까지 포함한 전체 success predicate가 있을 때만 operation success 판정을 켭니다. Go와 같은 SHA-256 recipient/amount hash는 `clairveiljs/reservation`의 `hashRecipient(recipient, { shieldedPrefix })`, `hashAmount(denom, amount)` helper로 만드세요. 두 helper는 빈 identity field를 거절하며, amount helper는 non-negative uint64 최소 단위 amount만 canonical `denom:amount` 해시로 만듭니다.
+Reservation은 operation success evidence도 저장할 수 있습니다. Nullifier spent는 입력 note가 소비됐다는 뜻이지만 payroll/payment 성공에는 저장된 tx identity와 output evidence까지 일치해야 합니다. `markProofReady(...)`는 direct item용 `expectedOutputCommitment`, `expectedDisclosureDigest`, `expectedRecipientHash`, `expectedAmount`, `expectedAmountHash`, `expectedDenom`, `batchItemIndex`, `batchItemIndexKnown` 등을 받습니다. One-proof 고수준 batch 경로는 대신 모든 input reservation에 하나의 `expectedOperationEvidenceHash`를 저장하고 전체 `operationEvidence.expected_outputs` 목록을 별도로 반환합니다. 각 entry는 item ID, output index, commitment, recipient hash, amount/asset, user/audit/self-view disclosure digest를 결합합니다. Item 성공을 보고하기 전에 aggregate hash와 모든 per-item entry를 검증해야 합니다. Go와 같은 SHA-256 recipient/amount hash는 `clairveiljs/reservation`의 `hashRecipient(recipient, { shieldedPrefix })`, `hashAmount(denom, amount)` helper로 만드세요. 두 helper는 빈 identity field를 거절하며, amount helper는 non-negative uint64 최소 단위 amount만 canonical `denom:amount` 해시로 만듭니다.
 
 Scan migration에서는 최신 nullifier 확인이 명시적으로 `nullifierStatus: "unspent"`인 note만 spendable로 취급하세요. 이전 cache의 `isSpent: false`, 누락·malformed 응답, query 실패는 unverified이므로 다시 검증하기 전에는 planner에서 제외해야 합니다.
 
@@ -469,7 +531,7 @@ Release handoff 또는 CI에서는 strict command를 사용하세요. fixture가
 npm run test:conformance:required
 ```
 
-`prepublishOnly`는 strict conformance command를 실행합니다.
+`prepublishOnly`는 `verify:release:integration`을 실행합니다. Package 검사, required conformance fixture, 필수 5-shape localnet one-proof matrix를 모두 실행하며 wallet, deposit-proof, node, prover 설정이 없으면 skip하지 않고 실패합니다.
 
 검증 범위:
 
@@ -481,9 +543,9 @@ npm run test:conformance:required
 - disclosure decode
 - relay withdraw message handoff behavior
 
-## Optional Local Node E2E
+## Local Node E2E와 Release Gate
 
-Local node e2e는 `prepublishOnly`의 필수 gate가 아닙니다. Clairveil node와 prover를 실행하는 것은 chain repository의 책임이고, SDK는 해당 서비스에 붙었을 때 전체 wallet flow를 수행할 수 있음을 증명합니다.
+Local node E2E는 일반 개발에서는 opt-in이지만 `npm publish`에는 필수입니다. Release 환경은 Clairveil node, 명시적으로 선택한 prover 한 곳, wallet credential, deposit-proof provider를 제공해야 합니다.
 
 현재 local e2e scope:
 

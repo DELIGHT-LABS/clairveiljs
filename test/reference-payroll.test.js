@@ -332,7 +332,8 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   await assert.doesNotReject(() => assertOneProofPayrollNullifiersUnspent(prepared.payload, async values => new Map(values.map(value => [value, false]))));
   await assert.rejects(
     () => assertOneProofPayrollNullifiersUnspent(prepared.payload, async values => new Map(values.map(value => [value, true]))),
-    /spent, missing, or has an invalid status/
+    error => /spent, missing, or has an invalid status/.test(error.message) &&
+      !error.message.includes(prepared.input_nullifier_hexes[0])
   );
   const proofCalls = [];
   const execution = await provePreparedOneProofPayrollOperation(prepared, {

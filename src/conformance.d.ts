@@ -2,7 +2,6 @@ export const conformanceFixtureRelativePath: string;
 export const defaultConformanceFixtureDir: string;
 export const defaultConformanceFixtureNames: readonly string[];
 export const batchTransferConformanceFixtureName: string;
-export const legacyBatchTransferConformanceFixtureName: string;
 
 export interface ClairveilConformanceFixtureOptions {
   fixtureDir?: string;

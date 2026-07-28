@@ -52,11 +52,22 @@ export function plannerStatusToErrorCode(status) {
 
 export function wrapProverError(error) {
   const message = error?.message || String(error);
+  const details = { cause: error };
+  if (Number.isInteger(error?.status)) details.status = error.status;
+  if (typeof error?.proverCode === "string" && error.proverCode) details.proverCode = error.proverCode;
+  if (typeof error?.retryable === "boolean") details.retryable = error.retryable;
+  const wrapped = code => {
+    const result = new ClairveilError(code, message, details);
+    if (details.status !== undefined) result.status = details.status;
+    if (details.proverCode !== undefined) result.proverCode = details.proverCode;
+    if (details.retryable !== undefined) result.retryable = details.retryable;
+    return result;
+  };
   if (/timed out|abort/i.test(message)) {
-    return new ClairveilError(ClairveilErrorCode.PROVER_TIMEOUT, message, { cause: error });
+    return wrapped(ClairveilErrorCode.PROVER_TIMEOUT);
   }
-  if (/status\s+5\d\d|unavailable|ECONNREFUSED|fetch failed/i.test(message)) {
-    return new ClairveilError(ClairveilErrorCode.PROVER_UNAVAILABLE, message, { cause: error });
+  if (error?.retryable === true || /status\s+(?:429|5\d\d)|unavailable|ECONNREFUSED|fetch failed/i.test(message)) {
+    return wrapped(ClairveilErrorCode.PROVER_UNAVAILABLE);
   }
-  return new ClairveilError(ClairveilErrorCode.PROVER_REJECTED, message, { cause: error });
+  return wrapped(ClairveilErrorCode.PROVER_REJECTED);
 }

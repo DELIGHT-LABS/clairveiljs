@@ -8,7 +8,7 @@ import {
   parseCoin
 } from "../core/note.js";
 import {
-  selectTransferInputBatch,
+  selectBatchTransferInputs,
   selectTransferInputs,
   summarizeSpendableNotesByDenom
 } from "./payload.js";
@@ -17,6 +17,8 @@ import {
   plannerStatusToErrorCode
 } from "../core/errors.js";
 import { computeAssetIdV1 } from "./protocol-v1.js";
+
+const maxShieldedAmount = (1n << 64n) - 1n;
 
 function coinString(amount, denom) {
   return `${amount.toString()}${denom}`;
@@ -160,6 +162,16 @@ export function planTransferBatchNotes({ notes, amounts = [], denom = defaultAss
       selections: []
     };
   }
+  if (coins.length > 32) {
+    return {
+      status: "batch_capacity_exceeded",
+      canBuildTx: false,
+      action: "split_batch_by_output_capacity",
+      message: "One-proof batch transfer supports at most 32 outputs.",
+      facts,
+      selections: []
+    };
+  }
   if (coins.some(coin => coin.denom !== batchDenom)) {
     return {
       status: "mixed_denom_unsupported",
@@ -170,12 +182,15 @@ export function planTransferBatchNotes({ notes, amounts = [], denom = defaultAss
       selections: []
     };
   }
-  if (coins.some(coin => BigInt(coin.amount) <= 0n)) {
+  if (coins.some(coin => {
+    const amount = BigInt(coin.amount);
+    return amount <= 0n || amount > maxShieldedAmount;
+  })) {
     return {
       status: "invalid_amount",
       canBuildTx: false,
       action: "enter_positive_amounts",
-      message: "Every batch transfer amount must be greater than 0.",
+      message: "Every batch transfer amount must be within the positive uint64 NoteV1 range.",
       facts,
       selections: []
     };
@@ -192,19 +207,33 @@ export function planTransferBatchNotes({ notes, amounts = [], denom = defaultAss
   }
 
   try {
-    const selections = selectTransferInputBatch(notes, batchDenom, coins.map(coin => coin.amount));
-    const selectedTotal = selections.reduce((sum, selection) => sum + selection.total, 0n);
+    const selection = selectBatchTransferInputs(notes, batchDenom, requestedTotal);
+    if (!selection.isFinal || selection.inputs.length < 1 || selection.inputs.length > 16) {
+      throw new Error("one-proof batch transfer requires a spendable 1..16-input selection");
+    }
+    const outputCount = coins.length + (selection.total > requestedTotal ? 1 : 0);
+    if (outputCount > 32) {
+      return {
+        status: "batch_capacity_exceeded",
+        canBuildTx: false,
+        action: "reduce_batch_output_count",
+        message: "One-proof batch transfer supports at most 32 outputs including change.",
+        facts,
+        selections: []
+      };
+    }
     return {
       status: "batch_transfer_ready",
       canBuildTx: true,
-      action: "build_multi_message_transfer",
-      message: "The selected notes can satisfy the batch without reusing inputs.",
+      action: "build_one_proof_batch_transfer",
+      message: "The selected notes can satisfy one atomic one-proof batch transfer.",
       facts: {
         ...facts,
-        selectedInputTotal: coinString(selectedTotal, batchDenom),
-        selectedInputTotalValue: selectedTotal.toString()
+        selectedInputTotal: coinString(selection.total, batchDenom),
+        selectedInputTotalValue: selection.total.toString()
       },
-      selections
+      selection,
+      selections: [selection]
     };
   } catch (error) {
     return {

@@ -10,14 +10,12 @@ import {
   computeNoteCommitmentHex,
   computeNoteNullifierHex,
   decryptWithRootSeed,
-  normalizeFoundNote,
-  normalizeNote
+  normalizeFoundNote
 } from "../core/note.js";
 import {
   bytesFromBase64,
   bytesFromHex,
-  hexFromBytes,
-  utf8String
+  hexFromBytes
 } from "../core/browser-crypto.js";
 import {
   activeCircuitSetIdV1,
@@ -72,38 +70,8 @@ function stripQuotes(value) {
   return text;
 }
 
-function parseBigIntField(text, key) {
-  const match = new RegExp(`"${key}"\\s*:\\s*(-?\\d+)`).exec(text);
-  if (!match) {
-    throw new Error(`note JSON is missing ${key}`);
-  }
-  return BigInt(match[1]);
-}
-
-function parseStringField(text, key) {
-  const match = new RegExp(`"${key}"\\s*:\\s*("(?:\\\\.|[^"\\\\])*")`).exec(text);
-  if (!match) return "";
-  return JSON.parse(match[1]);
-}
-
 export function parseNoteBytes(bytes) {
-  try {
-    return unmarshalNotePlaintextV1(bytes);
-  } catch {
-    // Historical scan events can be retained locally, but all current
-    // Clairveil 0.2.0 network payloads take the fixed-binary branch above.
-  }
-  const text = utf8String(bytes).trim();
-  return normalizeNote({
-    rsx: parseBigIntField(text, "rsx"),
-    rsy: parseBigIntField(text, "rsy"),
-    rvx: parseBigIntField(text, "rvx"),
-    rvy: parseBigIntField(text, "rvy"),
-    am: parseBigIntField(text, "am"),
-    as: parseBigIntField(text, "as"),
-    rn: parseBigIntField(text, "rn"),
-    mm: parseStringField(text, "mm")
-  });
+  return unmarshalNotePlaintextV1(bytes);
 }
 
 function foundNoteFromEvent(note, event) {

@@ -919,9 +919,9 @@ export async function assertOneProofPayrollNullifiersUnspent(payload, checkNulli
   const statusFor = nullifier => statuses instanceof Map
     ? statuses.get(nullifier) ?? statuses.get(`0x${nullifier}`)
     : statuses?.[nullifier] ?? statuses?.[`0x${nullifier}`];
-  for (const nullifier of nullifiers) {
+  for (const [index, nullifier] of nullifiers.entries()) {
     const value = statusFor(nullifier);
-    if (value !== false) throw new Error(`one-proof payroll input nullifier ${nullifier} is spent, missing, or has an invalid status`);
+    if (value !== false) throw new Error(`one-proof payroll input nullifier at index ${index} is spent, missing, or has an invalid status`);
   }
   return nullifiers;
 }
@@ -1086,7 +1086,7 @@ export async function prepareOneProofPayrollReservation(reservationManager, prep
     } catch {
       try {
         await reservationManager.markManualReview(batch.reservation_ids, {
-          error: error?.message || "one-proof payroll reservation claim failed",
+          error: "payroll_reservation_claim_failed",
           metadata: { reconcile_reason: "payroll_reservation_claim_failed" }
         });
       } catch {
@@ -1820,9 +1820,9 @@ function normalizedNullifierStatuses(nullifiers, statuses) {
   const values = new Map();
   const add = (raw, used) => {
     const nullifier = canonicalDigest(raw, "one-proof payroll nullifier status key");
-    if (typeof used !== "boolean") throw new Error(`one-proof payroll nullifier ${nullifier} has an invalid status`);
+    if (typeof used !== "boolean") throw new Error("one-proof payroll nullifier has an invalid status");
     if (values.has(nullifier) && values.get(nullifier) !== used) {
-      throw new Error(`one-proof payroll nullifier ${nullifier} has conflicting statuses`);
+      throw new Error("one-proof payroll nullifier has conflicting statuses");
     }
     values.set(nullifier, used);
   };
@@ -1833,8 +1833,8 @@ function normalizedNullifierStatuses(nullifiers, statuses) {
   } else {
     throw new Error("one-proof payroll nullifier status response must be a Map or object");
   }
-  return nullifiers.map(nullifier => {
-    if (!values.has(nullifier)) throw new Error(`one-proof payroll nullifier status is missing ${nullifier}`);
+  return nullifiers.map((nullifier, index) => {
+    if (!values.has(nullifier)) throw new Error(`one-proof payroll nullifier status is missing at index ${index}`);
     return Object.freeze({ nullifier, spent: values.get(nullifier) });
   });
 }
@@ -1908,10 +1908,6 @@ export async function reconcileOneProofPayrollOperationEvidence({
   });
 }
 
-function reconciliationReason(reconciliation) {
-  return reconciliation.items.find(item => item.reason)?.reason || `one-proof payroll reconciliation is ${reconciliation.status}`;
-}
-
 async function markPayrollReservationsManualReview(reservationManager, reservationSet, reservationBatch, operationEvidence, reconciliation) {
   if (reservationStatusesAre(reservationSet.reservations, "ManualReview")) {
     return { action: "ManualReview", reservations: reservationSet.reservations };
@@ -1921,7 +1917,7 @@ async function markPayrollReservationsManualReview(reservationManager, reservati
   }
   const reservations = await reservationManager.markManualReview(reservationSet.reservationIDs, {
     leaseToken: reservationBatch.lease_token,
-    error: reconciliationReason(reconciliation),
+    error: "payroll_operation_evidence_manual_review",
     metadata: payrollReservationMetadata(operationEvidence, {
       reconcile_reason: "payroll_operation_evidence_manual_review",
       payroll_reconciliation_status: reconciliation.status

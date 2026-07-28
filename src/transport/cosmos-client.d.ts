@@ -1,4 +1,8 @@
-import type { PrivacyScanValidationStateSnapshotV2 } from "../privacy/scan.js";
+import type {
+  PrivacyScanValidationStateV2,
+  PrivacyScanValidationStateSnapshotV2,
+  ValidatedPrivacyScanPageV2
+} from "../privacy/scan.js";
 
 export * from "../core/crypto.js";
 export * from "../core/disclosure.js";
@@ -75,8 +79,12 @@ import type {
   WithdrawMessage,
   WithdrawMessageBuildResult
 } from "../privacy/payload.js";
+import type {
+  PreparedBatchTransferPayload,
+  PreparedBatchTransferProof
+} from "../privacy/batch-transfer.js";
 import type { TransferBatchPlan, TransferPlan, WithdrawPlan } from "../privacy/planner.js";
-import type { ProverAdapter } from "../privacy/prover.js";
+import type { BatchTransferProverAdapter, ProverAdapter } from "../privacy/prover.js";
 import type { NoteReservationManager, ReservationBatch } from "../privacy/reservation.js";
 import type { ScanResult } from "../privacy/scan.js";
 import type { VerifiedCommitmentPathSnapshot } from "../privacy/merkle-path.js";
@@ -178,6 +186,10 @@ type RequiredReservationBatchBinding =
   | { reservation: ReservationBatch; reservationBatch?: ReservationBatch | null; reservation_batch?: ReservationBatch | null }
   | { reservation?: ReservationBatch | null; reservationBatch: ReservationBatch; reservation_batch?: ReservationBatch | null }
   | { reservation?: ReservationBatch | null; reservationBatch?: ReservationBatch | null; reservation_batch: ReservationBatch };
+
+type RequiredBatchTransferOperationIDBinding =
+  | { operationId: string; operation_id?: string }
+  | { operationId?: string; operation_id: string };
 
 export type ReservationBroadcastBinding =
   | (RequiredReservationManagerBinding & RequiredReservationBatchBinding)
@@ -305,6 +317,9 @@ export interface TypedPrivacyScanQuery {
   max_encoded_bytes?: Uint64CursorInput;
   eventTypes?: string[];
   event_types?: string[];
+  /** Retain the same mutable state while fetching consecutive cursor pages. */
+  validationState?: PrivacyScanValidationStateV2;
+  validation_state?: PrivacyScanValidationStateV2;
 }
 
 export interface CommitmentPathsAtRootQuery {
@@ -400,6 +415,9 @@ export interface ClairveilClientOptions {
   queryRetry?: QueryRetryOptions | false;
   nullifierFailover?: boolean;
   expectedCircuitIdentity?: CircuitSetIdentityV1;
+  /** Explicit downstream gate required until this integration passes its own localnet matrix. */
+  enableExperimentalBatchTransfer?: boolean;
+  enable_experimental_batch_transfer?: boolean;
 }
 
 export interface QueryRetryOptions {
@@ -455,9 +473,20 @@ export interface PreparedTransfer extends ReservationReconciliationState {
 
 export interface PreparedTransferBatchSummary {
   planAction: "batch_transfer";
+  payments: Array<{
+    itemId: string;
+    amount: CoinString;
+    recipient: ShieldedAddress;
+    privacyPolicy: string;
+    disclosureMode: string;
+  }>;
   amounts: CoinString[];
-  recipient: ShieldedAddress;
-  selectedInputTotals: string[];
+  /** Present only when every payment has the same recipient. */
+  recipient?: ShieldedAddress;
+  outputMode: "compact" | "exact32";
+  selectedInputTotal?: string;
+  inputCount?: number;
+  outputCount?: number;
   reservation?: ReservationBatch | null;
 }
 
@@ -466,9 +495,11 @@ export interface PreparedTransferBatch extends ReservationReconciliationState {
   plan: TransferBatchPlan;
   scan: ScanResult;
   signDoc?: SignDocBase64;
-  payloads?: PreparedTransferPayload[];
-  proofs?: PreparedTransferProof[];
-  messages?: TransferMessage[];
+  payload?: PreparedBatchTransferPayload;
+  proof?: PreparedBatchTransferProof;
+  message?: MsgBatchTransferMessage;
+  operationEvidence?: BatchTransferOperationEvidence;
+  operationEvidenceHash?: Hex;
   reservation?: ReservationBatch | null;
   prepared?: PreparedTransferBatchSummary;
   privacyAccount: PrivacyAccountSummary;
@@ -647,17 +678,145 @@ export type BatchOperationEvidenceHashes =
     }
   | (BatchRecipientHashEvidence & BatchAmountHashEvidence);
 
+export const batchTransferOperationEvidenceVersion: "batch-transfer-operation-evidence-v1";
+
+export interface TransferBatchPaymentInput {
+  itemId?: string;
+  item_id?: string;
+  amount: CoinString;
+  recipient?: ShieldedAddress;
+  recipientAddress?: ShieldedAddress;
+  recipient_address?: ShieldedAddress;
+  privacyPolicy?: string | number;
+  privacy_policy?: string | number;
+  userPrivacyPolicy?: string | number;
+  user_privacy_policy?: string | number;
+  disclosureMode?: string | number;
+  disclosure_mode?: string | number;
+  userDisclosureMode?: string | number;
+  user_disclosure_mode?: string | number;
+  disclosurePubKeyHex?: Hex;
+  disclosure_pubkey_hex?: Hex;
+  userDisclosureTargetPubKeyHex?: Hex;
+  user_disclosure_target_pubkey_hex?: Hex;
+  expectedRecipientHash?: Hex;
+  expected_recipient_hash?: Hex;
+  expectedAmountHash?: Hex;
+  expected_amount_hash?: Hex;
+  expectedOutputCommitment?: Hex;
+  expected_output_commitment?: Hex;
+  expectedUserDisclosureDigest?: Hex;
+  expected_user_disclosure_digest?: Hex;
+  expectedAuditDisclosureDigest?: Hex;
+  expected_audit_disclosure_digest?: Hex;
+  expectedSelfViewDisclosureDigest?: Hex;
+  expected_self_view_disclosure_digest?: Hex;
+  expectedDisclosureDigest?: Hex;
+  expected_disclosure_digest?: Hex;
+  memo?: string;
+}
+
+export interface BatchTransferExpectedOutputEvidence {
+  operation_id: string;
+  item_id: string;
+  batch_item_index: number;
+  role: "payment";
+  expected_output_commitment: Hex;
+  expected_user_disclosure_digest: Hex | "";
+  expected_audit_disclosure_digest: Hex;
+  expected_self_view_disclosure_digest: Hex | "";
+  expected_recipient_hash: Hex;
+  expected_amount: string;
+  expected_amount_hash: Hex;
+  expected_denom: string;
+  asset_id_hex: Hex;
+  user_privacy_policy: number;
+  user_disclosure_mode: number;
+  audit_key_id: string;
+  audit_key_epoch: string;
+}
+
+export interface BatchTransferOperationEvidence {
+  version: typeof batchTransferOperationEvidenceVersion;
+  operation_id: string;
+  circuit_set_id: "privacy-note-v1";
+  payload_hash: Hex;
+  proof_payload_hash: Hex;
+  proof_hash: Hex;
+  input_nullifier_hexes: readonly Hex[];
+  expected_outputs: readonly BatchTransferExpectedOutputEvidence[];
+}
+
+type PrepareTransferBatchPaymentShape =
+  | {
+      payments: readonly TransferBatchPaymentInput[];
+      amounts?: never;
+      recipient?: never;
+    }
+  | {
+      payments?: never;
+      amounts: CoinString[];
+      recipient: ShieldedAddress;
+    };
+
+export type PreparedBatchTransferPayloadCheckpoint = (
+  payload: PreparedBatchTransferPayload,
+  context: { operationId: string; reservation: ReservationBatch | null }
+) => Promise<void> | void;
+
+export type PreparedBatchTransferProofCheckpoint = (
+  proof: PreparedBatchTransferProof,
+  context: {
+    payload: PreparedBatchTransferPayload;
+    operationId: string;
+    reservation: ReservationBatch | null;
+  }
+) => Promise<void> | void;
+
+type RequiredPreparedBatchTransferPayloadCheckpoint =
+  | {
+      onPreparedPayload: PreparedBatchTransferPayloadCheckpoint;
+      on_prepared_payload?: PreparedBatchTransferPayloadCheckpoint;
+    }
+  | {
+      onPreparedPayload?: PreparedBatchTransferPayloadCheckpoint;
+      on_prepared_payload: PreparedBatchTransferPayloadCheckpoint;
+    };
+
+type RequiredPreparedBatchTransferProofCheckpoint =
+  | {
+      onPreparedProof: PreparedBatchTransferProofCheckpoint;
+      on_prepared_proof?: PreparedBatchTransferProofCheckpoint;
+    }
+  | {
+      onPreparedProof?: PreparedBatchTransferProofCheckpoint;
+      on_prepared_proof: PreparedBatchTransferProofCheckpoint;
+    };
+
 export type PrepareTransferBatchInput = {
   wallet?: WalletAdapterLike;
   material?: PrivacyMaterial;
-  amounts: CoinString[];
-  recipient: ShieldedAddress;
-  proverAdapter: ProverAdapter;
+  proverAdapter: BatchTransferProverAdapter;
+  outputMode?: "compact" | "exact32" | "exact-32";
+  output_mode?: "compact" | "exact32" | "exact-32";
   gasLimit?: number;
+  expiresAtUnix?: number;
+  expires_at_unix?: number;
+  chainNowUnix?: number;
+  chain_now_unix?: number;
+  rootHex?: Hex;
+  root_hex?: Hex;
+  snapshotHeight?: Uint64CursorInput;
+  snapshot_height?: Uint64CursorInput;
+  disableSelfViewDisclosure?: boolean;
+  disable_self_view_disclosure?: boolean;
+  selfViewDisclosureTargetPubKeyHex?: Hex;
+  self_view_disclosure_target_pubkey?: Hex;
   userPrivacyPolicy?: string | number;
   userDisclosureMode?: string | number;
   userDisclosureTargetPubKeyHex?: Hex;
   auditDisclosureTargetPubKeyHex?: Hex;
+  audit_disclosure_target_pubkey_hex?: Hex;
   denom?: string;
   afterHeight?: Uint64CursorInput;
   after_height?: Uint64CursorInput;
@@ -672,9 +831,12 @@ export type PrepareTransferBatchInput = {
   scan?: PrivacyScanOptions;
   scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
   scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
-  reservationManager?: NoteReservationManager | null;
-  reservation_manager?: NoteReservationManager | null;
-} & PrivacyScanOptions & BatchOperationEvidenceHashes;
+} & PrivacyScanOptions &
+  PrepareTransferBatchPaymentShape &
+  BatchOperationEvidenceHashes &
+  RequiredReservationManagerBinding &
+  RequiredPreparedBatchTransferPayloadCheckpoint &
+  RequiredPreparedBatchTransferProofCheckpoint;
 
 export class ClairveilJS {
   constructor(options: ClairveilClientOptions);
@@ -750,6 +912,7 @@ export class ClairveilJS {
     view_tag_version?: number;
   }>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
+  fetchAuditableBatchTransfers(options?: TypedPrivacyScanQuery): Promise<ValidatedPrivacyScanPageV2>;
   findPrivacyEventByTxHash(txHash: Hex, options?: PrivacyScanOptions): Promise<object>;
   derivePrivacyAccount(input: {
     address: ClairAddress;
@@ -834,6 +997,24 @@ export class ClairveilJS {
     reservation_manager?: NoteReservationManager | null;
   } & PrivacyScanOptions & DirectOperationEvidenceHashes): Promise<PreparedTransfer>;
   prepareTransferBatch(input: PrepareTransferBatchInput): Promise<PreparedTransferBatch>;
+  provePreparedBatchTransfer(input: {
+    payload: PreparedBatchTransferPayload;
+    proverAdapter: BatchTransferProverAdapter;
+    creator?: ClairAddress | string;
+    denom?: string;
+    nowUnix?: number;
+    chainNowUnix?: number;
+    chain_now_unix?: number;
+  } & RequiredBatchTransferOperationIDBinding &
+    RequiredReservationBatchBinding &
+    RequiredPreparedBatchTransferProofCheckpoint): Promise<{
+    payload: PreparedBatchTransferPayload;
+    proof: PreparedBatchTransferProof & { proof_bytes: Uint8Array };
+    message: MsgBatchTransferMessage;
+    effects: { root_hex: Hex; nullifier_hexes: Hex[]; output_commitment_hexes: Hex[] };
+    proofStageOnly: true;
+    reservationFinalizationRequired: true;
+  }>;
   prepareWithdraw(input: {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
@@ -897,6 +1078,8 @@ export class ClairveilJS {
     message: MsgBatchTransferMessage;
     memo?: string;
     expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"];
+    chainNowUnix?: number;
+    chain_now_unix?: number;
   }): Promise<SignDocBase64>;
   createWithdrawSignDoc(input: Parameters<ClairveilJS["prepareWithdraw"]>[0]): Promise<PreparedWithdrawReady>;
   createRelayWithdrawPayload(input: Parameters<ClairveilJS["prepareRelayWithdraw"]>[0]): Promise<PreparedRelayWithdraw & { status: "ready"; payload: PreparedWithdrawPayload }>;
@@ -1068,6 +1251,8 @@ export function createClairveilClient(options: {
   queryRetry?: QueryRetryOptions | false;
   nullifierFailover?: boolean;
   expectedCircuitIdentity?: CircuitSetIdentityV1;
+  enableExperimentalBatchTransfer?: boolean;
+  enable_experimental_batch_transfer?: boolean;
 }): ClairveilJS;
 
 export function nextPrivacyScanOptions(scanOrCursor?: object, defaults?: PrivacyScanOptions & {

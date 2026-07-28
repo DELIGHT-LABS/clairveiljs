@@ -149,10 +149,7 @@ test("conformance helper default fixtures include the reservation contract", fix
   assert.ok(defaultConformanceFixtureNames.includes("privacy_relay_withdraw_contract.json"));
   const result = await runClairveilConformanceFixtures({ fixtureDir });
   const contract = result.fixtures["privacy_note_reservation_contract.json"];
-  // v0.2.0 published the original reservation contract. Current Clairveil
-  // main keeps the same replayed safety rules while advancing its fixture
-  // revision.
-  assert.ok([1, 3].includes(contract.version));
+  assert.equal(contract.version, 3);
   const leaseTransitions = contract.lease_transition_preconditions.token_required_for;
   for (const transition of [
     ["Reserved", "Proving"],

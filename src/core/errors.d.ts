@@ -20,6 +20,9 @@ export type ClairveilErrorCodeValue = typeof ClairveilErrorCode[keyof typeof Cla
 export class ClairveilError extends Error {
   code: ClairveilErrorCodeValue | string;
   details: object;
+  status?: number;
+  proverCode?: string;
+  retryable?: boolean;
   constructor(code: ClairveilErrorCodeValue | string, message: string, details?: object);
 }
 

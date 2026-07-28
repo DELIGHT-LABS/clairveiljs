@@ -290,7 +290,7 @@ async function markBroadcastReservationManualReview(context, error) {
   try {
     await context.reservationManager.markManualReview(context.reservationIDs, {
       leaseToken: context.leaseToken,
-      error: String(error?.message || error || "EVM broadcast result is unknown"),
+      error: "sdk_evm_broadcast_result_unknown",
       metadata: {
         opaque_broadcast_error: true,
         no_broadcast_attempt: false,
@@ -312,7 +312,7 @@ async function markBroadcastReservationRejected(context, error) {
     await context.reservationManager.markBroadcastRejected(context.reservationIDs, {
       leaseToken: context.leaseToken,
       providerCode: "4001",
-      error: String(error?.message || error || "wallet request rejected")
+      error: "wallet_rejected_before_broadcast"
     });
   } catch (bookkeepingError) {
     throw attachReservationBookkeepingError(error, bookkeepingError);

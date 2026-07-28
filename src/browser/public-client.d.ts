@@ -9,6 +9,10 @@ import type {
   ValidatedDisclosureConfigV1,
   ValidatedReserveResponseV1
 } from "../privacy/network-config.js";
+import type {
+  PrivacyScanValidationStateV2,
+  ValidatedPrivacyScanPageV2
+} from "../privacy/scan.js";
 
 export interface PrivacyEventsQuery {
   afterHeight?: Uint64CursorInput;
@@ -39,6 +43,9 @@ export interface TypedPrivacyScanQuery {
   max_encoded_bytes?: Uint64CursorInput;
   eventTypes?: string[];
   event_types?: string[];
+  /** Retain the same mutable state while fetching consecutive cursor pages. */
+  validationState?: PrivacyScanValidationStateV2;
+  validation_state?: PrivacyScanValidationStateV2;
 }
 
 export interface CommitmentPathsAtRootQuery {
@@ -104,6 +111,7 @@ export class ClairveilPublicClient {
   checkNullifier(nullifierHex: string): Promise<object & { used?: boolean; Used?: boolean }>;
   checkNullifiers(nullifierHexes: readonly string[]): Promise<Map<string, boolean>>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
+  fetchAuditableBatchTransfers(options?: TypedPrivacyScanQuery): Promise<ValidatedPrivacyScanPageV2>;
   fetchAuditConfig(): Promise<object>;
   fetchDisclosureConfig(): Promise<object>;
   queryAuditConfig(): Promise<ValidatedAuditConfigV1>;

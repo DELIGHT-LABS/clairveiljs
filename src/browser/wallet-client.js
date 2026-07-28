@@ -407,7 +407,7 @@ async function markReservationReplanRequired(reservationManager, reservation, er
   }
   return reservationManager.markReplanRequired(reservation.reservation_ids, {
     leaseToken: reservation.lease_token || reservation.reservations?.[0]?.lease_token || "",
-    error: error?.message || String(error || "reservation replan required"),
+    error: reason,
     metadata: {
       reconcile_reason: reason,
       no_broadcast_attempt: true,
@@ -619,6 +619,8 @@ export class ClairveilBrowserClient {
     fetchTimeoutMs,
     queryRetry,
     nullifierFailover,
+    enableExperimentalBatchTransfer = false,
+    enable_experimental_batch_transfer,
     evmRpc,
     evmChainId,
     evmPrivacyPrecompileAddress,
@@ -655,7 +657,11 @@ export class ClairveilBrowserClient {
       restEndpoints: this.restEndpoints,
       queryTimeoutMs: this.queryTimeoutMs,
       queryRetry,
-      nullifierFailover
+      nullifierFailover,
+      enableExperimentalBatchTransfer: resolved.enableExperimentalBatchTransfer
+        ?? resolved.enable_experimental_batch_transfer
+        ?? enable_experimental_batch_transfer
+        ?? enableExperimentalBatchTransfer
     });
     this.evm = createClairveilEvmClient({
       contractAddress: resolved.evmPrivacyPrecompileAddress || evmPrivacyPrecompileAddress,
@@ -740,6 +746,10 @@ export class ClairveilBrowserClient {
 
   async fetchAuditableTransfers(options = {}) {
     return this.cosmos.fetchAuditableTransfers(options);
+  }
+
+  async fetchAuditableBatchTransfers(options = {}) {
+    return this.cosmos.fetchAuditableBatchTransfers(options);
   }
 
   async fetchAuditConfig() {
@@ -1077,7 +1087,10 @@ export class ClairveilBrowserClient {
           privacyPolicy: userPrivacyPolicy,
           disclosureMode: userDisclosureMode,
           planStatus: prepared.plan?.status || "",
-          planAction: prepared.prepared?.planAction || prepared.plan?.action || ""
+          planAction: prepared.prepared?.planAction || prepared.plan?.action || "",
+          payload: prepared.payload,
+          proof: prepared.proof,
+          message: prepared.message
         },
         plan: prepared.plan
       };
@@ -1181,22 +1194,29 @@ export class ClairveilBrowserClient {
       throw new Error("batch transfer is currently supported for Cosmos wallet profiles only");
     }
     const material = this.privacyMaterial(body, walletType);
-    const amounts = body.amounts || [];
+    const payments = body.payments;
+    const amounts = body.amounts;
     const recipient = body.recipient;
     const userPrivacyPolicy = body.privacyPolicy ?? body.privacy_policy ?? "all-private";
     const userDisclosureMode = body.disclosureMode ?? body.disclosure_mode ?? "none";
     const userDisclosureTargetPubKeyHex = body.disclosurePubKeyHex ?? body.disclosure_pubkey_hex ?? "";
     const scanOptions = scanOptionsFromBody(body);
-    const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
-
     const prepared = await this.cosmos.prepareTransferBatch({
       proverAdapter: this.proverAdapter(),
       material,
+      payments,
       recipient,
       amounts,
+      outputMode: body.outputMode ?? body.output_mode,
+      onPreparedPayload: body.onPreparedPayload,
+      on_prepared_payload: body.on_prepared_payload,
+      onPreparedProof: body.onPreparedProof,
+      on_prepared_proof: body.on_prepared_proof,
       userPrivacyPolicy,
       userDisclosureMode,
       userDisclosureTargetPubKeyHex,
+      auditDisclosureTargetPubKeyHex: body.auditDisclosureTargetPubKeyHex,
+      audit_disclosure_target_pubkey_hex: body.audit_disclosure_target_pubkey_hex,
       expectedRecipientHash: body.expectedRecipientHash,
       expected_recipient_hash: body.expected_recipient_hash,
       expectedRecipientHashes: body.expectedRecipientHashes,
@@ -1205,7 +1225,15 @@ export class ClairveilBrowserClient {
       expected_amount_hashes: body.expected_amount_hashes,
       scan: scanOptions,
       gasLimit: body.gasLimit ?? body.gas_limit ?? 25000000,
-      reservationManager
+      expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
+      chainNowUnix: body.chainNowUnix ?? body.chain_now_unix,
+      rootHex: body.rootHex ?? body.root_hex,
+      snapshotHeight: body.snapshotHeight ?? body.snapshot_height,
+      disableSelfViewDisclosure: body.disableSelfViewDisclosure ?? body.disable_self_view_disclosure,
+      selfViewDisclosureTargetPubKeyHex: body.selfViewDisclosureTargetPubKeyHex
+        ?? body.self_view_disclosure_target_pubkey,
+      reservationManager: body.reservationManager,
+      reservation_manager: body.reservation_manager
     });
     if (prepared.status !== "ready") throw plannerError(prepared);
     return {
@@ -1215,16 +1243,42 @@ export class ClairveilBrowserClient {
       prepared: {
         ...prepared.prepared,
         shieldedAddress: prepared.privacyAccount.shielded_address,
-        privacyPolicy: userPrivacyPolicy,
-        disclosureMode: userDisclosureMode,
+        ...(prepared.prepared?.payments?.every(payment => payment.privacyPolicy === prepared.prepared.payments[0].privacyPolicy)
+          ? { privacyPolicy: prepared.prepared.payments[0].privacyPolicy }
+          : {}),
+        ...(prepared.prepared?.payments?.every(payment => payment.disclosureMode === prepared.prepared.payments[0].disclosureMode)
+          ? { disclosureMode: prepared.prepared.payments[0].disclosureMode }
+          : {}),
         planStatus: prepared.plan?.status || "",
         planAction: prepared.prepared?.planAction || prepared.plan?.action || "",
-        payloads: prepared.payloads,
-        proofs: prepared.proofs,
-        messages: prepared.messages
+        selectedInputTotal: prepared.prepared?.selectedInputTotal,
+        payload: prepared.payload,
+        proof: prepared.proof,
+        message: prepared.message,
+        operationEvidence: prepared.operationEvidence,
+        operationEvidenceHash: prepared.operationEvidenceHash,
+        inputCount: prepared.prepared?.inputCount,
+        outputCount: prepared.prepared?.outputCount
       },
       plan: prepared.plan
     };
+  }
+
+  async provePreparedBatchTransfer(body = {}) {
+    return this.cosmos.provePreparedBatchTransfer({
+      payload: body.payload,
+      proverAdapter: body.proverAdapter ?? body.prover_adapter ?? this.proverAdapter(),
+      creator: body.creator ?? body.address ?? body.payload?.creator,
+      denom: body.denom ?? this.denom,
+      operationId: body.operationId,
+      operation_id: body.operation_id,
+      reservation: body.reservation,
+      reservationBatch: body.reservationBatch,
+      reservation_batch: body.reservation_batch,
+      chainNowUnix: body.chainNowUnix ?? body.chain_now_unix ?? body.nowUnix,
+      onPreparedProof: body.onPreparedProof,
+      on_prepared_proof: body.on_prepared_proof
+    });
   }
 
   async prepareWithdraw(body) {
@@ -1588,6 +1642,28 @@ export class ClairveilBrowserClient {
     addIfPresent(request, "assetDenom", body.assetDenom);
     addIfPresent(request, "asset_denom", body.asset_denom);
     return this.cosmos.decodeAuditDisclosure(request);
+  }
+
+  async decodeBatchUserDisclosure(body = {}) {
+    const request = { ...body };
+    if (body.address && (body.pubKeyHex || body.pub_key_hex) && (body.signatureBase64 || body.signature_base64)) {
+      const walletType = this.walletTypeFromBody(body);
+      if (walletType === "evm") request.skipSignerPubKeyCheck = true;
+    }
+    return this.cosmos.decodeBatchUserDisclosure(request);
+  }
+
+  async decodeBatchSelfViewDisclosure(body = {}) {
+    const request = { ...body };
+    if (body.address && (body.pubKeyHex || body.pub_key_hex) && (body.signatureBase64 || body.signature_base64)) {
+      const walletType = this.walletTypeFromBody(body);
+      if (walletType === "evm") request.skipSignerPubKeyCheck = true;
+    }
+    return this.cosmos.decodeBatchSelfViewDisclosure(request);
+  }
+
+  async decodeBatchAuditDisclosure(body = {}) {
+    return this.cosmos.decodeBatchAuditDisclosure({ ...body });
   }
 
   txRawBytesBase64({ bodyBytes, authInfoBytes, signature }) {
