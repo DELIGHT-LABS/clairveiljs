@@ -82,7 +82,9 @@ const clairveil = createClairveilClient({
 
 `prepareTransferBatch(...)`는 Clairveil v0.2 `BatchTransfer` 계약을 구현합니다. 입력 1~16개를 계획하고 원자적으로 예약하며, 순서가 고정된 payment/change/padding 출력 1~32개를 만들고, 명시적으로 선택한 `proverAdapter.proveBatchTransfer(payload)`를 정확히 한 번 호출해 Cosmos `MsgBatchTransfer` 한 건을 반환합니다. Payment를 여러 `MsgTransfer` proof로 확장하지 않고 prover 자동 failover도 하지 않습니다.
 
-일반 `prepareTransfer(...)`는 공식 native 2×2 `MsgTransfer` 경로로 계속 지원되며 native 2×2는 deprecated가 아닙니다. Clairveil의 기존 multi-message `transfer-batch` orchestration은 별도 protocol 의미를 유지하고 `prepareTransferBatch(...)`의 alias가 아닙니다.
+일반 `prepareTransfer(...)`는 공식 native 2×2 `MsgTransfer` 경로로 계속 지원되며 native 2×2는 deprecated가 아닙니다. 두 입력 witness는 검증된 하나의 exact-root `commitment_paths_at_root` snapshot에서 함께 가져옵니다. Clairveil의 기존 multi-message `transfer-batch` orchestration은 별도 protocol 의미를 유지하고 `prepareTransferBatch(...)`의 alias가 아닙니다.
+
+Merkle witness (`merkle_path`)와 exact snapshot (`commitment_paths_at_root`) 요청은 기본적으로 설정된 REST endpoint에 고정됩니다. 지출하려는 commitment가 여러 endpoint에 노출되어도 되는 경우에만 `merklePathFailover: true`를 설정하세요.
 
 여러 수신자와 출력별 disclosure에는 `payments`를 사용합니다. `outputMode: "compact"`는 payment와 선택적 change만 만들고, `outputMode: "exact32"`는 payment/change 뒤에 명시적인 0-value padding을 추가합니다.
 
@@ -124,7 +126,7 @@ console.log(prepared.prepared.inputCount, prepared.prepared.outputCount);
 console.log(prepared.operationEvidence.expected_outputs);
 ```
 
-실행 가능한 batch에는 `reservationManager`, `onPreparedPayload`, `onPreparedProof`가 모두 필수입니다. Callback 저장 구현은 caller 책임이며 private artifact를 암호화해야 합니다. Local file은 mode `0600`이어야 합니다. 두 checkpoint callback 중 하나라도 시작된 뒤 prepare가 실패하면 SDK는 재사용 가능한 input을 해제하지 않고 reservation 전체를 `ManualReview`로 격리합니다. `provePreparedBatchTransfer(...)`는 proof 단계만 복구하는 primitive입니다. 재시작 후에는 저장한 정확한 payload, 원래 operation ID와 reservation batch, proof checkpoint callback을 모두 넘겨야 합니다. 이 메서드가 반환한 message만으로 broadcast하면 안 되며, 원래 operation을 복원해 동일한 sign-doc/evidence와 reservation `ProofReady` 전환을 원자적으로 완료해야 합니다. 서명된 transaction까지 포함한 완전한 재시작 안전 흐름에는 reference-payroll artifact/retry API를 사용하세요. Retry 전에는 저장된 transaction hash와 모든 input nullifier를 조회하고, 이전에 저장한 정확한 TxRaw bytes만 재전송하며 atomic output 일부를 다시 만들거나 재시도하면 안 됩니다.
+실행 가능한 batch에는 `reservationManager`, `onPreparedPayload`, `onPreparedProof`가 모두 필수입니다. Callback 저장 구현은 caller 책임이며 private artifact를 암호화해야 합니다. Local file은 mode `0600`이어야 합니다. 두 checkpoint callback 중 하나라도 시작된 뒤 prepare가 실패하면 SDK는 재사용 가능한 input을 해제하지 않고 reservation 전체를 `ManualReview`로 격리합니다. `provePreparedBatchTransfer(...)`는 proof 단계만 복구하는 primitive입니다. 재시작 후에는 저장한 정확한 payload, 원래 operation ID와 reservation batch, proof checkpoint callback을 모두 넘겨야 합니다. 이 메서드가 반환한 message만으로 broadcast하면 안 됩니다. 저장한 payload/proof와 원래 payment 행, signer, reservation manager, reservation batch를 `finalizePreparedBatchTransfer(...)`에 넘긴 뒤에만 wallet을 열어야 합니다. 이 API는 sign-doc·operation evidence를 다시 만들고 nullifier를 재확인한 뒤 모든 input을 원자적으로 `ProofReady`로 전환합니다. 서명된 transaction까지 포함한 완전한 재시작 안전 흐름에는 reference-payroll artifact/retry API를 사용하세요. Retry 전에는 저장된 transaction hash와 모든 input nullifier를 조회하고, 이전에 저장한 정확한 TxRaw bytes만 재전송하며 atomic output 일부를 다시 만들거나 재시도하면 안 됩니다.
 
 Batch 준비는 통합 `privacy-scan-v2`를 요구하며 ciphertext가 없는 legacy event로 fallback하지 않고 fail-closed합니다. SDK는 같은 root의 Merkle snapshot을 검증하고, proving 또는 proof 단계 복구 시 active circuit, authoritative asset mapping, audit identity, disclosure capability를 다시 확인하며, proving 전후 모든 nullifier를 확인하고 proof version/request hash/circuit identity를 검증합니다. 중단 없이 완료된 `prepareTransferBatch(...)`는 reservation 전체를 원자적으로 `ProofReady`로 전환합니다. 반면 proof 단계 복구 결과는 caller가 복원된 operation workflow를 완료할 때까지 `reservationFinalizationRequired: true`를 유지합니다. `operationEvidence`는 payment별 output index, commitment, recipient hash, amount/asset, user/audit/self-view disclosure digest를 기록합니다. Typed output reconcile에는 `fetchAuditableBatchTransfers(...)`, `decodeBatchUserDisclosure(...)`, `decodeBatchSelfViewDisclosure(...)`, `decodeBatchAuditDisclosure(...)`를 사용하고, 연속 audit-query cursor page 사이에는 같은 `createPrivacyScanValidationStateV2()` 객체를 유지하세요.
 
@@ -198,6 +200,29 @@ const deposit = await clairveil.prepareDeposit({
 // prepareDeposit이 EIP-1193 제출용 deposit.transaction을 반환합니다.
 ```
 
+product-hosted DepositCircuit service를 쓰는 profile 기반 Cosmos DApp은
+`profile.depositProofUrl`에 검토된 정확한 endpoint를 설정하세요. SDK는 이
+URL을 `proverUrl`에서 만들지 않습니다. `{ note_json, note_commitment_hex }`를
+한 번 직접 `POST`하고, redirect·JSON이 아닌 응답·제한을 넘는 응답을 거부하며,
+같은 commitment를 담은 `{ version: "v1", proof_hex, note_commitment_hex }`
+응답만 받습니다. local/WASM `depositProofProvider`도 계속 사용할 수 있습니다.
+활성 profile에서는 `depositProofUrl`도 profile만 source입니다.
+
+EVM profile의 `prepareDeposit`, `prepareTransfer`, `prepareWithdraw`,
+`prepareRelayWithdraw`에는 `evmWallet: { getChainId() }`가 필요합니다. SDK는
+proof나 prepared transaction을 만들기 전에 연결 지갑과 read-only `evmRpc`의
+chain ID가 모두 `profile.evmChainId`와 일치하는지 확인합니다.
+
+Browser-DApp의 `profile`은 생성 시 Web client profile contract에 맞춰
+fail-closed 검증됩니다. 공통 필수 필드(`id`, `label`, `chainName`, wallet
+metadata, endpoint, denom/display metadata)와 transport별 필드를 모두
+제공해야 합니다. EVM profile에는 MetaMask, `evmRpc`, `evmChainId`,
+`evmChainName`, precompile address, 두 gas limit이 필수입니다. EVM prepared
+transaction은 provider를 직접 호출하지 말고
+`sendEvmTransaction({ wallet, transaction, ...reservationOptions })`로
+제출하세요. 이 API가 configured network를 다시 확인하고 reserved note의
+broadcast lifecycle 상태를 보존합니다.
+
 `waitForEvmTransaction(...)`이 일반적인 EVM confirmation API입니다. 더 높은 수준의 ClairveilJS wrapper가 없는 read-only EVM JSON-RPC method에는 browser client의 `evmJsonRpc<TResult>(method, params)`를 사용할 수 있습니다. 이 API는 설정된 `evmRpc` endpoint와 client query timeout을 사용하며 injected wallet provider를 사용하지 않고 read-only allowlist 밖의 method와 비어 있는 `evmRpc` endpoint를 거부합니다. account 접근, 서명, subscription, transaction 제출에는 사용하면 안 됩니다.
 
 ```ts
@@ -217,17 +242,16 @@ ClairveilJS는 브라우저에서 privacy payload를 준비한 뒤, prepared mes
 
 지원 범위:
 
-- 대상 EVM chain은 Clairveil `IPrivacy` precompile ABI와 payload semantic을 제공해야 합니다.
+- 대상 EVM chain은 canonical Clairveil 0.2 `IPrivacy` precompile ABI와 payload semantic을 제공해야 합니다.
+- 기본 adapter는 `deposit((string,bytes,bytes,bytes))`, `transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))`, `withdraw((bytes,bytes,bytes,string,address,string,uint64))`를 encode합니다.
 - precompile address는 chain config에서 제공하거나 SDK 기본값 `0x100000000000000000000000000000000000000b`를 사용할 수 있습니다.
-- ABI shape가 다른 EVM chain은 현재 SDK의 stable support 범위 밖입니다.
+- ABI shape가 다른 EVM chain은 profile 설정만으로 지원 범위에 넣을 수 없습니다.
 
-지원되는 EVM ABI에서 `IPrivacy.deposit`은 `{ amount, noteCommitment, encryptedNote }`만 받습니다. Cosmos `MsgDeposit` 경로는 `DepositCircuit` proof가 필요하지만, 현재 EVM precompile deposit calldata에는 proof field가 없습니다.
+지원되는 EVM `IPrivacy.deposit` tuple에는 Cosmos `MsgDeposit`과 같은 필수 `DepositCircuit` proof가 포함됩니다: `{ amount, noteCommitment, encryptedNote, proof }`.
 
-지원되는 EVM `IPrivacy.transfer` ABI에는 encrypted output note와 `newCommitments`, `cipherTexts` 순서에 맞춘 2개의 2-byte `viewTags`, 그리고 user/audit disclosure field가 들어갑니다. Cosmos `selfViewDisclosure*` field는 없습니다. 그래서 ClairveilJS는 EVM transport에서 self-view disclosure를 기본으로 끄고, self-view disclosure bytes가 들어간 EVM transfer message는 조용히 버리지 않고 에러로 막습니다.
+지원되는 EVM `IPrivacy.transfer` tuple에는 encrypted output note, `newCommitments`/`cipherTexts` 순서에 맞춘 2-byte `viewTags`, user/audit disclosure, sender `selfViewDisclosureDigest`/`selfViewDisclosurePayload`, absolute `expiresAtUnix`가 들어갑니다. self-view disclosure는 기본 포함되고 명시적 opt-out에서만 빠집니다. `IPrivacy.withdraw` tuple에는 legacy output-note field가 없으므로 dummy `newNoteCommitment`나 `encryptedNote` bytes를 보내면 안 됩니다.
 
-EVM transfer/withdraw도 note scan, planner, disclosure, prover adapter 흐름은 Cosmos와 같습니다. 마지막 submit 단계만 Cosmos sign doc이 아니라 EVM calldata 전송으로 달라집니다.
-
-일부 EVM `IPrivacy.withdraw` 배포는 legacy `newNoteCommitment`, `encryptedNote` ABI field를 아직 포함할 수 있습니다. ClairveilJS는 호환을 위해 기본값으로 이 ABI-only field에 32-byte zero placeholder를 넣습니다. `withdrawOutputMode: "none"`은 이 legacy-compatible ABI에 들어가는 placeholder 값만 비웁니다. downstream precompile이 해당 ABI field 자체를 제거했다면 새 function shape에 맞는 custom contract adapter/encoder를 제공해야 합니다.
+EVM transfer/withdraw도 note scan, planner, disclosure, prover adapter 흐름은 Cosmos와 같습니다. 마지막 submit 단계만 Cosmos sign doc이 아니라 canonical precompile calldata 전송으로 달라집니다. 필수 proof, self-view, expiry, exact withdraw tuple이 없는 legacy precompile은 기본 adapter가 지원하지 않으므로 해당 profile을 활성화하기 전에 배포를 업그레이드해야 합니다.
 
 ## Prover
 
@@ -350,6 +374,7 @@ EVM profile에서는 `prepared.transaction`을 user wallet에서 바로 보내�
 const latestChainBlockTimeUnix = await fetchLatestChainBlockTimeUnix();
 const prepared = await clairveil.prepareRelayWithdraw({
   walletType: "evm",
+  evmWallet: { getChainId: () => ethereum.request({ method: "eth_chainId" }) },
   address,
   pubKeyHex,
   signatureBase64,

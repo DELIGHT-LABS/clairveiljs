@@ -65,8 +65,6 @@ import {
   createEip1193WalletAdapter,
   encodeEvmPrivacyDeposit,
   encodeFunctionData,
-  encodeReferenceEvmDeposit,
-  encodeReferenceEvmWithdraw,
   evmTransactionBindingHash,
   evmAddressToBech32,
   functionSelector,
@@ -103,6 +101,78 @@ import {
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const validV2ProofHex = `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}`;
+
+function browserEvmProfile(overrides = {}) {
+  return {
+    id: "clairveil-evm-test",
+    label: "Clairveil EVM Test",
+    chainName: "Clairveil EVM Test",
+    transport: "evm",
+    wallet: "metamask",
+    chainId: "demo-1",
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    proverUrl: "http://127.0.0.1:8080",
+    accountPrefix: "demo",
+    shieldedPrefix: "demos",
+    denom: "udemo",
+    displayDenom: "DEMO",
+    coinDecimals: 6,
+    evmRpc: "http://127.0.0.1:8545",
+    evmChainId: "0x539",
+    evmChainName: "Clairveil EVM Test",
+    evmPrivacyPrecompileAddress,
+    evmGasLimit: "0x989680",
+    evmSendGasLimit: "0x5208",
+    ...overrides
+  };
+}
+
+function browserCosmosProfile(overrides = {}) {
+  return {
+    id: "clairveil-cosmos-test",
+    label: "Clairveil Cosmos Test",
+    chainName: "Clairveil Cosmos Test",
+    transport: "cosmos",
+    wallet: "keplr",
+    chainId: "profile-chain",
+    rpc: "http://profile-rpc.local",
+    rest: "http://profile-rest.local",
+    proverUrl: "http://profile-prover.local",
+    accountPrefix: "profile",
+    shieldedPrefix: "profiles",
+    denom: "uprofile",
+    displayDenom: "PROFILE",
+    coinDecimals: 6,
+    keplrCoinType: 118,
+    gasPriceStep: { low: 0.01, average: 0.025, high: 0.04 },
+    keplrChainInfo: {
+      chainId: "profile-chain",
+      chainName: "Clairveil Cosmos Test",
+      rpc: "http://profile-rpc.local",
+      rest: "http://profile-rest.local",
+      bip44: { coinType: 118 },
+      bech32Config: {
+        bech32PrefixAccAddr: "profile",
+        bech32PrefixAccPub: "profilepub",
+        bech32PrefixValAddr: "profilevaloper",
+        bech32PrefixValPub: "profilevaloperpub",
+        bech32PrefixConsAddr: "profilevalcons",
+        bech32PrefixConsPub: "profilevalconspub"
+      },
+      currencies: [{ coinDenom: "PROFILE", coinMinimalDenom: "uprofile", coinDecimals: 6 }],
+      feeCurrencies: [{
+        coinDenom: "PROFILE",
+        coinMinimalDenom: "uprofile",
+        coinDecimals: 6,
+        gasPriceStep: { low: 0.01, average: 0.025, high: 0.04 }
+      }],
+      stakeCurrency: { coinDenom: "PROFILE", coinMinimalDenom: "uprofile", coinDecimals: 6 },
+      features: []
+    },
+    ...overrides
+  };
+}
 
 function transferProtocolConfig({ policies = ["all-private"], modes = ["none"] } = {}) {
   return {
@@ -237,7 +307,8 @@ async function readyBroadcastReservation(suffix = "01", options = {}) {
     leaseToken: reservation.lease_token,
     payloadHash: options.payloadHash ?? `payload-${suffix}`,
     signDocHash: options.signDocHash ?? "",
-    txBytesHash: options.txBytesHash ?? ""
+    txBytesHash: options.txBytesHash ?? "",
+    metadata: options.metadata ?? {}
   });
   reservation.reservations = ready;
   reservation.lease_until = ready[0].lease_until;
@@ -252,7 +323,7 @@ test("core/cosmos/evm entrypoints load", () => {
   assert.equal(typeof createClairveilEvmClient, "function");
   assert.equal(typeof createNoteReservationManager, "function");
   assert.equal(typeof createRootNoteReservationManager, "function");
-  assert.equal(functionSelector("deposit((string,bytes,bytes))").length, 8);
+  assert.equal(functionSelector("deposit((string,bytes,bytes,bytes))").length, 8);
   assert.equal(evmPrivacyPrecompileAddress, "0x100000000000000000000000000000000000000b");
 });
 
@@ -281,7 +352,15 @@ test("browser-dapp entrypoint instantiates a DApp client", async () => {
   assert.equal(typeof client.assertCircuitConfig, "function");
   assert.equal(typeof client.assertTransferProtocolConfig, "function");
   assert.equal(typeof client.queryAssetByDenom, "function");
+  assert.equal(typeof client.fetchAssetByID, "function");
+  assert.equal(typeof client.queryAssetByID, "function");
+  assert.equal(typeof client.resolveAssetByID, "function");
   assert.equal(typeof client.fetchTreeState, "function");
+  assert.equal(typeof client.fetchCommitmentInfo, "function");
+  assert.equal(typeof client.lookupMerklePath, "function");
+  assert.equal(typeof client.fetchCommitmentPathsAtRoot, "function");
+  assert.equal(typeof client.queryCommitmentPathsAtRoot, "function");
+  assert.equal(typeof client.createCommitmentPathSnapshotProvider, "function");
   assert.equal(typeof browserDapp.ClairveilBrowserDappClient, "function");
 });
 
@@ -316,30 +395,64 @@ test("browser-dapp client uses restEndpoints when rest is omitted", async () => 
 
 test("browser-dapp profile transport is the default wallet type", async () => {
   const client = createClairveilBrowserDappClient({
-    profile: {
-      transport: "evm",
-      rpc: "http://127.0.0.1:26657",
-      rest: "http://127.0.0.1:1317",
-      chainId: "evm-local-1",
-      accountPrefix: "demo",
-      shieldedPrefix: "demos",
-      denom: "udemo",
-      evmChainId: "0x32f",
-      evmPrivacyPrecompileAddress: evmPrivacyPrecompileAddress
-    }
+    profile: browserEvmProfile({ chainId: "evm-local-1", evmChainId: "0x32f" })
   });
+  client.evmJsonRpc = async () => "0x32f";
+  client.cosmos.assertProtocolPreflight = async () => ({});
 
   const prepared = await client.prepareDeposit({
     address: "0x1111111111111111111111111111111111111111",
     pubKeyHex: "02".padEnd(66, "0"),
     signatureBase64: Buffer.from("profile-transport-evm").toString("base64"),
-    amount: "3udemo"
+    amount: "3udemo",
+    proofHex: "ab",
+    evmWallet: { getChainId: async () => "0x32f" }
   });
 
   assert.equal(prepared.signDoc, undefined);
   assert.equal(prepared.transaction.chainId, "0x32f");
   assert.equal(prepared.transaction.to, evmPrivacyPrecompileAddress);
   assert.equal(prepared.prepared.amount, "3udemo");
+});
+
+test("browser-dapp profile is the sole source for transport endpoints and wallet type", async () => {
+  const client = createClairveilBrowserDappClient({
+    profile: browserCosmosProfile(),
+    rpc: "http://override-rpc.local",
+    rest: "http://override-rest.local",
+    chainId: "override-chain",
+    denom: "uoverride",
+    proverUrl: "http://override-prover.local",
+    evmRpc: "http://override-evm.local",
+    evmChainId: "0x1"
+  });
+
+  assert.equal(client.rpc, "http://profile-rpc.local");
+  assert.equal(client.rest, "http://profile-rest.local");
+  assert.equal(client.chainId, "profile-chain");
+  assert.equal(client.denom, "uprofile");
+  assert.equal(client.proverUrl, "http://profile-prover.local");
+  assert.equal(client.evmRpc, "");
+  await assert.rejects(
+    () => client.prepareTransferBatch({ walletType: "evm" }),
+    /does not match active profile transport cosmos/
+  );
+});
+
+test("browser-dapp EVM profiles reject a configured RPC on another network", async () => {
+  const client = createClairveilBrowserDappClient({
+    profile: browserEvmProfile({
+      rpc: "http://profile-rpc.local",
+      rest: "http://profile-rest.local",
+      chainId: "profile-chain",
+      evmRpc: "http://profile-evm.local"
+    })
+  });
+  client.evmJsonRpc = async () => "0x1";
+  await assert.rejects(
+    () => client.assertEvmNetwork(),
+    /EVM RPC chain ID 0x1 does not match configured evmChainId 0x539/
+  );
 });
 
 test("MsgDeposit includes the required deposit proof field", () => {
@@ -915,6 +1028,37 @@ test("EIP-1193 wallet adapter strips Clairveil transaction metadata", async () =
   assert.equal(calls[0].params[0].__clairveilEvmTransaction, undefined);
   assert.equal(calls[1].params[0].__clairveilEvmTransaction, undefined);
   assert.deepEqual(Object.keys(calls[0].params[0]).sort(), ["data", "from", "to", "value"]);
+});
+
+test("EVM transaction submission verifies the connected wallet network", async () => {
+  const client = createClairveilEvmClient({ evmChainId: "0x539" });
+  let sendCalls = 0;
+  const mismatchedWallet = {
+    async getChainId() {
+      return "0x1";
+    },
+    async sendTransaction() {
+      sendCalls += 1;
+      return "0x" + "11".repeat(32);
+    }
+  };
+  await assert.rejects(
+    () => client.sendTransaction(mismatchedWallet, { to: evmPrivacyPrecompileAddress }),
+    /EVM wallet chain ID 0x1 does not match configured evmChainId 0x539/
+  );
+  assert.equal(sendCalls, 0);
+
+  const matchingWallet = {
+    async getChainId() {
+      return "0x0539";
+    },
+    async sendTransaction() {
+      sendCalls += 1;
+      return "0x" + "12".repeat(32);
+    }
+  };
+  await client.sendTransaction(matchingWallet, { to: evmPrivacyPrecompileAddress });
+  assert.equal(sendCalls, 1);
 });
 
 test("deposit preparation requires a deposit proof", async () => {
@@ -2112,17 +2256,23 @@ test("browser-dapp EVM prepareTransfer enables full operation success evidence",
     foundNotes: [helperNote(99, 99n), helperNote(100, 100n), selectedNote],
     scanCursor: { source: "privacy_scan", has_more: false }
   });
-  client.cosmos.fetchAuditConfig = async () => ({ audit_master_pubkey_hex: "aa".repeat(32) });
+  client.cosmos.assertTransferProtocolConfig = async () => transferProtocolConfig();
   client.proverAdapter = () => null;
-  client.cosmos.buildTransferMessage = async () => ({
-    payload: {
-      payload_hash: "payload-evm-transfer",
-      outputs: [{ amount: "1", commitment_hex: "commitment-evm-transfer" }],
-      audit_disclosure_digest_hex: "audit-digest-evm-transfer"
-    },
-    proof: { payload_hash: "payload-evm-transfer", proof_hex: "01" },
-    message: { proof: new Uint8Array([1]) }
-  });
+  let evmAuditTarget = null;
+  let evmSelfViewOptOut = null;
+  client.cosmos.buildTransferMessage = async input => {
+    evmAuditTarget = input.auditDisclosureTargetPubKeyHex;
+    evmSelfViewOptOut = input.disableSelfViewDisclosure;
+    return {
+      payload: {
+        payload_hash: "payload-evm-transfer",
+        outputs: [{ amount: "1", commitment_hex: "commitment-evm-transfer" }],
+        audit_disclosure_digest_hex: "audit-digest-evm-transfer"
+      },
+      proof: { payload_hash: "payload-evm-transfer", proof_hex: "01" },
+      message: { proof: new Uint8Array([1]) }
+    };
+  };
   client.evm.contract.buildTransferTransaction = () => ({
     to: evmPrivacyPrecompileAddress,
     data: "0x1234"
@@ -2147,6 +2297,8 @@ test("browser-dapp EVM prepareTransfer enables full operation success evidence",
   });
 
   assert.equal(result.transaction.data, "0x1234");
+  assert.equal(evmAuditTarget, transferProtocolConfig().audit_config.audit_master_pubkey_hex);
+  assert.equal(evmSelfViewOptOut, undefined);
   assert.equal(result.reservation.reservations.length > 0, true);
   for (const reservationID of result.reservation.reservation_ids) {
     const reservation = await store.getReservation(reservationID);
@@ -2315,7 +2467,7 @@ test("browser EVM prepareTransfer returns its transaction with reconciliation wa
   client.privacyMaterial = heartbeatTestMaterial;
   client.proverAdapter = () => null;
   client.cosmos.scanNotes = async () => heartbeatTestScanResult();
-  client.cosmos.fetchAuditConfig = async () => ({ audit_master_pubkey_hex: "aa".repeat(32) });
+  client.cosmos.assertTransferProtocolConfig = async () => transferProtocolConfig();
   client.cosmos.buildTransferMessage = async () => heartbeatTestBuiltTransfer();
   client.proverAdapter = () => null;
   client.evm.contract.buildTransferTransaction = () => ({
@@ -2920,7 +3072,12 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
     foundNotes: [inputNote],
     scanCursor: { source: "privacy_scan", has_more: false }
   });
-  client.createCommitmentPathSnapshotProvider = async () => merklePathProvider;
+  let snapshotRequest = null;
+  client.fetchTreeState = async () => ({ root: rootHex });
+  client.createCommitmentPathSnapshotProvider = async input => {
+    snapshotRequest = input;
+    return merklePathProvider;
+  };
   client.checkNullifiers = async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]));
   let proveBatchTransferCalls = 0;
   const checkpointOrder = [];
@@ -2983,6 +3140,13 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
   await assert.rejects(
     () => client.prepareTransferBatch({
       ...safetyInput,
+      rootHex: undefined
+    }),
+    /rootHex and snapshotHeight must be supplied together/
+  );
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      ...safetyInput,
       reservationManager,
       onPreparedProof() {}
     }),
@@ -2997,6 +3161,30 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
     /requires onPreparedProof/
   );
 
+  const batchPayments = [
+    {
+      itemId: "private-payment",
+      amount: "3uclair",
+      recipient: recipients[0],
+      userPrivacyPolicy: "all-private",
+      userDisclosureMode: "none"
+    },
+    {
+      itemId: "public-amount-payment",
+      amount: "4uclair",
+      recipient: recipients[1],
+      userPrivacyPolicy: "amount",
+      userDisclosureMode: "public"
+    },
+    {
+      itemId: "recipient-encrypted-payment",
+      amount: "5uclair",
+      recipient: recipients[2],
+      userPrivacyPolicy: "to",
+      userDisclosureMode: "recipient-encrypted",
+      userDisclosureTargetPubKeyHex: Buffer.from(packPoint(CURVE_BASE)).toString("hex")
+    }
+  ];
   const result = await client.prepareTransferBatch({
     material: {
       rootSeed,
@@ -3004,35 +3192,10 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
       pubKeyHex: "02".padEnd(66, "0"),
       shieldedAddress: "clairs1sender"
     },
-    payments: [
-      {
-        itemId: "private-payment",
-        amount: "3uclair",
-        recipient: recipients[0],
-        userPrivacyPolicy: "all-private",
-        userDisclosureMode: "none"
-      },
-      {
-        itemId: "public-amount-payment",
-        amount: "4uclair",
-        recipient: recipients[1],
-        userPrivacyPolicy: "amount",
-        userDisclosureMode: "public"
-      },
-      {
-        itemId: "recipient-encrypted-payment",
-        amount: "5uclair",
-        recipient: recipients[2],
-        userPrivacyPolicy: "to",
-        userDisclosureMode: "recipient-encrypted",
-        userDisclosureTargetPubKeyHex: Buffer.from(packPoint(CURVE_BASE)).toString("hex")
-      }
-    ],
+    payments: batchPayments,
     outputMode: "exact32",
     proverAdapter,
     audit_disclosure_target_pubkey_hex: activeTransferProtocolConfig.audit_config.audit_master_pubkey_hex,
-    rootHex,
-    snapshotHeight: 3,
     chainNowUnix,
     expiresAtUnix: chainNowUnix + 1_800,
     reservation_manager: reservationManager,
@@ -3055,6 +3218,8 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
   assert.equal(result.signDoc.messages[0].typeUrl, MsgBatchTransfer.typeUrl);
   assert.equal(result.message.nullifiers.length, 1);
   assert.equal(result.message.outputs.length, 32);
+  assert.equal(snapshotRequest.rootHex, rootHex);
+  assert.equal("snapshotHeight" in snapshotRequest, false);
   assert.deepEqual(result.payload.outputs.slice(0, 3).map(output => output.kind), [
     "payment",
     "payment",
@@ -3363,6 +3528,65 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
   assert.equal(resumed.reservationFinalizationRequired, true);
   assert.equal(resumedProofContext.operationId, result.operationEvidence.operation_id);
   assert.deepEqual(resumedProofContext.reservation, result.reservation);
+
+  // Simulate a process restart: the new manager restores the original
+  // reservation batch in Proving, then the public recovery primitive binds the
+  // durable payload/proof back to the original payment rows before it permits
+  // signing or broadcasting.
+  const resumedReservationManager = createNoteReservationManager({
+    store: new MemoryReservationStore(),
+    ownerKeyId: "chain:clair1sender-resumed",
+    indexKey: "index-key-v1"
+  });
+  const resumedReservation = await resumedReservationManager.reserveNotes({
+    notes: [inputNote],
+    operationId: result.operationEvidence.operation_id,
+    kind: "batch_transfer",
+    metadata: { batch_transfer_output_mode: "exact32" }
+  });
+  const provingReservations = await resumedReservationManager.markProving(
+    resumedReservation.reservation_ids,
+    { leaseToken: resumedReservation.lease_token }
+  );
+  resumedReservation.reservations = provingReservations;
+  client.assertCircuitConfig = async () => activeTransferProtocolConfig.circuit_config;
+  const finalizationInput = {
+    payload: checkpointedPayload,
+    proof: resumed.proof,
+    signer: "clair1sender",
+    pubKeyHex: "02".padEnd(66, "0"),
+    gasLimit: 25000000,
+    payments: batchPayments,
+    operationId: result.operationEvidence.operation_id,
+    reservationManager: resumedReservationManager,
+    reservation: resumedReservation,
+    chainNowUnix
+  };
+  await assert.rejects(
+    () => client.finalizePreparedBatchTransfer({
+      ...finalizationInput,
+      payments: [{ ...batchPayments[0], amount: "4uclair" }, ...batchPayments.slice(1)]
+    }),
+    /prepared batch payment output 0 does not match its payment/
+  );
+  assert.equal(
+    (await resumedReservationManager.getReservation(resumedReservation.reservation_ids[0])).status,
+    reservationStatuses.Proving
+  );
+  const finalized = await client.finalizePreparedBatchTransfer(finalizationInput);
+  assert.equal(finalized.signDoc.messages[0].typeUrl, MsgBatchTransfer.typeUrl);
+  assert.equal(finalized.message.outputs.length, 32);
+  assert.equal(finalized.operationEvidence.expected_outputs.length, 3);
+  assert.match(finalized.operationEvidenceHash, /^[0-9a-f]{64}$/);
+  assert.equal(finalized.reservation.reservations[0].status, reservationStatuses.ProofReady);
+  assert.equal(
+    finalized.reservation.reservations[0].expected_operation_evidence_hash,
+    finalized.operationEvidenceHash
+  );
+  assert.deepEqual(
+    finalized.reservation.reservations[0].metadata.batch_transfer_operation_evidence.expected_outputs,
+    finalized.operationEvidence.expected_outputs
+  );
 });
 
 test("REST Merkle-path failures do not echo response bodies or commitment URLs", async () => {
@@ -4096,19 +4320,30 @@ test("browser-dapp balance and health REST queries fail over across endpoints", 
       });
     }
     if (text.endsWith("/clairveil/privacy/v1/tree_state")) {
-      return new Response(JSON.stringify({ tree_size: "1" }), {
+      return new Response(JSON.stringify({
+        root: "00".repeat(31) + "01",
+        leaf_count: "1",
+        depth: 32,
+        initialized: true,
+        max_leaves: "4294967296",
+        remaining_leaves: "4294967295"
+      }), {
         status: 200,
         headers: { "content-type": "application/json" }
       });
     }
     if (text.endsWith("/clairveil/privacy/v1/audit_config")) {
-      return new Response(JSON.stringify({ audit_master_pubkey_hex: "" }), {
+      return new Response(JSON.stringify({
+        audit_master_pubkey_hex: Buffer.from(packPoint(CURVE_BASE)).toString("hex"),
+        audit_key_id: "audit-key-1",
+        audit_key_epoch: "1"
+      }), {
         status: 200,
         headers: { "content-type": "application/json" }
       });
     }
     if (text.endsWith("/status")) {
-      return new Response(JSON.stringify({ result: { node_info: { network: "local" } } }), {
+      return new Response(JSON.stringify({ result: { node_info: { network: "clairveil-local-3" } } }), {
         status: 200,
         headers: { "content-type": "application/json" }
       });
@@ -4133,8 +4368,8 @@ test("browser-dapp balance and health REST queries fail over across endpoints", 
     const health = await client.health();
 
     assert.equal(balances.balances[0].amount, "7");
-    assert.equal(health.tree.tree_size, "1");
-    assert.equal(health.audit.audit_master_pubkey_hex, "");
+    assert.equal(health.tree.leaf_count, "1");
+    assert.equal(health.audit.audit_key_id, "audit-key-1");
     assert.deepEqual(requestedUrls, [
       "http://rest-a.local/cosmos/bank/v1beta1/balances/clair1abc",
       "http://rest-a.local/cosmos/bank/v1beta1/balances/clair1abc",
@@ -4146,6 +4381,36 @@ test("browser-dapp balance and health REST queries fail over across endpoints", 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("native 2x2 prepareTransfer binds an asserted audit key to the active chain config", async () => {
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    defaultDenom: "uclair"
+  });
+  client.scanNotes = async () => heartbeatTestScanResult();
+  client.assertTransferProtocolConfig = async () => transferProtocolConfig();
+  let buildCalls = 0;
+  client.buildTransferMessage = async () => {
+    buildCalls += 1;
+    throw new Error("transfer build must not run");
+  };
+
+  await assert.rejects(
+    () => client.prepareTransfer({
+      material: heartbeatTestMaterial(),
+      amount: "1uclair",
+      recipient: "clairs1recipient",
+      proverAdapter: null,
+      auditDisclosureTargetPubKeyHex: "00".repeat(32)
+    }),
+    /transfer audit disclosure target must exactly match the active chain audit config/
+  );
+  assert.equal(buildCalls, 0);
 });
 
 test("chain read query failover does not mask non-retryable errors", async () => {
@@ -4437,6 +4702,43 @@ test("cosmos raw TxRaw retransmission preserves reservation attempt evidence", a
   const stored = await store.getReservation(reservation.reservation_ids[0]);
   assert.equal(stored.status, reservationStatuses.Submitted);
   assert.equal(stored.tx_bytes_hash, txBytesHash);
+});
+
+test("reserved batch broadcast rechecks persisted input nullifiers immediately before submission", async () => {
+  const signedTx = { bodyBytes: "", authInfoBytes: "", signature: "" };
+  const nullifier = "4d".repeat(32);
+  const { store, reservationManager, reservation } = await readyBroadcastReservation("4d", {
+    signDocHash: cosmosSignDocBindingHash(signedTx),
+    metadata: { batch_transfer_nullifier_hexes: [nullifier] }
+  });
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  let nullifierChecks = 0;
+  let broadcastCalls = 0;
+  client.connect = async () => ({
+    async broadcastTxSync() {
+      broadcastCalls += 1;
+      return "BATCH-UNREACHABLE";
+    }
+  });
+  client.checkNullifiers = async values => {
+    nullifierChecks += 1;
+    assert.deepEqual(values, [nullifier]);
+    return new Map([[nullifier, true]]);
+  };
+
+  await assert.rejects(
+    () => client.broadcastSignedTx(signedTx, { reservationManager, reservation }),
+    /batch transfer input nullifier at index 0 is spent/
+  );
+  assert.equal(nullifierChecks, 1);
+  assert.equal(broadcastCalls, 0);
+  const stored = await store.getReservation(reservation.reservation_ids[0]);
+  assert.equal(stored.status, reservationStatuses.ProofReady);
+  assert.equal(stored.broadcast_attempt_count, 0);
 });
 
 test("cosmos broadcastSignedTx does not mark unindexed transactions as ok", async () => {
@@ -4908,8 +5210,8 @@ test("reserved EVM broadcasts preserve frozen wallet errors when bookkeeping als
 test("reserved EVM transaction guards survive JSON serialization", async () => {
   const client = createClairveilEvmClient();
   const selectors = [
-    functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))"),
-    functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))")
+    functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))"),
+    functionSelector("withdraw((bytes,bytes,bytes,string,address,string,uint64))")
   ];
   let calls = 0;
 
@@ -5334,6 +5636,152 @@ test("default nullifier queries stay pinned after REST failover", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("Merkle witness and exact-snapshot queries stay pinned unless failover is explicit", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  globalThis.fetch = async url => {
+    const text = String(url);
+    requestedUrls.push(text);
+    if (text.startsWith("http://rest-a.local")) {
+      return new Response("busy", { status: 503 });
+    }
+    return new Response(JSON.stringify({}), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  const commitmentHex = "01".repeat(32);
+  const rootHex = "02".repeat(32);
+  const defaultFactories = [
+    () => createClairveilClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      chainId: "clairveil-local-3",
+      queryRetry: false
+    }),
+    () => createClairveilPublicClient({
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      queryRetry: false
+    })
+  ];
+  const failoverFactories = [
+    () => createClairveilClient({
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      chainId: "clairveil-local-3",
+      queryRetry: false,
+      merklePathFailover: true
+    }),
+    () => createClairveilPublicClient({
+      rest: "http://rest-a.local",
+      restEndpoints: ["http://rest-a.local", "http://rest-b.local"],
+      queryRetry: false,
+      merklePathFailover: true
+    })
+  ];
+  try {
+    for (const createClient of defaultFactories) {
+      const client = createClient();
+      requestedUrls.length = 0;
+      await assert.rejects(() => client.lookupMerklePath(commitmentHex), /503/);
+      assert.deepEqual(requestedUrls, [
+        `http://rest-a.local/clairveil/privacy/v1/merkle_path/${commitmentHex}`
+      ]);
+
+      requestedUrls.length = 0;
+      await assert.rejects(
+        () => client.fetchCommitmentPathsAtRoot({ commitmentHexes: [commitmentHex], rootHex }),
+        /503/
+      );
+      assert.deepEqual(requestedUrls, [
+        "http://rest-a.local/clairveil/privacy/v1/commitment_paths_at_root"
+      ]);
+    }
+
+    for (const createClient of failoverFactories) {
+      const client = createClient();
+      requestedUrls.length = 0;
+      await client.lookupMerklePath(commitmentHex);
+      assert.deepEqual(requestedUrls, [
+        `http://rest-a.local/clairveil/privacy/v1/merkle_path/${commitmentHex}`,
+        `http://rest-b.local/clairveil/privacy/v1/merkle_path/${commitmentHex}`
+      ]);
+
+      requestedUrls.length = 0;
+      client.activeRestEndpoint = client.rest;
+      await client.fetchCommitmentPathsAtRoot({ commitmentHexes: [commitmentHex], rootHex });
+      assert.deepEqual(requestedUrls, [
+        "http://rest-a.local/clairveil/privacy/v1/commitment_paths_at_root",
+        "http://rest-b.local/clairveil/privacy/v1/commitment_paths_at_root"
+      ]);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("native 2x2 transfer builds both witnesses from one exact Merkle snapshot", async () => {
+  const rootSeed = new Uint8Array(32).fill(17);
+  const spendPubKey = deriveSpendKeys(rootSeed).pubKey;
+  const viewPubKey = deriveViewKeys(rootSeed).pubKey;
+  const inputs = [7n, 5n].map((amount, index) => ({
+    note: createNote({
+      spendPubKey,
+      viewPubKey,
+      amount,
+      assetDenom: "uclair",
+      randomness: BigInt(index + 31)
+    }),
+    isSpent: false,
+    nullifierStatus: "unspent",
+    txHash: `transfer-snapshot-${index}`,
+    height: 1,
+    sequence: index
+  }));
+  const directPathProvider = strictMerklePathProvider(inputs.map(input => input.note));
+  const rootHex = (await directPathProvider.lookupMerklePath(
+    fieldHexV1(computeNoteCommitmentV1(inputs[0].note))
+  )).root;
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    shieldedPrefix: "clairs",
+    defaultDenom: "uclair"
+  });
+  client.assertTransferProtocolConfig = async () => transferProtocolConfig();
+  client.fetchTreeState = async () => ({ root: rootHex });
+  let snapshotRequest = null;
+  client.createCommitmentPathSnapshotProvider = async request => {
+    snapshotRequest = request;
+    return directPathProvider;
+  };
+  const result = await client.buildTransferMessage({
+    creator: "clair1snapshot",
+    inputs,
+    recipient: encodeShieldedAddress(spendPubKey, viewPubKey, { prefix: "clairs" }),
+    amount: "7uclair",
+    rootSeed,
+    auditDisclosureTargetPubKeyHex: Buffer.from(packPoint(CURVE_BASE)).toString("hex"),
+    chainNowUnix: Math.floor(Date.now() / 1000),
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false])),
+    proverAdapter: {
+      async proveTransfer({ payload }) {
+        return { version: "v2", payload_hash: payload.payload_hash, proof_hex: validV2ProofHex };
+      }
+    }
+  });
+
+  assert.deepEqual(snapshotRequest, {
+    commitmentHexes: inputs.map(input => fieldHexV1(computeNoteCommitmentV1(input.note))),
+    rootHex
+  });
+  assert.equal(result.payload.root_hex, rootHex);
 });
 
 test("scan_events fallback rewinds a mid-block cursor for legacy scans", async () => {
@@ -6194,10 +6642,12 @@ test("EVM client builds and sends deposit transaction with mock provider", async
   const prepared = client.buildDepositTransaction({
     creator: material.address,
     rootSeed: material.rootSeed,
-    amount: "3"
+    amount: "3",
+    proof: new Uint8Array([1, 2, 3])
   });
   const sameMaterial = client.buildDepositTransaction({
-    material: prepared.material
+    material: prepared.material,
+    proof: new Uint8Array([1, 2, 3])
   });
   const sameMessage = client.buildDepositTransaction({
     message: prepared.message
@@ -6214,7 +6664,7 @@ test("EVM client builds and sends deposit transaction with mock provider", async
 
   assert.equal(prepared.material.amount, "3udemo");
   assert.equal(prepared.transaction.to, evmPrivacyPrecompileAddress);
-  assert.equal(prepared.transaction.data.slice(2, 10), functionSelector("deposit((string,bytes,bytes))"));
+  assert.equal(prepared.transaction.data.slice(2, 10), functionSelector("deposit((string,bytes,bytes,bytes))"));
   assert.equal(prepared.transaction.data, sameMaterial.transaction.data);
   assert.equal(prepared.transaction.data, sameMessage.transaction.data);
   assert.equal(sameMessage.material, undefined);
@@ -6237,7 +6687,8 @@ test("EVM client wraps existing transfer and withdraw messages without prepared 
     viewTags: [new Uint8Array([8, 9]), new Uint8Array([10, 11])],
     auditDisclosureDigest: new Uint8Array(),
     auditDisclosureTargetPubkey: new Uint8Array(),
-    auditDisclosurePayload: new Uint8Array()
+    auditDisclosurePayload: new Uint8Array(),
+    expiresAtUnix: 4102448400n
   };
   const withdrawMessage = {
     proof: new Uint8Array([1, 2, 3]),
@@ -6256,14 +6707,14 @@ test("EVM client wraps existing transfer and withdraw messages without prepared 
   assert.equal(transfer.payload, undefined);
   assert.equal(transfer.proof, undefined);
   assert.equal(transfer.transaction.to, evmPrivacyPrecompileAddress);
-  assert.equal(transfer.transaction.data.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))"));
+  assert.equal(transfer.transaction.data.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))"));
   assert.equal(withdraw.message, withdrawMessage);
   assert.equal(withdraw.payload, undefined);
   assert.equal(withdraw.proof, undefined);
   assert.equal(withdraw.proverPayload, undefined);
   assert.equal(withdraw.selectedNote, undefined);
   assert.equal(withdraw.transaction.to, evmPrivacyPrecompileAddress);
-  assert.equal(withdraw.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))"));
+  assert.equal(withdraw.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,string,address,string,uint64))"));
 
   const frozenTransferRequest = Object.freeze({ to: evmPrivacyPrecompileAddress, data: "0x1234", value: "0x0" });
   const frozenWithdrawRequest = Object.freeze({ to: evmPrivacyPrecompileAddress, data: "0x5678", value: "0x0" });
@@ -6428,7 +6879,7 @@ test("EVM client wraps prepared relay withdraw payloads into withdraw transactio
   assert.deepEqual(legacySnake.message, withdraw.message);
   assert.deepEqual(canonicalWins.message, withdraw.message);
   assert.equal(withdraw.transaction.to, evmPrivacyPrecompileAddress);
-  assert.equal(withdraw.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))"));
+  assert.equal(withdraw.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,string,address,string,uint64))"));
 });
 
 test("Cosmos operation evidence rejects conflicting direct and batch aliases", async () => {
@@ -6565,19 +7016,7 @@ test("EVM withdraw transaction validates relay payload chain id and message reci
 
 test("browser-dapp prepareRelayWithdraw returns an EVM transaction for EVM profiles", async () => {
   const client = createClairveilBrowserDappClient({
-    profile: {
-      transport: "evm",
-      chainId: "demo-1",
-      accountPrefix: "demo",
-      shieldedPrefix: "demos",
-      denom: "udemo",
-      rpc: "http://127.0.0.1:26657",
-      rest: "http://127.0.0.1:1317",
-      evmRpc: "http://127.0.0.1:8545",
-      evmChainId: "0x539",
-      evmPrivacyPrecompileAddress: evmPrivacyPrecompileAddress
-    },
-    proverUrl: "http://127.0.0.1:8080"
+    profile: browserEvmProfile()
   });
   client.privacyMaterial = () => ({
     rootSeed: new Uint8Array(32),
@@ -6585,6 +7024,7 @@ test("browser-dapp prepareRelayWithdraw returns an EVM transaction for EVM profi
     pubKeyHex: "02".padEnd(66, "0"),
     shieldedAddress: "demos1example"
   });
+  client.evmJsonRpc = async () => "0x539";
   let captured = null;
   client.cosmos.prepareRelayWithdraw = async input => {
     captured = input;
@@ -6621,7 +7061,8 @@ test("browser-dapp prepareRelayWithdraw returns an EVM transaction for EVM profi
     signatureBase64: "AQID",
     amount: "1udemo",
     recipient: "0x1111111111111111111111111111111111111111",
-    chainNowUnix: 4102444800
+    chainNowUnix: 4102444800,
+    evmWallet: { getChainId: async () => "0x539" }
   });
 
   assert.equal(captured.recipient, evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"));
@@ -6629,24 +7070,12 @@ test("browser-dapp prepareRelayWithdraw returns an EVM transaction for EVM profi
   assert.equal(prepared.prepared.evmRecipient, "0x1111111111111111111111111111111111111111");
   assert.equal(prepared.transaction.chainId, "0x539");
   assert.equal(prepared.transaction.to, evmPrivacyPrecompileAddress);
-  assert.equal(prepared.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))"));
+  assert.equal(prepared.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,string,address,string,uint64))"));
 });
 
 test("browser-dapp EVM relay withdraw build failure replans the durable ProofReady reservation", async () => {
   const client = createClairveilBrowserDappClient({
-    profile: {
-      transport: "evm",
-      chainId: "demo-1",
-      accountPrefix: "demo",
-      shieldedPrefix: "demos",
-      denom: "udemo",
-      rpc: "http://127.0.0.1:26657",
-      rest: "http://127.0.0.1:1317",
-      evmRpc: "http://127.0.0.1:8545",
-      evmChainId: "0x539",
-      evmPrivacyPrecompileAddress
-    },
-    proverUrl: "http://127.0.0.1:8080"
+    profile: browserEvmProfile()
   });
   client.privacyMaterial = () => ({
     rootSeed: new Uint8Array(32),
@@ -6654,6 +7083,7 @@ test("browser-dapp EVM relay withdraw build failure replans the durable ProofRea
     pubKeyHex: "02".padEnd(66, "0"),
     shieldedAddress: "demos1example"
   });
+  client.evmJsonRpc = async () => "0x539";
 
   const now = () => new Date("2026-01-02T03:04:05.000Z");
   const store = new MemoryReservationStore({ now });
@@ -6730,7 +7160,8 @@ test("browser-dapp EVM relay withdraw build failure replans the durable ProofRea
       amount: "1udemo",
       recipient: "0x1111111111111111111111111111111111111111",
       chainNowUnix: 4102444800,
-      reservationManager
+      reservationManager,
+      evmWallet: { getChainId: async () => "0x539" }
     }),
     /evm transaction build failed/
   );
@@ -6752,7 +7183,8 @@ test("EVM privacy precompile encoders use tuple selectors", () => {
   const deposit = encodeEvmPrivacyDeposit({
     amount: "1aokrw",
     noteCommitment: new Uint8Array(32).fill(1),
-    encryptedNote: new Uint8Array([2, 3])
+    encryptedNote: new Uint8Array([2, 3]),
+    proof: new Uint8Array([4, 5])
   });
   const transferMessage = {
     proof: new Uint8Array([1, 2, 3]),
@@ -6765,16 +7197,12 @@ test("EVM privacy precompile encoders use tuple selectors", () => {
     userDisclosureMode: 0,
     auditDisclosureDigest: new Uint8Array(32).fill(8),
     auditDisclosureTargetPubkey: new Uint8Array(32).fill(9),
-    auditDisclosurePayload: new Uint8Array([10])
+    auditDisclosurePayload: new Uint8Array([10]),
+    selfViewDisclosureDigest: new Uint8Array(32).fill(11),
+    selfViewDisclosurePayload: new Uint8Array([12]),
+    expiresAtUnix: 1234
   };
   const transfer = encodeEvmPrivacyTransfer(transferMessage);
-  assert.throws(
-    () => encodeEvmPrivacyTransfer({
-      ...transferMessage,
-      selfViewDisclosureDigest: new Uint8Array(32).fill(11)
-    }),
-    /does not support self-view disclosure/
-  );
   const withdraw = encodeEvmPrivacyWithdraw({
     proof: new Uint8Array([1, 2, 3]),
     root: new Uint8Array(32).fill(1),
@@ -6785,43 +7213,23 @@ test("EVM privacy precompile encoders use tuple selectors", () => {
     expiresAtUnix: 1234
   }, { accountPrefix: "demo" });
 
-  assert.equal(deposit.slice(2, 10), functionSelector("deposit((string,bytes,bytes))"));
-  assert.equal(transfer.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))"));
-  assert.equal(withdraw.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))"));
-});
-
-test("EVM reference deposit encoder matches the proofless precompile signature", () => {
-  const encoded = encodeReferenceEvmDeposit({
-    amount: "1aokrw",
-    noteCommitment: new Uint8Array(32).fill(1),
-    encryptedNote: new Uint8Array([2, 3])
-  });
-  assert.equal(encoded.slice(2, 10), functionSelector("deposit(uint256,bytes32,bytes)"));
-});
-
-test("EVM reference withdraw encoder compares evmRecipient with bech32 recipient", () => {
-  const encoded = encodeReferenceEvmWithdraw({
-    proof: new Uint8Array([1, 2, 3]),
-    root: new Uint8Array(32).fill(1),
-    nullifier: new Uint8Array(32).fill(2),
-    amount: "1aokrw",
-    recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
-    evmRecipient: "0x1111111111111111111111111111111111111111",
-    expiresAtUnix: 1234
-  });
-  assert.equal(encoded.slice(2, 10), functionSelector("withdraw(bytes,bytes32,bytes32,uint256,address,string,uint64)"));
-
+  assert.equal(deposit.slice(2, 10), functionSelector("deposit((string,bytes,bytes,bytes))"));
+  assert.equal(transfer.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))"));
+  assert.equal(withdraw.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,string,address,string,uint64))"));
   assert.throws(
-    () => encodeReferenceEvmWithdraw({
-      proof: new Uint8Array([1, 2, 3]),
-      root: new Uint8Array(32).fill(1),
-      nullifier: new Uint8Array(32).fill(2),
+    () => encodeEvmPrivacyTransfer({ ...transferMessage, expiresAtUnix: undefined }),
+    /transfer expiresAtUnix is required/
+  );
+  assert.throws(
+    () => encodeEvmPrivacyWithdraw({
+      proof: new Uint8Array([1]),
+      root: new Uint8Array(32),
+      nullifier: new Uint8Array(32),
       amount: "1aokrw",
       recipient: evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo"),
-      evmRecipient: "0x2222222222222222222222222222222222222222",
-      expiresAtUnix: 1234
-    }),
-    /evmRecipient does not match message recipient/
+      chainId: "evm-privacy-local-1"
+    }, { accountPrefix: "demo" }),
+    /withdraw expiresAtUnix is required/
   );
 });
 

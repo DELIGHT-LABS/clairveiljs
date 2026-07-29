@@ -91,7 +91,9 @@ const clairveil = createClairveilClient({
 
 `prepareTransferBatch(...)` implements the Clairveil v0.2 `BatchTransfer` contract. It plans and atomically reserves 1–16 inputs, builds 1–32 ordered payment/change/padding outputs, calls one explicitly selected `proverAdapter.proveBatchTransfer(payload)` exactly once, and returns one Cosmos `MsgBatchTransfer`. It never expands the payments into multiple `MsgTransfer` proofs and does not perform automatic prover failover.
 
-The ordinary `prepareTransfer(...)` API remains the supported native 2×2 `MsgTransfer` path; native 2×2 is not deprecated. Clairveil's older multi-message `transfer-batch` orchestration remains a separate protocol meaning and is not aliased to `prepareTransferBatch(...)`.
+The ordinary `prepareTransfer(...)` API remains the supported native 2×2 `MsgTransfer` path; native 2×2 is not deprecated. Its two input witnesses are fetched together from one verified exact-root `commitment_paths_at_root` snapshot. Clairveil's older multi-message `transfer-batch` orchestration remains a separate protocol meaning and is not aliased to `prepareTransferBatch(...)`.
+
+Merkle witness (`merkle_path`) and exact-snapshot (`commitment_paths_at_root`) requests stay pinned to the configured REST endpoint by default. Set `merklePathFailover: true` only when cross-endpoint disclosure of the commitments being spent is acceptable.
 
 Use `payments` for multiple recipients and per-output disclosure. `outputMode: "compact"` emits payments plus optional change; `outputMode: "exact32"` appends explicit zero-value padding after payment/change outputs.
 
@@ -133,7 +135,7 @@ console.log(prepared.prepared.inputCount, prepared.prepared.outputCount);
 console.log(prepared.operationEvidence.expected_outputs);
 ```
 
-`reservationManager`, `onPreparedPayload`, and `onPreparedProof` are required for every executable batch. The callback storage implementation is caller-owned and must keep private artifacts encrypted; local files must be mode `0600`. Once either checkpoint callback starts, a later prepare failure quarantines the whole reservation set as `ManualReview` instead of releasing potentially reusable inputs. `provePreparedBatchTransfer(...)` is a proof-stage recovery primitive: after a restart it requires the exact checkpointed payload, original operation ID and reservation batch, plus a proof checkpoint callback. Its returned message is not authorization to broadcast; the caller must restore the original operation and atomically complete the same sign-doc/evidence and `ProofReady` reservation finalization first. Use the reference-payroll artifact/retry APIs for the complete restart-safe signed-transaction workflow. Query the stored transaction hash and every input nullifier before any retry; retransmit only previously checkpointed exact TxRaw bytes and never rebuild or retry part of an atomic output list.
+`reservationManager`, `onPreparedPayload`, and `onPreparedProof` are required for every executable batch. The callback storage implementation is caller-owned and must keep private artifacts encrypted; local files must be mode `0600`. Once either checkpoint callback starts, a later prepare failure quarantines the whole reservation set as `ManualReview` instead of releasing potentially reusable inputs. `provePreparedBatchTransfer(...)` is a proof-stage recovery primitive: after a restart it requires the exact checkpointed payload, original operation ID and reservation batch, plus a proof checkpoint callback. Its returned message is not authorization to broadcast. Pass that persisted payload/proof, the original payment rows, signer, reservation manager, and reservation batch to `finalizePreparedBatchTransfer(...)` before opening the wallet; it recreates the sign doc and operation evidence, rechecks nullifiers, and atomically advances every input to `ProofReady`. Use the reference-payroll artifact/retry APIs for the complete restart-safe signed-transaction workflow. Query the stored transaction hash and every input nullifier before any retry; retransmit only previously checkpointed exact TxRaw bytes and never rebuild or retry part of an atomic output list.
 
 Batch preparation requires unified `privacy-scan-v2`; it fails closed rather than falling back to ciphertext-free legacy events. The SDK validates one same-root Merkle snapshot, rechecks the active circuit, authoritative asset mapping, audit identity, and disclosure capabilities when proving or recovering the proof stage, checks all input nullifiers before and after proving, and verifies proof version/request hash/circuit identity. The uninterrupted `prepareTransferBatch(...)` flow then atomically advances reservations to `ProofReady`; proof-stage recovery deliberately returns `reservationFinalizationRequired: true` until the caller completes the restored operation workflow. `operationEvidence` records output index, commitment, recipient hash, amount/asset, and user/audit/self-view disclosure digests per payment. Use `fetchAuditableBatchTransfers(...)` plus `decodeBatchUserDisclosure(...)`, `decodeBatchSelfViewDisclosure(...)`, and `decodeBatchAuditDisclosure(...)` for typed output reconciliation; retain one `createPrivacyScanValidationStateV2()` object across consecutive audit-query cursor pages.
 
@@ -351,6 +353,31 @@ const deposit = await clairveil.prepareDeposit({
 // then prepareDeposit returns deposit.transaction for EIP-1193 submission.
 ```
 
+For a profile-based Cosmos DApp that uses the product-hosted DepositCircuit
+service, configure `profile.depositProofUrl` with the exact reviewed endpoint.
+The SDK never derives this URL from `proverUrl`: it sends one direct `POST`
+with `{ note_json, note_commitment_hex }`, rejects redirects and non-JSON or
+oversized responses, and requires `{ version: "v1", proof_hex,
+note_commitment_hex }` with the same commitment. A local/WASM
+`depositProofProvider` remains supported. The active profile is the only
+source for `depositProofUrl`.
+
+Every EVM-profile `prepareDeposit`, `prepareTransfer`, `prepareWithdraw`, and
+`prepareRelayWithdraw` call also requires `evmWallet: { getChainId() }`. The
+SDK checks that connected-wallet chain ID and the configured read-only
+`evmRpc` chain ID both match `profile.evmChainId` before it creates a proof or
+prepared transaction.
+
+Browser-DApp `profile` is validated fail-closed against the Web client profile
+contract at construction. Supply the required common fields (`id`, `label`,
+`chainName`, wallet metadata, endpoints, denom/display metadata) and the
+transport-specific fields; EVM profiles require MetaMask plus `evmRpc`,
+`evmChainId`, `evmChainName`, precompile address, and both gas limits. Submit
+the resulting EVM transaction with `sendEvmTransaction({ wallet,
+transaction, ...reservationOptions })`, rather than calling the injected
+provider directly, so the configured network is rechecked and reserved-note
+broadcast lifecycle state is retained.
+
 `waitForEvmTransaction(...)` is the normal EVM confirmation API. For a
 read-only EVM JSON-RPC method that has no higher-level ClairveilJS wrapper,
 the browser client also exposes `evmJsonRpc<TResult>(method, params)`. It
@@ -409,11 +436,22 @@ const noteStore = new LocalStorageNoteStore({
 
 EVM Clairveil chains submit state-changing privacy actions through the EVM privacy precompile, not direct Cosmos SDK tx broadcast. ClairveilJS still prepares the privacy payload in the browser, then converts the prepared message into `IPrivacy.deposit`, `IPrivacy.transfer`, or `IPrivacy.withdraw` calldata.
 
-Supported EVM scope: an EVM Clairveil chain is expected to use the Clairveil `IPrivacy` precompile ABI and payload semantics. Adding another EVM chain should only require chain/profile configuration changes when that chain keeps the same ABI contract. Different precompile function shapes are outside the current supported SDK scope.
+Supported EVM scope: an EVM Clairveil chain must implement the canonical Clairveil
+0.2 `IPrivacy` precompile ABI and payload semantics. The default adapter encodes
+`deposit((string,bytes,bytes,bytes))`,
+`transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))`,
+and `withdraw((bytes,bytes,bytes,string,address,string,uint64))`. A different
+function shape is outside the supported SDK scope and must not be selected by
+profile-only configuration.
 
-In the supported EVM ABI, `IPrivacy.deposit` receives `{ amount, noteCommitment, encryptedNote }`. The Cosmos `MsgDeposit` path requires a `DepositCircuit` proof, but the current EVM precompile deposit calldata does not include a proof field.
-
-The supported EVM `IPrivacy.transfer` ABI carries encrypted output notes and the two 2-byte `viewTags` aligned with `newCommitments` and `cipherTexts`, plus user and audit disclosure fields. It does not carry the Cosmos `selfViewDisclosure*` fields. ClairveilJS disables self-view disclosure by default on the EVM transport and rejects EVM transfer messages that still contain self-view disclosure bytes instead of silently dropping them.
+The EVM deposit tuple includes the same required `DepositCircuit` proof as
+`MsgDeposit`: `{ amount, noteCommitment, encryptedNote, proof }`. The transfer
+tuple carries encrypted output notes, 2-byte `viewTags` aligned with
+`newCommitments` and `cipherTexts`, user/audit disclosure, sender
+`selfViewDisclosureDigest`/`selfViewDisclosurePayload`, and absolute
+`expiresAtUnix`. Self-view is enabled by default and is omitted only by an
+explicit opt-out. The withdraw tuple has no legacy output-note fields; never
+send dummy `newNoteCommitment` or `encryptedNote` bytes.
 
 ```js
 import {
@@ -436,7 +474,8 @@ const evmClairveil = createClairveilEvmClient({
 
 const deposit = evmClairveil.buildDepositTransaction({
   rootSeed,
-  amount: "10uclair"
+  amount: "10uclair",
+  proof: await proveDepositCircuit({ rootSeed, amount: "10uclair" })
 });
 
 await evmClairveil.sendTransaction(wallet, deposit.transaction);
@@ -444,9 +483,12 @@ await evmClairveil.sendTransaction(wallet, deposit.transaction);
 console.log(defaultEvmPrivacyPrecompileAddress);
 ```
 
-For EVM transfer/withdraw, use the same ClairveilJS note scan, planner, disclosure, and prover adapter flow as the Cosmos client. The final submit step is different: Cosmos sends a `Msg*` sign doc, while EVM sends calldata to the privacy precompile.
-
-Some EVM `IPrivacy.withdraw` deployments may still include legacy `newNoteCommitment` and `encryptedNote` ABI fields. ClairveilJS fills those ABI-only fields with 32 zero bytes by default for compatibility. `withdrawOutputMode: "none"` only changes the placeholder values sent to that legacy-compatible ABI. If a downstream precompile removes those ABI fields entirely, provide a custom contract adapter/encoder that matches the new function shape.
+For EVM transfer/withdraw, use the same ClairveilJS note scan, planner,
+disclosure, and prover adapter flow as the Cosmos client. The final submit step
+is different: Cosmos sends a `Msg*` sign doc, while EVM sends the canonical
+precompile calldata. A deployed legacy precompile without the required proof,
+self-view, expiry, or exact withdraw tuple is not supported by the default
+adapter; upgrade that deployment before enabling its profile.
 
 For a CosmJS `OfflineSigner`, supply a separate root-signing function because standard OfflineSigners do not define Clairveil's arbitrary root message signature by themselves:
 
@@ -699,6 +741,7 @@ For an EVM profile, forward `prepared.transaction` to the relayer as a candidate
 const latestChainBlockTimeUnix = await fetchLatestChainBlockTimeUnix();
 const prepared = await clairveil.prepareRelayWithdraw({
   walletType: "evm",
+  evmWallet: { getChainId: () => ethereum.request({ method: "eth_chainId" }) },
   address,
   pubKeyHex,
   signatureBase64,

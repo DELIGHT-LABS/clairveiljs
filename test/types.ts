@@ -278,6 +278,7 @@ const eip1193Wallet = createEip1193WalletAdapter({
 });
 const eip1193WalletAdapterLike: WalletAdapterLike = eip1193Wallet;
 const eip1193TypedWallet: Eip1193WalletAdapter = eip1193Wallet;
+const evmPreparationWallet: Pick<Eip1193WalletAdapter, "getChainId"> = eip1193Wallet;
 const cosmos = createClairveilClient({
   rpc: "http://127.0.0.1:26657",
   rest: "http://127.0.0.1:1317",
@@ -295,13 +296,15 @@ const cosmos = createClairveilClient({
     retryStatuses: [408, 429, 502, 503, 504]
   },
   nullifierFailover: false,
+  merklePathFailover: false,
   enableExperimentalBatchTransfer: true
 });
 const publicClient = createClairveilPublicClient({
   rest: "http://127.0.0.1:1317",
   restEndpoints: ["http://127.0.0.1:1317"],
   queryTimeoutMs: 30000,
-  queryRetry: false
+  queryRetry: false,
+  merklePathFailover: false
 });
 const assetRegistryResolver = createAssetRegistryResolverV1({
   fetchAssetByDenom: async () => ({
@@ -420,51 +423,127 @@ const dappClient = createClairveilBrowserDappClient({
   restEndpoints: ["http://127.0.0.1:1317"],
   queryRetry: { retries: 2 },
   nullifierFailover: false,
+  merklePathFailover: false,
   proverUrl: "http://127.0.0.1:8080"
 });
-const evmProfileDappClient = createClairveilBrowserDappClient({
+const cosmosProfileDappClient = createClairveilBrowserDappClient({
   profile: {
-    transport: "evm",
-    wallet: "metamask",
-    chainId: "demo-evm-1",
+    id: "demo-cosmos",
+    label: "Demo Cosmos",
+    chainName: "Demo Cosmos",
+    transport: "cosmos",
+    wallet: "keplr",
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "demo-cosmos-1",
     accountPrefix: "demo",
     shieldedPrefix: "demos",
     denom: "udemo",
+    displayDenom: "DEMO",
+    coinDecimals: 6,
+    proverUrl: "http://127.0.0.1:8080",
+    keplrCoinType: 118,
+    gasPriceStep: { low: 0.01, average: 0.025, high: 0.04 },
+    keplrChainInfo: {
+      chainId: "demo-cosmos-1",
+      chainName: "Demo Cosmos",
+      rpc: "http://127.0.0.1:26657",
+      rest: "http://127.0.0.1:1317",
+      bip44: { coinType: 118 },
+      bech32Config: {
+        bech32PrefixAccAddr: "demo",
+        bech32PrefixAccPub: "demopub",
+        bech32PrefixValAddr: "demovaloper",
+        bech32PrefixValPub: "demovaloperpub",
+        bech32PrefixConsAddr: "demovalcons",
+        bech32PrefixConsPub: "demovalconspub"
+      },
+      currencies: [{ coinDenom: "DEMO", coinMinimalDenom: "udemo", coinDecimals: 6 }],
+      feeCurrencies: [{
+        coinDenom: "DEMO",
+        coinMinimalDenom: "udemo",
+        coinDecimals: 6,
+        gasPriceStep: { low: 0.01, average: 0.025, high: 0.04 }
+      }],
+      stakeCurrency: { coinDenom: "DEMO", coinMinimalDenom: "udemo", coinDecimals: 6 },
+      features: []
+    }
+  }
+});
+const evmProfileDappClient = createClairveilBrowserDappClient({
+  profile: {
+    id: "demo-evm",
+    label: "Demo EVM",
+    chainName: "Demo EVM",
+    transport: "evm",
+    wallet: "metamask",
+    chainId: "demo-evm-1",
+    rpc: "http://127.0.0.1:26657",
+    accountPrefix: "demo",
+    shieldedPrefix: "demos",
+    denom: "udemo",
+    displayDenom: "DEMO",
+    coinDecimals: 6,
+    proverUrl: "http://127.0.0.1:8080",
     rest: "http://127.0.0.1:1317",
     restEndpoints: ["http://127.0.0.1:1317"],
     evmRpc: "http://127.0.0.1:8545",
     evmChainId: "0x539",
-    evmPrivacyPrecompileAddress: "0x0000000000000000000000000000000000000900"
-  },
-  proverUrl: "http://127.0.0.1:8080"
+    evmChainName: "Demo EVM",
+    evmPrivacyPrecompileAddress: "0x0000000000000000000000000000000000000900",
+    evmGasLimit: "0x989680",
+    evmSendGasLimit: "0x5208"
+  }
 });
 const typedEvmReceipt = evmProfileDappClient.evmJsonRpc<{ blockNumber: string } | null>(
   "eth_getTransactionReceipt",
   ["0x".padEnd(66, "0")]
 );
+const typedEvmBroadcast = evmProfileDappClient.sendEvmTransaction({
+  wallet: {
+    getChainId: async () => "0x539",
+    sendTransaction: async () => "0x".padEnd(66, "0")
+  },
+  transaction: {
+    to: "0x0000000000000000000000000000000000000900",
+    data: "0x1234",
+    gas: "0x5208",
+    chainId: "0x539"
+  }
+});
 const typedBrowserCircuitConfig = evmProfileDappClient.assertCircuitConfig();
 const typedBrowserTransferConfig = evmProfileDappClient.assertTransferProtocolConfig("uclair");
 const typedBrowserAsset = evmProfileDappClient.queryAssetByDenom("uclair");
 const typedBrowserTree = evmProfileDappClient.fetchTreeState();
 void typedEvmReceipt;
+void typedEvmBroadcast;
 void typedBrowserCircuitConfig;
 void typedBrowserTransferConfig;
 void typedBrowserAsset;
 void typedBrowserTree;
 const evmDirectDappClient = new ClairveilBrowserDappClient({
   profile: {
+    id: "demo-evm-direct",
+    label: "Demo EVM Direct",
+    chainName: "Demo EVM Direct",
     transport: "evm",
     wallet: "metamask",
     chainId: "demo-evm-direct-1",
+    rpc: "http://127.0.0.1:26657",
     accountPrefix: "demo",
     shieldedPrefix: "demos",
     denom: "udemo",
+    displayDenom: "DEMO",
+    coinDecimals: 6,
+    proverUrl: "http://127.0.0.1:8080",
     rest: "http://127.0.0.1:1317",
     evmRpc: "http://127.0.0.1:8545",
     evmChainId: "0x540",
-    evmPrivacyPrecompileAddress: "0x0000000000000000000000000000000000000900"
-  },
-  proverUrl: "http://127.0.0.1:8080"
+    evmChainName: "Demo EVM Direct",
+    evmPrivacyPrecompileAddress: "0x0000000000000000000000000000000000000900",
+    evmGasLimit: "0x989680",
+    evmSendGasLimit: "0x5208"
+  }
 });
 createClairveilBrowserDappClient({
   profile: {
@@ -696,21 +775,47 @@ const scanInput: ScanWalletNotesInput = {
 const invalidWalletType: PrepareDepositInput = { ...walletIdentity, walletType: "evmm", amount: "1udemo" };
 // @ts-expect-error Cosmos deposit requires proof/proofHex/depositProofProvider.
 const invalidCosmosDepositInput: PrepareDepositInput = { ...walletIdentity, amount: "1udemo" };
-const evmCompatibleDepositInput: PrepareDepositInput = { ...walletIdentity, walletType: "evm", amount: "1udemo" };
-const evmProfileDepositInput: PrepareDepositInput<"evm"> = { ...walletIdentity, amount: "1udemo" };
+const evmCompatibleDepositInput: PrepareDepositInput = {
+  ...walletIdentity,
+  walletType: "evm",
+  evmWallet: evmPreparationWallet,
+  amount: "1udemo"
+};
+const evmProfileDepositInput: PrepareDepositInput<"evm"> = {
+  ...walletIdentity,
+  evmWallet: evmPreparationWallet,
+  amount: "1udemo"
+};
 const depositResult: Promise<PreparedCosmosDeposit> = dappClient.prepareDeposit(depositInput);
 const evmProfileDepositResult: Promise<PreparedEvmDeposit> = evmProfileDappClient.prepareDeposit(evmProfileDepositInput);
 const evmProfileInlineDepositResult: Promise<PreparedEvmDeposit> = evmProfileDappClient.prepareDeposit({
   ...walletIdentity,
+  evmWallet: evmPreparationWallet,
   amount: "1udemo"
 });
 const evmProfileInlineDepositWithProofResult: Promise<PreparedEvmDeposit> = evmProfileDappClient.prepareDeposit({
   ...walletIdentity,
+  evmWallet: evmPreparationWallet,
   amount: "1udemo",
   proofHex: "ab"
 });
 const evmDirectInlineDepositResult: Promise<PreparedEvmDeposit> = evmDirectDappClient.prepareDeposit({
   ...walletIdentity,
+  evmWallet: evmPreparationWallet,
+  amount: "1udemo"
+});
+evmProfileDappClient.prepareDeposit({
+  ...walletIdentity,
+  // @ts-expect-error An EVM profile cannot prepare a Cosmos deposit payload.
+  walletType: "cosmos",
+  amount: "1udemo",
+  proofHex: "ab"
+});
+cosmosProfileDappClient.prepareDeposit({
+  ...walletIdentity,
+  // @ts-expect-error A Cosmos profile cannot prepare an EVM deposit payload.
+  walletType: "evm",
+  evmWallet: evmPreparationWallet,
   amount: "1udemo"
 });
 const depositUnionResult: Promise<PreparedDeposit> = dappClient.prepareDeposit(depositInput);
@@ -722,11 +827,13 @@ const cosmosInlineTransferResult: Promise<PreparedCosmosTransfer> = dappClient.p
 });
 const evmProfileTransferResult: Promise<PreparedEvmTransfer> = evmProfileDappClient.prepareTransfer({
   ...walletIdentity,
+  evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demos1recipient"
 });
 const evmDirectTransferResult: Promise<PreparedEvmTransfer> = evmDirectDappClient.prepareTransfer({
   ...walletIdentity,
+  evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demos1recipient"
 });
@@ -801,8 +908,9 @@ const invalidExplicitCosmosBatchEvidence: PrepareExplicitCosmosTransferBatchInpu
   recipient: "demos1recipient",
   expectedAmountHashes: ["amount-hash-0"]
 };
-const evmProfileExplicitCosmosBatchResult: Promise<PreparedCosmosTransferBatch> = evmProfileDappClient.prepareTransferBatch(explicitCosmosTransferBatchInput);
-// @ts-expect-error EVM-default browser clients require explicit walletType: "cosmos" for batch transfer.
+// @ts-expect-error EVM profiles never permit Cosmos one-proof batch transfer.
+evmProfileDappClient.prepareTransferBatch(explicitCosmosTransferBatchInput);
+// @ts-expect-error EVM profiles do not have a default batch-transfer transport.
 evmProfileDappClient.prepareTransferBatch({
   ...walletIdentity,
   ...batchSafetyBindings,
@@ -817,11 +925,13 @@ const cosmosInlineWithdrawResult: Promise<PreparedCosmosWithdraw> = dappClient.p
 });
 const evmProfileWithdrawResult: Promise<PreparedEvmWithdraw> = evmProfileDappClient.prepareWithdraw({
   ...walletIdentity,
+  evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demo1recipient"
 });
 const evmDirectWithdrawResult: Promise<PreparedEvmWithdraw> = evmDirectDappClient.prepareWithdraw({
   ...walletIdentity,
+  evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demo1recipient"
 });
@@ -842,6 +952,7 @@ const legacyTimeRelayWithdrawResult: Promise<PreparedCosmosRelayWithdraw> = dapp
 void legacyTimeRelayWithdrawResult;
 const evmProfileRelayWithdrawResult: Promise<PreparedEvmRelayWithdraw> = evmProfileDappClient.prepareRelayWithdraw({
   ...walletIdentity,
+  evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demo1recipient",
   chainNowUnix: 4102444800,
@@ -850,6 +961,7 @@ const evmProfileRelayWithdrawResult: Promise<PreparedEvmRelayWithdraw> = evmProf
 const evmDirectRelayWithdrawInput: PrepareEvmRelayWithdrawInput = {
   ...walletIdentity,
   walletType: "evm",
+  evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demo1recipient",
   chain_now_unix: 4102444800,
@@ -920,6 +1032,45 @@ const cosmosPreparedTransferBatch = cosmos.prepareTransferBatch({
   onPreparedProof() {}
 });
 const checkpointedBatchPayload = undefined as unknown as PreparedBatchTransferPayload;
+const finalizedCosmosBatch = cosmos.finalizePreparedBatchTransfer({
+  payload: checkpointedBatchPayload,
+  proof: undefined as never,
+  signer: "demo1sender",
+  pubKeyHex: "02".repeat(33),
+  gasLimit: 25000000,
+  amounts: ["1udemo"],
+  recipient: "demos1recipient",
+  operationId: "batch-operation-1",
+  reservationManager,
+  reservation: {} as ReservationBatch,
+  chainNowUnix: 4102444800
+});
+const finalizedDappBatch = dappClient.finalizePreparedBatchTransfer({
+  payload: checkpointedBatchPayload,
+  proof: undefined as never,
+  address: "demo1sender",
+  pubKeyHex: "02".repeat(33),
+  gasLimit: 25000000,
+  amounts: ["1udemo"],
+  recipient: "demos1recipient",
+  operationId: "batch-operation-1",
+  reservationManager,
+  reservation: {} as ReservationBatch,
+  chainNowUnix: 4102444800
+});
+// @ts-expect-error EVM profiles never permit Cosmos staged batch finalization.
+evmProfileDappClient.finalizePreparedBatchTransfer({
+  payload: checkpointedBatchPayload,
+  proof: undefined as never,
+  address: "demo1sender",
+  pubKeyHex: "02".repeat(33),
+  gasLimit: 25000000,
+  amounts: ["1udemo"],
+  recipient: "demos1recipient",
+  operationId: "batch-operation-1",
+  reservationManager,
+  reservation: {} as ReservationBatch
+});
 const resumedCosmosBatch = cosmos.provePreparedBatchTransfer({
   payload: checkpointedBatchPayload,
   proverAdapter: batchOnlyAsyncProver,
@@ -1270,8 +1421,10 @@ const evm = createClairveilEvmClient({
   shieldedPrefix: "demos",
   defaultDenom: "udemo"
 });
+// @ts-expect-error Direct EVM deposit calldata requires the DepositCircuit proof.
 evm.buildDepositTransaction({ amount: "1udemo" });
-const selector: string = functionSelector("deposit((string,bytes,bytes))");
+evm.buildDepositTransaction({ amount: "1udemo", proof: new Uint8Array([1]) });
+const selector: string = functionSelector("deposit((string,bytes,bytes,bytes))");
 const evmPrecompileAddress: string = evmPrivacyPrecompileAddress;
 const bech32: string = evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo");
 const evmAddress: string = bech32AddressToEvm(bech32, "demo");

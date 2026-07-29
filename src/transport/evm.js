@@ -24,13 +24,9 @@ import { sha256Hex } from "../core/browser-crypto.js";
 const { keccak_256: keccak256 } = sha3;
 const zeroWord = "0".repeat(64);
 const emptyBytes = new Uint8Array();
-const zeroBytes32 = new Uint8Array(32);
-const referenceDepositSignature = "deposit(uint256,bytes32,bytes)";
-const referenceTransferSignature = "shieldedTransfer(bytes,bytes32,bytes32[],bytes32[],bytes[],bytes[],uint8,uint8,bytes32,bytes32,bytes,bytes32,bytes32,bytes)";
-const referenceWithdrawSignature = "withdraw(bytes,bytes32,bytes32,uint256,address,string,uint64)";
-const evmPrivacyDepositSignature = "deposit((string,bytes,bytes))";
-const evmPrivacyTransferSignature = "transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes))";
-const evmPrivacyWithdrawSignature = "withdraw((bytes,bytes,bytes,bytes,bytes,string,address,string,uint64))";
+const evmPrivacyDepositSignature = "deposit((string,bytes,bytes,bytes))";
+const evmPrivacyTransferSignature = "transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))";
+const evmPrivacyWithdrawSignature = "withdraw((bytes,bytes,bytes,string,address,string,uint64))";
 const evmTransactionMarker = Symbol("clairveil.evm-transaction");
 const evmTransactionMetadataField = "__clairveilEvmTransaction";
 
@@ -44,6 +40,22 @@ function normalizedEvmQuantity(value, label) {
   }
   if (quantity < 0n) throw new Error(`${label} must be non-negative`);
   return `0x${quantity.toString(16)}`;
+}
+
+async function assertWalletEvmChainId(wallet, expectedEvmChainId) {
+  if (!expectedEvmChainId) return;
+  if (!wallet || typeof wallet.getChainId !== "function") {
+    throw new Error("EVM wallet must expose getChainId() before transaction submission");
+  }
+  const actualEvmChainId = normalizedEvmQuantity(
+    await wallet.getChainId(),
+    "EVM wallet chain ID"
+  );
+  if (actualEvmChainId !== expectedEvmChainId) {
+    throw new Error(
+      `EVM wallet chain ID ${actualEvmChainId} does not match configured evmChainId ${expectedEvmChainId}`
+    );
+  }
 }
 
 function markedEvmTransaction(transaction, metadata = {}) {
@@ -145,8 +157,7 @@ function broadcastReservationContext(options = {}) {
 function isKnownWithdrawTransaction(transaction) {
   if (evmTransactionMetadata(transaction).operation === "withdraw") return true;
   const data = String(transaction?.data || "").trim().replace(/^0x/i, "").toLowerCase();
-  return [evmPrivacyWithdrawSignature, referenceWithdrawSignature]
-    .some(signature => data.startsWith(functionSelector(signature).toLowerCase()));
+  return data.startsWith(functionSelector(evmPrivacyWithdrawSignature).toLowerCase());
 }
 
 async function authoritativeReservationRecords(context) {
@@ -347,7 +358,8 @@ export const evmPrivacyPrecompileAbi = Object.freeze([
         components: [
           { name: "amount", type: "string" },
           { name: "noteCommitment", type: "bytes" },
-          { name: "encryptedNote", type: "bytes" }
+          { name: "encryptedNote", type: "bytes" },
+          { name: "proof", type: "bytes" }
         ]
       }
     ],
@@ -375,7 +387,10 @@ export const evmPrivacyPrecompileAbi = Object.freeze([
           { name: "userDisclosurePayload", type: "bytes" },
           { name: "auditDisclosureDigest", type: "bytes" },
           { name: "auditDisclosureTargetPubkey", type: "bytes" },
-          { name: "auditDisclosurePayload", type: "bytes" }
+          { name: "auditDisclosurePayload", type: "bytes" },
+          { name: "selfViewDisclosureDigest", type: "bytes" },
+          { name: "selfViewDisclosurePayload", type: "bytes" },
+          { name: "expiresAtUnix", type: "uint64" }
         ]
       }
     ],
@@ -393,8 +408,6 @@ export const evmPrivacyPrecompileAbi = Object.freeze([
           { name: "proof", type: "bytes" },
           { name: "root", type: "bytes" },
           { name: "nullifier", type: "bytes" },
-          { name: "newNoteCommitment", type: "bytes" },
-          { name: "encryptedNote", type: "bytes" },
           { name: "amount", type: "string" },
           { name: "recipient", type: "address" },
           { name: "chainId", type: "string" },
@@ -593,11 +606,6 @@ export function encodeFunctionData(signature, types, values) {
   return with0x(`${functionSelector(signature)}${encodeAbiParameters(types, values)}`);
 }
 
-function optionalBytes32(value) {
-  const hex = bytesLikeToHex(value);
-  return hex ? bytes32Word(hex) : zeroWord;
-}
-
 export function normalizeEvmAddress(value, label = "EVM address") {
   const hex = strip0x(value).toLowerCase();
   if (!/^[0-9a-f]{40}$/.test(hex)) {
@@ -630,10 +638,6 @@ export function bech32AddressToEvm(address, expectedPrefix) {
   return `0x${hexFromBytes(bytes)}`;
 }
 
-function evmAmount(coinString) {
-  return parseCoin(coinString).amount;
-}
-
 function valueFrom(object, names, fallback) {
   for (const name of names) {
     if (object?.[name] != null) return object[name];
@@ -652,6 +656,22 @@ function requiredBytes(value, label, byteLength) {
 
 function optionalBytes(value) {
   return value == null ? emptyBytes : value;
+}
+
+function requiredUint64(value, label) {
+  if (value == null || String(value).trim() === "") {
+    throw new Error(`${label} is required`);
+  }
+  let parsed;
+  try {
+    parsed = BigInt(value);
+  } catch {
+    throw new Error(`${label} must be a uint64`);
+  }
+  if (parsed < 0n || parsed > 0xffffffffffffffffn) {
+    throw new Error(`${label} must be a uint64`);
+  }
+  return parsed;
 }
 
 function bytesArray(value, label, byteLength) {
@@ -694,76 +714,12 @@ function withdrawRecipientToEvmAddress(message, options = {}) {
   return bech32AddressToEvm(fallback, options.accountPrefix);
 }
 
-function legacyWithdrawOutput(message, options = {}) {
-  if (options.withdrawOutputMode === "none" || options.legacyOutputMode === "none") {
-    return {
-      newNoteCommitment: optionalBytes(valueFrom(message, ["newNoteCommitment", "new_note_commitment"], emptyBytes)),
-      encryptedNote: optionalBytes(valueFrom(message, ["encryptedNote", "encrypted_note"], emptyBytes))
-    };
-  }
-  return {
-    newNoteCommitment: valueFrom(message, ["newNoteCommitment", "new_note_commitment"], zeroBytes32),
-    encryptedNote: valueFrom(message, ["encryptedNote", "encrypted_note"], zeroBytes32)
-  };
-}
-
-export function encodeReferenceEvmDeposit(message, options = {}) {
-  return encodeFunctionData(
-    options.signature || referenceDepositSignature,
-    ["uint256", "bytes32", "bytes"],
-    [
-      evmAmount(message.amount),
-      bytes32Word(message.noteCommitment, "note commitment"),
-      message.encryptedNote
-    ]
-  );
-}
-
-export function encodeReferenceEvmTransfer(message, options = {}) {
-  return encodeFunctionData(
-    options.signature || referenceTransferSignature,
-    ["bytes", "bytes32", "bytes32[]", "bytes32[]", "bytes[]", "bytes[]", "uint8", "uint8", "bytes32", "bytes32", "bytes", "bytes32", "bytes32", "bytes"],
-    [
-      message.proof,
-      bytes32Word(message.root, "transfer root"),
-      message.nullifiers,
-      message.newCommitments,
-      message.cipherTexts,
-      bytesArray(message.viewTags, "transfer view tags", 2),
-      message.userPrivacyPolicy ?? 0,
-      message.userDisclosureMode ?? 0,
-      optionalBytes32(message.userDisclosureDigest),
-      optionalBytes32(message.userDisclosureTargetPubkey),
-      message.userDisclosurePayload || new Uint8Array(),
-      bytes32Word(message.auditDisclosureDigest, "audit disclosure digest"),
-      bytes32Word(message.auditDisclosureTargetPubkey, "audit disclosure target pubkey"),
-      message.auditDisclosurePayload
-    ]
-  );
-}
-
-export function encodeReferenceEvmWithdraw(message, options = {}) {
-  const coin = parseCoin(message.amount);
-  return encodeFunctionData(
-    options.signature || referenceWithdrawSignature,
-    ["bytes", "bytes32", "bytes32", "uint256", "address", "string", "uint64"],
-    [
-      message.proof,
-      bytes32Word(message.root, "withdraw root"),
-      bytes32Word(message.nullifier, "withdraw nullifier"),
-      coin.amount,
-      withdrawRecipientToEvmAddress(message, options),
-      coin.denom,
-      message.expiresAtUnix ?? 0
-    ]
-  );
-}
-
 export function encodeEvmPrivacyDeposit(message, options = {}) {
   const request = {
     amount: String(valueFrom(message, ["amount"], "")),
     noteCommitment: requiredBytes(valueFrom(message, ["noteCommitment", "note_commitment"], null), "note commitment", 32),
-    encryptedNote: requiredBytes(valueFrom(message, ["encryptedNote", "encrypted_note"], null), "encrypted note")
+    encryptedNote: requiredBytes(valueFrom(message, ["encryptedNote", "encrypted_note"], null), "encrypted note"),
+    proof: requiredBytes(valueFrom(message, ["proof", "depositProof", "deposit_proof"], null), "deposit proof")
   };
   return encodeFunctionData(
     options.signature || evmPrivacyDepositSignature,
@@ -773,17 +729,6 @@ export function encodeEvmPrivacyDeposit(message, options = {}) {
 }
 
 export function encodeEvmPrivacyTransfer(message, options = {}) {
-  const hasSelfViewDisclosure = (value) => {
-    if (value == null) return false;
-    if (typeof value === "string") return strip0x(value).length > 0;
-    return value.length > 0;
-  };
-  if (
-    hasSelfViewDisclosure(message.selfViewDisclosureDigest ?? message.self_view_disclosure_digest)
-    || hasSelfViewDisclosure(message.selfViewDisclosurePayload ?? message.self_view_disclosure_payload)
-  ) {
-    throw new Error("EVM privacy transfer ABI does not support self-view disclosure fields");
-  }
   const request = {
     proof: requiredBytes(message.proof, "transfer proof"),
     root: requiredBytes(message.root, "transfer root", 32),
@@ -798,7 +743,13 @@ export function encodeEvmPrivacyTransfer(message, options = {}) {
     userDisclosurePayload: optionalBytes(message.userDisclosurePayload),
     auditDisclosureDigest: optionalBytes(message.auditDisclosureDigest),
     auditDisclosureTargetPubkey: optionalBytes(message.auditDisclosureTargetPubkey),
-    auditDisclosurePayload: optionalBytes(message.auditDisclosurePayload)
+    auditDisclosurePayload: optionalBytes(message.auditDisclosurePayload),
+    selfViewDisclosureDigest: optionalBytes(message.selfViewDisclosureDigest ?? message.self_view_disclosure_digest),
+    selfViewDisclosurePayload: optionalBytes(message.selfViewDisclosurePayload ?? message.self_view_disclosure_payload),
+    expiresAtUnix: requiredUint64(
+      message.expiresAtUnix ?? message.expires_at_unix,
+      "transfer expiresAtUnix"
+    )
   };
   return encodeFunctionData(
     options.signature || evmPrivacyTransferSignature,
@@ -808,17 +759,17 @@ export function encodeEvmPrivacyTransfer(message, options = {}) {
 }
 
 export function encodeEvmPrivacyWithdraw(message, options = {}) {
-  const legacyOutput = legacyWithdrawOutput(message, options);
   const request = {
     proof: requiredBytes(message.proof, "withdraw proof"),
     root: requiredBytes(message.root, "withdraw root", 32),
     nullifier: requiredBytes(message.nullifier, "withdraw nullifier", 32),
-    newNoteCommitment: legacyOutput.newNoteCommitment,
-    encryptedNote: legacyOutput.encryptedNote,
     amount: String(message.amount || ""),
     recipient: withdrawRecipientToEvmAddress(message, options),
     chainId: String(message.chainId ?? message.chain_id ?? options.chainId ?? ""),
-    expiresAtUnix: message.expiresAtUnix ?? message.expires_at_unix ?? 0
+    expiresAtUnix: requiredUint64(
+      message.expiresAtUnix ?? message.expires_at_unix,
+      "withdraw expiresAtUnix"
+    )
   };
   return encodeFunctionData(
     options.signature || evmPrivacyWithdrawSignature,
@@ -855,6 +806,9 @@ export function createEip1193WalletAdapter({ provider, account } = {}) {
   return {
     async getAddress() {
       return (await accounts())[0];
+    },
+    async getChainId() {
+      return provider.request({ method: "eth_chainId", params: [] });
     },
     async signPrivacyRoot(messageBytes) {
       const address = await this.getAddress();
@@ -899,8 +853,7 @@ export function createEvmContractAdapter({
   encodeTransfer = defaultEncodeEvmTransfer,
   encodeWithdraw = defaultEncodeEvmWithdraw,
   accountPrefix,
-  chainId,
-  withdrawOutputMode
+  chainId
 } = {}) {
   const to = normalizeEvmAddress(contractAddress, "contractAddress");
   return {
@@ -909,21 +862,21 @@ export function createEvmContractAdapter({
     buildDepositTransaction(message, options = {}) {
       return {
         to,
-        data: encodeDeposit(message, { accountPrefix, chainId, withdrawOutputMode, ...options }),
+        data: encodeDeposit(message, { accountPrefix, chainId, ...options }),
         value: options.value ?? "0x0"
       };
     },
     buildTransferTransaction(message, options = {}) {
       return {
         to,
-        data: encodeTransfer(message, { accountPrefix, chainId, withdrawOutputMode, ...options }),
+        data: encodeTransfer(message, { accountPrefix, chainId, ...options }),
         value: options.value ?? "0x0"
       };
     },
     buildWithdrawTransaction(message, options = {}) {
       return {
         to,
-        data: encodeWithdraw(message, { accountPrefix, chainId, withdrawOutputMode, ...options }),
+        data: encodeWithdraw(message, { accountPrefix, chainId, ...options }),
         value: options.value ?? "0x0"
       };
     }
@@ -935,7 +888,6 @@ export function createEvmPrivacyPrecompileAdapter(options = {}) {
     contractAddress: options.contractAddress ?? evmPrivacyPrecompileAddress,
     accountPrefix: options.accountPrefix,
     chainId: options.chainId,
-    withdrawOutputMode: options.withdrawOutputMode ?? "legacy-zero",
     encodeDeposit: options.encodeDeposit ?? encodeEvmPrivacyDeposit,
     encodeTransfer: options.encodeTransfer ?? encodeEvmPrivacyTransfer,
     encodeWithdraw: options.encodeWithdraw ?? encodeEvmPrivacyWithdraw
@@ -958,25 +910,26 @@ export class ClairveilEvmClient {
     provider,
     contractAddress = defaultEvmPrivacyPrecompileAddress,
     chainId,
+    evmChainId,
     accountPrefix,
     bech32Prefix,
     shieldedPrefix = defaultShieldedPrefix,
     defaultDenom = "uclair",
-    withdrawOutputMode = "legacy-zero",
     contractAdapter
   } = {}) {
     this.provider = provider;
     this.chainId = chainId;
+    this.evmChainId = evmChainId == null || String(evmChainId).trim() === ""
+      ? ""
+      : normalizedEvmQuantity(evmChainId, "evmChainId");
     this.accountPrefix = normalizeBech32Prefix(accountPrefix ?? bech32Prefix ?? "clair", "accountPrefix");
     this.bech32Prefix = this.accountPrefix;
     this.shieldedPrefix = normalizeBech32Prefix(shieldedPrefix, "shieldedPrefix");
     this.defaultDenom = String(defaultDenom || "uclair");
-    this.withdrawOutputMode = withdrawOutputMode;
     this.contract = contractAdapter || createEvmPrivacyPrecompileAdapter({
       contractAddress,
       accountPrefix: this.accountPrefix,
-      chainId,
-      withdrawOutputMode
+      chainId
     });
   }
 
@@ -1010,7 +963,8 @@ export class ClairveilEvmClient {
     const message = input.message || {
       amount: material.amount,
       noteCommitment: material.note_commitment,
-      encryptedNote: material.encrypted_note
+      encryptedNote: material.encrypted_note,
+      proof: input.proof ?? input.proofHex ?? input.proof_hex ?? input.depositProof ?? input.deposit_proof
     };
     return {
       status: "ready",
@@ -1028,8 +982,7 @@ export class ClairveilEvmClient {
         transferDenom: input.transferDenom ?? input.denom ?? this.defaultDenom,
         ...input,
         chainId: input.chainId ?? this.chainId,
-        checkNullifiers: input.checkNullifiers,
-        disableSelfViewDisclosure: input.disableSelfViewDisclosure ?? true
+        checkNullifiers: input.checkNullifiers
       });
     return {
       status: "ready",
@@ -1046,8 +999,7 @@ export class ClairveilEvmClient {
       shieldedPrefix: this.shieldedPrefix,
       transferDenom: input.transferDenom ?? input.denom ?? this.defaultDenom,
       ...input,
-      chainId: input.chainId ?? this.chainId,
-      disableSelfViewDisclosure: input.disableSelfViewDisclosure ?? true
+      chainId: input.chainId ?? this.chainId
     });
   }
 
@@ -1163,15 +1115,14 @@ export class ClairveilEvmClient {
     });
     const submittedTransaction = externalEvmTransaction(broadcastTransaction);
     const broadcastTransactionHash = evmTransactionBindingHash(submittedTransaction);
+    const submissionWallet = wallet?.sendTransaction
+      ? wallet
+      : createEip1193WalletAdapter({ provider: this.provider });
+    await assertWalletEvmChainId(submissionWallet, this.evmChainId);
     await beginBroadcastReservation(reservationContext, broadcastTransactionHash);
     let txHash;
     try {
-      if (wallet?.sendTransaction) {
-        txHash = await wallet.sendTransaction(submittedTransaction);
-      } else {
-        const adapter = createEip1193WalletAdapter({ provider: this.provider });
-        txHash = await adapter.sendTransaction(submittedTransaction);
-      }
+      txHash = await submissionWallet.sendTransaction(submittedTransaction);
     } catch (error) {
       if (reservationContext && isExplicitWalletRejection(error)) {
         await markBroadcastReservationRejected(reservationContext, error);

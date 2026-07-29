@@ -164,6 +164,8 @@ export interface EvmDepositMessage {
   amount: CoinString;
   noteCommitment: BytesLike;
   encryptedNote: BytesLike;
+  /** DepositCircuit proof binding the transparent amount, asset, and note commitment. */
+  proof: BytesLike;
 }
 
 export interface EvmWithdrawMessage extends WithdrawMessage {
@@ -178,8 +180,6 @@ export interface EvmPrivacyTransactionOptions {
   signature?: string;
   accountPrefix?: string;
   chainId?: string | number;
-  withdrawOutputMode?: "legacy-zero" | "none" | string;
-  legacyOutputMode?: "legacy-zero" | "none" | string;
 }
 
 export type EvmDepositEncoder = (message: EvmDepositMessage, options?: EvmPrivacyTransactionOptions) => Hex;
@@ -188,11 +188,17 @@ export type EvmWithdrawEncoder = (message: EvmWithdrawMessage, options?: EvmPriv
 
 export interface Eip1193WalletAdapter {
   getAddress(): Promise<string>;
+  /** Returns the connected wallet's EIP-155 chain ID before transaction submission. */
+  getChainId(): Promise<EvmQuantity>;
   signPrivacyRoot(messageBytes: Uint8Array): Promise<PrefixedHex>;
   sendTransaction(transaction: EvmTransactionRequest): Promise<Hex | string>;
   call(transaction: EvmCallRequest, blockTag?: EvmBlockTag): Promise<Hex | string>;
   getLogs(filter: EvmLogFilter): Promise<EvmLog[]>;
 }
+
+/** A custom sender may omit getChainId only when no expected evmChainId is configured. */
+export type EvmTransactionWallet = Pick<Eip1193WalletAdapter, "sendTransaction"> &
+  Partial<Pick<Eip1193WalletAdapter, "getChainId">>;
 
 export interface EvmContractAdapter {
   contractAddress: string;
@@ -211,7 +217,7 @@ export interface EvmPublicPrivacyAccount {
   root_signature_hash?: Hex;
 }
 
-export type EvmDepositTransactionInput = {
+interface EvmDepositTransactionFields {
   material?: DepositMaterial;
   depositMaterial?: DepositMaterial;
   deposit_material?: DepositMaterial;
@@ -223,8 +229,22 @@ export type EvmDepositTransactionInput = {
   denom?: string;
   assetDenom?: string;
   transactionOptions?: EvmPrivacyTransactionOptions;
-  message?: EvmDepositMessage;
-};
+}
+
+type EvmDepositProofInput =
+  | { proof: BytesLike; proofHex?: Hex; proof_hex?: Hex; depositProof?: BytesLike; deposit_proof?: BytesLike }
+  | { proof?: undefined; proofHex: Hex; proof_hex?: Hex; depositProof?: BytesLike; deposit_proof?: BytesLike }
+  | { proof?: undefined; proofHex?: undefined; proof_hex: Hex; depositProof?: BytesLike; deposit_proof?: BytesLike }
+  | { proof?: undefined; proofHex?: undefined; proof_hex?: undefined; depositProof: BytesLike; deposit_proof?: BytesLike }
+  | { proof?: undefined; proofHex?: undefined; proof_hex?: undefined; depositProof?: undefined; deposit_proof: BytesLike };
+
+export type EvmDepositTransactionInput =
+  | (EvmDepositTransactionFields & {
+      message: EvmDepositMessage;
+    })
+  | (EvmDepositTransactionFields & EvmDepositProofInput & {
+      message?: undefined;
+    });
 
 export interface EvmDepositTransactionResult {
   status: "ready";
@@ -329,9 +349,6 @@ export function normalizeEvmAddress(value: unknown, label?: string): string;
 export function isEvmAddress(value: unknown): boolean;
 export function evmAddressToBech32(address: string, prefix: string): string;
 export function bech32AddressToEvm(address: string, expectedPrefix?: string): string;
-export function encodeReferenceEvmDeposit(message: EvmDepositMessage, options?: EvmPrivacyTransactionOptions): Hex;
-export function encodeReferenceEvmTransfer(message: TransferMessage, options?: EvmPrivacyTransactionOptions): Hex;
-export function encodeReferenceEvmWithdraw(message: EvmWithdrawMessage, options?: EvmPrivacyTransactionOptions): Hex;
 export function encodeEvmPrivacyDeposit(message: EvmDepositMessage, options?: EvmPrivacyTransactionOptions): Hex;
 export function encodeEvmPrivacyTransfer(message: TransferMessage, options?: EvmPrivacyTransactionOptions): Hex;
 export function encodeEvmPrivacyWithdraw(message: EvmWithdrawMessage, options?: EvmPrivacyTransactionOptions): Hex;
@@ -345,7 +362,6 @@ export function createEvmContractAdapter(input?: {
   contractAddress?: string;
   accountPrefix?: string;
   chainId?: string | number;
-  withdrawOutputMode?: "legacy-zero" | "none" | string;
   encodeDeposit?: EvmDepositEncoder;
   encodeTransfer?: EvmTransferEncoder;
   encodeWithdraw?: EvmWithdrawEncoder;
@@ -354,7 +370,6 @@ export function createEvmPrivacyPrecompileAdapter(input?: {
   contractAddress?: string;
   accountPrefix?: string;
   chainId?: string | number;
-  withdrawOutputMode?: "legacy-zero" | "none" | string;
   encodeDeposit?: EvmDepositEncoder;
   encodeTransfer?: EvmTransferEncoder;
   encodeWithdraw?: EvmWithdrawEncoder;
@@ -365,11 +380,12 @@ export class ClairveilEvmClient {
     provider?: Eip1193Provider;
     contractAddress?: string;
     chainId?: string | number;
+    /** Expected EIP-155 network for connected-wallet transaction submission. */
+    evmChainId?: string | number;
     accountPrefix?: string;
     bech32Prefix?: string;
     shieldedPrefix?: string;
     defaultDenom?: string;
-    withdrawOutputMode?: "legacy-zero" | "none" | string;
     contractAdapter?: EvmContractAdapter;
   });
   buildDepositMaterial(input?: {
@@ -386,7 +402,7 @@ export class ClairveilEvmClient {
   buildTransferTransaction(input?: EvmTransferTransactionInput): Promise<EvmTransferTransactionResult>;
   buildPreparedWithdrawProverPayload(input?: PreparedWithdrawProverPayloadInput): Promise<PreparedWithdrawProverPayloadResult>;
   buildWithdrawTransaction(input?: EvmWithdrawTransactionInput): Promise<EvmWithdrawTransactionResult>;
-  sendTransaction(wallet: Eip1193WalletAdapter | null | undefined, transaction: EvmTransactionRequest, reservationOptions?: EvmReservationBroadcastOptions): Promise<Hex | string>;
+  sendTransaction(wallet: EvmTransactionWallet | null | undefined, transaction: EvmTransactionRequest, reservationOptions?: EvmReservationBroadcastOptions): Promise<Hex | string>;
   privacyAccount(material: PrivacyMaterial): EvmPublicPrivacyAccount;
 }
 

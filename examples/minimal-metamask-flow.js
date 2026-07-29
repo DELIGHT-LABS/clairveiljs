@@ -71,17 +71,30 @@ export async function runMinimalMetaMaskFlow({
   depositAmount = `10${denom}`,
   transferAmount = `1${denom}`,
   recipientShieldedAddress,
-  chainName,
+  chainName = "Clairveil EVM",
   nativeCurrency,
+  profileId = "clairveil-evm",
+  profileLabel = "Clairveil EVM",
+  displayDenom = "CLAIR",
+  coinDecimals = 6,
+  evmGasLimit = "0x989680",
+  evmSendGasLimit = "0x5208",
+  depositProofProvider,
   waitForDeposit = true,
   waitForTransfer = false
 }) {
   if (!provider) {
     throw new Error("MetaMask provider is required");
   }
+  if (typeof depositProofProvider !== "function") {
+    throw new Error("depositProofProvider is required to build the canonical EVM DepositCircuit proof");
+  }
 
   const clairveil = createClairveilBrowserDappClient({
     profile: {
+      id: profileId,
+      label: profileLabel,
+      chainName,
       transport: "evm",
       wallet: "metamask",
       chainId,
@@ -90,10 +103,15 @@ export async function runMinimalMetaMaskFlow({
       proverUrl,
       evmRpc,
       evmChainId,
+      evmChainName: chainName,
       evmPrivacyPrecompileAddress,
+      evmGasLimit,
+      evmSendGasLimit,
       accountPrefix,
       shieldedPrefix,
-      denom
+      denom,
+      displayDenom,
+      coinDecimals
     }
   });
 
@@ -118,14 +136,25 @@ export async function runMinimalMetaMaskFlow({
     pubKeyHex: identity.pubKeyHex,
     signatureBase64
   };
+  // Browser EVM profiles verify this connected wallet network before every
+  // privacy prepare call, independently of the read-only evmRpc endpoint.
+  const evmWallet = {
+    getChainId: () => provider.request({ method: "eth_chainId" }),
+    sendTransaction: transaction => provider.request({
+      method: "eth_sendTransaction",
+      params: [{ from: evmAccount, ...transaction }]
+    })
+  };
 
   const deposit = await clairveil.prepareDeposit({
     ...privacyRequest,
-    amount: depositAmount
+    evmWallet,
+    amount: depositAmount,
+    depositProofProvider
   });
-  const depositTxHash = await provider.request({
-    method: "eth_sendTransaction",
-    params: [{ from: evmAccount, ...deposit.transaction }]
+  const depositTxHash = await clairveil.sendEvmTransaction({
+    wallet: evmWallet,
+    transaction: deposit.transaction
   });
   const depositReceipt = waitForDeposit
     ? await clairveil.waitForEvmTransaction(depositTxHash)
@@ -145,13 +174,14 @@ export async function runMinimalMetaMaskFlow({
   if (recipientShieldedAddress) {
     transfer = await clairveil.prepareTransfer({
       ...privacyRequest,
+      evmWallet,
       amount: transferAmount,
       recipient: recipientShieldedAddress,
       allowPlanStep: false
     });
-    transferTxHash = await provider.request({
-      method: "eth_sendTransaction",
-      params: [{ from: evmAccount, ...transfer.transaction }]
+    transferTxHash = await clairveil.sendEvmTransaction({
+      wallet: evmWallet,
+      transaction: transfer.transaction
     });
     transferReceipt = waitForTransfer
       ? await clairveil.waitForEvmTransaction(transferTxHash)
