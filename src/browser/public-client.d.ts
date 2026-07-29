@@ -9,6 +9,7 @@ import type {
   ValidatedDisclosureConfigV1,
   ValidatedReserveResponseV1
 } from "../privacy/network-config.js";
+import type { ValidatedCircuitConfigV1 } from "../privacy/circuit-config.js";
 import type {
   PrivacyScanValidationStateV2,
   ValidatedPrivacyScanPageV2
@@ -64,6 +65,8 @@ export interface ClairveilPublicClientOptions {
   fetchTimeoutMs?: number;
   queryRetry?: QueryRetryOptions | false;
   nullifierFailover?: boolean;
+  /** Allow Merkle witness and exact-snapshot queries to fail over across REST endpoints. */
+  merklePathFailover?: boolean;
 }
 
 export interface QueryRetryOptions {
@@ -105,9 +108,18 @@ export class ClairveilPublicClient {
     body?: BodyInit | null;
     headers?: Record<string, string>;
   }): Promise<T>;
+  fetchMerklePathJson<T = object>(path: string, options?: {
+    method?: string;
+    body?: BodyInit | null;
+    headers?: Record<string, string>;
+  }): Promise<T>;
   fetchPrivacyEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchScanEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchPrivacyScan(options?: TypedPrivacyScanQuery): Promise<object>;
+  queryPrivacyScan(options?: TypedPrivacyScanQuery): Promise<ValidatedPrivacyScanPageV2>;
+  fetchTreeState(): Promise<object>;
+  fetchCommitmentInfo(commitmentHex: string): Promise<object>;
+  lookupMerklePath(commitmentHex: string): Promise<object>;
   checkNullifier(nullifierHex: string): Promise<object & { used?: boolean; Used?: boolean }>;
   checkNullifiers(nullifierHexes: readonly string[]): Promise<Map<string, boolean>>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
@@ -116,6 +128,8 @@ export class ClairveilPublicClient {
   fetchDisclosureConfig(): Promise<object>;
   queryAuditConfig(): Promise<ValidatedAuditConfigV1>;
   queryDisclosureConfig(): Promise<ValidatedDisclosureConfigV1>;
+  fetchCircuitConfig(options?: { expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<ValidatedCircuitConfigV1>;
+  assertCircuitConfig(options?: { expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<ValidatedCircuitConfigV1>;
   fetchReserve(denom: string): Promise<ReserveResponse>;
   queryReserve(denom: string): Promise<ValidatedReserveResponseV1>;
   fetchAssetByDenom(denom: string): Promise<object>;

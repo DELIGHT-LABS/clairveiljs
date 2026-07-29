@@ -149,7 +149,7 @@ export type NullifierStatusResult =
   | Record<string, NullifierUsage>
   | { statuses: readonly NullifierStatusEntry[] };
 export type NullifierStatusReader = (nullifiers: readonly Hex[]) => NullifierStatusResult | Promise<NullifierStatusResult>;
-export function buildTransferMessage(input: PreparedTransferPayloadInput & { proverAdapter: ProverAdapter; checkNullifiers: NullifierStatusReader }): Promise<TransferMessageBuildResult>;
+export function buildTransferMessage(input: PreparedTransferPayloadInput & { proverAdapter: ProverAdapter; checkNullifiers: NullifierStatusReader; signal?: AbortSignal }): Promise<TransferMessageBuildResult>;
 export function computePreparedWithdrawProverPayloadHash(payload: PreparedWithdrawProverPayload): Hex;
 export interface PreparedWithdrawProverPayloadInput {
   notes?: FoundNote[];
@@ -247,11 +247,13 @@ export function buildRelayWithdrawPayload(input: Omit<PreparedWithdrawProverPayl
   chainNowUnix: number;
   proverAdapter: ProverAdapter;
   checkNullifiers: NullifierStatusReader;
+  signal?: AbortSignal;
 }): Promise<RelayWithdrawPayloadBuildResult>;
 export function buildWithdrawMessage(input: PreparedWithdrawProverPayloadInput & {
   proverAdapter: ProverAdapter;
   checkNullifiers: NullifierStatusReader;
   creator?: ClairAddress | string;
+  signal?: AbortSignal;
 }): Promise<WithdrawMessageBuildResult>;
 export function createRestMerklePathProvider(input?: { rest: string; fetchImpl?: typeof fetch; timeoutMs?: number }): { lookupMerklePath(commitmentHex: Hex): Promise<MerklePathResult> };
 

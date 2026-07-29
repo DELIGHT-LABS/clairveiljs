@@ -315,6 +315,31 @@ test("Cosmos pagination retains batch self-view validation state", async () => {
   );
 });
 
+test("Cosmos queryPrivacyScan returns only validator-issued typed pages", async () => {
+  const page = validBatchPage();
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-test-1"
+  });
+  const requests = [];
+  client.fetchPrivacyScan = async request => {
+    requests.push(request);
+    return page;
+  };
+
+  const validated = await client.queryPrivacyScan({ outputLimit: 2 });
+  assert.equal(validated.scan_schema_version, "privacy-scan-v2");
+  assert.equal(validated.outputs.length, 2);
+  assert.equal(requests[0].outputLimit, 2);
+
+  client.fetchPrivacyScan = async () => ({ scanSchemaVersion: "privacy-scan-v1" });
+  await assert.rejects(
+    () => client.queryPrivacyScan(),
+    /unsupported privacy scan schema version/
+  );
+});
+
 test("durable privacy scan cursors retain partial batch validation across a restart", async () => {
   const batch = validBatchPage();
   const firstPage = {

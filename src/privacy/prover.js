@@ -26,8 +26,12 @@ export const transferProofRequestVersion = "v2";
 export const transferProofResponseVersion = "v2";
 export const withdrawProofRequestVersion = "v2";
 export const withdrawProofResponseVersion = "v2";
+/** Versioned response contract for the product-owned DepositCircuit endpoint. */
+export const depositProofResponseVersion = "v1";
 /** Match the bounded Go prover transport response policy. */
 export const defaultProverResponseMaxBytes = 1 << 20;
+/** Browser-DApp deposit proof requests have the same 120s bound as the reference integration. */
+export const defaultDepositProofTimeoutMs = 120000;
 const proverErrorResponseVersion = "v1";
 const proverErrorCodes = new Set([
   "invalid_request",
@@ -46,6 +50,19 @@ function normalizeBaseURL(baseURL) {
   }
   if (url.protocol === "http:" && !isLoopbackProverHost(url.hostname)) {
     throw new Error(`prover transport requires HTTPS for non-loopback endpoint ${JSON.stringify(url.host)}`);
+  }
+  return url;
+}
+
+/**
+ * A deposit proof URL is a pinned endpoint, unlike the transfer/withdraw
+ * prover base URL. Reject URL credentials and mutable URL components so a
+ * profile cannot conceal an alternate proof recipient or a bearer secret.
+ */
+function normalizeDepositProofURL(urlValue) {
+  const url = normalizeBaseURL(urlValue);
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("deposit proof URL must not contain credentials, query parameters, or a fragment");
   }
   return url;
 }
@@ -224,9 +241,44 @@ async function readBoundedResponseText(response, maxResponseBytes) {
   return new TextDecoder().decode(bytes);
 }
 
-async function postJSON({ baseURL, path, body, serializedBody, bearerToken, timeoutMs, maxResponseBytes, fetchImpl }) {
+function proverCancelledError() {
+  const error = new Error("prover request cancelled");
+  error.name = "AbortError";
+  error.code = "PROVER_CANCELLED";
+  return error;
+}
+
+function linkAbortSignal(signal, controller, onExternalAbort) {
+  if (!signal) return () => {};
+  if (signal.aborted) {
+    onExternalAbort();
+    controller.abort();
+    return () => {};
+  }
+  const abort = () => {
+    onExternalAbort();
+    controller.abort();
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  return () => signal.removeEventListener("abort", abort);
+}
+
+async function postJSON({ baseURL, path, body, serializedBody, bearerToken, timeoutMs, maxResponseBytes, fetchImpl, signal }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let cancelled = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const unlinkAbortSignal = linkAbortSignal(signal, controller, () => {
+    cancelled = true;
+  });
+  if (signal?.aborted) {
+    clearTimeout(timeout);
+    unlinkAbortSignal();
+    throw proverCancelledError();
+  }
   const headers = new Headers();
   headers.set("Content-Type", "application/json");
   if (bearerToken && String(bearerToken).trim()) {
@@ -252,11 +304,82 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
     }
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw new Error(`prover request timed out after ${timeoutMs}ms`);
+      if (cancelled || signal?.aborted) throw proverCancelledError();
+      if (timedOut) throw new Error(`prover request timed out after ${timeoutMs}ms`);
+    }
+    if (cancelled || signal?.aborted) {
+      throw proverCancelledError();
     }
     throw error;
   } finally {
     clearTimeout(timeout);
+    unlinkAbortSignal();
+  }
+}
+
+function assertDirectDepositProofResponse(response, endpoint) {
+  if (response?.redirected === true) {
+    throw new Error("deposit proof response must not redirect");
+  }
+  const finalURL = String(response?.url || "");
+  if (finalURL && new URL(finalURL).href !== endpoint.href) {
+    throw new Error("deposit proof response must be served directly from its configured endpoint");
+  }
+  const contentType = String(response?.headers?.get?.("content-type") || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (contentType !== "application/json") {
+    throw new Error("deposit proof response must return Content-Type: application/json");
+  }
+}
+
+async function postDepositProofJSON({ endpoint, body, timeoutMs, maxResponseBytes, fetchImpl, signal }) {
+  const controller = new AbortController();
+  let timedOut = false;
+  let cancelled = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const unlinkAbortSignal = linkAbortSignal(signal, controller, () => {
+    cancelled = true;
+  });
+  if (signal?.aborted) {
+    clearTimeout(timeout);
+    unlinkAbortSignal();
+    throw proverCancelledError();
+  }
+
+  try {
+    const response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body),
+      redirect: "error",
+      signal: controller.signal
+    });
+    assertDirectDepositProofResponse(response, endpoint);
+    const text = await readBoundedResponseText(response, maxResponseBytes);
+    if (!response.ok) throw proverRequestError(response.status, text);
+    try {
+      return parseStrictJSON(text);
+    } catch (error) {
+      throw new Error(`deposit proof response was not JSON: ${error.message}`);
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      if (cancelled || signal?.aborted) throw proverCancelledError();
+      if (timedOut) throw new Error(`deposit proof request timed out after ${timeoutMs}ms`);
+    }
+    if (cancelled || signal?.aborted) throw proverCancelledError();
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    unlinkAbortSignal();
   }
 }
 
@@ -404,7 +527,7 @@ export function createHttpProverAdapter({
   const normalizedBaseURL = normalizeBaseURL(baseURL);
 
   return {
-    async proveTransfer(request) {
+    async proveTransfer(request, { signal } = {}) {
       const normalizedRequest = {
         version: request?.version || transferProofRequestVersion,
         payload: request?.payload || request
@@ -423,7 +546,8 @@ export function createHttpProverAdapter({
           bearerToken,
           timeoutMs,
           maxResponseBytes,
-          fetchImpl
+          fetchImpl,
+          signal
         });
         return unwrapTransferProof(normalizedRequest, response);
       } catch (error) {
@@ -431,7 +555,7 @@ export function createHttpProverAdapter({
       }
     },
 
-    async proveWithdraw(request) {
+    async proveWithdraw(request, { signal } = {}) {
       const normalizedRequest = {
         version: request?.version || withdrawProofRequestVersion,
         payload: request?.payload || request
@@ -447,7 +571,8 @@ export function createHttpProverAdapter({
           bearerToken,
           timeoutMs,
           maxResponseBytes,
-          fetchImpl
+          fetchImpl,
+          signal
         });
         return unwrapWithdrawProof(normalizedRequest, response);
       } catch (error) {
@@ -455,7 +580,7 @@ export function createHttpProverAdapter({
       }
     },
 
-    async proveBatchTransfer(request) {
+    async proveBatchTransfer(request, { signal } = {}) {
       const isEnvelope = Boolean(request && typeof request === "object" && Object.prototype.hasOwnProperty.call(request, "payload"));
       const normalizedRequest = {
         version: isEnvelope ? (request.version || batchTransferProofRequestVersion) : batchTransferProofRequestVersion,
@@ -476,7 +601,8 @@ export function createHttpProverAdapter({
           bearerToken,
           timeoutMs,
           maxResponseBytes,
-          fetchImpl
+          fetchImpl,
+          signal
         });
         return unwrapBatchTransferProof(normalizedRequest, response);
       } catch (error) {
@@ -486,8 +612,92 @@ export function createHttpProverAdapter({
   };
 }
 
+/**
+ * Build the pinned HTTP provider used by browser-dapp `prepareDeposit` when
+ * the active profile supplies `depositProofUrl`. This is intentionally
+ * separate from `createHttpProverAdapter`: Deposit uses one exact endpoint
+ * and a small versioned response rather than a prover route derived from a
+ * base URL.
+ */
+export function createHttpDepositProofProvider({
+  url,
+  timeoutMs = defaultDepositProofTimeoutMs,
+  maxResponseBytes = defaultProverResponseMaxBytes,
+  fetchImpl = fetch
+} = {}) {
+  if (!fetchImpl) throw new Error("fetch implementation is required");
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("deposit proof timeoutMs must be positive");
+  }
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
+    throw new Error("deposit proof maxResponseBytes must be a positive safe integer");
+  }
+  const endpoint = normalizeDepositProofURL(url);
+
+  return async function proveDeposit(input = {}) {
+    const noteJSON = String(input.note_json ?? input.noteJson ?? input.material?.note_json ?? "");
+    const noteCommitmentHex = normalizeHex(
+      String(input.note_commitment_hex ?? input.noteCommitmentHex ?? input.material?.note_commitment_hex ?? ""),
+      "deposit proof note_commitment_hex"
+    );
+    if (noteCommitmentHex.length !== 64) {
+      throw new Error("deposit proof note_commitment_hex must be a 32-byte hex string");
+    }
+    if (!noteJSON) throw new Error("deposit proof note_json is required");
+    try {
+      const response = assertOnlyResponseFields(
+        await postDepositProofJSON({
+          endpoint,
+          body: {
+            note_json: noteJSON,
+            note_commitment_hex: noteCommitmentHex
+          },
+          timeoutMs,
+          maxResponseBytes,
+          fetchImpl,
+          signal: input.signal
+        }),
+        "deposit proof response",
+        ["version", "proof_hex", "note_commitment_hex"]
+      );
+      if (response.version !== depositProofResponseVersion) {
+        throw new Error(`deposit proof response.version must be ${depositProofResponseVersion}`);
+      }
+      const responseCommitmentHex = normalizeHex(
+        response.note_commitment_hex,
+        "deposit proof response.note_commitment_hex"
+      );
+      if (responseCommitmentHex !== noteCommitmentHex) {
+        throw new Error("deposit proof response note_commitment_hex does not match the request");
+      }
+      return Object.freeze({
+        version: depositProofResponseVersion,
+        proof_hex: normalizeHex(response.proof_hex, "deposit proof response.proof_hex"),
+        note_commitment_hex: responseCommitmentHex
+      });
+    } catch (error) {
+      throw wrapProverError(error);
+    }
+  };
+}
+
 async function sleep(ms) {
   await new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function abortable(value, signal) {
+  if (!signal) return value;
+  if (signal.aborted) throw proverCancelledError();
+  let abort;
+  const cancellation = new Promise((_, reject) => {
+    abort = () => reject(proverCancelledError());
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    return await Promise.race([value, cancellation]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
 }
 
 function normalizeJobResult(job) {
@@ -515,33 +725,40 @@ export function createAsyncJobProverAdapter({
     throw new Error("getJob(jobId) is required");
   }
 
-  async function waitForProof({ request, submit, unwrap }) {
-    const submitted = await submit(request);
-    const jobId = submitted?.jobId ?? submitted?.job_id ?? submitted?.id;
-    if (!jobId) {
-      throw new Error("prover job submit response must include jobId");
-    }
+  async function waitForProof({ request, submit, unwrap, signal }) {
+    try {
+      if (signal?.aborted) throw proverCancelledError();
+      const submitted = await abortable(submit(request, { signal }), signal);
+      const jobId = submitted?.jobId ?? submitted?.job_id ?? submitted?.id;
+      if (!jobId) {
+        throw new Error("prover job submit response must include jobId");
+      }
 
-    const deadline = now() + timeoutMs;
-    while (now() <= deadline) {
-      const job = await getJob(jobId);
-      const status = normalizeJobResult(job);
-      if (status === "completed") {
-        const response = job.response ?? job.result ?? job;
-        return unwrap(request, response);
+      const deadline = now() + timeoutMs;
+      while (now() <= deadline) {
+        if (signal?.aborted) throw proverCancelledError();
+        const job = await abortable(getJob(jobId, { signal }), signal);
+        const status = normalizeJobResult(job);
+        if (status === "completed") {
+          const response = job.response ?? job.result ?? job;
+          return unwrap(request, response);
+        }
+        if (status === "failed") {
+          throw wrapProverError(new Error(`prover job ${jobId} failed`));
+        }
+        await abortable(sleepImpl(intervalMs), signal);
       }
-      if (status === "failed") {
-        throw wrapProverError(new Error(`prover job ${jobId} failed`));
-      }
-      await sleepImpl(intervalMs);
+      throw wrapProverError(new Error(`prover job ${jobId} timed out after ${timeoutMs}ms`));
+    } catch (error) {
+      if (error?.code === "PROVER_CANCELLED") throw wrapProverError(error);
+      throw error;
     }
-    throw wrapProverError(new Error(`prover job ${jobId} timed out after ${timeoutMs}ms`));
   }
 
   const adapter = {};
 
   if (typeof submitTransferJob === "function") {
-    adapter.proveTransfer = async request => {
+    adapter.proveTransfer = async (request, { signal } = {}) => {
       const normalizedRequest = {
         version: request?.version || transferProofRequestVersion,
         payload: request?.payload || request
@@ -555,13 +772,14 @@ export function createAsyncJobProverAdapter({
       return waitForProof({
         request: normalizedRequest,
         submit: submitTransferJob,
-        unwrap: unwrapTransferProof
+        unwrap: unwrapTransferProof,
+        signal
       });
     };
   }
 
   if (typeof submitWithdrawJob === "function") {
-    adapter.proveWithdraw = async request => {
+    adapter.proveWithdraw = async (request, { signal } = {}) => {
       const normalizedRequest = {
         version: request?.version || withdrawProofRequestVersion,
         payload: request?.payload || request
@@ -572,13 +790,14 @@ export function createAsyncJobProverAdapter({
       return waitForProof({
         request: normalizedRequest,
         submit: submitWithdrawJob,
-        unwrap: unwrapWithdrawProof
+        unwrap: unwrapWithdrawProof,
+        signal
       });
     };
   }
 
   if (typeof submitBatchTransferJob === "function") {
-    adapter.proveBatchTransfer = async request => {
+    adapter.proveBatchTransfer = async (request, { signal } = {}) => {
       const isEnvelope = Boolean(
         request && typeof request === "object" && Object.prototype.hasOwnProperty.call(request, "payload")
       );
@@ -595,7 +814,8 @@ export function createAsyncJobProverAdapter({
       return waitForProof({
         request: normalizedRequest,
         submit: submitBatchTransferJob,
-        unwrap: unwrapBatchTransferProof
+        unwrap: unwrapBatchTransferProof,
+        signal
       });
     };
   }

@@ -480,6 +480,39 @@ function buildBatchTransferOperationEvidence({
   });
 }
 
+/**
+ * Bind a checkpointed batch payload to the same authoritative network
+ * configuration used at preparation time. Reusing this at proof-resume and
+ * finalization keeps an old checkpoint from becoming signable after an asset,
+ * audit, or disclosure-policy change.
+ */
+function assertPreparedBatchTransferMatchesActiveConfig(payload, transferProtocolConfig, denom) {
+  if (String(payload.asset_id) !== computeAssetIdV1(denom).toString()) {
+    throw new Error("prepared batch transfer asset ID does not match the authoritative denom");
+  }
+  const activeAuditConfig = transferProtocolConfig.audit_config;
+  if (String(payload.audit_key_id) !== String(activeAuditConfig.audit_key_id) ||
+      String(payload.audit_key_epoch) !== String(activeAuditConfig.audit_key_epoch) ||
+      hexFromBytes(bytesFromBase64(
+        payload.audit_disclosure_target_pubkey,
+        "prepared batch transfer audit disclosure target"
+      )) !== String(activeAuditConfig.audit_master_pubkey_hex).toLowerCase()) {
+    throw new Error("prepared batch transfer audit identity does not match the active chain config");
+  }
+  for (const [index, output] of payload.outputs.entries()) {
+    try {
+      assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
+        userPrivacyPolicy: output.privacy_policy,
+        userDisclosureMode: output.disclosure_mode
+      });
+    } catch (error) {
+      throw new Error(`prepared batch transfer output ${index} is incompatible with the active disclosure config`, {
+        cause: error
+      });
+    }
+  }
+}
+
 function batchTransferNullifiersUnspent(statuses, nullifiers) {
   const statusFor = nullifier => statuses instanceof Map
     ? statuses.get(nullifier) ?? statuses.get(`0x${nullifier}`)
@@ -491,7 +524,7 @@ function batchTransferNullifiersUnspent(statuses, nullifiers) {
   }
 }
 
-function assertTransferDisclosureCapabilities(disclosureConfig, {
+export function assertTransferDisclosureCapabilities(disclosureConfig, {
   userPrivacyPolicy,
   userDisclosureMode
 } = {}) {
@@ -504,6 +537,30 @@ function assertTransferDisclosureCapabilities(disclosureConfig, {
     throw new Error(`disclosure config does not support user disclosure mode ${mode}`);
   }
   return Object.freeze({ policy, mode });
+}
+
+function bindRawTransferBuilderProtocolConfig(input, transferProtocolConfig) {
+  const camelAuditTarget = input?.auditDisclosureTargetPubKeyHex;
+  const snakeAuditTarget = input?.audit_disclosure_target_pubkey_hex;
+  if (camelAuditTarget != null && snakeAuditTarget != null &&
+      String(camelAuditTarget).trim().toLowerCase() !== String(snakeAuditTarget).trim().toLowerCase()) {
+    throw new Error("auditDisclosureTargetPubKeyHex aliases conflict");
+  }
+  const requestedAuditTarget = String(camelAuditTarget ?? snakeAuditTarget ?? "").trim().toLowerCase();
+  const activeAuditTarget = String(
+    transferProtocolConfig.audit_config.audit_master_pubkey_hex || ""
+  ).trim().toLowerCase();
+  if (requestedAuditTarget && requestedAuditTarget !== activeAuditTarget) {
+    throw new Error("transfer audit disclosure target must exactly match the active chain audit config");
+  }
+  assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
+    userPrivacyPolicy: input?.userPrivacyPolicy ?? input?.user_privacy_policy ?? "all-private",
+    userDisclosureMode: input?.userDisclosureMode ?? input?.user_disclosure_mode ?? "none"
+  });
+  return {
+    ...input,
+    auditDisclosureTargetPubKeyHex: transferProtocolConfig.audit_config.audit_master_pubkey_hex
+  };
 }
 
 function normalizeTimeoutMs(value, label = "timeoutMs") {
@@ -702,6 +759,63 @@ export function assertSignerPubKey(address, pubKeyHex, prefix = defaultAccountPr
 
 export function eventAttribute(event, key) {
   return (event?.attributes || []).find(attribute => attribute.key === key)?.value || "";
+}
+
+function transactionEvents(tx) {
+  return [
+    ...(Array.isArray(tx?.events) ? tx.events : []),
+    ...(Array.isArray(tx?.tx_result?.events) ? tx.tx_result.events : []),
+    ...(Array.isArray(tx?.tx?.events) ? tx.tx.events : [])
+  ];
+}
+
+function transactionEventType(event) {
+  return String(event?.type ?? event?.event_type ?? event?.eventType ?? "").trim().toLowerCase();
+}
+
+function transactionEventAttribute(event, key) {
+  const attributes = Array.isArray(event?.attributes)
+    ? event.attributes
+    : Array.isArray(event?.Attributes)
+      ? event.Attributes
+      : [];
+  return attributes.find(attribute => String(attribute?.key ?? attribute?.Key ?? "") === key)?.value ??
+    attributes.find(attribute => String(attribute?.key ?? attribute?.Key ?? "") === key)?.Value ??
+    "";
+}
+
+function normalizedDepositHex(value, label) {
+  const raw = value instanceof Uint8Array
+    ? hexFromBytes(value)
+    : String(value ?? "").trim().replace(/^"|"$/g, "").replace(/^0x/i, "");
+  if (!raw || !/^[0-9a-f]+$/i.test(raw) || raw.length % 2 !== 0) {
+    throw new Error(`${label} must be non-empty hex`);
+  }
+  return raw.toLowerCase();
+}
+
+function depositExpectedMaterial({ prepared, material, depositMaterial, deposit_material, message, expectedCommitment, expected_commitment, expectedEncryptedNote, expected_encrypted_note } = {}) {
+  const resolvedMaterial = depositMaterial ?? deposit_material ?? material ?? prepared?.material ?? null;
+  const resolvedMessage = message ?? prepared?.message ?? null;
+  const commitment = expectedCommitment ?? expected_commitment ??
+    resolvedMaterial?.note_commitment_hex ?? resolvedMaterial?.noteCommitmentHex ??
+    resolvedMaterial?.note_commitment ?? resolvedMaterial?.noteCommitment ??
+    resolvedMessage?.noteCommitment ?? resolvedMessage?.note_commitment;
+  const encryptedNote = expectedEncryptedNote ?? expected_encrypted_note ??
+    resolvedMaterial?.encrypted_note_hex ?? resolvedMaterial?.encryptedNoteHex ??
+    resolvedMaterial?.encrypted_note ?? resolvedMaterial?.encryptedNote ??
+    resolvedMessage?.encryptedNote ?? resolvedMessage?.encrypted_note;
+  return {
+    commitment: normalizedDepositHex(commitment, "expected deposit commitment"),
+    encryptedNote: normalizedDepositHex(encryptedNote, "expected deposit encrypted note")
+  };
+}
+
+function explicitTransactionCode(tx) {
+  const raw = tx?.code ?? tx?.tx_result?.code;
+  if (typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0) return raw;
+  if (typeof raw === "string" && /^(0|[1-9][0-9]*)$/.test(raw.trim())) return Number(raw);
+  return null;
 }
 
 export function isAuditableTransfer(event) {
@@ -1391,6 +1505,36 @@ async function authoritativeReservationRecords(context) {
   return Promise.all(context.reservationIDs.map(id => context.reservationManager.getReservation(id)));
 }
 
+function batchTransferNullifierHexesFromReservationRecords(records) {
+  const values = records.map(record => record?.metadata?.batch_transfer_nullifier_hexes);
+  if (!values.some(value => value != null)) return [];
+  if (values.some(value => !Array.isArray(value))) {
+    throw new Error("batch transfer reservation is missing its persisted input nullifiers");
+  }
+  const normalized = values.map(value => value.map((nullifier, index) => {
+    const hex = String(nullifier ?? "").trim().replace(/^0x/i, "").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(hex)) {
+      throw new Error(`batch transfer reservation nullifier at index ${index} is invalid`);
+    }
+    return hex;
+  }));
+  if (!normalized[0]?.length || normalized.some(value =>
+    value.length !== normalized[0].length || value.some((nullifier, index) => nullifier !== normalized[0][index])
+  )) {
+    throw new Error("batch transfer reservations disagree on their persisted input nullifiers");
+  }
+  return normalized[0];
+}
+
+async function recheckReservedBatchTransferNullifiers(context, checkNullifiers) {
+  if (!context) return;
+  const nullifiers = batchTransferNullifierHexesFromReservationRecords(
+    await authoritativeReservationRecords(context)
+  );
+  if (!nullifiers.length) return;
+  batchTransferNullifiersUnspent(await checkNullifiers(nullifiers), nullifiers);
+}
+
 function assertReservationPayloadMatches(records, payload) {
   if (!records.length) return;
   const payloadHash = String(payload?.payload_hash || "").trim();
@@ -1962,6 +2106,7 @@ export class ClairveilJS {
     fetchTimeoutMs,
     queryRetry,
     nullifierFailover = false,
+    merklePathFailover = false,
     expectedCircuitIdentity,
     enableExperimentalBatchTransfer = false,
     enable_experimental_batch_transfer
@@ -1979,6 +2124,7 @@ export class ClairveilJS {
     this.queryTimeoutMs = normalizeTimeoutMs(fetchTimeoutMs ?? queryTimeoutMs, "queryTimeoutMs");
     this.queryRetry = normalizeQueryRetry(queryRetry);
     this.nullifierFailover = Boolean(nullifierFailover);
+    this.merklePathFailover = Boolean(merklePathFailover);
     this.enableExperimentalBatchTransfer = Boolean(
       enable_experimental_batch_transfer ?? enableExperimentalBatchTransfer
     );
@@ -2064,6 +2210,20 @@ export class ClairveilJS {
     });
   }
 
+  async fetchMerklePathJson(path, options = {}) {
+    return this.fetchJson(path, {
+      ...options,
+      failover: this.merklePathFailover,
+      // Merkle witnesses reveal the commitments a wallet is attempting to
+      // spend. Keep those requests on the configured endpoint unless the
+      // application explicitly accepts cross-endpoint disclosure.
+      ...(this.merklePathFailover ? {} : {
+        endpoint: this.rest,
+        updateActiveEndpoint: false
+      })
+    });
+  }
+
   async getAccountInfo(address) {
     const data = await this.fetchJson(`/cosmos/auth/v1beta1/accounts/${address}`, { failover: true });
     const info = unwrapBaseAccount(data.account ?? data.info);
@@ -2118,6 +2278,24 @@ export class ClairveilJS {
     });
   }
 
+  /** Fetch a typed privacy-scan-v2 page and fail closed before it is consumed. */
+  async queryPrivacyScan(options = {}) {
+    const {
+      validationState,
+      validation_state,
+      ...request
+    } = options || {};
+    return validatePrivacyScanPageV2(
+      await this.fetchPrivacyScan(request),
+      {
+        ...request,
+        ...(validationState ?? validation_state
+          ? { validationState: validationState ?? validation_state }
+          : {})
+      }
+    );
+  }
+
   async fetchTreeState() {
     return this.fetchJson("/clairveil/privacy/v1/tree_state", { failover: true });
   }
@@ -2127,7 +2305,7 @@ export class ClairveilJS {
   }
 
   async lookupMerklePath(commitmentHex) {
-    return this.fetchJson(`/clairveil/privacy/v1/merkle_path/${commitmentHex}`, { failover: true });
+    return this.fetchMerklePathJson(`/clairveil/privacy/v1/merkle_path/${commitmentHex}`);
   }
 
   async fetchAuditConfig() {
@@ -2256,11 +2434,10 @@ export class ClairveilJS {
   }
 
   async fetchCommitmentPathsAtRoot(options = {}) {
-    return this.fetchJson("/clairveil/privacy/v1/commitment_paths_at_root", {
+    return this.fetchMerklePathJson("/clairveil/privacy/v1/commitment_paths_at_root", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: jsonRequestBody(commitmentPathsAtRootRequestBody(options)),
-      failover: true
+      body: jsonRequestBody(commitmentPathsAtRootRequestBody(options))
     });
   }
 
@@ -2274,6 +2451,20 @@ export class ClairveilJS {
   /** Build a lookupMerklePath provider pinned to one verified root/height snapshot. */
   async createCommitmentPathSnapshotProvider(options = {}) {
     return createCommitmentPathSnapshotProvider(await this.queryCommitmentPathsAtRoot(options));
+  }
+
+  /**
+   * Build the default witness provider for a native 2x2 transfer. Both
+   * selected commitments are resolved through one verified exact-root
+   * snapshot rather than two mutable merkle_path reads.
+   */
+  async createTransferMerklePathSnapshotProvider(inputs) {
+    if (!Array.isArray(inputs) || inputs.length !== 2) return this;
+    const commitmentHexes = inputs.map(found => fieldHexV1(computeNoteCommitmentV1(found?.note)));
+    const treeState = await this.fetchTreeState();
+    const rootHex = String(treeState?.root ?? treeState?.root_hex ?? treeState?.rootHex ?? "").trim();
+    if (!rootHex) throw new Error("transfer requires a verified current tree root");
+    return this.createCommitmentPathSnapshotProvider({ commitmentHexes, rootHex });
   }
 
   async checkNullifier(nullifierHex) {
@@ -2405,7 +2596,7 @@ export class ClairveilJS {
             // cursor progress across withdraws and filtered wallet outputs.
             eventTypes: []
           };
-          const pageResult = validatePrivacyScanPageV2(await this.fetchPrivacyScan(request), { ...request, validationState });
+          const pageResult = await this.queryPrivacyScan({ ...request, validationState });
           found.push(...processPrivacyScanPageV2(pageResult, { rootSeed }));
           currentAfter = {
             height: pageResult.next_cursor.height,
@@ -2658,6 +2849,8 @@ export class ClairveilJS {
     }
     const request = { ...options, eventTypes: ["batch_transfer"] };
     delete request.event_types;
+    // Preserve the existing auditable query request shape, including the
+    // caller-owned validation state used by downstream pagination adapters.
     const page = validatePrivacyScanPageV2(
       await this.fetchPrivacyScan(request),
       request
@@ -3028,12 +3221,80 @@ export class ClairveilJS {
     };
   }
 
+  /**
+   * Wait for a prepared deposit transaction and fail closed unless its
+   * successful tx result contains the exact commitment and encrypted note
+   * that were prepared for the wallet.
+   */
+  async confirmDeposit({
+    txHash,
+    tx_hash,
+    prepared,
+    material,
+    depositMaterial,
+    deposit_material,
+    message,
+    expectedCommitment,
+    expected_commitment,
+    expectedEncryptedNote,
+    expected_encrypted_note,
+    waitOptions,
+    attempts,
+    intervalMs
+  } = {}) {
+    const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
+    if (!normalizedTxHash) throw new Error("txHash is required");
+    const expected = depositExpectedMaterial({
+      prepared,
+      material,
+      depositMaterial,
+      deposit_material,
+      message,
+      expectedCommitment,
+      expected_commitment,
+      expectedEncryptedNote,
+      expected_encrypted_note
+    });
+    const tx = await this.waitForTx(normalizedTxHash, {
+      ...(waitOptions || {}),
+      ...(attempts == null ? {} : { attempts }),
+      ...(intervalMs == null ? {} : { intervalMs })
+    });
+    if (!tx) throw new Error(`deposit transaction was not found: ${normalizedTxHash}`);
+    const code = explicitTransactionCode(tx);
+    if (code !== 0) {
+      throw new Error(`deposit transaction did not succeed: ${code == null ? "missing or malformed code" : `code ${code}`}`);
+    }
+
+    const event = transactionEvents(tx).find(candidate => {
+      const type = transactionEventType(candidate);
+      if (type !== "deposit" && type !== "shielded_deposit") return false;
+      const commitment = String(transactionEventAttribute(candidate, "commitment"))
+        .trim().replace(/^"|"$/g, "").replace(/^0x/i, "").toLowerCase();
+      const encryptedNote = String(transactionEventAttribute(candidate, "encrypted_note"))
+        .trim().replace(/^"|"$/g, "").replace(/^0x/i, "").toLowerCase();
+      return commitment === expected.commitment && encryptedNote === expected.encryptedNote;
+    });
+    if (!event) {
+      throw new Error("deposit tx result does not contain the prepared commitment and encrypted note");
+    }
+    return {
+      status: "confirmed",
+      txHash: normalizedTxHash,
+      tx,
+      event,
+      commitment: expected.commitment,
+      encryptedNote: expected.encryptedNote
+    };
+  }
+
   async prepareTransfer({
     wallet,
     material,
     amount,
     recipient,
     proverAdapter,
+    signal,
     userPrivacyPolicy = "all-private",
     userDisclosureMode,
     userDisclosureTargetPubKeyHex = "",
@@ -3135,8 +3396,14 @@ export class ClairveilJS {
       userDisclosureMode: isFinal ? userDisclosureMode : "none"
     });
 
-    const auditPubKeyHex = auditDisclosureTargetPubKeyHex
-      || transferProtocolConfig.audit_config.audit_master_pubkey_hex;
+    const requestedAuditPubKeyHex = String(auditDisclosureTargetPubKeyHex ?? "").trim().toLowerCase();
+    const configuredAuditPubKeyHex = String(
+      transferProtocolConfig.audit_config.audit_master_pubkey_hex || ""
+    ).toLowerCase();
+    if (requestedAuditPubKeyHex && requestedAuditPubKeyHex !== configuredAuditPubKeyHex) {
+      throw new Error("transfer audit disclosure target must exactly match the active chain audit config");
+    }
+    const auditPubKeyHex = transferProtocolConfig.audit_config.audit_master_pubkey_hex;
     const stepRecipient = isFinal ? recipient : privacy.shieldedAddress;
     const stepAmount = isFinal ? amount : plan.nextAmount;
     let reservationBatch = null;
@@ -3164,7 +3431,8 @@ export class ClairveilJS {
           userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
           userDisclosureMode: isFinal ? userDisclosureMode : "none",
           userDisclosureTargetPubKeyHex: isFinal ? userDisclosureTargetPubKeyHex : "",
-          auditDisclosureTargetPubKeyHex: auditPubKeyHex
+          auditDisclosureTargetPubKeyHex: auditPubKeyHex,
+          signal
         });
         assertHeartbeatHealthy();
         const signDoc = await this.buildDirectSignDoc({
@@ -3235,6 +3503,7 @@ export class ClairveilJS {
     amounts,
     recipient,
     proverAdapter,
+    signal,
     userPrivacyPolicy = "all-private",
     userDisclosureMode = "none",
     userDisclosureTargetPubKeyHex = "",
@@ -3312,6 +3581,14 @@ export class ClairveilJS {
         String(uint64CursorValue(snapshotHeight, "snapshotHeight")) !==
           String(uint64CursorValue(snapshot_height, "snapshot_height"))) {
       throw new Error("snapshotHeight aliases conflict");
+    }
+    const suppliedRootHex = rootHex ?? root_hex;
+    const suppliedSnapshotHeight = snapshotHeight ?? snapshot_height;
+    const hasPinnedRoot = suppliedRootHex != null && String(suppliedRootHex).trim() !== "";
+    const hasPinnedSnapshotHeight = suppliedSnapshotHeight != null &&
+      String(suppliedSnapshotHeight).trim() !== "";
+    if (hasPinnedRoot !== hasPinnedSnapshotHeight) {
+      throw new Error("rootHex and snapshotHeight must be supplied together for an exact Merkle snapshot");
     }
     for (const [value, label] of [
       [disableSelfViewDisclosure, "disableSelfViewDisclosure"],
@@ -3535,17 +3812,13 @@ export class ClairveilJS {
       });
       const heartbeatResult = await withReservationHeartbeat(resolvedReservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
         const commitmentHexes = selectedInputs.map(found => fieldHexV1(computeNoteCommitmentV1(found.note)));
-        const treeState = rootHex || root_hex ? null : await this.fetchTreeState();
-        const resolvedRootHex = String(rootHex || root_hex || treeState?.root || treeState?.root_hex || treeState?.rootHex || "").trim();
+        const treeState = hasPinnedRoot ? null : await this.fetchTreeState();
+        const resolvedRootHex = String(suppliedRootHex || treeState?.root || treeState?.root_hex || treeState?.rootHex || "").trim();
         if (!resolvedRootHex) throw new Error("one-proof batch transfer requires a verified current tree root");
-        const resolvedSnapshotHeight = snapshotHeight ?? snapshot_height ?? selectedInputs.reduce((latest, found) => {
-          const height = BigInt(found.height ?? 0);
-          return height > BigInt(latest) ? height.toString() : latest;
-        }, String(selectedInputs[0]?.height ?? 0));
         const pathProvider = await this.createCommitmentPathSnapshotProvider({
           commitmentHexes,
           rootHex: resolvedRootHex,
-          snapshotHeight: resolvedSnapshotHeight
+          ...(hasPinnedSnapshotHeight ? { snapshotHeight: suppliedSnapshotHeight } : {})
         });
         const preparedInputs = await Promise.all(selectedInputs.map(async found => {
           const path = await pathProvider.lookupMerklePath(fieldHexV1(computeNoteCommitmentV1(found.note)));
@@ -3663,6 +3936,7 @@ export class ClairveilJS {
           operationId,
           reservation: reservationBatchSummary(reservationBatch),
           nowUnix: resolvedNowUnix,
+          signal,
           onPreparedProof: persistPreparedProof
             ? preparedProof => {
                 proofCheckpointStarted = true;
@@ -3830,6 +4104,7 @@ export class ClairveilJS {
     nowUnix,
     chainNowUnix,
     chain_now_unix,
+    signal,
     onPreparedProof,
     on_prepared_proof
   } = {}) {
@@ -3877,36 +4152,13 @@ export class ClairveilJS {
     validatePreparedBatchTransferPayloadEnvelope(payload, { nowUnix: resolvedNowUnix });
     const resolvedDenom = canonicalAssetDenomV1(denom ?? this.defaultDenom);
     const transferProtocolConfig = await this.assertTransferProtocolConfig(resolvedDenom);
-    if (String(payload.asset_id) !== computeAssetIdV1(resolvedDenom).toString()) {
-      throw new Error("prepared batch transfer asset ID does not match the authoritative denom");
-    }
-    const activeAuditConfig = transferProtocolConfig.audit_config;
-    if (String(payload.audit_key_id) !== String(activeAuditConfig.audit_key_id) ||
-        String(payload.audit_key_epoch) !== String(activeAuditConfig.audit_key_epoch) ||
-        hexFromBytes(bytesFromBase64(
-          payload.audit_disclosure_target_pubkey,
-          "prepared batch transfer audit disclosure target"
-        )) !== String(activeAuditConfig.audit_master_pubkey_hex).toLowerCase()) {
-      throw new Error("prepared batch transfer audit identity does not match the active chain config");
-    }
-    for (const [index, output] of payload.outputs.entries()) {
-      try {
-        assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
-          userPrivacyPolicy: output.privacy_policy,
-          userDisclosureMode: output.disclosure_mode
-        });
-      } catch (error) {
-        throw new Error(`prepared batch transfer output ${index} is incompatible with the active disclosure config`, {
-          cause: error
-        });
-      }
-    }
+    assertPreparedBatchTransferMatchesActiveConfig(payload, transferProtocolConfig, resolvedDenom);
     const effects = preparedBatchTransferEffectHex(payload);
     batchTransferNullifiersUnspent(
       await this.checkNullifiers(effects.nullifier_hexes),
       effects.nullifier_hexes
     );
-    const proofResponse = await proverAdapter.proveBatchTransfer(payload);
+    const proofResponse = await proverAdapter.proveBatchTransfer(payload, { signal });
     if (proofResponse?.proof && typeof proofResponse.proof === "object" &&
         proofResponse.version !== batchTransferProofResponseVersion) {
       throw new Error(`unsupported batch transfer proof response version ${JSON.stringify(proofResponse.version)}`);
@@ -3939,12 +4191,218 @@ export class ClairveilJS {
     };
   }
 
+  /**
+   * Complete the local stage after a checkpointed batch proof has been
+   * restored. This derives the message and operation evidence from the exact
+   * payload/proof, creates the reservation-bound sign doc, and atomically
+   * advances every reserved input to ProofReady. It performs no wallet or
+   * broadcast request.
+   */
+  async finalizePreparedBatchTransfer({
+    payload,
+    proof,
+    signer,
+    pubKeyHex,
+    gasLimit,
+    memo = "Clairveil batch veiled transfer",
+    payments,
+    amounts,
+    recipient,
+    userPrivacyPolicy = "all-private",
+    userDisclosureMode = "none",
+    userDisclosureTargetPubKeyHex = "",
+    expectedRecipientHash,
+    expected_recipient_hash,
+    expectedRecipientHashes,
+    expected_recipient_hashes,
+    expectedAmountHashes,
+    expected_amount_hashes,
+    denom,
+    operationId,
+    operation_id,
+    reservationManager,
+    reservation_manager,
+    reservation,
+    reservationBatch,
+    reservation_batch,
+    chainNowUnix,
+    chain_now_unix
+  } = {}) {
+    if (!this.enableExperimentalBatchTransfer) {
+      throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
+    }
+    if (operationId != null && operation_id != null && String(operationId) !== String(operation_id)) {
+      throw new Error("operationId aliases conflict");
+    }
+    if (chainNowUnix != null && chain_now_unix != null && Number(chainNowUnix) !== Number(chain_now_unix)) {
+      throw new Error("batch transfer chainNowUnix aliases conflict");
+    }
+    if (reservationManager != null && reservation_manager != null && reservationManager !== reservation_manager) {
+      throw new Error("reservationManager aliases conflict");
+    }
+    const reservationAliases = [reservation, reservationBatch, reservation_batch]
+      .filter(value => value != null);
+    if (reservationAliases.length > 1 && reservationAliases.some(value => value !== reservationAliases[0])) {
+      throw new Error("reservation aliases conflict");
+    }
+    const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
+    if (!resolvedReservationManager) {
+      throw new Error("finalizePreparedBatchTransfer requires the original reservationManager");
+    }
+    const resolvedReservation = reservation ?? reservationBatch ?? reservation_batch ?? null;
+    if (!resolvedReservation?.reservation_ids?.length) {
+      throw new Error("finalizePreparedBatchTransfer requires the original reservation batch");
+    }
+    const resolvedOperationID = String(operationId ?? operation_id ?? "").trim();
+    if (!resolvedOperationID) {
+      throw new Error("finalizePreparedBatchTransfer requires the original operationId");
+    }
+    const reservationOperationID = String(
+      resolvedReservation.operation_id ?? resolvedReservation.operationId ?? ""
+    ).trim();
+    if (reservationOperationID && reservationOperationID !== resolvedOperationID) {
+      throw new Error("prepared batch transfer operationId does not match the reservation batch");
+    }
+    const resolvedSigner = String(signer || "").trim();
+    if (!resolvedSigner) throw new Error("finalizePreparedBatchTransfer requires the original Cosmos signer");
+    const resolvedNowUnix = normalizedBatchNowUnix(
+      chainNowUnix ?? chain_now_unix ?? Math.floor(Date.now() / 1000)
+    );
+    validatePreparedBatchTransferPayloadEnvelope(payload, { nowUnix: resolvedNowUnix });
+    const resolvedDenom = canonicalAssetDenomV1(denom ?? this.defaultDenom);
+    const transferProtocolConfig = await this.assertTransferProtocolConfig(resolvedDenom);
+    assertPreparedBatchTransferMatchesActiveConfig(payload, transferProtocolConfig, resolvedDenom);
+
+    const normalizedPayments = normalizeBatchTransferPayments({
+      payments,
+      amounts,
+      recipient,
+      userPrivacyPolicy,
+      userDisclosureMode,
+      userDisclosureTargetPubKeyHex
+    });
+    const legacyOperationEvidence = resolveBatchOperationEvidence({
+      amounts: normalizedPayments.map(payment => payment.amount),
+      expectedRecipientHash,
+      expected_recipient_hash,
+      expectedRecipientHashes,
+      expected_recipient_hashes,
+      expectedAmountHashes,
+      expected_amount_hashes
+    });
+    const resolvedPayments = normalizedPayments.map((payment, index) => {
+      const legacyRecipientHash = legacyOperationEvidence.recipientHashes[index] || "";
+      const legacyAmountHash = legacyOperationEvidence.amountHashes[index] || "";
+      if (payment.expectedRecipientHash && legacyRecipientHash &&
+          canonicalBatchEvidenceDigest(payment.expectedRecipientHash, `batch payment ${index} expected recipient hash`) !==
+            canonicalBatchEvidenceDigest(legacyRecipientHash, `batch payment ${index} legacy expected recipient hash`)) {
+        throw new Error(`batch payment ${index} expected recipient hash conflicts with the top-level evidence`);
+      }
+      if (payment.expectedAmountHash && legacyAmountHash &&
+          canonicalBatchEvidenceDigest(payment.expectedAmountHash, `batch payment ${index} expected amount hash`) !==
+            canonicalBatchEvidenceDigest(legacyAmountHash, `batch payment ${index} legacy expected amount hash`)) {
+        throw new Error(`batch payment ${index} expected amount hash conflicts with the top-level evidence`);
+      }
+      return Object.freeze({
+        ...payment,
+        expectedRecipientHash: payment.expectedRecipientHash || legacyRecipientHash,
+        expectedAmountHash: payment.expectedAmountHash || legacyAmountHash
+      });
+    });
+    const preparedPayments = resolvedPayments.map((payment, index) => {
+      const capabilities = assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
+        userPrivacyPolicy: payment.userPrivacyPolicy,
+        userDisclosureMode: payment.userDisclosureMode
+      });
+      const privacyPolicy = transferPrivacyPolicyNames.indexOf(capabilities.policy);
+      const disclosureMode = transferDisclosureModeNames.indexOf(capabilities.mode);
+      if (privacyPolicy !== 0 && disclosureMode === 2 && !payment.userDisclosureTargetPubKeyHex) {
+        throw new Error(`batch transfer payment ${index} recipient-encrypted disclosure requires a disclosure target public key`);
+      }
+      const coin = parseCoin(payment.amount, resolvedDenom);
+      if (coin.denom !== resolvedDenom) {
+        throw new Error(`batch transfer payment ${index} denom must equal ${resolvedDenom}`);
+      }
+      return Object.freeze({ ...payment, privacyPolicy, disclosureMode, coin });
+    });
+    const normalizedProof = normalizePreparedBatchTransferProof(payload, proof, { nowUnix: resolvedNowUnix });
+    const message = buildMsgBatchTransferFromPrepared(payload, normalizedProof, {
+      creator: resolvedSigner,
+      nowUnix: resolvedNowUnix
+    });
+    const expectedOutputs = buildBatchTransferExpectedOutputEvidence({
+      payload,
+      payments: preparedPayments,
+      operationId: resolvedOperationID,
+      denom: resolvedDenom,
+      shieldedPrefix: this.shieldedPrefix,
+      nowUnix: resolvedNowUnix
+    });
+    const operationEvidence = buildBatchTransferOperationEvidence({
+      payload,
+      proof: normalizedProof,
+      expectedOutputs,
+      operationId: resolvedOperationID,
+      denom: resolvedDenom,
+      shieldedPrefix: this.shieldedPrefix,
+      nowUnix: resolvedNowUnix
+    });
+    const signDoc = await this.createBatchTransferSignDoc({
+      signer: resolvedSigner,
+      pubKeyHex,
+      gasLimit,
+      message,
+      memo,
+      expectedCircuitIdentity: transferProtocolConfig.circuit_config.circuit_set_id,
+      chainNowUnix: resolvedNowUnix
+    });
+    const effects = preparedBatchTransferEffectHex(payload);
+    if (resolvedReservation.reservation_ids.length !== effects.nullifier_hexes.length) {
+      throw new Error("prepared batch transfer reservation count does not match its input nullifiers");
+    }
+    batchTransferNullifiersUnspent(
+      await this.checkNullifiers(effects.nullifier_hexes),
+      effects.nullifier_hexes
+    );
+    const persistedOutputMode = String(
+      resolvedReservation.reservations?.[0]?.metadata?.batch_transfer_output_mode ||
+      (payload.outputs.length === 32 ? "exact32" : "compact")
+    );
+    await markReservationProofReady(resolvedReservationManager, resolvedReservation, {
+      payloadHash: payload.payload_hash,
+      signDocHash: cosmosSignDocBindingHash(signDoc),
+      expectedOperationEvidenceHash: operationEvidence.evidenceHash,
+      operationSuccessEvidenceRequired: true,
+      metadata: {
+        payload_expires_at_unix: String(payload.expires_at_unix),
+        batch_transfer_input_count: effects.nullifier_hexes.length,
+        batch_transfer_output_count: payload.outputs.length,
+        batch_transfer_output_mode: persistedOutputMode,
+        batch_transfer_nullifier_hexes: effects.nullifier_hexes,
+        batch_transfer_output_commitment_hexes: effects.output_commitment_hexes,
+        batch_transfer_operation_evidence: operationEvidence.evidence,
+        batch_transfer_operation_evidence_hash: operationEvidence.evidenceHash
+      }
+    });
+    return {
+      payload,
+      proof: normalizedProof,
+      message,
+      effects,
+      operationEvidence: operationEvidence.evidence,
+      operationEvidenceHash: operationEvidence.evidenceHash,
+      signDoc: markCosmosSignDocReservationRequired(signDoc, resolvedReservation),
+      reservation: reservationBatchSummary(resolvedReservation)
+    };
+  }
+
   async prepareWithdraw({
     wallet,
     material,
     amount,
     recipient,
     proverAdapter,
+    signal,
     denom,
     assetDenom,
     scan,
@@ -4043,7 +4501,8 @@ export class ClairveilJS {
           rootSeed: privacy.rootSeed,
           chainId: this.chainId,
           expiresAtUnix,
-          chainNowUnix: chainNowUnix ?? chain_now_unix
+          chainNowUnix: chainNowUnix ?? chain_now_unix,
+          signal
         });
         assertHeartbeatHealthy();
         const signDoc = await this.buildDirectSignDoc({
@@ -4103,6 +4562,7 @@ export class ClairveilJS {
     amount,
     recipient,
     proverAdapter,
+    signal,
     denom,
     assetDenom,
     scan,
@@ -4195,7 +4655,8 @@ export class ClairveilJS {
           rootSeed: privacy.rootSeed,
           chainId: this.chainId,
           expiresAtUnix,
-          chainNowUnix: chainNowUnix ?? chain_now_unix
+          chainNowUnix: chainNowUnix ?? chain_now_unix,
+          signal
         });
         assertHeartbeatHealthy();
         await heartbeatNow();
@@ -4313,24 +4774,30 @@ export class ClairveilJS {
 
   async buildPreparedTransferPayload(input) {
     const transferDenom = input?.transferDenom ?? input?.denom ?? this.defaultDenom;
-    await this.assertProtocolPreflight(transferDenom);
+    const transferProtocolConfig = await this.assertTransferProtocolConfig(transferDenom);
+    const boundInput = bindRawTransferBuilderProtocolConfig(input, transferProtocolConfig);
+    const merklePathProvider = input?.merklePathProvider ??
+      await this.createTransferMerklePathSnapshotProvider(input?.inputs);
     return buildPreparedTransferPayloadCore({
-      merklePathProvider: this,
+      ...boundInput,
+      merklePathProvider,
       shieldedPrefix: this.shieldedPrefix,
       transferDenom,
-      ...input,
       chainId: input?.chainId ?? this.chainId
     });
   }
 
   async buildTransferMessage(input) {
     const transferDenom = input?.transferDenom ?? input?.denom ?? this.defaultDenom;
-    await this.assertProtocolPreflight(transferDenom);
+    const transferProtocolConfig = await this.assertTransferProtocolConfig(transferDenom);
+    const boundInput = bindRawTransferBuilderProtocolConfig(input, transferProtocolConfig);
+    const merklePathProvider = input?.merklePathProvider ??
+      await this.createTransferMerklePathSnapshotProvider(input?.inputs);
     return buildTransferMessageCore({
-      merklePathProvider: this,
+      ...boundInput,
+      merklePathProvider,
       shieldedPrefix: this.shieldedPrefix,
       transferDenom,
-      ...input,
       chainId: input?.chainId ?? this.chainId,
       checkNullifiers: input?.checkNullifiers ?? (nullifiers => this.checkNullifiers(nullifiers))
     });
@@ -4753,6 +5220,13 @@ export class ClairveilJS {
       signDocHash
     });
     const client = await this.connect();
+    // Batch proof preparation checks nullifiers, but wallet signing can take
+    // arbitrarily long. Re-read the exact persisted batch inputs at the final
+    // broadcast boundary so a stale proof can never be submitted.
+    await recheckReservedBatchTransferNullifiers(
+      reservationContext,
+      nullifiers => this.checkNullifiers(nullifiers)
+    );
     await beginBroadcastReservation(
       reservationContext,
       "cosmos_broadcast_tx_sync",

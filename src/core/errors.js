@@ -10,6 +10,7 @@ export const ClairveilErrorCode = Object.freeze({
   EXACT_NOTE_REQUIRED: "EXACT_NOTE_REQUIRED",
   PROVER_UNAVAILABLE: "PROVER_UNAVAILABLE",
   PROVER_TIMEOUT: "PROVER_TIMEOUT",
+  PROVER_CANCELLED: "PROVER_CANCELLED",
   PROVER_REJECTED: "PROVER_REJECTED",
   DISCLOSURE_UNAVAILABLE: "DISCLOSURE_UNAVAILABLE",
   TX_BROADCAST_FAILED: "TX_BROADCAST_FAILED"
@@ -63,6 +64,9 @@ export function wrapProverError(error) {
     if (details.retryable !== undefined) result.retryable = details.retryable;
     return result;
   };
+  if (error?.code === ClairveilErrorCode.PROVER_CANCELLED) {
+    return wrapped(ClairveilErrorCode.PROVER_CANCELLED);
+  }
   if (/timed out|abort/i.test(message)) {
     return wrapped(ClairveilErrorCode.PROVER_TIMEOUT);
   }

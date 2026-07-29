@@ -3,6 +3,7 @@ import type {
   PrivacyScanValidationStateSnapshotV2,
   ValidatedPrivacyScanPageV2
 } from "../privacy/scan.js";
+import type { ValidatedDisclosureConfigV1 } from "../privacy/network-config.js";
 
 export * from "../core/crypto.js";
 export * from "../core/disclosure.js";
@@ -414,6 +415,8 @@ export interface ClairveilClientOptions {
   fetchTimeoutMs?: number;
   queryRetry?: QueryRetryOptions | false;
   nullifierFailover?: boolean;
+  /** Allow Merkle witness and exact-snapshot queries to fail over across REST endpoints. */
+  merklePathFailover?: boolean;
   expectedCircuitIdentity?: CircuitSetIdentityV1;
   /** Explicit downstream gate required until this integration passes its own localnet matrix. */
   enableExperimentalBatchTransfer?: boolean;
@@ -445,6 +448,15 @@ export interface PreparedDeposit {
   message: MsgDepositMessage;
   material: DepositMaterial;
   privacyAccount: PrivacyAccountSummary;
+}
+
+export interface ConfirmedDeposit {
+  status: "confirmed";
+  txHash: Hex;
+  tx: TxSearchResult;
+  event: object;
+  commitment: Hex;
+  encryptedNote: Hex;
 }
 
 export interface PreparedTransferSummary {
@@ -580,6 +592,23 @@ export type PrepareDepositInput = {
   assetDenom?: string;
 } & DepositProofInput;
 
+export type ConfirmDepositInput = {
+  txHash?: Hex;
+  tx_hash?: Hex;
+  prepared?: PreparedDeposit | object;
+  material?: DepositMaterial;
+  depositMaterial?: object;
+  deposit_material?: object;
+  message?: MsgDepositMessage | object;
+  expectedCommitment?: Hex;
+  expected_commitment?: Hex;
+  expectedEncryptedNote?: Hex;
+  expected_encrypted_note?: Hex;
+  waitOptions?: { attempts?: number; intervalMs?: number };
+  attempts?: number;
+  intervalMs?: number;
+};
+
 export function createClairveilRegistry(extraTypes?: Array<[string, object]>): object;
 export function normalizeRpcEndpoint(rpc: string): string;
 export function normalizeRestEndpoint(rest: string): string;
@@ -597,6 +626,11 @@ export function assertSignerPubKey(address: ClairAddress, pubKeyHex: Hex, prefix
 };
 export function eventAttribute(event: object, key: string): string;
 export function isAuditableTransfer(event: object): boolean;
+/** Reject a user disclosure policy or mode that the active chain does not support. */
+export function assertTransferDisclosureCapabilities(
+  disclosureConfig: ValidatedDisclosureConfigV1,
+  options?: { userPrivacyPolicy?: string | number; userDisclosureMode?: string | number }
+): { policy: string; mode: string };
 export function cosmosSignDocBindingHash(signDoc: Pick<SignDocBase64, "bodyBytes" | "authInfoBytes">): Hex;
 
 export type DirectOperationEvidenceHashes =
@@ -797,6 +831,7 @@ export type PrepareTransferBatchInput = {
   wallet?: WalletAdapterLike;
   material?: PrivacyMaterial;
   proverAdapter: BatchTransferProverAdapter;
+  signal?: AbortSignal;
   outputMode?: "compact" | "exact32" | "exact-32";
   output_mode?: "compact" | "exact32" | "exact-32";
   gasLimit?: number;
@@ -838,6 +873,42 @@ export type PrepareTransferBatchInput = {
   RequiredPreparedBatchTransferPayloadCheckpoint &
   RequiredPreparedBatchTransferProofCheckpoint;
 
+/**
+ * Restores the non-proving half of a checkpointed one-proof batch transfer.
+ * Supply the exact original payment rows so the SDK can bind the recovered
+ * payload/proof to per-item operation evidence before it makes the
+ * reservation broadcastable.
+ */
+export type FinalizePreparedBatchTransferInput = {
+  payload: PreparedBatchTransferPayload;
+  proof: PreparedBatchTransferProof;
+  signer: ClairAddress | string;
+  pubKeyHex: Hex;
+  gasLimit: number | bigint;
+  memo?: string;
+  userPrivacyPolicy?: string | number;
+  userDisclosureMode?: string | number;
+  userDisclosureTargetPubKeyHex?: Hex;
+  denom?: string;
+  chainNowUnix?: number;
+  chain_now_unix?: number;
+} & PrepareTransferBatchPaymentShape &
+  BatchOperationEvidenceHashes &
+  RequiredBatchTransferOperationIDBinding &
+  RequiredReservationManagerBinding &
+  RequiredReservationBatchBinding;
+
+export interface FinalizedPreparedBatchTransfer {
+  payload: PreparedBatchTransferPayload;
+  proof: PreparedBatchTransferProof & { proof_bytes: Uint8Array };
+  message: MsgBatchTransferMessage;
+  effects: { root_hex: Hex; nullifier_hexes: Hex[]; output_commitment_hexes: Hex[] };
+  operationEvidence: BatchTransferOperationEvidence;
+  operationEvidenceHash: Hex;
+  signDoc: SignDocBase64;
+  reservation: ReservationBatch;
+}
+
 export class ClairveilJS {
   constructor(options: ClairveilClientOptions);
   connect(): Promise<object>;
@@ -860,12 +931,19 @@ export class ClairveilJS {
     body?: BodyInit | null;
     headers?: Record<string, string>;
   }): Promise<T>;
+  fetchMerklePathJson<T = object>(path: string, options?: {
+    retry?: QueryRetryOptions | false;
+    method?: string;
+    body?: BodyInit | null;
+    headers?: Record<string, string>;
+  }): Promise<T>;
   getAccountInfo(address: ClairAddress): Promise<{ accountNumber: bigint; sequence: bigint }>;
   getBalances(address: ClairAddress): Promise<object>;
   getTx(txHash: Hex): Promise<TxSearchResult | null>;
   waitForTx(txHash: Hex, options?: { attempts?: number; intervalMs?: number }): Promise<TxSearchResult | null>;
   fetchPrivacyEvents(options?: PrivacyEventsQuery): Promise<object & { events?: object[] }>;
   fetchPrivacyScan(options?: TypedPrivacyScanQuery): Promise<object>;
+  queryPrivacyScan(options?: TypedPrivacyScanQuery): Promise<ValidatedPrivacyScanPageV2>;
   fetchTreeState(): Promise<object>;
   fetchCommitmentInfo(commitmentHex: Hex): Promise<object>;
   fetchAuditConfig(): Promise<object>;
@@ -967,17 +1045,20 @@ export class ClairveilJS {
   }): Promise<{ plan: WithdrawPlan; scan: ScanResult }>;
   buildDepositMessage(input: BuildDepositMessageInput): object;
   prepareDeposit(input: PrepareDepositInput): Promise<PreparedDeposit>;
+  confirmDeposit(input: ConfirmDepositInput): Promise<ConfirmedDeposit>;
   prepareTransfer(input: {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
     amount: CoinString;
     recipient: ShieldedAddress;
     proverAdapter: ProverAdapter;
+    signal?: AbortSignal;
     allowPlanStep?: boolean;
     gasLimit?: number;
     userPrivacyPolicy?: string | number;
     userDisclosureMode?: string | number;
     userDisclosureTargetPubKeyHex?: Hex;
+    /** Optional safety assertion; if set, it must equal the active chain audit master key. */
     auditDisclosureTargetPubKeyHex?: Hex;
     denom?: string;
     afterHeight?: Uint64CursorInput;
@@ -1000,6 +1081,7 @@ export class ClairveilJS {
   provePreparedBatchTransfer(input: {
     payload: PreparedBatchTransferPayload;
     proverAdapter: BatchTransferProverAdapter;
+    signal?: AbortSignal;
     creator?: ClairAddress | string;
     denom?: string;
     nowUnix?: number;
@@ -1015,12 +1097,14 @@ export class ClairveilJS {
     proofStageOnly: true;
     reservationFinalizationRequired: true;
   }>;
+  finalizePreparedBatchTransfer(input: FinalizePreparedBatchTransferInput): Promise<FinalizedPreparedBatchTransfer>;
   prepareWithdraw(input: {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
     amount: CoinString;
     recipient: ClairAddress;
     proverAdapter: ProverAdapter;
+    signal?: AbortSignal;
     gasLimit?: number;
     denom?: string;
     assetDenom?: string;
@@ -1049,6 +1133,7 @@ export class ClairveilJS {
     amount: CoinString;
     recipient: ClairAddress;
     proverAdapter: ProverAdapter;
+    signal?: AbortSignal;
     denom?: string;
     assetDenom?: string;
     afterHeight?: Uint64CursorInput;
@@ -1087,17 +1172,20 @@ export class ClairveilJS {
   buildTransferMessage(input: PreparedTransferPayloadInput & {
     proverAdapter: ProverAdapter;
     checkNullifiers?: import("../privacy/payload.js").NullifierStatusReader;
+    signal?: AbortSignal;
   }): Promise<TransferMessageBuildResult>;
   buildPreparedWithdrawProverPayload(input: PreparedWithdrawProverPayloadInput): Promise<PreparedWithdrawProverPayloadResult>;
   buildRelayWithdrawPayload(input: Omit<PreparedWithdrawProverPayloadInput, "chainNowUnix"> & {
     chainNowUnix: number;
     proverAdapter: ProverAdapter;
     checkNullifiers?: import("../privacy/payload.js").NullifierStatusReader;
+    signal?: AbortSignal;
   }): Promise<RelayWithdrawPayloadBuildResult>;
   buildWithdrawMessage(input: PreparedWithdrawProverPayloadInput & {
     proverAdapter: ProverAdapter;
     creator?: ClairAddress | string;
     checkNullifiers?: import("../privacy/payload.js").NullifierStatusReader;
+    signal?: AbortSignal;
   }): Promise<WithdrawMessageBuildResult>;
   buildRelayWithdrawMessageFromPayload(input: {
     payload: PreparedWithdrawPayload;
@@ -1250,6 +1338,7 @@ export function createClairveilClient(options: {
   fetchTimeoutMs?: number;
   queryRetry?: QueryRetryOptions | false;
   nullifierFailover?: boolean;
+  merklePathFailover?: boolean;
   expectedCircuitIdentity?: CircuitSetIdentityV1;
   enableExperimentalBatchTransfer?: boolean;
   enable_experimental_batch_transfer?: boolean;

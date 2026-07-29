@@ -522,7 +522,7 @@ export async function buildTransferMessage({ proverAdapter, ...input } = {}) {
   const response = await proverAdapter.proveTransfer({
     version: "v2",
     payload
-  });
+  }, { signal: input.signal });
   const proof = response?.proof || response;
   return {
     payload,
@@ -848,7 +848,7 @@ async function buildWithdrawPayloadWithProof({ proverAdapter, ...input } = {}) {
   const response = await proverAdapter.proveWithdraw({
     version: "v2",
     payload: proverPayload
-  });
+  }, { signal: input.signal });
   const proof = response?.proof || response;
   const payload = buildPreparedWithdrawPayloadFromProof(
     proverPayload,

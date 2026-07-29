@@ -143,3 +143,38 @@ test("low-level proof builders cannot bypass consensus protocol preflight", asyn
     assert.equal(denoms.at(-1), expectedDenom, method);
   }
 });
+
+test("raw 2x2 transfer builders bind audit and disclosure settings to active chain config", async () => {
+  const activeAuditKey = packPointHex(derivePubKeyFromScalar(101n));
+  const client = createClairveilClient({
+    rpc: "http://rpc.example",
+    rest: "http://rest.example",
+    chainId: "clairveil-test-1",
+    defaultDenom: "uclair"
+  });
+  client.assertTransferProtocolConfig = async () => ({
+    audit_config: { audit_master_pubkey_hex: activeAuditKey },
+    disclosure_config: {
+      supported_user_policies: ["all-private"],
+      supported_user_modes: ["none"]
+    }
+  });
+
+  for (const method of ["buildPreparedTransferPayload", "buildTransferMessage"]) {
+    await assert.rejects(
+      () => client[method]({
+        transferDenom: "uclair",
+        auditDisclosureTargetPubKeyHex: "aa".repeat(32)
+      }),
+      /transfer audit disclosure target must exactly match the active chain audit config/
+    );
+    await assert.rejects(
+      () => client[method]({
+        transferDenom: "uclair",
+        userPrivacyPolicy: "amount",
+        userDisclosureMode: "public"
+      }),
+      /does not support transfer privacy policy amount/
+    );
+  }
+});

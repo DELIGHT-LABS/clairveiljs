@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   createAsyncJobProverAdapter,
+  createHttpDepositProofProvider,
   createHttpProverAdapter,
   createStaticProverAdapter
 } from "clairveiljs/prover";
@@ -163,6 +164,139 @@ test("HTTP prover adapter aborts on timeout", fixtureTestOptions, async () => {
     error => error?.code === ClairveilErrorCode.PROVER_TIMEOUT && /timed out/.test(error.message)
   );
   assert.equal(sawAbort, true);
+});
+
+test("HTTP prover adapter supports caller cancellation separately from timeout", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const controller = new AbortController();
+  let sawAbort = false;
+  const adapter = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    timeoutMs: 1000,
+    fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => {
+        sawAbort = true;
+        reject(new DOMException("aborted", "AbortError"));
+      });
+    })
+  });
+
+  const pending = adapter.proveTransfer(examples.transfer.request, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(
+    () => pending,
+    error => error?.code === ClairveilErrorCode.PROVER_CANCELLED && /cancelled/.test(error.message)
+  );
+  assert.equal(sawAbort, true);
+});
+
+test("pinned DepositCircuit provider uses its exact endpoint and validates the response contract", async () => {
+  const calls = [];
+  const provider = createHttpDepositProofProvider({
+    url: "https://deposit.example/prove",
+    fetchImpl: async (url, init) => {
+      calls.push({
+        url: String(url),
+        method: init.method,
+        redirect: init.redirect,
+        accept: init.headers.Accept,
+        contentType: init.headers["Content-Type"],
+        body: JSON.parse(init.body)
+      });
+      return jsonResponse({
+        version: "v1",
+        proof_hex: "ab",
+        note_commitment_hex: "11".repeat(32)
+      });
+    }
+  });
+
+  const result = await provider({
+    note_json: '{"amount":"1uclair"}',
+    note_commitment_hex: "11".repeat(32)
+  });
+
+  assert.deepEqual(calls, [{
+    url: "https://deposit.example/prove",
+    method: "POST",
+    redirect: "error",
+    accept: "application/json",
+    contentType: "application/json",
+    body: {
+      note_json: '{"amount":"1uclair"}',
+      note_commitment_hex: "11".repeat(32)
+    }
+  }]);
+  assert.deepEqual(result, {
+    version: "v1",
+    proof_hex: "ab",
+    note_commitment_hex: "11".repeat(32)
+  });
+
+  const mismatchedCommitment = createHttpDepositProofProvider({
+    url: "https://deposit.example/prove",
+    fetchImpl: async () => jsonResponse({
+      version: "v1",
+      proof_hex: "ab",
+      note_commitment_hex: "22".repeat(32)
+    })
+  });
+  await assert.rejects(
+    () => mismatchedCommitment({
+      note_json: "{}",
+      note_commitment_hex: "11".repeat(32)
+    }),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /does not match the request/.test(error.message)
+  );
+});
+
+test("pinned DepositCircuit provider forwards caller cancellation", async () => {
+  const controller = new AbortController();
+  let sawAbort = false;
+  const provider = createHttpDepositProofProvider({
+    url: "http://127.0.0.1:8080/deposit-proof",
+    timeoutMs: 1000,
+    fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => {
+        sawAbort = true;
+        reject(new DOMException("aborted", "AbortError"));
+      }, { once: true });
+    })
+  });
+
+  const pending = provider({
+    note_json: "{}",
+    note_commitment_hex: "11".repeat(32),
+    signal: controller.signal
+  });
+  controller.abort();
+  await assert.rejects(
+    () => pending,
+    error => error?.code === ClairveilErrorCode.PROVER_CANCELLED && /cancelled/.test(error.message)
+  );
+  assert.equal(sawAbort, true);
+});
+
+test("async prover job adapter stops waiting when the caller cancels", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const controller = new AbortController();
+  let sawSignal = false;
+  const adapter = createAsyncJobProverAdapter({
+    submitTransferJob: async (_request, options) => {
+      sawSignal = options.signal === controller.signal;
+      return { job_id: "job-cancelled" };
+    },
+    getJob: async () => new Promise(() => {}),
+    intervalMs: 0
+  });
+
+  const pending = adapter.proveTransfer(examples.transfer.request, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(
+    () => pending,
+    error => error?.code === ClairveilErrorCode.PROVER_CANCELLED && /cancelled/.test(error.message)
+  );
+  assert.equal(sawSignal, true);
 });
 
 test("HTTP prover adapter reports non-JSON and error status responses", fixtureTestOptions, async () => {

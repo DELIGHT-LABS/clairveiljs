@@ -17,6 +17,7 @@ import {
   normalizeDisclosureConfigV1,
   normalizeReserveResponseV1
 } from "../privacy/network-config.js";
+import { validateCircuitConfigV1 } from "../privacy/circuit-config.js";
 
 function trimTrailingSlash(value) {
   return String(value || "").replace(/\/$/, "");
@@ -274,13 +275,14 @@ export function isAuditableTransfer(event) {
 }
 
 export class ClairveilPublicClient {
-  constructor({ rest, restEndpoints, queryTimeoutMs = defaultFetchTimeoutMs, fetchTimeoutMs, queryRetry, nullifierFailover = false } = {}) {
+  constructor({ rest, restEndpoints, queryTimeoutMs = defaultFetchTimeoutMs, fetchTimeoutMs, queryRetry, nullifierFailover = false, merklePathFailover = false } = {}) {
     this.restEndpoints = normalizeRestEndpoints(rest, restEndpoints);
     this.rest = this.restEndpoints[0];
     this.activeRestEndpoint = this.rest;
     this.queryTimeoutMs = normalizeTimeoutMs(fetchTimeoutMs ?? queryTimeoutMs, "queryTimeoutMs");
     this.queryRetry = normalizeQueryRetry(queryRetry);
     this.nullifierFailover = Boolean(nullifierFailover);
+    this.merklePathFailover = Boolean(merklePathFailover);
   }
 
   restUrl(path, endpoint = this.activeRestEndpoint) {
@@ -344,6 +346,20 @@ export class ClairveilPublicClient {
     });
   }
 
+  async fetchMerklePathJson(path, options = {}) {
+    return this.fetchJson(path, {
+      ...options,
+      failover: this.merklePathFailover,
+      // Merkle witnesses reveal the commitments a wallet is attempting to
+      // spend. Keep those requests on the configured endpoint unless the
+      // application explicitly accepts cross-endpoint disclosure.
+      ...(this.merklePathFailover ? {} : {
+        endpoint: this.rest,
+        updateActiveEndpoint: false
+      })
+    });
+  }
+
   async fetchPrivacyEvents(options = {}) {
     return this.fetchJson(`/clairveil/privacy/v1/events${privacyEventsQuery(options)}`);
   }
@@ -358,6 +374,40 @@ export class ClairveilPublicClient {
       headers: { "content-type": "application/json" },
       body: jsonRequestBody(privacyScanRequestBody(options))
     });
+  }
+
+  /** Fetch a typed privacy-scan-v2 page and fail closed before it is consumed. */
+  async queryPrivacyScan(options = {}) {
+    const {
+      validationState,
+      validation_state,
+      ...request
+    } = options || {};
+    return validatePrivacyScanPageV2(
+      await this.fetchPrivacyScan(request),
+      {
+        ...request,
+        ...(validationState ?? validation_state
+          ? { validationState: validationState ?? validation_state }
+          : {})
+      }
+    );
+  }
+
+  async fetchTreeState() {
+    return this.fetchJson("/clairveil/privacy/v1/tree_state");
+  }
+
+  async fetchCommitmentInfo(commitmentHex) {
+    const normalized = String(commitmentHex || "").trim();
+    if (!normalized) throw new Error("commitment is required");
+    return this.fetchJson(`/clairveil/privacy/v1/commitment/${encodeURIComponent(normalized)}`);
+  }
+
+  async lookupMerklePath(commitmentHex) {
+    const normalized = String(commitmentHex || "").trim();
+    if (!normalized) throw new Error("commitment is required");
+    return this.fetchMerklePathJson(`/clairveil/privacy/v1/merkle_path/${encodeURIComponent(normalized)}`);
   }
 
   async checkNullifier(nullifierHex) {
@@ -417,6 +467,8 @@ export class ClairveilPublicClient {
     }
     const request = { ...options, eventTypes: ["batch_transfer"] };
     delete request.event_types;
+    // Preserve the existing auditable query request shape, including the
+    // caller-owned validation state used by downstream pagination adapters.
     const page = validatePrivacyScanPageV2(
       await this.fetchPrivacyScan(request),
       request
@@ -450,6 +502,17 @@ export class ClairveilPublicClient {
 
   async queryDisclosureConfig() {
     return normalizeDisclosureConfigV1(await this.fetchDisclosureConfig());
+  }
+
+  async fetchCircuitConfig(options = {}) {
+    return validateCircuitConfigV1(
+      await this.fetchJson("/clairveil/privacy/v1/circuit_config"),
+      options
+    );
+  }
+
+  async assertCircuitConfig(options = {}) {
+    return this.fetchCircuitConfig(options);
   }
 
   async queryReserve(denom) {
@@ -501,7 +564,7 @@ export class ClairveilPublicClient {
   }
 
   async fetchCommitmentPathsAtRoot(options = {}) {
-    return this.fetchJson("/clairveil/privacy/v1/commitment_paths_at_root", {
+    return this.fetchMerklePathJson("/clairveil/privacy/v1/commitment_paths_at_root", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: jsonRequestBody(commitmentPathsAtRootRequestBody(options))
