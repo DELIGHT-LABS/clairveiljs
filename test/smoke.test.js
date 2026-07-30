@@ -181,7 +181,35 @@ function transferProtocolConfig({ policies = ["all-private"], modes = ["none"] }
       audit_key_epoch: 1,
       audit_master_pubkey_hex: Buffer.from(packPoint(CURVE_BASE)).toString("hex")
     },
-    circuit_config: { circuit_set_id: "privacy-note-v1" },
+    circuit_config: {
+      circuit_set_identity: {
+        schema_version: "v1",
+        circuit_set_id: "privacy-note-v1",
+        curve: "BN254",
+        circuits: [
+          {
+            circuit_id: "deposit",
+            verifying_key_sha256: "5bd1bb4e4240db8b277095791528f0473dd5f44317ddf6b2f8d479afa677e19a",
+            public_input_schema_sha256: "c3231fb5ae62539d2e4baeb78aa4be8a4c44e3cd8fa325ba60f13b7f563d5a1e"
+          },
+          {
+            circuit_id: "spend",
+            verifying_key_sha256: "e223a161d451f328efee501d9f7ec699b4a7805828cd2ca5ea58e168b6598a6e",
+            public_input_schema_sha256: "d0a033aa2f7b6e098873307a815545ee3e83d974026c0e52bf39a038e08f4872"
+          },
+          {
+            circuit_id: "joinsplit",
+            verifying_key_sha256: "6bd0a17db07f099d4ec1271d4c8d02f6729d5c365cb113a119a972ad31090d85",
+            public_input_schema_sha256: "4946e23db34529c6fce0a95ce69f6df08563a305ddcc70c7b6b786471e03aa82"
+          },
+          {
+            circuit_id: "batch-joinsplit-16x32-v1",
+            verifying_key_sha256: "f31844fcc7349bfdd68babe8f00638179ee7f608e0060baee8b8f4c443f186ee",
+            public_input_schema_sha256: "5606327d69dcb06c00811f2135291d39a2ea1cedf554f114f7eb4a178098d333"
+          }
+        ]
+      }
+    },
     disclosure_config: {
       supported_user_policies: policies,
       supported_user_modes: modes
@@ -3218,6 +3246,14 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
   assert.equal(result.signDoc.messages[0].typeUrl, MsgBatchTransfer.typeUrl);
   assert.equal(result.message.nullifiers.length, 1);
   assert.equal(result.message.outputs.length, 32);
+  const persistedReservations = await store.listReservations({
+    ownerKeyId: "chain:clair1sender"
+  });
+  assert.equal(persistedReservations.length, 1);
+  assert.equal(
+    persistedReservations[0].metadata.circuit_set_id,
+    "privacy-note-v1"
+  );
   assert.equal(snapshotRequest.rootHex, rootHex);
   assert.equal("snapshotHeight" in snapshotRequest, false);
   assert.deepEqual(result.payload.outputs.slice(0, 3).map(output => output.kind), [

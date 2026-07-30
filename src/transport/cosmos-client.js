@@ -3805,7 +3805,15 @@ export class ClairveilJS {
         metadata: {
           batch_transfer_payment_count: preparedPayments.length,
           batch_transfer_output_mode: resolvedOutputMode,
-          circuit_set_id: transferProtocolConfig.circuit_config.circuit_set_id,
+          // CircuitConfig v1 exposes the active identity as a structured
+          // `circuit_set_identity`.  Reservation metadata is deliberately
+          // JSON-only, so never persist the absent legacy shorthand here:
+          // `undefined` causes the reservation to fail before the prover is
+          // called and hides an otherwise valid batch behind a generic UI
+          // preparation error.
+          circuit_set_id:
+            transferProtocolConfig.circuit_config.circuit_set_identity
+              .circuit_set_id,
           max_inputs: 16,
           max_outputs: 32
         }
@@ -4353,7 +4361,8 @@ export class ClairveilJS {
       gasLimit,
       message,
       memo,
-      expectedCircuitIdentity: transferProtocolConfig.circuit_config.circuit_set_id,
+      expectedCircuitIdentity:
+        transferProtocolConfig.circuit_config.circuit_set_identity,
       chainNowUnix: resolvedNowUnix
     });
     const effects = preparedBatchTransferEffectHex(payload);
