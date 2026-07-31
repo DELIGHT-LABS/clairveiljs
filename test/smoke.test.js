@@ -2184,6 +2184,7 @@ test("browser-dapp prepare forwards scan options into EVM note scans", async () 
     pubKeyHex: "02".padEnd(66, "0"),
     shieldedAddress: "clairs1example"
   });
+  client.cosmos.assertTransferProtocolConfig = async () => transferProtocolConfig();
   const scans = [];
   client.cosmos.scanNotes = async input => {
     scans.push(input);

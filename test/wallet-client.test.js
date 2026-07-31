@@ -498,6 +498,75 @@ test("EVM profile prepare checks the connected wallet network before building an
   assert.equal(protocolPreflightCalls, 0);
 });
 
+test("payable EVM deposit profiles require an exact native-denom binding", async () => {
+  const profile = webEvmProfile({
+    evmDepositMode: "payable-exact-value",
+    evmNativeDenom: "uclair"
+  });
+  const client = browserClient({ profile });
+  assert.equal(client.evmDepositMode, "payable-exact-value");
+  assert.equal(client.evmNativeDenom, "uclair");
+
+  assert.throws(
+    () => browserClient({
+      profile: webEvmProfile({
+        evmDepositMode: "payable-exact-value",
+        evmNativeDenom: undefined
+      })
+    }),
+    /profile\.evmNativeDenom/
+  );
+  assert.throws(
+    () => browserClient({
+      profile: webEvmProfile({
+        evmDepositMode: "payable-exact-value",
+        evmNativeDenom: "uother"
+      })
+    }),
+    /must match profile\.denom/
+  );
+  assert.throws(
+    () => browserClient({
+      profile: webEvmProfile({ evmDepositMode: "caller-selected" })
+    }),
+    /unsupported EVM deposit mode/
+  );
+
+  client.evmJsonRpc = async () => "0x539";
+  let protocolPreflightCalled = false;
+  client.cosmos.assertProtocolPreflight = async () => {
+    protocolPreflightCalled = true;
+    return {};
+  };
+  await assert.rejects(
+    () => client.prepareDeposit({
+      amount: "1uother",
+      evmWallet: { getChainId: async () => "0x539" },
+      depositProofProvider: async () => {
+        throw new Error("deposit proof provider must not be called");
+      }
+    }),
+    /does not match native denom/
+  );
+  assert.equal(protocolPreflightCalled, false);
+
+  let depositProofProviderCalled = false;
+  await assert.rejects(
+    () => client.prepareDeposit({
+      amount: "1uclair",
+      depositMaterial: { amount: "2uclair" },
+      evmWallet: { getChainId: async () => "0x539" },
+      depositProofProvider: async () => {
+        depositProofProviderCalled = true;
+        return {};
+      }
+    }),
+    /deposit material amount mismatch/
+  );
+  assert.equal(depositProofProviderCalled, false);
+  assert.equal(protocolPreflightCalled, false);
+});
+
 test("EVM deposit runs the consensus protocol preflight before building a transaction", async () => {
   const client = browserClient({ profile: webEvmProfile() });
   client.evmJsonRpc = async () => "0x539";

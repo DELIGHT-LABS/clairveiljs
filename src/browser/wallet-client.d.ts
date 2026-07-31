@@ -33,6 +33,7 @@ import type {
   NormalizedAssetRegistryQueryResponseV1
 } from "../privacy/asset-registry.js";
 import type {
+  EvmDepositMode,
   Eip1193WalletAdapter,
   EvmPrivacyTransactionOptions,
   EvmReservationBroadcastOptions,
@@ -128,7 +129,7 @@ export interface BrowserCosmosWalletProfile extends BrowserWalletProfileBase {
   keplrChainInfo: BrowserKeplrChainInfo;
 }
 
-export interface BrowserEvmWalletProfile extends BrowserWalletProfileBase {
+interface BrowserEvmWalletProfileBase extends BrowserWalletProfileBase {
   transport: "evm";
   wallet: "metamask";
   evmRpc: string;
@@ -138,6 +139,19 @@ export interface BrowserEvmWalletProfile extends BrowserWalletProfileBase {
   evmGasLimit: string;
   evmSendGasLimit: string;
 }
+
+export type BrowserEvmWalletProfile = BrowserEvmWalletProfileBase & (
+  | {
+      evmDepositMode?: "nonpayable";
+      evmNativeDenom?: string;
+    }
+  | {
+      /** Explicitly opt into downstream Clairveil v0.3.1 escrow-funded deposits. */
+      evmDepositMode: "payable-exact-value";
+      /** Must equal denom so the minimal-unit amount can bind exactly to msg.value. */
+      evmNativeDenom: string;
+    }
+);
 
 /** A complete, document-validated browser DApp profile. */
 export type BrowserWalletProfile = BrowserCosmosWalletProfile | BrowserEvmWalletProfile;
@@ -189,6 +203,8 @@ export interface ClairveilWebClientConfig {
   evmChainId?: string;
   evmChainName?: string;
   evmPrivacyPrecompileAddress?: string;
+  evmDepositMode?: EvmDepositMode;
+  evmNativeDenom?: string;
   evmGasLimit?: string;
   evmSendGasLimit?: string;
 }
@@ -228,6 +244,8 @@ export interface ClairveilBrowserClientOptions {
   evmRpc?: string;
   evmChainId?: string;
   evmPrivacyPrecompileAddress?: string;
+  evmDepositMode?: EvmDepositMode;
+  evmNativeDenom?: string;
   evmGasLimit?: string;
   evmSendGasLimit?: string;
   enableExperimentalBatchTransfer?: boolean;

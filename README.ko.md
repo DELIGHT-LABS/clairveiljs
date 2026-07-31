@@ -58,6 +58,18 @@ Public consumer는 내부 파일 경로를 직접 import하지 말고 package ex
 
 `clairveiljs/generated/.../tx`와 `clairveiljs/generated/.../tx.js` import 형태를 모두 지원합니다.
 
+## Clairveil 호환성
+
+| ClairveilJS | 검증한 Clairveil 릴리스 | Public Cosmos wire | Downstream EVM deposit |
+| --- | --- | --- | --- |
+| `0.3.1` | `v0.3.1` (`1a6ce6a`) | 기존 `MsgDeposit`/query 계약 유지 | opt-in `payable-exact-value` |
+
+Clairveil v0.3.1의 `Keeper.DepositWithFunder`는 trusted in-process Go
+integration API이며 protobuf, gRPC, CLI 또는 client `funder` field가
+아닙니다. 따라서 ClairveilJS의 Cosmos message surface는 바꾸지 않고,
+새 흐름은 fixed payable privacy precompile을 제공하는 downstream
+chain에서만 활성화합니다.
+
 ## 예제 코드
 
 최소 SDK 사용 예제는 [`examples/`](https://github.com/DELIGHT-LABS/clairveiljs/tree/main/examples)에 있습니다.
@@ -223,6 +235,11 @@ transaction은 provider를 직접 호출하지 말고
 제출하세요. 이 API가 configured network를 다시 확인하고 reserved note의
 broadcast lifecycle 상태를 보존합니다.
 
+v0.3.1 payable deposit profile에서는
+`evmDepositMode: "payable-exact-value"`와 profile의 최소단위 `denom`과
+같은 `evmNativeDenom`도 설정하세요. 두 값은 per-request funding input이
+아니라 고정 profile 설정입니다.
+
 `waitForEvmTransaction(...)`이 일반적인 EVM confirmation API입니다. 더 높은 수준의 ClairveilJS wrapper가 없는 read-only EVM JSON-RPC method에는 browser client의 `evmJsonRpc<TResult>(method, params)`를 사용할 수 있습니다. 이 API는 설정된 `evmRpc` endpoint와 client query timeout을 사용하며 injected wallet provider를 사용하지 않고 read-only allowlist 밖의 method와 비어 있는 `evmRpc` endpoint를 거부합니다. account 접근, 서명, subscription, transaction 제출에는 사용하면 안 됩니다.
 
 ```ts
@@ -242,12 +259,45 @@ ClairveilJS는 브라우저에서 privacy payload를 준비한 뒤, prepared mes
 
 지원 범위:
 
-- 대상 EVM chain은 canonical Clairveil 0.2 `IPrivacy` precompile ABI와 payload semantic을 제공해야 합니다.
+- 대상 EVM chain은 canonical Clairveil v0.3.1-compatible `IPrivacy` precompile ABI와 payload semantic을 제공해야 합니다.
 - 기본 adapter는 `deposit((string,bytes,bytes,bytes))`, `transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))`, `withdraw((bytes,bytes,bytes,string,address,string,uint64))`를 encode합니다.
 - precompile address는 chain config에서 제공하거나 SDK 기본값 `0x100000000000000000000000000000000000000b`를 사용할 수 있습니다.
 - ABI shape가 다른 EVM chain은 profile 설정만으로 지원 범위에 넣을 수 없습니다.
 
 지원되는 EVM `IPrivacy.deposit` tuple에는 Cosmos `MsgDeposit`과 같은 필수 `DepositCircuit` proof가 포함됩니다: `{ amount, noteCommitment, encryptedNote, proof }`.
+
+기본 deposit mode는 기존 배포를 위한 `nonpayable`입니다. EVM
+`msg.value`를 fixed precompile escrow로 이동한 뒤 Clairveil v0.3.1
+`Keeper.DepositWithFunder`를 호출하는 downstream chain에서는 다음처럼
+명시적으로 활성화합니다.
+
+```js
+const evmClairveil = createClairveilEvmClient({
+  provider: window.ethereum,
+  chainId: "evm-privacy-local-1",
+  accountPrefix: "clair",
+  shieldedPrefix: "clairs",
+  defaultDenom: "uclair",
+  depositMode: "payable-exact-value",
+  nativeDenom: "uclair"
+});
+
+const deposit = evmClairveil.buildDepositTransaction({
+  rootSeed,
+  amount: "10uclair",
+  proof: await proveDepositCircuit({ rootSeed, amount: "10uclair" })
+});
+
+// transaction.value는 0xa로 자동 계산됩니다.
+await evmClairveil.sendTransaction(wallet, deposit.transaction);
+```
+
+이 mode에서는 deposit denom이 `nativeDenom`과 정확히 같아야 하고 최소
+단위 amount가 EVM transaction value에 그대로 bind됩니다. Zero-value
+deposit은 계속 허용됩니다. Caller-selected funder는 SDK surface에
+추가하지 않으며 actor derivation과 fixed escrow 선택은 downstream
+precompile 책임입니다. Transfer와 withdraw의 non-zero value는
+거부합니다.
 
 지원되는 EVM `IPrivacy.transfer` tuple에는 encrypted output note, `newCommitments`/`cipherTexts` 순서에 맞춘 2-byte `viewTags`, user/audit disclosure, sender `selfViewDisclosureDigest`/`selfViewDisclosurePayload`, absolute `expiresAtUnix`가 들어갑니다. self-view disclosure는 기본 포함되고 명시적 opt-out에서만 빠집니다. `IPrivacy.withdraw` tuple에는 legacy output-note field가 없으므로 dummy `newNoteCommitment`나 `encryptedNote` bytes를 보내면 안 됩니다.
 
@@ -555,6 +605,11 @@ Release handoff 또는 CI에서는 strict command를 사용하세요. fixture가
 ```bash
 npm run test:conformance:required
 ```
+
+`npm run verify:clairveil-source`는 sibling Clairveil checkout이 정확히
+`v0.3.1`인지 확인하고 복사된 Clairveil proto 4개를 byte-for-byte로
+검증합니다. 기본 sibling 경로가 아니면
+`CLAIRVEIL_SOURCE_DIR=/path/to/clairveil`을 지정하세요.
 
 `prepublishOnly`는 `verify:release:integration`을 실행합니다. Package 검사, required conformance fixture, 필수 5-shape localnet one-proof matrix를 모두 실행하며 wallet, deposit-proof, node, prover 설정이 없으면 skip하지 않고 실패합니다.
 

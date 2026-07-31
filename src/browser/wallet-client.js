@@ -7,10 +7,14 @@ import {
 } from "../transport/cosmos-client.js";
 import {
   createClairveilEvmClient,
+  defaultEvmDepositMode,
+  evmDepositModePayableExactValue,
+  evmDepositValueForAmount,
   evmTransactionBindingHash,
   evmAddressToBech32,
   isEvmAddress,
   markEvmTransactionReservationRequired,
+  normalizeEvmDepositMode,
   normalizeEvmAddress
 } from "../transport/evm.js";
 import {
@@ -146,6 +150,8 @@ const browserProfileKeys = new Set([
   "evmChainId",
   "evmChainName",
   "evmPrivacyPrecompileAddress",
+  "evmDepositMode",
+  "evmNativeDenom",
   "evmGasLimit",
   "evmSendGasLimit"
 ]);
@@ -175,6 +181,8 @@ const browserConfigKeys = new Set([
   "evmChainId",
   "evmChainName",
   "evmPrivacyPrecompileAddress",
+  "evmDepositMode",
+  "evmNativeDenom",
   "evmGasLimit",
   "evmSendGasLimit",
   "serverFeatures"
@@ -196,6 +204,8 @@ const browserConfigCompatibilityFields = [
   "evmChainId",
   "evmChainName",
   "evmPrivacyPrecompileAddress",
+  "evmDepositMode",
+  "evmNativeDenom",
   "evmGasLimit",
   "evmSendGasLimit"
 ];
@@ -420,6 +430,28 @@ export function validateBrowserWalletProfile(profile) {
     normalizedEvmChainId(profile.evmChainId, "profile.evmChainId");
     requiredProfileString(profile, "evmChainName", { maxLength: 128 });
     normalizeEvmAddress(profile.evmPrivacyPrecompileAddress, "profile.evmPrivacyPrecompileAddress");
+    const evmDepositMode = normalizeEvmDepositMode(
+      profile.evmDepositMode ?? defaultEvmDepositMode
+    );
+    if (profile.evmNativeDenom != null) {
+      requiredProfileString(profile, "evmNativeDenom", {
+        minLength: 3,
+        maxLength: 128,
+        pattern: /^[A-Za-z][A-Za-z0-9/:._-]*$/u
+      });
+    }
+    if (evmDepositMode === evmDepositModePayableExactValue) {
+      requiredProfileString(profile, "evmNativeDenom", {
+        minLength: 3,
+        maxLength: 128,
+        pattern: /^[A-Za-z][A-Za-z0-9/:._-]*$/u
+      });
+      if (profile.evmNativeDenom !== profile.denom) {
+        throw new Error(
+          "profile.evmNativeDenom must match profile.denom for payable EVM deposits"
+        );
+      }
+    }
     requiredProfileString(profile, "evmGasLimit", { pattern: /^0x[0-9a-fA-F]+$/u });
     requiredProfileString(profile, "evmSendGasLimit", { pattern: /^0x[0-9a-fA-F]+$/u });
   }
@@ -1158,6 +1190,8 @@ export class ClairveilBrowserClient {
     evmRpc,
     evmChainId,
     evmPrivacyPrecompileAddress,
+    evmDepositMode = defaultEvmDepositMode,
+    evmNativeDenom,
     evmGasLimit = "0x989680",
     evmSendGasLimit = "0x5208"
   } = {}) {
@@ -1198,6 +1232,16 @@ export class ClairveilBrowserClient {
     this.queryTimeoutMs = normalizeTimeoutMs(fetchTimeoutMs ?? queryTimeoutMs, "queryTimeoutMs");
     this.evmRpc = hasProfile ? resolved.evmRpc || "" : evmRpc || "";
     this.evmChainId = hasProfile ? resolved.evmChainId || "" : evmChainId || "";
+    this.evmDepositMode = normalizeEvmDepositMode(
+      hasProfile ? resolved.evmDepositMode ?? defaultEvmDepositMode : evmDepositMode
+    );
+    this.evmNativeDenom = String(
+      hasProfile ? resolved.evmNativeDenom || this.denom : evmNativeDenom || this.denom
+    ).trim();
+    if (this.evmDepositMode === evmDepositModePayableExactValue &&
+        this.evmNativeDenom !== this.denom) {
+      throw new Error("evmNativeDenom must match denom for payable EVM deposits");
+    }
     this.evmGasLimit = hasProfile ? resolved.evmGasLimit || "0x989680" : evmGasLimit;
     this.evmSendGasLimit = hasProfile ? resolved.evmSendGasLimit || "0x5208" : evmSendGasLimit;
     this.cosmos = createClairveilClient({
@@ -1225,7 +1269,9 @@ export class ClairveilBrowserClient {
       evmChainId: this.evmChainId,
       accountPrefix: this.accountPrefix,
       shieldedPrefix: this.shieldedPrefix,
-      defaultDenom: this.denom
+      defaultDenom: this.denom,
+      depositMode: this.evmDepositMode,
+      nativeDenom: this.evmNativeDenom
     });
   }
 
@@ -1706,6 +1752,24 @@ export class ClairveilBrowserClient {
     const walletType = this.walletTypeFromBody(body);
     if (walletType === "evm") {
       await this.assertEvmPreparationNetwork(body);
+      if (this.evmDepositMode === evmDepositModePayableExactValue) {
+        // Validate the exact msg.value/native-denom binding before invoking a
+        // deposit proof provider or opening a wallet.
+        evmDepositValueForAmount(body.amount, this.evmNativeDenom);
+        const suppliedMaterial = body.depositMaterial ?? body.deposit_material;
+        if (suppliedMaterial) {
+          const requestedAmount = parseCoin(body.amount, this.evmNativeDenom).raw;
+          const materialAmount = parseCoin(
+            suppliedMaterial.amount,
+            this.evmNativeDenom
+          ).raw;
+          if (materialAmount !== requestedAmount) {
+            throw new Error(
+              `deposit material amount mismatch: expected ${requestedAmount}, got ${materialAmount}`
+            );
+          }
+        }
+      }
       // Cosmos deposits already run this validation in prepareDeposit. EVM
       // deposits build locally, so perform the same consensus circuit and
       // asset preflight before producing an EIP-1193 transaction.

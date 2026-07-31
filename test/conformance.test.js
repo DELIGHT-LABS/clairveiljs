@@ -64,6 +64,8 @@ import {
   conformanceFixtureRelativePath,
   defaultConformanceFixtureDir,
   defaultConformanceFixtureNames,
+  supportedClairveilCommit,
+  supportedClairveilRelease,
   suggestClairveilConformanceFixtureDirs
 } from "clairveiljs/conformance";
 import {
@@ -149,7 +151,10 @@ test("conformance helper default fixtures include the reservation contract", fix
   assert.ok(defaultConformanceFixtureNames.includes("privacy_relay_withdraw_contract.json"));
   const result = await runClairveilConformanceFixtures({ fixtureDir });
   const contract = result.fixtures["privacy_note_reservation_contract.json"];
-  assert.equal(contract.version, 3);
+  // Clairveil v0.3.1 publishes reservation contract v1. Later client-only
+  // reservation revisions are exercised by the SDK's own reservation tests
+  // instead of being attributed to the immutable upstream release fixture.
+  assert.equal(contract.version, 1);
   const leaseTransitions = contract.lease_transition_preconditions.token_required_for;
   for (const transition of [
     ["Reserved", "Proving"],
@@ -472,6 +477,8 @@ test("reservation contract fixture replays state, lease, and direct operation-ev
 test("conformance helper defaults use repo-relative fixture discovery", () => {
   assert.equal(conformanceFixtureRelativePath, "x/privacy/client/sdk/conformance/testdata");
   assert.equal(defaultConformanceFixtureDir, `../clairveil/${conformanceFixtureRelativePath}`);
+  assert.equal(supportedClairveilRelease, "v0.3.1");
+  assert.equal(supportedClairveilCommit, "1a6ce6a0a0e10b765c025072b44c2364e9711b48");
   assert.ok(suggestClairveilConformanceFixtureDirs().some(candidate => candidate.endsWith(conformanceFixtureRelativePath)));
 });
 

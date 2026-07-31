@@ -30,6 +30,14 @@ const evmPrivacyWithdrawSignature = "withdraw((bytes,bytes,bytes,string,address,
 const evmTransactionMarker = Symbol("clairveil.evm-transaction");
 const evmTransactionMetadataField = "__clairveilEvmTransaction";
 
+export const evmDepositModeNonpayable = "nonpayable";
+export const evmDepositModePayableExactValue = "payable-exact-value";
+export const defaultEvmDepositMode = evmDepositModeNonpayable;
+export const evmDepositModes = Object.freeze([
+  evmDepositModeNonpayable,
+  evmDepositModePayableExactValue
+]);
+
 function normalizedEvmQuantity(value, label) {
   if (value == null || String(value).trim() === "") return "";
   let quantity;
@@ -40,6 +48,62 @@ function normalizedEvmQuantity(value, label) {
   }
   if (quantity < 0n) throw new Error(`${label} must be non-negative`);
   return `0x${quantity.toString(16)}`;
+}
+
+export function normalizeEvmDepositMode(value = defaultEvmDepositMode) {
+  const mode = String(value ?? defaultEvmDepositMode).trim();
+  if (!evmDepositModes.includes(mode)) {
+    throw new Error(`unsupported EVM deposit mode ${JSON.stringify(mode)}`);
+  }
+  return mode;
+}
+
+function normalizeEvmNativeDenom(value, fallback = "uclair") {
+  const denom = String(value ?? fallback).trim();
+  if (!denom) throw new Error("EVM native denom is required");
+  try {
+    return parseCoin(`0${denom}`, denom).denom;
+  } catch {
+    throw new Error(`invalid EVM native denom ${JSON.stringify(denom)}`);
+  }
+}
+
+export function evmDepositValueForAmount(amount, nativeDenom = "uclair") {
+  const expectedDenom = normalizeEvmNativeDenom(nativeDenom);
+  const coin = parseCoin(amount, expectedDenom);
+  if (coin.denom !== expectedDenom) {
+    throw new Error(
+      `payable EVM deposit denom ${coin.denom} does not match native denom ${expectedDenom}`
+    );
+  }
+  if (BigInt(coin.amount) > 0xffffffffffffffffn) {
+    throw new Error("payable EVM deposit amount must fit the Clairveil uint64 amount range");
+  }
+  return normalizedEvmQuantity(coin.amount, "payable EVM deposit amount");
+}
+
+function boundDepositTransactionValue(message, options, depositMode, nativeDenom) {
+  const mode = normalizeEvmDepositMode(depositMode);
+  const expectedValue = mode === evmDepositModePayableExactValue
+    ? evmDepositValueForAmount(message?.amount, nativeDenom)
+    : "0x0";
+  if (Object.prototype.hasOwnProperty.call(options, "value") && options.value != null) {
+    const suppliedValue = normalizedEvmQuantity(options.value, "deposit transaction value");
+    if (suppliedValue !== expectedValue) {
+      throw new Error(
+        `deposit transaction value ${suppliedValue} does not match required value ${expectedValue}`
+      );
+    }
+  }
+  return expectedValue;
+}
+
+function zeroTransactionValue(options, operation) {
+  const value = normalizedEvmQuantity(options?.value ?? "0x0", `${operation} transaction value`);
+  if (value !== "0x0") {
+    throw new Error(`${operation} transaction value must be zero`);
+  }
+  return "0x0";
 }
 
 async function assertWalletEvmChainId(wallet, expectedEvmChainId) {
@@ -158,6 +222,40 @@ function isKnownWithdrawTransaction(transaction) {
   if (evmTransactionMetadata(transaction).operation === "withdraw") return true;
   const data = String(transaction?.data || "").trim().replace(/^0x/i, "").toLowerCase();
   return data.startsWith(functionSelector(evmPrivacyWithdrawSignature).toLowerCase());
+}
+
+function isKnownDepositTransaction(transaction) {
+  if (evmTransactionMetadata(transaction).operation === "deposit") return true;
+  const data = String(transaction?.data || "").trim().replace(/^0x/i, "").toLowerCase();
+  return data.startsWith(functionSelector(evmPrivacyDepositSignature).toLowerCase());
+}
+
+function assertDepositTransactionBinding(transaction, depositMode) {
+  if (!isKnownDepositTransaction(transaction)) return;
+  const mode = normalizeEvmDepositMode(depositMode);
+  const metadata = evmTransactionMetadata(transaction);
+  const actualValue = normalizedEvmQuantity(
+    transaction?.value ?? "0x0",
+    "deposit transaction value"
+  );
+  if (mode === evmDepositModeNonpayable) {
+    if (actualValue !== "0x0") {
+      throw new Error("nonpayable EVM deposit transaction value must be zero");
+    }
+    return;
+  }
+  if (metadata.operation !== "deposit" ||
+      metadata.depositMode !== evmDepositModePayableExactValue ||
+      !metadata.expectedData ||
+      !metadata.expectedValue) {
+    throw new Error(
+      "payable EVM deposit transaction must be built by the configured Clairveil client"
+    );
+  }
+  const actualData = String(transaction?.data || "").trim().toLowerCase();
+  if (actualData !== metadata.expectedData || actualValue !== metadata.expectedValue) {
+    throw new Error("payable EVM deposit transaction binding was modified after preparation");
+  }
 }
 
 async function authoritativeReservationRecords(context) {
@@ -447,6 +545,11 @@ export const evmPrivacyPrecompileAbi = Object.freeze([
     anonymous: false
   }
 ]);
+export const evmPrivacyPrecompilePayableDepositAbi = Object.freeze(
+  evmPrivacyPrecompileAbi.map((item, index) => (
+    index === 0 ? Object.freeze({ ...item, stateMutability: "payable" }) : item
+  ))
+);
 
 const evmPrivacyDepositTuple = evmPrivacyPrecompileAbi[0].inputs[0];
 const evmPrivacyTransferTuple = evmPrivacyPrecompileAbi[1].inputs[0];
@@ -853,31 +956,52 @@ export function createEvmContractAdapter({
   encodeTransfer = defaultEncodeEvmTransfer,
   encodeWithdraw = defaultEncodeEvmWithdraw,
   accountPrefix,
-  chainId
+  chainId,
+  depositMode = defaultEvmDepositMode,
+  nativeDenom = "uclair"
 } = {}) {
   const to = normalizeEvmAddress(contractAddress, "contractAddress");
+  const resolvedDepositMode = normalizeEvmDepositMode(depositMode);
+  const resolvedNativeDenom = normalizeEvmNativeDenom(nativeDenom);
   return {
     contractAddress: to,
-    abi: evmPrivacyPrecompileAbi,
+    abi: resolvedDepositMode === evmDepositModePayableExactValue
+      ? evmPrivacyPrecompilePayableDepositAbi
+      : evmPrivacyPrecompileAbi,
     buildDepositTransaction(message, options = {}) {
-      return {
+      const data = encodeDeposit(message, { accountPrefix, chainId, ...options });
+      const value = boundDepositTransactionValue(
+        message,
+        options,
+        resolvedDepositMode,
+        resolvedNativeDenom
+      );
+      return markedEvmTransaction({
         to,
-        data: encodeDeposit(message, { accountPrefix, chainId, ...options }),
-        value: options.value ?? "0x0"
-      };
+        data,
+        value
+      }, {
+        operation: "deposit",
+        depositMode: resolvedDepositMode,
+        nativeDenom: resolvedNativeDenom,
+        expectedData: String(data).trim().toLowerCase(),
+        expectedValue: value
+      });
     },
     buildTransferTransaction(message, options = {}) {
+      const value = zeroTransactionValue(options, "transfer");
       return {
         to,
         data: encodeTransfer(message, { accountPrefix, chainId, ...options }),
-        value: options.value ?? "0x0"
+        value
       };
     },
     buildWithdrawTransaction(message, options = {}) {
+      const value = zeroTransactionValue(options, "withdraw");
       return {
         to,
         data: encodeWithdraw(message, { accountPrefix, chainId, ...options }),
-        value: options.value ?? "0x0"
+        value
       };
     }
   };
@@ -888,6 +1012,8 @@ export function createEvmPrivacyPrecompileAdapter(options = {}) {
     contractAddress: options.contractAddress ?? evmPrivacyPrecompileAddress,
     accountPrefix: options.accountPrefix,
     chainId: options.chainId,
+    depositMode: options.depositMode,
+    nativeDenom: options.nativeDenom,
     encodeDeposit: options.encodeDeposit ?? encodeEvmPrivacyDeposit,
     encodeTransfer: options.encodeTransfer ?? encodeEvmPrivacyTransfer,
     encodeWithdraw: options.encodeWithdraw ?? encodeEvmPrivacyWithdraw
@@ -915,6 +1041,8 @@ export class ClairveilEvmClient {
     bech32Prefix,
     shieldedPrefix = defaultShieldedPrefix,
     defaultDenom = "uclair",
+    depositMode = defaultEvmDepositMode,
+    nativeDenom = defaultDenom,
     contractAdapter
   } = {}) {
     this.provider = provider;
@@ -926,10 +1054,14 @@ export class ClairveilEvmClient {
     this.bech32Prefix = this.accountPrefix;
     this.shieldedPrefix = normalizeBech32Prefix(shieldedPrefix, "shieldedPrefix");
     this.defaultDenom = String(defaultDenom || "uclair");
+    this.depositMode = normalizeEvmDepositMode(depositMode);
+    this.nativeDenom = normalizeEvmNativeDenom(nativeDenom, this.defaultDenom);
     this.contract = contractAdapter || createEvmPrivacyPrecompileAdapter({
       contractAddress,
       accountPrefix: this.accountPrefix,
-      chainId
+      chainId,
+      depositMode: this.depositMode,
+      nativeDenom: this.nativeDenom
     });
   }
 
@@ -943,10 +1075,38 @@ export class ClairveilEvmClient {
 
   buildDepositTransaction(input = {}) {
     if (input.message) {
+      const transactionOptions = {
+        ...(input.transactionOptions || {}),
+        value: boundDepositTransactionValue(
+          input.message,
+          input.transactionOptions || {},
+          this.depositMode,
+          this.nativeDenom
+        )
+      };
+      const transaction = this.contract.buildDepositTransaction(
+        input.message,
+        transactionOptions
+      );
+      const expectedData = String(transaction?.data || "").trim().toLowerCase();
+      const expectedValue = transactionOptions.value;
+      const actualValue = normalizedEvmQuantity(
+        transaction?.value ?? "0x0",
+        "deposit transaction value"
+      );
+      if (actualValue !== expectedValue) {
+        throw new Error("EVM contract adapter returned a mismatched deposit transaction value");
+      }
       return {
         status: "ready",
         message: input.message,
-        transaction: this.contract.buildDepositTransaction(input.message, input.transactionOptions)
+        transaction: markedEvmTransaction(transaction, {
+          operation: "deposit",
+          depositMode: this.depositMode,
+          nativeDenom: this.nativeDenom,
+          expectedData,
+          expectedValue
+        })
       };
     }
     const material = input.material || input.depositMaterial || input.deposit_material || this.buildDepositMaterial(input);
@@ -966,11 +1126,36 @@ export class ClairveilEvmClient {
       encryptedNote: material.encrypted_note,
       proof: input.proof ?? input.proofHex ?? input.proof_hex ?? input.depositProof ?? input.deposit_proof
     };
+    const transactionOptions = {
+      ...(input.transactionOptions || {}),
+      value: boundDepositTransactionValue(
+        message,
+        input.transactionOptions || {},
+        this.depositMode,
+        this.nativeDenom
+      )
+    };
+    const transaction = this.contract.buildDepositTransaction(message, transactionOptions);
+    const expectedData = String(transaction?.data || "").trim().toLowerCase();
+    const expectedValue = transactionOptions.value;
+    const actualValue = normalizedEvmQuantity(
+      transaction?.value ?? "0x0",
+      "deposit transaction value"
+    );
+    if (actualValue !== expectedValue) {
+      throw new Error("EVM contract adapter returned a mismatched deposit transaction value");
+    }
     return {
       status: "ready",
       material,
       message,
-      transaction: this.contract.buildDepositTransaction(message, input.transactionOptions)
+      transaction: markedEvmTransaction(transaction, {
+        operation: "deposit",
+        depositMode: this.depositMode,
+        nativeDenom: this.nativeDenom,
+        expectedData,
+        expectedValue
+      })
     };
   }
 
@@ -1100,6 +1285,7 @@ export class ClairveilEvmClient {
   }
 
   async sendTransaction(wallet, transaction, reservationOptions = {}) {
+    assertDepositTransactionBinding(transaction, this.depositMode);
     const reservationContext = broadcastReservationContext(reservationOptions);
     if (evmTransactionMetadata(transaction).reservationRequired && !reservationContext) {
       throw new Error("prepared reserved EVM transaction requires reservationManager and reservation");

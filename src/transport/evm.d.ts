@@ -23,6 +23,7 @@ export interface Eip1193Provider {
 
 export type EvmQuantity = Hex | string;
 export type EvmBlockTag = "earliest" | "latest" | "pending" | "safe" | "finalized" | EvmQuantity;
+export type EvmDepositMode = "nonpayable" | "payable-exact-value";
 
 export interface EvmTransactionRequest {
   from?: string;
@@ -176,6 +177,7 @@ export interface EvmWithdrawMessage extends WithdrawMessage {
 }
 
 export interface EvmPrivacyTransactionOptions {
+  /** Must be zero except for an exact amount-derived payable deposit. */
   value?: EvmQuantity;
   signature?: string;
   accountPrefix?: string;
@@ -340,8 +342,15 @@ export interface EvmWithdrawTransactionResult {
 
 export const evmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b";
 export const defaultEvmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b";
+export const evmDepositModeNonpayable: "nonpayable";
+export const evmDepositModePayableExactValue: "payable-exact-value";
+export const defaultEvmDepositMode: "nonpayable";
+export const evmDepositModes: readonly EvmDepositMode[];
 export const evmPrivacyPrecompileAbi: readonly AbiItem[];
+export const evmPrivacyPrecompilePayableDepositAbi: readonly AbiItem[];
 
+export function normalizeEvmDepositMode(value?: string | null): EvmDepositMode;
+export function evmDepositValueForAmount(amount: CoinString, nativeDenom?: string): Hex;
 export function functionSelector(signature: string): string;
 export function encodeAbiParameters(types: Array<string | AbiParameter>, values: unknown[]): string;
 export function encodeFunctionData(signature: string, types: Array<string | AbiParameter>, values: unknown[]): Hex;
@@ -362,6 +371,8 @@ export function createEvmContractAdapter(input?: {
   contractAddress?: string;
   accountPrefix?: string;
   chainId?: string | number;
+  depositMode?: EvmDepositMode;
+  nativeDenom?: string;
   encodeDeposit?: EvmDepositEncoder;
   encodeTransfer?: EvmTransferEncoder;
   encodeWithdraw?: EvmWithdrawEncoder;
@@ -370,6 +381,8 @@ export function createEvmPrivacyPrecompileAdapter(input?: {
   contractAddress?: string;
   accountPrefix?: string;
   chainId?: string | number;
+  depositMode?: EvmDepositMode;
+  nativeDenom?: string;
   encodeDeposit?: EvmDepositEncoder;
   encodeTransfer?: EvmTransferEncoder;
   encodeWithdraw?: EvmWithdrawEncoder;
@@ -386,6 +399,10 @@ export class ClairveilEvmClient {
     bech32Prefix?: string;
     shieldedPrefix?: string;
     defaultDenom?: string;
+    /** Nonpayable by default; opt into Clairveil v0.3.1 downstream escrow funding explicitly. */
+    depositMode?: EvmDepositMode;
+    /** Runtime-native minimal denom whose amount must equal EVM msg.value. */
+    nativeDenom?: string;
     contractAdapter?: EvmContractAdapter;
   });
   buildDepositMaterial(input?: {

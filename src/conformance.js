@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 export const conformanceFixtureRelativePath = "x/privacy/client/sdk/conformance/testdata";
 export const defaultConformanceFixtureDir = `../clairveil/${conformanceFixtureRelativePath}`;
+export const supportedClairveilRelease = "v0.3.1";
+export const supportedClairveilCommit = "1a6ce6a0a0e10b765c025072b44c2364e9711b48";
 
 export const batchTransferConformanceFixtureName = "privacy_batch_transfer_v1_contract.json";
 

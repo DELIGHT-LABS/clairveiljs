@@ -1,5 +1,7 @@
 export const conformanceFixtureRelativePath: string;
 export const defaultConformanceFixtureDir: string;
+export const supportedClairveilRelease: "v0.3.1";
+export const supportedClairveilCommit: "1a6ce6a0a0e10b765c025072b44c2364e9711b48";
 export const defaultConformanceFixtureNames: readonly string[];
 export const batchTransferConformanceFixtureName: string;
 
