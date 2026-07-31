@@ -150,6 +150,19 @@ function evmTransactionMetadata(transaction) {
   };
 }
 
+function privacyTransactionBindingMetadata(transaction, operation, metadata = {}) {
+  return {
+    operation,
+    expectedTo: normalizeEvmAddress(transaction?.to, `${operation} transaction target`),
+    expectedData: String(transaction?.data || "").trim().toLowerCase(),
+    expectedValue: normalizedEvmQuantity(
+      transaction?.value ?? "0x0",
+      `${operation} transaction value`
+    ),
+    ...metadata
+  };
+}
+
 function canonicalExternalEvmTransaction(transaction) {
   if (!transaction || typeof transaction !== "object") return transaction;
   const canonical = {};
@@ -224,20 +237,60 @@ function isKnownWithdrawTransaction(transaction) {
   return data.startsWith(functionSelector(evmPrivacyWithdrawSignature).toLowerCase());
 }
 
-function isKnownDepositTransaction(transaction) {
-  if (evmTransactionMetadata(transaction).operation === "deposit") return true;
+function knownPrivacyTransactionOperation(transaction) {
   const data = String(transaction?.data || "").trim().replace(/^0x/i, "").toLowerCase();
-  return data.startsWith(functionSelector(evmPrivacyDepositSignature).toLowerCase());
+  for (const [operation, signature] of [
+    ["deposit", evmPrivacyDepositSignature],
+    ["transfer", evmPrivacyTransferSignature],
+    ["withdraw", evmPrivacyWithdrawSignature]
+  ]) {
+    if (data.startsWith(functionSelector(signature).toLowerCase())) return operation;
+  }
+  const operation = evmTransactionMetadata(transaction).operation;
+  if (["deposit", "transfer", "withdraw"].includes(operation)) return operation;
+  return "";
 }
 
-function assertDepositTransactionBinding(transaction, depositMode) {
-  if (!isKnownDepositTransaction(transaction)) return;
-  const mode = normalizeEvmDepositMode(depositMode);
+function assertPrivacyTransactionBinding(transaction, depositMode, contractAddress) {
+  const operation = knownPrivacyTransactionOperation(transaction);
+  if (!operation) return;
   const metadata = evmTransactionMetadata(transaction);
+  const actualTo = normalizeEvmAddress(transaction?.to, `${operation} transaction target`);
+  const configuredTarget = String(contractAddress ?? "").trim();
+  if (configuredTarget &&
+      actualTo !== normalizeEvmAddress(configuredTarget, "configured privacy contract target")) {
+    throw new Error(`${operation} transaction target does not match the configured privacy contract`);
+  }
+  if (!configuredTarget && !metadata.expectedTo) {
+    throw new Error(`${operation} transaction requires a configured or prepared privacy contract target`);
+  }
   const actualValue = normalizedEvmQuantity(
     transaction?.value ?? "0x0",
-    "deposit transaction value"
+    `${operation} transaction value`
   );
+  const actualData = String(transaction?.data || "").trim().toLowerCase();
+  const hasPreparedBinding = [
+    metadata.expectedTo,
+    metadata.expectedData,
+    metadata.expectedValue
+  ].some(value => value != null && String(value) !== "");
+  if (hasPreparedBinding) {
+    if (!metadata.expectedTo || !metadata.expectedData || !metadata.expectedValue) {
+      throw new Error(`${operation} transaction binding metadata is incomplete`);
+    }
+    if (actualTo !== metadata.expectedTo ||
+        actualData !== metadata.expectedData ||
+        actualValue !== metadata.expectedValue) {
+      throw new Error(`${operation} transaction binding was modified after preparation`);
+    }
+  }
+  if (operation !== "deposit") {
+    if (actualValue !== "0x0") {
+      throw new Error(`${operation} transaction value must be zero`);
+    }
+    return;
+  }
+  const mode = normalizeEvmDepositMode(depositMode);
   if (mode === evmDepositModeNonpayable) {
     if (actualValue !== "0x0") {
       throw new Error("nonpayable EVM deposit transaction value must be zero");
@@ -246,14 +299,16 @@ function assertDepositTransactionBinding(transaction, depositMode) {
   }
   if (metadata.operation !== "deposit" ||
       metadata.depositMode !== evmDepositModePayableExactValue ||
+      !metadata.expectedTo ||
       !metadata.expectedData ||
       !metadata.expectedValue) {
     throw new Error(
       "payable EVM deposit transaction must be built by the configured Clairveil client"
     );
   }
-  const actualData = String(transaction?.data || "").trim().toLowerCase();
-  if (actualData !== metadata.expectedData || actualValue !== metadata.expectedValue) {
+  if (actualTo !== metadata.expectedTo ||
+      actualData !== metadata.expectedData ||
+      actualValue !== metadata.expectedValue) {
     throw new Error("payable EVM deposit transaction binding was modified after preparation");
   }
 }
@@ -976,17 +1031,19 @@ export function createEvmContractAdapter({
         resolvedDepositMode,
         resolvedNativeDenom
       );
-      return markedEvmTransaction({
+      const transaction = {
         to,
         data,
         value
-      }, {
-        operation: "deposit",
-        depositMode: resolvedDepositMode,
-        nativeDenom: resolvedNativeDenom,
-        expectedData: String(data).trim().toLowerCase(),
-        expectedValue: value
-      });
+      };
+      return markedEvmTransaction(transaction, privacyTransactionBindingMetadata(
+        transaction,
+        "deposit",
+        {
+          depositMode: resolvedDepositMode,
+          nativeDenom: resolvedNativeDenom
+        }
+      ));
     },
     buildTransferTransaction(message, options = {}) {
       const value = zeroTransactionValue(options, "transfer");
@@ -1100,13 +1157,16 @@ export class ClairveilEvmClient {
       return {
         status: "ready",
         message: input.message,
-        transaction: markedEvmTransaction(transaction, {
-          operation: "deposit",
-          depositMode: this.depositMode,
-          nativeDenom: this.nativeDenom,
-          expectedData,
-          expectedValue
-        })
+        transaction: markedEvmTransaction(transaction, privacyTransactionBindingMetadata(
+          transaction,
+          "deposit",
+          {
+            depositMode: this.depositMode,
+            nativeDenom: this.nativeDenom,
+            expectedData,
+            expectedValue
+          }
+        ))
       };
     }
     const material = input.material || input.depositMaterial || input.deposit_material || this.buildDepositMaterial(input);
@@ -1149,13 +1209,16 @@ export class ClairveilEvmClient {
       status: "ready",
       material,
       message,
-      transaction: markedEvmTransaction(transaction, {
-        operation: "deposit",
-        depositMode: this.depositMode,
-        nativeDenom: this.nativeDenom,
-        expectedData,
-        expectedValue
-      })
+      transaction: markedEvmTransaction(transaction, privacyTransactionBindingMetadata(
+        transaction,
+        "deposit",
+        {
+          depositMode: this.depositMode,
+          nativeDenom: this.nativeDenom,
+          expectedData,
+          expectedValue
+        }
+      ))
     };
   }
 
@@ -1169,12 +1232,16 @@ export class ClairveilEvmClient {
         chainId: input.chainId ?? this.chainId,
         checkNullifiers: input.checkNullifiers
       });
+    const transaction = this.contract.buildTransferTransaction(
+      built.message,
+      input.transactionOptions
+    );
     return {
       status: "ready",
       ...built,
       transaction: markedEvmTransaction(
-        this.contract.buildTransferTransaction(built.message, input.transactionOptions),
-        { operation: "transfer" }
+        transaction,
+        privacyTransactionBindingMetadata(transaction, "transfer")
       )
     };
   }
@@ -1273,19 +1340,27 @@ export class ClairveilEvmClient {
     const message = messageEvmRecipient
       ? { ...candidateMessage, evmRecipient: messageEvmRecipient }
       : candidateMessage;
+    const transaction = this.contract.buildWithdrawTransaction(
+      message,
+      input.transactionOptions
+    );
     return {
       status: "ready",
       ...built,
       message,
       transaction: markedEvmTransaction(
-        this.contract.buildWithdrawTransaction(message, input.transactionOptions),
-        { operation: "withdraw" }
+        transaction,
+        privacyTransactionBindingMetadata(transaction, "withdraw")
       )
     };
   }
 
   async sendTransaction(wallet, transaction, reservationOptions = {}) {
-    assertDepositTransactionBinding(transaction, this.depositMode);
+    assertPrivacyTransactionBinding(
+      transaction,
+      this.depositMode,
+      this.contract.contractAddress
+    );
     const reservationContext = broadcastReservationContext(reservationOptions);
     if (evmTransactionMetadata(transaction).reservationRequired && !reservationContext) {
       throw new Error("prepared reserved EVM transaction requires reservationManager and reservation");

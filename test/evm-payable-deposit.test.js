@@ -96,11 +96,45 @@ test("nonpayable operations reject value and payable deposit bindings survive se
   assert.equal(Object.hasOwn(submitted, "__clairveilEvmTransaction"), false);
 
   await assert.rejects(
-    () => client.sendTransaction(wallet, { ...prepared.transaction, value: "0x4" }),
+    () => client.sendTransaction(wallet, { ...serialized, value: "0x4" }),
     /binding was modified/
   );
   await assert.rejects(
-    () => client.sendTransaction(wallet, { ...prepared.transaction, data: "0x1234" }),
+    () => client.sendTransaction(wallet, { ...serialized, data: "0x1234" }),
+    /binding was modified/
+  );
+  await assert.rejects(
+    () => client.sendTransaction(wallet, {
+      ...serialized,
+      to: "0x1111111111111111111111111111111111111111"
+    }),
+    /target does not match/
+  );
+
+  const transferClient = createClairveilEvmClient({
+    contractAdapter: nonpayable
+  });
+  const transfer = await transferClient.buildTransferTransaction({ message: {} });
+  await transferClient.sendTransaction(wallet, JSON.parse(JSON.stringify(transfer.transaction)));
+  await assert.rejects(
+    () => transferClient.sendTransaction(wallet, { ...transfer.transaction, value: "0x5" }),
+    /binding was modified/
+  );
+  await assert.rejects(
+    () => transferClient.sendTransaction(wallet, { ...transfer.transaction, data: "0x04" }),
+    /binding was modified/
+  );
+  await assert.rejects(
+    () => transferClient.sendTransaction(wallet, {
+      ...transfer.transaction,
+      to: "0x2222222222222222222222222222222222222222"
+    }),
+    /target does not match/
+  );
+
+  const withdraw = await transferClient.buildWithdrawTransaction({ message: {} });
+  await assert.rejects(
+    () => transferClient.sendTransaction(wallet, { ...withdraw.transaction, value: "0x5" }),
     /binding was modified/
   );
 });

@@ -5029,7 +5029,7 @@ test("relay broadcasts recheck authoritative chain time before external submissi
       relayPayload: evmPayload,
       chainNowUnix: 1_000
     }),
-    /does not match the EVM transaction/
+    /binding was modified|does not match the EVM transaction/
   );
   await assert.rejects(
     () => evm.sendTransaction(wallet, {
