@@ -51,10 +51,11 @@
     "test:conformance:required": "node --import ./tools/require-conformance-fixtures.js --test test/conformance.test.js test/prover-contract.test.js test/disclosure-conformance.test.js test/batch-transfer.test.js test/v0.2-fixture-contract.test.js test/wallet-contract-schema.test.js",
     "test:e2e:local": "node --test test/e2e-local.e2e.js",
     "test:e2e:local:one-proof-all": "CLAIRVEIL_E2E_LOCAL=1 CLAIRVEIL_E2E_FULL_FLOW=1 CLAIRVEIL_E2E_ONE_PROOF_BATCH=1 CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE=all CLAIRVEIL_E2E_REQUIRED=1 node --test test/e2e-local.e2e.js",
+    "test:e2e:evm-payable": "node tools/verify-evm-payable-integration.js",
     "verify:clairveil-source": "node tools/verify-clairveil-source.js",
     "verify:package": "npm run check && npm run typecheck && npm test",
     "verify:release": "npm run verify:package && npm run verify:clairveil-source && npm run test:conformance:required",
-    "verify:release:integration": "npm run verify:release && npm run test:e2e:local:one-proof-all",
+    "verify:release:integration": "npm run verify:release && npm run test:e2e:local:one-proof-all && CLAIRVEIL_EVM_PAYABLE_E2E_REQUIRED=1 npm run test:e2e:evm-payable",
     "prepack": "npm run verify:package",
     "prepublishOnly": "npm run verify:release:integration"
   },

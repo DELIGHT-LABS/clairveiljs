@@ -19,9 +19,14 @@ All notable changes to ClairveilJS are documented in this file.
   v0.3.1 (`1a6ce6a0a0e10b765c025072b44c2364e9711b48`).
 - Kept the default EVM deposit mode nonpayable for existing deployments.
 - Reject non-zero EVM value on nonpayable deposits, transfers, and withdrawals.
+- Require downstream payable EVM evidence for publish releases, covering
+  successful escrow funding, policy-failure rollback, and zero-value deposits.
 
 ### Fixed
 
 - Separated the immutable upstream v0.3.1 reservation fixture contract from
   later client-only reservation revisions.
 - Updated the EVM scan-option test harness for the protocol preflight boundary.
+- Bound prepared privacy transaction targets, calldata, and values through
+  submission so deposits, transfers, and withdrawals cannot be redirected or
+  value-mutated after preparation.

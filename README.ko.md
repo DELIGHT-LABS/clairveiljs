@@ -296,8 +296,9 @@ await evmClairveil.sendTransaction(wallet, deposit.transaction);
 단위 amount가 EVM transaction value에 그대로 bind됩니다. Zero-value
 deposit은 계속 허용됩니다. Caller-selected funder는 SDK surface에
 추가하지 않으며 actor derivation과 fixed escrow 선택은 downstream
-precompile 책임입니다. Transfer와 withdraw의 non-zero value는
-거부합니다.
+precompile 책임입니다. Prepared deposit, transfer, withdraw request는
+target, calldata, value를 submit 시점까지 bind하며 transfer와 withdraw의
+non-zero value는 거부합니다.
 
 지원되는 EVM `IPrivacy.transfer` tuple에는 encrypted output note, `newCommitments`/`cipherTexts` 순서에 맞춘 2-byte `viewTags`, user/audit disclosure, sender `selfViewDisclosureDigest`/`selfViewDisclosurePayload`, absolute `expiresAtUnix`가 들어갑니다. self-view disclosure는 기본 포함되고 명시적 opt-out에서만 빠집니다. `IPrivacy.withdraw` tuple에는 legacy output-note field가 없으므로 dummy `newNoteCommitment`나 `encryptedNote` bytes를 보내면 안 됩니다.
 
@@ -611,7 +612,10 @@ npm run test:conformance:required
 검증합니다. 기본 sibling 경로가 아니면
 `CLAIRVEIL_SOURCE_DIR=/path/to/clairveil`을 지정하세요.
 
-`prepublishOnly`는 `verify:release:integration`을 실행합니다. Package 검사, required conformance fixture, 필수 5-shape localnet one-proof matrix를 모두 실행하며 wallet, deposit-proof, node, prover 설정이 없으면 skip하지 않고 실패합니다.
+`prepublishOnly`는 `verify:release:integration`을 실행합니다. Package 검사,
+required conformance fixture, 필수 5-shape localnet one-proof matrix,
+downstream payable EVM evidence gate를 모두 실행하며 wallet, deposit-proof,
+node, prover, payable EVM driver 설정이 없으면 skip하지 않고 실패합니다.
 
 검증 범위:
 
@@ -664,7 +668,32 @@ npm run test:e2e:local
 
 `CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT`, `CLAIRVEIL_E2E_ONE_PROOF_PAYROLL_AMOUNT`로 input/payment를 바꿀 수 있습니다. Recipient는 typed output evidence를 독립적으로 decrypt·검증할 수 있도록 의도적으로 E2E wallet으로 고정합니다. 기본 snapshot height는 새 input deposit output의 height입니다. 동시 활동으로 tree가 전진했다면 검증된 같은 snapshot의 `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX`와 `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT`를 항상 함께 지정하세요.
 
-릴리스 환경에서 wallet·deposit proof credential까지 준비되었다면 `npm run verify:release:integration`을 실행하세요. 이 명령은 wallet-contract JSON Schema, required Go fixture, 모든 localnet one-proof shape를 검사하며, 필요한 wallet/proof 설정이 없으면 skip 대신 실패합니다.
+릴리스 환경에서 wallet·deposit proof credential까지 준비되었다면
+`npm run verify:release:integration`을 실행하세요. 이 명령은 wallet-contract
+JSON Schema, required Go fixture, 모든 localnet one-proof shape와 아래의
+downstream payable EVM 동작을 검사하며 필요한 설정이 없으면 skip 대신
+실패합니다.
+
+`CLAIRVEIL_EVM_PAYABLE_E2E_DRIVER`에는
+`runClairveilPayableDepositE2E(context)`를 export하는 ESM module의 절대
+경로를 지정합니다. 배포, wallet, RPC, chain별 query는 driver가 담당하고
+`clairveil-payable-evm-e2e-v1` evidence를 반환합니다. 릴리스 검증기는 다음
+동작을 독립적으로 확인합니다.
+
+- 양수 deposit은 configured precompile에 `amount == msg.value`로 제출되고,
+  event actor/funder가 authenticated actor와 fixed escrow이며, escrow/module
+  balance와 accounting counter가 정확한 amount만큼 변하고 commitment가
+  하나 추가되어야 합니다.
+- downstream policy가 거부한 deposit은 추적한 모든 balance, counter,
+  leaf 변경을 rollback해야 합니다.
+- zero-value deposit은 금융 상태를 바꾸지 않고 성공하며 actor/funder를
+  유지하고 commitment를 하나 추가해야 합니다.
+- 각 결과 상태는 Clairveil reserve invariant를 만족해야 합니다.
+
+일반 로컬 개발에서 driver가 없으면 `npm run test:e2e:evm-payable`은
+skip할 수 있습니다. `verify:release:integration`은
+`CLAIRVEIL_EVM_PAYABLE_E2E_REQUIRED=1`을 설정하므로 publish 릴리스에서는
+이 downstream 검증을 생략할 수 없습니다.
 
 ## 테스트
 
@@ -684,5 +713,6 @@ npm pack --dry-run --json
 3. `npm test`
 4. `npm run test:conformance:required`
 5. `npm pack --dry-run --json`
-6. 릴리스 localnet에서 `npm run verify:release:integration`
-7. 최종 EVM ABI/prover contract를 pin한 뒤 EVM support stable 여부를 선언
+6. downstream payable EVM driver를 설정
+7. 릴리스 localnet에서 `npm run verify:release:integration`
+8. 최종 EVM ABI/prover contract를 pin한 뒤 EVM support stable 여부를 선언

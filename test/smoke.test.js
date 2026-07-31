@@ -6404,6 +6404,15 @@ test("package metadata is ready for public npm publishing", () => {
   assert.equal(packageJson.scripts.prepublishOnly, "npm run verify:release:integration");
   assert.ok(!packageJson.scripts["verify:package"].includes("test:conformance:required"));
   assert.ok(packageJson.scripts["verify:release"].includes("test:conformance:required"));
+  assert.equal(
+    packageJson.scripts["test:e2e:evm-payable"],
+    "node tools/verify-evm-payable-integration.js"
+  );
+  assert.ok(
+    packageJson.scripts["verify:release:integration"].includes(
+      "CLAIRVEIL_EVM_PAYABLE_E2E_REQUIRED=1 npm run test:e2e:evm-payable"
+    )
+  );
   assert.equal(conformanceFixtureRelativePath, "x/privacy/client/sdk/conformance/testdata");
 });
 

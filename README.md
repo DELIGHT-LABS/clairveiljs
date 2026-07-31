@@ -198,7 +198,10 @@ checkout to be exactly `v0.3.1` and verifies all four copied Clairveil protobuf
 files byte-for-byte. Set `CLAIRVEIL_SOURCE_DIR=/path/to/clairveil` when the
 checkout is not the default sibling directory.
 
-`prepublishOnly` runs `verify:release:integration`: package checks, required conformance fixtures, and the required five-shape localnet one-proof matrix. Missing wallet, deposit-proof, node, or prover configuration fails instead of skipping.
+`prepublishOnly` runs `verify:release:integration`: package checks, required
+conformance fixtures, the required five-shape localnet one-proof matrix, and
+the downstream payable EVM evidence gate. Missing wallet, deposit-proof, node,
+prover, or payable EVM driver configuration fails instead of skipping.
 
 These tests verify root seed/key/address derivation, note primitives and disclosure-blinding rules, browser signer adapter behavior, note scan results, prepared transfer and one-proof batch payload/prover contracts, withdraw payload hashes, disclosure decoding, and relay withdraw message handoff behavior against the Go-generated fixtures.
 
@@ -264,7 +267,32 @@ npm run test:e2e:local
 
 Set `CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE` to run an actual selected localnet shape: `one-input-one-payment` (self-view enabled), `three-input-four-output` (private/public/recipient-encrypted with self-view enabled), `thirty-one-payments-plus-change` (self-view disabled), `exact-thirty-two-payments` (self-view enabled), or `explicit-zero-padding` (self-view disabled). Set it to `all` to run the full five-shape localnet matrix sequentially. The large 16/32 variants make 16 deposits and may need a higher `CLAIRVEIL_E2E_ONE_PROOF_BATCH_TIMEOUT_MS` than the 30-minute default, depending on local prover hardware.
 
-For a release environment with wallet and deposit-proof credentials, run `npm run verify:release:integration`. It validates the published wallet-contract JSON Schema, required Go fixtures, and every localnet one-proof shape; missing wallet/proof configuration fails instead of skipping.
+For a release environment with wallet and deposit-proof credentials, run
+`npm run verify:release:integration`. It validates the published wallet-contract
+JSON Schema, required Go fixtures, every localnet one-proof shape, and the
+downstream payable EVM behavior described below; missing required configuration
+fails instead of skipping.
+
+Set `CLAIRVEIL_EVM_PAYABLE_E2E_DRIVER` to an absolute path to an ESM module
+exporting `runClairveilPayableDepositE2E(context)`. The driver owns deployment,
+wallet, RPC, and chain-specific query details and returns
+`clairveil-payable-evm-e2e-v1` evidence. The release validator independently
+checks:
+
+- a positive deposit sends `amount == msg.value` to the configured precompile,
+  attributes the event to the authenticated actor and fixed escrow funder,
+  moves escrow/module/accounting balances by the exact amount, and appends one
+  commitment;
+- a downstream-policy rejection reverts every tracked balance, counter, and
+  leaf change;
+- a zero-value deposit succeeds without financial state changes, preserves
+  actor/funder attribution, and still appends one commitment;
+- every resulting state satisfies the Clairveil reserve invariant.
+
+`npm run test:e2e:evm-payable` remains skippable for ordinary local development
+when no driver is configured. `verify:release:integration` sets
+`CLAIRVEIL_EVM_PAYABLE_E2E_REQUIRED=1`, so a publish release cannot silently
+skip this downstream check.
 
 `planOneProofPayroll(input, notes, { outputMode: "exact32" })` is available when an operation must explicitly fill all 32 batch output slots. `exact-32` remains a compatibility alias. It preserves payment/change ordering and appends zero-value `padding` notes; the strict Go fixture conformance suite creates and serializes all five representative 1/1, 3/4, 16/32 (31+change), exact-32, and explicit-padding shapes.
 
@@ -534,7 +562,9 @@ In this mode the parsed deposit denom must equal `nativeDenom` and the minimal
 unit amount is bound exactly to the EVM transaction value. Zero-value deposits
 remain valid. The SDK never accepts a caller-selected funder: the target chain
 must derive the actor from the authenticated EVM caller and use only its fixed
-precompile escrow. Non-zero value is rejected for transfer and withdraw.
+precompile escrow. Prepared deposit, transfer, and withdraw requests bind their
+target, calldata, and value through submission; non-zero value is rejected for
+transfer and withdraw.
 
 For EVM transfer/withdraw, use the same ClairveilJS note scan, planner,
 disclosure, and prover adapter flow as the Cosmos client. The final submit step
