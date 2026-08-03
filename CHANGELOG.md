@@ -24,6 +24,8 @@ All notable changes to ClairveilJS are documented in this file.
 
 ### Fixed
 
+- Removed legacy JSON and raw-ciphertext disclosure fallbacks; disclosure
+  decoders now require exact `privacy-fixed-v1` plaintexts and typed envelopes.
 - Separated the immutable upstream v0.3.1 reservation fixture contract from
   later client-only reservation revisions.
 - Updated the EVM scan-option test harness for the protocol preflight boundary.

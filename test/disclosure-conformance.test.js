@@ -14,7 +14,11 @@ import {
   encryptDisclosureV1,
   marshalDisclosurePlaintextV1
 } from "clairveiljs/protocol-v1";
-import { derivePubKeyFromScalar } from "clairveiljs/core";
+import {
+  asymEncrypt,
+  derivePubKeyFromScalar,
+  packPointHex
+} from "clairveiljs/core";
 import {
   fixtureTestOptions,
   readFixture
@@ -67,6 +71,63 @@ test("fixed public disclosure rejects a full plane and an unbound asset denomina
   assert.throws(
     () => publicPayloadReport(Buffer.from(marshalDisclosurePlaintextV1(user)).toString("hex"), "", "", { assetDenom: "uatom" }),
     /asset denom/
+  );
+});
+
+test("fixed disclosure decoders reject legacy JSON, raw ciphertext, wrong kinds, and trailing bytes", () => {
+  const legacyJson = Buffer.from(JSON.stringify({
+    version: "v4",
+    plane: "user",
+    policy: 0,
+    output_index: 0,
+    commitment_hex: "00".repeat(32),
+    disclosure_digest_hex: "00".repeat(32)
+  }), "utf8");
+  assert.throws(
+    () => publicPayloadReport(legacyJson.toString("hex")),
+    /DisclosurePlaintextV1 must be exactly/
+  );
+
+  const user = fixedDisclosure({ plane: 1, policy: 1, disclosedFieldBitmap: 1 });
+  const userPlaintext = Buffer.from(marshalDisclosurePlaintextV1(user));
+  assert.throws(
+    () => publicPayloadReport(Buffer.concat([userPlaintext, Buffer.of(0)]).toString("hex")),
+    /DisclosurePlaintextV1 must be exactly/
+  );
+
+  const legacyScalar = 31n;
+  const legacyTarget = derivePubKeyFromScalar(legacyScalar);
+  const legacyCiphertext = asymEncrypt(legacyJson, legacyTarget);
+  const legacyEvent = {
+    event_type: "shielded_transfer",
+    attributes: [
+      { key: "user_disclosure_mode", value: userDisclosureModeRecipientEncrypted },
+      { key: "user_disclosure_target_pubkey", value: packPointHex(legacyTarget) },
+      { key: "user_disclosure_payload", value: Buffer.from(legacyCiphertext).toString("hex") }
+    ]
+  };
+  assert.throws(
+    () => decodeUserDisclosureFromEvent(legacyEvent, legacyScalar, packPointHex(legacyTarget)),
+    /encrypted envelope/
+  );
+
+  const full = fixedDisclosure({ plane: 2, policy: 0xffffffff, disclosedFieldBitmap: 7 });
+  const selfScalar = 37n;
+  const wrongKindPayload = encryptDisclosureV1(
+    full,
+    derivePubKeyFromScalar(selfScalar),
+    encryptedEnvelopeKindV1.auditDisclosure
+  );
+  const wrongKindEvent = {
+    event_type: "shielded_transfer",
+    attributes: [{
+      key: "self_view_disclosure_payload",
+      value: Buffer.from(wrongKindPayload).toString("hex")
+    }]
+  };
+  assert.throws(
+    () => decodeSelfViewDisclosureFromEvent(wrongKindEvent, selfScalar),
+    /encrypted envelope kind mismatch/
   );
 });
 
@@ -212,7 +273,7 @@ test("Cosmos client decodes self-view disclosure through the high-level API", fi
   });
 });
 
-test("Cosmos legacy disclosure wrappers retain an explicitly verified non-default asset denom", async () => {
+test("Cosmos disclosure wrappers retain an explicitly verified non-default asset denom", async () => {
   const assetDenom = "uatom";
   const user = fixedDisclosure({ plane: 1, policy: 1, disclosedFieldBitmap: 1, assetDenom });
   const full = fixedDisclosure({ plane: 2, policy: 0xffffffff, disclosedFieldBitmap: 7, assetDenom });

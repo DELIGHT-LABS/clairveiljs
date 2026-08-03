@@ -1,21 +1,13 @@
 import {
-  asymDecryptHex,
   bytesToBigIntBE,
-  canonicalFieldHex,
   CURVE_ORDER,
   decodeCanonicalFieldHex,
-  decodeShieldedAddress,
   encodeShieldedAddress,
   hexFromBytes,
-  mimcHash,
   normalizeHex,
   unpackPoint
 } from "./crypto.js";
-import {
-  bytesFromHex,
-  utf8Bytes,
-  utf8String
-} from "./browser-crypto.js";
+import { bytesFromHex } from "./browser-crypto.js";
 import {
   computeBatchFullDisclosureDigestV1,
   computeBatchUserDisclosureDigestV1,
@@ -31,7 +23,6 @@ import {
 import { canonicalAssetDenomV1 } from "../privacy/asset-registry.js";
 import { isValidatedPrivacyScanOutputV2 } from "../privacy/scan.js";
 
-export const payloadVersion = "v4";
 export const planeUser = "user";
 export const planeAudit = "audit";
 export const planeSelfView = "self-view";
@@ -43,9 +34,6 @@ export const transferPrivacyPolicyAllPrivate = 0;
 export const transferPrivacyPolicyDiscloseAmount = 1;
 export const transferPrivacyPolicyDiscloseTo = 2;
 export const transferPrivacyPolicyDiscloseFrom = 4;
-export const transferAuditDisclosureDomain = 255;
-export const transferSelfViewDisclosureDomain = 254;
-export const transferDisclosureRecipientOutputIndex = 0;
 
 const supportedPolicies = new Set([0, 1, 2, 3, 4, 5, 6, 7]);
 const batchTransferScanEventType = "batch_transfer";
@@ -75,24 +63,6 @@ export function privacyPolicyLabel(policy) {
       return "amount-from-to";
     default:
       return `unknown-${policy}`;
-  }
-}
-
-export function decodePublicPayloadHex(payloadHex) {
-  const bytes = bytesFromHex(normalizeHex(payloadHex, "disclosure payload"), "disclosure payload");
-  try {
-    return JSON.parse(utf8String(bytes));
-  } catch (error) {
-    throw new Error(`failed to decode disclosure payload JSON: ${error.message}`);
-  }
-}
-
-export function decryptPayloadHex(ciphertextHex, disclosureScalar) {
-  const plaintext = asymDecryptHex(ciphertextHex, disclosureScalar);
-  try {
-    return JSON.parse(utf8String(plaintext));
-  } catch (error) {
-    throw new Error(`failed to decode disclosure payload JSON: ${error.message}`);
   }
 }
 
@@ -196,6 +166,7 @@ function fixedDisclosureReport(value, onChainDigestHex, txHash, { expectedPlane 
     source,
     tx_hash: txHash ? String(txHash).toUpperCase() : "",
     verification: {
+      verified: true,
       fixed_encoding: true,
       local_disclosure_digest_match: true,
       on_chain_disclosure_digest_used: Boolean(onChain),
@@ -243,299 +214,6 @@ export function disclosureAmountAndAsset(payload) {
     throw new Error(`asset denom ${JSON.stringify(assetDenom)} does not match asset_id_hex ${assetIdRaw}`);
   }
   return { amount, assetId, assetDenom };
-}
-
-function decodeOptionalShieldedAddress(address, label, options = {}) {
-  const value = String(address || "").trim();
-  if (!value) return null;
-  try {
-    return decodeShieldedAddress(value, options);
-  } catch (error) {
-    throw new Error(`invalid ${label} shielded address: ${error.message}`);
-  }
-}
-
-function bundleCoordinate(bundle, key, coordinate) {
-  if (!bundle) return null;
-  return bundle[key][coordinate];
-}
-
-function requireValue(value, message) {
-  if (value == null) {
-    throw new Error(message);
-  }
-  return value;
-}
-
-function selectedValue(value, enabled) {
-  return enabled ? requireValue(value, "required disclosure field is missing") : 0n;
-}
-
-export function computeTransferDisclosureDigestHex({
-  policy,
-  outputIndex = transferDisclosureRecipientOutputIndex,
-  commitment,
-  amount,
-  assetId,
-  fromSpendPubKeyX,
-  fromSpendPubKeyY,
-  fromViewPubKeyX,
-  fromViewPubKeyY,
-  toSpendPubKeyX,
-  toSpendPubKeyY,
-  toViewPubKeyX,
-  toViewPubKeyY
-}) {
-  const numericPolicy = Number(policy || 0);
-  if (!supportedPolicies.has(numericPolicy)) {
-    throw new Error(`unsupported transfer privacy policy ${numericPolicy}`);
-  }
-  const commitmentBytes = commitment instanceof Uint8Array ? commitment : decodeCanonicalFieldHex(commitment, "disclosure commitment");
-  const commitmentField = bytesToBigIntBE(commitmentBytes);
-  if (numericPolicy === transferPrivacyPolicyAllPrivate) {
-    return canonicalFieldHex(0n);
-  }
-
-  const discloseAmount = (numericPolicy & transferPrivacyPolicyDiscloseAmount) !== 0;
-  const discloseFrom = (numericPolicy & transferPrivacyPolicyDiscloseFrom) !== 0;
-  const discloseTo = (numericPolicy & transferPrivacyPolicyDiscloseTo) !== 0;
-
-  if (discloseAmount && (amount == null || assetId == null)) {
-    throw new Error("amount and asset id are required for amount disclosure");
-  }
-  if (discloseFrom && [fromSpendPubKeyX, fromSpendPubKeyY, fromViewPubKeyX, fromViewPubKeyY].some(value => value == null)) {
-    throw new Error("full sender shielded address is required for from disclosure");
-  }
-  if (discloseTo && [toSpendPubKeyX, toSpendPubKeyY, toViewPubKeyX, toViewPubKeyY].some(value => value == null)) {
-    throw new Error("full recipient shielded address is required for to disclosure");
-  }
-
-  return canonicalFieldHex(mimcHash(
-    BigInt(numericPolicy),
-    BigInt(outputIndex),
-    commitmentField,
-    selectedValue(amount, discloseAmount),
-    selectedValue(assetId, discloseAmount),
-    selectedValue(fromSpendPubKeyX, discloseFrom),
-    selectedValue(fromSpendPubKeyY, discloseFrom),
-    selectedValue(fromViewPubKeyX, discloseFrom),
-    selectedValue(fromViewPubKeyY, discloseFrom),
-    selectedValue(toSpendPubKeyX, discloseTo),
-    selectedValue(toSpendPubKeyY, discloseTo),
-    selectedValue(toViewPubKeyX, discloseTo),
-    selectedValue(toViewPubKeyY, discloseTo)
-  ));
-}
-
-export function computeAuditTransferDisclosureDigestHex({
-  outputIndex = transferDisclosureRecipientOutputIndex,
-  commitment,
-  amount,
-  assetId,
-  fromSpendPubKeyX,
-  fromSpendPubKeyY,
-  fromViewPubKeyX,
-  fromViewPubKeyY,
-  toSpendPubKeyX,
-  toSpendPubKeyY,
-  toViewPubKeyX,
-  toViewPubKeyY
-}) {
-  const commitmentBytes = commitment instanceof Uint8Array ? commitment : decodeCanonicalFieldHex(commitment, "audit disclosure commitment");
-  if (amount == null || assetId == null) {
-    throw new Error("audit disclosure requires amount and asset id");
-  }
-  if ([fromSpendPubKeyX, fromSpendPubKeyY, fromViewPubKeyX, fromViewPubKeyY].some(value => value == null)) {
-    throw new Error("audit disclosure requires the full sender shielded address");
-  }
-  if ([toSpendPubKeyX, toSpendPubKeyY, toViewPubKeyX, toViewPubKeyY].some(value => value == null)) {
-    throw new Error("audit disclosure requires the full recipient shielded address");
-  }
-
-  return canonicalFieldHex(mimcHash(
-    BigInt(transferAuditDisclosureDomain),
-    BigInt(outputIndex),
-    bytesToBigIntBE(commitmentBytes),
-    amount,
-    assetId,
-    fromSpendPubKeyX,
-    fromSpendPubKeyY,
-    fromViewPubKeyX,
-    fromViewPubKeyY,
-    toSpendPubKeyX,
-    toSpendPubKeyY,
-    toViewPubKeyX,
-    toViewPubKeyY
-  ));
-}
-
-export function computeSelfViewTransferDisclosureDigestHex({
-  outputIndex = transferDisclosureRecipientOutputIndex,
-  commitment,
-  amount,
-  assetId,
-  fromSpendPubKeyX,
-  fromSpendPubKeyY,
-  fromViewPubKeyX,
-  fromViewPubKeyY,
-  toSpendPubKeyX,
-  toSpendPubKeyY,
-  toViewPubKeyX,
-  toViewPubKeyY
-}) {
-  const commitmentBytes = commitment instanceof Uint8Array ? commitment : decodeCanonicalFieldHex(commitment, "self-view disclosure commitment");
-  if (amount == null || assetId == null) {
-    throw new Error("self-view disclosure requires amount and asset id");
-  }
-  if ([fromSpendPubKeyX, fromSpendPubKeyY, fromViewPubKeyX, fromViewPubKeyY].some(value => value == null)) {
-    throw new Error("self-view disclosure requires the full sender shielded address");
-  }
-  if ([toSpendPubKeyX, toSpendPubKeyY, toViewPubKeyX, toViewPubKeyY].some(value => value == null)) {
-    throw new Error("self-view disclosure requires the full recipient shielded address");
-  }
-
-  return canonicalFieldHex(mimcHash(
-    BigInt(transferSelfViewDisclosureDomain),
-    BigInt(outputIndex),
-    bytesToBigIntBE(commitmentBytes),
-    amount,
-    assetId,
-    fromSpendPubKeyX,
-    fromSpendPubKeyY,
-    fromViewPubKeyX,
-    fromViewPubKeyY,
-    toSpendPubKeyX,
-    toSpendPubKeyY,
-    toViewPubKeyX,
-    toViewPubKeyY
-  ));
-}
-
-export function computeExpectedDisclosureDigestHex(payload, options = {}) {
-  const commitment = decodeCanonicalFieldHex(payload?.commitment_hex || "", "commitment");
-  const { amount, assetId } = disclosureAmountAndAsset(payload);
-  const fromBundle = decodeOptionalShieldedAddress(payload?.from_shielded_address, "from", options);
-  const toBundle = decodeOptionalShieldedAddress(payload?.to_shielded_address, "to", options);
-
-  const common = {
-    outputIndex: Number(payload?.output_index || 0),
-    commitment,
-    amount,
-    assetId,
-    fromSpendPubKeyX: bundleCoordinate(fromBundle, "spendPubKey", "x"),
-    fromSpendPubKeyY: bundleCoordinate(fromBundle, "spendPubKey", "y"),
-    fromViewPubKeyX: bundleCoordinate(fromBundle, "viewPubKey", "x"),
-    fromViewPubKeyY: bundleCoordinate(fromBundle, "viewPubKey", "y"),
-    toSpendPubKeyX: bundleCoordinate(toBundle, "spendPubKey", "x"),
-    toSpendPubKeyY: bundleCoordinate(toBundle, "spendPubKey", "y"),
-    toViewPubKeyX: bundleCoordinate(toBundle, "viewPubKey", "x"),
-    toViewPubKeyY: bundleCoordinate(toBundle, "viewPubKey", "y")
-  };
-
-  switch (payload?.plane || planeUser) {
-    case planeAudit:
-      return computeAuditTransferDisclosureDigestHex(common);
-    case planeSelfView:
-      return computeSelfViewTransferDisclosureDigestHex(common);
-    case "":
-    case planeUser:
-      return computeTransferDisclosureDigestHex({
-        ...common,
-        policy: Number(payload?.policy || 0)
-      });
-    default:
-      throw new Error(`unsupported disclosure payload plane ${JSON.stringify(payload?.plane)}`);
-  }
-}
-
-export function verifyPayload(payload, onChainDigestHex = "", options = {}) {
-  const expectedDigestHex = computeExpectedDisclosureDigestHex(payload, options);
-  const payloadDigestHex = String(payload?.disclosure_digest_hex || "").trim();
-  const localDisclosureDigestMatch = payloadDigestHex.toLowerCase() === expectedDigestHex.toLowerCase();
-  if (!localDisclosureDigestMatch) {
-    throw new Error(`disclosure digest mismatch: payload has ${payloadDigestHex}, expected ${expectedDigestHex}`);
-  }
-
-  const verification = {
-    verified: false,
-    local_disclosure_digest_match: localDisclosureDigestMatch,
-    asset_denom_verified: Boolean(payload?.amount),
-    on_chain_disclosure_digest_used: false
-  };
-
-  const onChain = String(onChainDigestHex || "").trim();
-  if (onChain) {
-    verification.on_chain_disclosure_digest_used = true;
-    verification.on_chain_disclosure_digest_match = onChain.toLowerCase() === expectedDigestHex.toLowerCase();
-    if (!verification.on_chain_disclosure_digest_match) {
-      throw new Error(`on-chain disclosure digest mismatch: event has ${onChain}, decoded payload resolves to ${expectedDigestHex}`);
-    }
-  }
-
-  verification.verified = verification.local_disclosure_digest_match &&
-    (!verification.on_chain_disclosure_digest_used || verification.on_chain_disclosure_digest_match);
-  return verification;
-}
-
-export function buildDisclosureReport({
-  payload,
-  onChainDigestHex = "",
-  txHash = "",
-  source,
-  delivery,
-  shieldedPrefix
-}) {
-  const verification = verifyPayload(payload, onChainDigestHex, { shieldedPrefix });
-  const plane = payload?.plane === planeAudit
-    ? planeAudit
-    : payload?.plane === planeSelfView
-      ? planeSelfView
-      : planeUser;
-  const resolvedSource = source || (plane === planeAudit
-    ? "audit_encrypted"
-    : plane === planeSelfView
-      ? "self_view_encrypted"
-      : "recipient_encrypted");
-  const resolvedDelivery = delivery || (plane === planeAudit
-    ? "audit-encrypted"
-    : plane === planeSelfView
-      ? "self-view-encrypted"
-      : "recipient-encrypted");
-  const policy = plane === planeAudit
-    ? "audit-full"
-    : plane === planeSelfView
-      ? "amount-from-to"
-      : privacyPolicyLabel(payload?.policy);
-  const amount = payload?.amount || "";
-  const assetDenom = payload?.asset_denom || "";
-  const from = payload?.from_shielded_address || "";
-  const to = payload?.to_shielded_address || "";
-  return {
-    plane,
-    policy,
-    output_index: Number(payload?.output_index || 0),
-    commitment_hex: payload?.commitment_hex || "",
-    digest_hex: payload?.disclosure_digest_hex || onChainDigestHex || "",
-    verified: verification.verified,
-    amount,
-    asset_denom: assetDenom,
-    from,
-    to,
-    source: resolvedSource,
-    tx_hash: txHash ? txHash.toUpperCase() : "",
-    verification,
-    summary: {
-      plane,
-      delivery: resolvedDelivery,
-      policy,
-      disclosed_fields: disclosedFields(payload),
-      amount,
-      asset_denom: assetDenom,
-      from_shielded_address: from,
-      to_shielded_address: to
-    },
-    payload
-  };
 }
 
 function equalDisclosureBytes(left, right) {
@@ -753,6 +431,7 @@ function batchDisclosureReport(value, digest, txHash, { plane, source, delivery,
     source,
     tx_hash: txHash ? String(txHash).toUpperCase() : "",
     verification: {
+      verified: true,
       fixed_encoding: true,
       batch_typed_scan_output: true,
       output_index_match: true,
@@ -961,24 +640,12 @@ export function decodeUserDisclosureFromEvent(event, disclosureScalar, disclosur
   if (!targetPubKey || targetPubKey.toLowerCase() !== String(disclosurePubKeyHex || "").toLowerCase()) {
     throw new Error("This transfer is not targeted to the provided disclosure public key");
   }
-  try {
-    return fixedDisclosureReport(
-      decryptDisclosureV1(bytesFromHex(payloadHex, "user disclosure payload"), disclosureScalar, encryptedEnvelopeKindV1.userDisclosure),
-      digestHex,
-      txHash,
-      { ...options, expectedPlane: planeUser, source: "recipient_encrypted", delivery: "recipient-encrypted" }
-    );
-  } catch (fixedError) {
-    const payload = decryptPayloadHex(payloadHex, disclosureScalar);
-    return buildDisclosureReport({
-      payload,
-      onChainDigestHex: digestHex,
-      txHash,
-      source: "recipient_encrypted",
-      delivery: "recipient-encrypted",
-      shieldedPrefix: options.shieldedPrefix
-    });
-  }
+  return fixedDisclosureReport(
+    decryptDisclosureV1(bytesFromHex(payloadHex, "user disclosure payload"), disclosureScalar, encryptedEnvelopeKindV1.userDisclosure),
+    digestHex,
+    txHash,
+    { ...options, expectedPlane: planeUser, source: "recipient_encrypted", delivery: "recipient-encrypted" }
+  );
 }
 
 export function decodeSelfViewDisclosureFromEvent(event, disclosureScalar, txHash = event?.tx_hash_hex || "", options = {}) {
@@ -990,24 +657,12 @@ export function decodeSelfViewDisclosureFromEvent(event, disclosureScalar, txHas
   if (!payloadHex) {
     throw new Error("selected transfer has no self-view disclosure");
   }
-  try {
-    return fixedDisclosureReport(
-      decryptDisclosureV1(bytesFromHex(payloadHex, "self-view disclosure payload"), disclosureScalar, encryptedEnvelopeKindV1.selfViewDisclosure),
-      digestHex,
-      txHash,
-      { ...options, expectedPlane: planeSelfView, source: "self_view_encrypted", delivery: "self-view-encrypted" }
-    );
-  } catch {
-    const payload = decryptPayloadHex(payloadHex, disclosureScalar);
-    return buildDisclosureReport({
-      payload,
-      onChainDigestHex: digestHex,
-      txHash,
-      source: "self_view_encrypted",
-      delivery: "self-view-encrypted",
-      shieldedPrefix: options.shieldedPrefix
-    });
-  }
+  return fixedDisclosureReport(
+    decryptDisclosureV1(bytesFromHex(payloadHex, "self-view disclosure payload"), disclosureScalar, encryptedEnvelopeKindV1.selfViewDisclosure),
+    digestHex,
+    txHash,
+    { ...options, expectedPlane: planeSelfView, source: "self_view_encrypted", delivery: "self-view-encrypted" }
+  );
 }
 
 export function decodeAuditDisclosureFromEvent(event, disclosureScalar, txHash = event?.tx_hash_hex || "", options = {}) {
@@ -1019,24 +674,12 @@ export function decodeAuditDisclosureFromEvent(event, disclosureScalar, txHash =
   if (!payloadHex) {
     throw new Error("selected transfer has no audit disclosure");
   }
-  try {
-    return fixedDisclosureReport(
-      decryptDisclosureV1(bytesFromHex(payloadHex, "audit disclosure payload"), disclosureScalar, encryptedEnvelopeKindV1.auditDisclosure),
-      digestHex,
-      txHash,
-      { ...options, expectedPlane: planeAudit, source: "audit_encrypted", delivery: "audit-encrypted" }
-    );
-  } catch {
-    const payload = decryptPayloadHex(payloadHex, disclosureScalar);
-    return buildDisclosureReport({
-      payload,
-      onChainDigestHex: digestHex,
-      txHash,
-      source: "audit_encrypted",
-      delivery: "audit-encrypted",
-      shieldedPrefix: options.shieldedPrefix
-    });
-  }
+  return fixedDisclosureReport(
+    decryptDisclosureV1(bytesFromHex(payloadHex, "audit disclosure payload"), disclosureScalar, encryptedEnvelopeKindV1.auditDisclosure),
+    digestHex,
+    txHash,
+    { ...options, expectedPlane: planeAudit, source: "audit_encrypted", delivery: "audit-encrypted" }
+  );
 }
 
 export function disclosureScalarFromHex(value) {
@@ -1051,28 +694,10 @@ export function disclosureScalarFromHex(value) {
 }
 
 export function publicPayloadReport(payloadHex, onChainDigestHex = "", txHash = "", options = {}) {
-  let plaintext;
-  try {
-    plaintext = unmarshalDisclosurePlaintextV1(bytesFromHex(payloadHex, "public disclosure payload"));
-  } catch {
-    const payload = decodePublicPayloadHex(payloadHex);
-    return buildDisclosureReport({
-      payload,
-      onChainDigestHex,
-      txHash,
-      source: "public",
-      delivery: "public",
-      shieldedPrefix: options.shieldedPrefix
-    });
-  }
   return fixedDisclosureReport(
-    plaintext,
+    unmarshalDisclosurePlaintextV1(bytesFromHex(payloadHex, "public disclosure payload")),
     onChainDigestHex,
     txHash,
     { ...options, expectedPlane: planeUser, source: "public", delivery: "public" }
   );
-}
-
-export function payloadHex(payload) {
-  return hexFromBytes(utf8Bytes(JSON.stringify(payload)));
 }
