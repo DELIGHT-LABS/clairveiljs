@@ -1643,40 +1643,46 @@ function operationReconciliationOutcome(reservations, spentNotesByLookupKey) {
   const requiresEvidence = reservations.some(operationSuccessEvidenceRequired);
   if (!requiresEvidence) return { evaluated: false, matches: true, errors: [], conflicts: [] };
   const evaluations = [];
+  const errors = [];
+  const conflicts = [];
+  let incomplete = false;
   for (const reservation of reservations) {
     const note = spentNotesByLookupKey.get(reservation.nullifier_lookup_key);
     if (!note) {
-      return {
-        evaluated: true,
-        matches: false,
-        operationStatus: operationStatuses.ManualReview,
-        errors: ["operation input evidence incomplete"],
-        conflicts: [operationEvidenceConflict(reservation, "operation_input", "missing")]
-      };
+      incomplete = true;
+      errors.push("operation input evidence incomplete");
+      conflicts.push(operationEvidenceConflict(reservation, "operation_input", "missing"));
+      continue;
     }
     const evidence = evaluateOperationSuccessEvidence(reservation, note);
     if (!evidence.evaluated) {
-      return {
-        evaluated: true,
-        matches: false,
-        operationStatus: operationStatuses.ManualReview,
-        errors: ["operation input evidence incomplete"],
-        conflicts: [operationEvidenceConflict(reservation, "operation_input", "missing")]
-      };
+      incomplete = true;
+      errors.push("operation input evidence incomplete");
+      conflicts.push(operationEvidenceConflict(reservation, "operation_input", "missing"));
+      continue;
     }
     evaluations.push(evidence);
+    errors.push(...evidence.errors);
+    conflicts.push(...evidence.conflicts);
   }
-  const errors = [...new Set(evaluations.flatMap(evidence => evidence.errors))];
-  const conflicts = uniqueOperationEvidenceConflicts(
-    evaluations.flatMap(evidence => evidence.conflicts)
-  );
+  const uniqueErrors = [...new Set(errors)];
+  const uniqueConflicts = uniqueOperationEvidenceConflicts(conflicts);
+  if (incomplete) {
+    return {
+      evaluated: true,
+      matches: false,
+      operationStatus: operationStatuses.ManualReview,
+      errors: uniqueErrors.length ? uniqueErrors : ["operation input evidence incomplete"],
+      conflicts: uniqueConflicts
+    };
+  }
   if (evaluations.some(evidence => !evidence.matches)) {
     return {
       evaluated: true,
       matches: false,
       operationStatus: operationStatuses.ConflictSpent,
-      errors: errors.length ? errors : ["operation input evidence conflict"],
-      conflicts
+      errors: uniqueErrors.length ? uniqueErrors : ["operation input evidence conflict"],
+      conflicts: uniqueConflicts
     };
   }
   return {

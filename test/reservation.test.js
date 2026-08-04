@@ -2783,10 +2783,10 @@ test("partial multi-input spent reconciliation cannot mark an operation as succe
     txHash: "TX-MULTI"
   });
   await manager.reconcileSpentNotes([{
-    ...first,
+    ...second,
     isSpent: true,
     operationSuccessEvidence: {
-      txHash: "TX-MULTI",
+      txHash: "TX-MULTI-CONFLICT",
       outputCommitment: "OUTPUT",
       auditDisclosureDigest: "AUDIT",
       recipientHash: "RECIPIENT",
@@ -2798,12 +2798,29 @@ test("partial multi-input spent reconciliation cannot mark an operation as succe
   }]);
   const firstRecord = await store.getReservation(batch.reservation_ids[0]);
   const secondRecord = await store.getReservation(batch.reservation_ids[1]);
-  assert.equal(firstRecord.status, reservationStatuses.ConfirmedSpent);
+  assert.equal(firstRecord.status, reservationStatuses.Submitted);
   assert.equal(firstRecord.metadata.operation_status, operationStatuses.ManualReview);
   assert.deepEqual(firstRecord.metadata.operation_success_evidence_errors, [
-    "operation input evidence incomplete"
+    "operation input evidence incomplete",
+    "tx_hash_or_tx_bytes mismatch"
   ]);
-  assert.equal(secondRecord.status, reservationStatuses.Submitted);
+  assert.deepEqual(firstRecord.metadata.operation_success_evidence_conflicts, [
+    {
+      reservation_id: batch.reservation_ids[0],
+      field: "operation_input",
+      source_field: "operation_input",
+      reason: "missing"
+    },
+    {
+      reservation_id: batch.reservation_ids[1],
+      field: "tx_hash",
+      source_field: "tx_hash",
+      reason: "mismatch",
+      expected: "tx-multi",
+      actual: "tx-multi-conflict"
+    }
+  ]);
+  assert.equal(secondRecord.status, reservationStatuses.ConfirmedSpent);
   assert.equal(secondRecord.metadata.operation_status, operationStatuses.ManualReview);
 
   await assert.rejects(
@@ -2816,12 +2833,12 @@ test("partial multi-input spent reconciliation cannot mark an operation as succe
       assert.deepEqual(error.details.reservations, [
         {
           reservation_id: batch.reservation_ids[0],
-          status: reservationStatuses.ConfirmedSpent,
+          status: reservationStatuses.Submitted,
           operation_status: operationStatuses.ManualReview
         },
         {
           reservation_id: batch.reservation_ids[1],
-          status: reservationStatuses.Submitted,
+          status: reservationStatuses.ConfirmedSpent,
           operation_status: operationStatuses.ManualReview
         }
       ]);
@@ -2829,13 +2846,13 @@ test("partial multi-input spent reconciliation cannot mark an operation as succe
     }
   );
 
-  await manager.markManualReview([batch.reservation_ids[1]], {
+  await manager.markManualReview([batch.reservation_ids[0]], {
     error: "partial spend requires manual review"
   });
   assert.deepEqual(
     (await Promise.all(batch.reservation_ids.map(id => store.getReservation(id))))
       .map(record => record.status),
-    [reservationStatuses.ConfirmedSpent, reservationStatuses.ManualReview]
+    [reservationStatuses.ManualReview, reservationStatuses.ConfirmedSpent]
   );
 
   const evidence = {
