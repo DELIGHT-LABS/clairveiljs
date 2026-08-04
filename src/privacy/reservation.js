@@ -2118,6 +2118,7 @@ function operationSuccessEvidence(input = {}) {
     amountHash: aliasValue(amountHashKeys),
     denom: aliasValue(denomKeys),
     aliasErrors,
+    batchItemIndexRaw: batchItemIndex,
     batchItemIndex: normalizedItemIndex.value,
     batchItemIndexValid: normalizedItemIndex.valid,
     batchItemIndexProvided: normalizedItemIndex.provided,
@@ -2415,7 +2416,7 @@ function evaluateOperationSuccessEvidence(reservation = {}, actualInput = {}) {
       errors.push("batch_item_index invalid");
       conflicts.push(operationEvidenceConflict(reservation, "batch_item_index", "mismatch", {
         expected: expected.batchItemIndex,
-        actual: String(actualInput?.batchItemIndex ?? actualInput?.batch_item_index ?? "")
+        actual: String(actual.batchItemIndexRaw ?? "")
       }));
     } else if (expected.batchItemIndexKnown && !actual.batchItemIndexKnown) {
       errors.push("batch_item_index missing");

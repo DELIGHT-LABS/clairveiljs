@@ -2553,6 +2553,14 @@ test("operation evidence rejects malformed batch indices and ignores extra sign-
   assert.deepEqual(malformed.metadata.operation_success_evidence_errors, [
     "batch_item_index invalid"
   ]);
+  assert.deepEqual(malformed.metadata.operation_success_evidence_conflicts, [{
+    reservation_id: malformedBatch.reservation_ids[0],
+    field: "batch_item_index",
+    source_field: "batch_item_index",
+    reason: "mismatch",
+    expected: 0,
+    actual: "bogus"
+  }]);
 
   const missingIndexNote = noteFixture({ nullifier: "bf".repeat(32), sequence: 196 });
   const missingIndexBatch = await preparePlanReservation(manager, {
