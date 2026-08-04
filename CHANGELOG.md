@@ -24,6 +24,9 @@ All notable changes to ClairveilJS are documented in this file.
 
 ### Fixed
 
+- Split operation reconciliation diagnostics into `OPERATION_STATE_MIXED` and
+  `OPERATION_EVIDENCE_CONFLICT`, preserving reservation-level states and
+  field-level expected/actual evidence in structured error details.
 - Removed legacy JSON and raw-ciphertext disclosure fallbacks; disclosure
   decoders now require exact `privacy-fixed-v1` plaintexts and typed envelopes.
 - Separated the immutable upstream v0.3.1 reservation fixture contract from

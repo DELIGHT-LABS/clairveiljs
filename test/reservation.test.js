@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { fromBech32, toBech32 } from "@cosmjs/encoding";
+import { ClairveilErrorCode } from "clairveiljs/errors";
 import {
   createBrowserReservationStore,
   createNoteReservationManager,
@@ -2203,6 +2204,19 @@ test("spent reconciliation records operation success evidence matches and confli
     "expected_denom mismatch",
     "batch_item_index mismatch"
   ]);
+  assert.deepEqual(
+    conflictRecord.metadata.operation_success_evidence_conflicts.map(conflict => ({
+      field: conflict.field,
+      source_field: conflict.source_field,
+      reason: conflict.reason
+    })),
+    [
+      { field: "recipient_hash", source_field: "expected_recipient_hash", reason: "mismatch" },
+      { field: "amount", source_field: "expected_amount", reason: "mismatch" },
+      { field: "denom", source_field: "expected_denom", reason: "mismatch" },
+      { field: "batch_item_index", source_field: "batch_item_index", reason: "mismatch" }
+    ]
+  );
 
   const missingTxNote = noteFixture({ nullifier: "8c".repeat(32), sequence: 83 });
   const missingTxBatch = await preparePlanReservation(manager, {
@@ -2792,6 +2806,29 @@ test("partial multi-input spent reconciliation cannot mark an operation as succe
   assert.equal(secondRecord.status, reservationStatuses.Submitted);
   assert.equal(secondRecord.metadata.operation_status, operationStatuses.ManualReview);
 
+  await assert.rejects(
+    () => manager.markManualReview(batch.reservation_ids, {
+      error: "inspect partial operation"
+    }),
+    error => {
+      assert.equal(error.code, ClairveilErrorCode.OPERATION_STATE_MIXED);
+      assert.equal(error.details.operation_id, batch.operation_id);
+      assert.deepEqual(error.details.reservations, [
+        {
+          reservation_id: batch.reservation_ids[0],
+          status: reservationStatuses.ConfirmedSpent,
+          operation_status: operationStatuses.ManualReview
+        },
+        {
+          reservation_id: batch.reservation_ids[1],
+          status: reservationStatuses.Submitted,
+          operation_status: operationStatuses.ManualReview
+        }
+      ]);
+      return true;
+    }
+  );
+
   await manager.markManualReview([batch.reservation_ids[1]], {
     error: "partial spend requires manual review"
   });
@@ -2838,15 +2875,71 @@ test("partial multi-input spent reconciliation cannot mark an operation as succe
     []
   );
   await assert.rejects(
-    () => manager.reconcileSpentNotes([{
-      ...first,
-      isSpent: true,
-      operationSuccessEvidence: {
-        ...evidence,
-        recipientHash: "CONFLICTING-RECIPIENT"
+    () => manager.reconcileSpentNotes([
+      {
+        ...first,
+        isSpent: true,
+        operationSuccessEvidence: {
+          ...evidence,
+          txHash: "CONFLICTING-TX",
+          outputCommitment: "CONFLICTING-COMMITMENT",
+          auditDisclosureDigest: "CONFLICTING-DIGEST",
+          amount: "10"
+        }
+      },
+      {
+        ...second,
+        isSpent: true,
+        operationSuccessEvidence: {
+          ...evidence,
+          outputCommitment: "SECOND-CONFLICTING-COMMITMENT"
+        }
       }
-    }]),
-    /retry evidence conflicts with a succeeded operation reconciliation/
+    ]),
+    error => {
+      assert.equal(error.code, ClairveilErrorCode.OPERATION_EVIDENCE_CONFLICT);
+      assert.equal(error.details.operation_id, batch.operation_id);
+      assert.deepEqual(
+        [...new Set(error.details.conflicts.map(conflict => conflict.field))],
+        ["tx_hash", "commitment", "digest", "amount"]
+      );
+      assert.deepEqual(
+        [...new Set(error.details.conflicts.map(conflict => conflict.reservation_id))].sort(),
+        [...batch.reservation_ids].sort()
+      );
+      assert.ok(error.details.conflicts.every(conflict =>
+        Object.prototype.hasOwnProperty.call(conflict, "expected") &&
+        Object.prototype.hasOwnProperty.call(conflict, "actual")
+      ));
+      const firstConflictsByField = new Map(error.details.conflicts
+        .filter(conflict => conflict.reservation_id === batch.reservation_ids[0])
+        .map(conflict => [conflict.field, conflict]));
+      assert.deepEqual(
+        [firstConflictsByField.get("tx_hash").expected, firstConflictsByField.get("tx_hash").actual],
+        ["tx-multi", "conflicting-tx"]
+      );
+      assert.deepEqual(
+        [firstConflictsByField.get("commitment").expected, firstConflictsByField.get("commitment").actual],
+        ["OUTPUT", "CONFLICTING-COMMITMENT"]
+      );
+      assert.deepEqual(
+        [firstConflictsByField.get("digest").expected, firstConflictsByField.get("digest").actual],
+        ["AUDIT", "CONFLICTING-DIGEST"]
+      );
+      assert.deepEqual(
+        [firstConflictsByField.get("amount").expected, firstConflictsByField.get("amount").actual],
+        ["9", "10"]
+      );
+      const secondCommitmentConflict = error.details.conflicts.find(conflict =>
+        conflict.reservation_id === batch.reservation_ids[1] && conflict.field === "commitment"
+      );
+      assert.deepEqual(
+        [secondCommitmentConflict.expected, secondCommitmentConflict.actual],
+        ["OUTPUT", "SECOND-CONFLICTING-COMMITMENT"]
+      );
+      assert.match(error.message, /retry evidence conflicts with a succeeded operation reconciliation/);
+      return true;
+    }
   );
 });
 
@@ -2983,6 +3076,82 @@ test("rollback with an expired lease moves proving reservations to manual review
       kind: "withdraw"
     }),
     /active reservation already exists/
+  );
+});
+
+test("rollback releases a partially claimed reservation batch", async () => {
+  const now = new Date("2026-01-02T03:04:05.000Z");
+  const store = new MemoryReservationStore({ now: () => now });
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1owner",
+    indexKey: "index-key-v1",
+    now: () => now
+  });
+  const batch = await manager.reservePlan({
+    plan: {
+      selection: {
+        inputs: [
+          noteFixture({ nullifier: "91".repeat(32), sequence: 91 }),
+          noteFixture({ nullifier: "92".repeat(32), sequence: 92 })
+        ]
+      }
+    },
+    kind: "withdraw"
+  });
+  const state = await store.load();
+  state.reservations[0] = {
+    ...state.reservations[0],
+    status: reservationStatuses.Proving,
+    lease_owner: manager.leaseOwner,
+    lease_token: batch.lease_token,
+    lease_until: "2026-01-02T04:04:05.000Z",
+    last_heartbeat_at: "2026-01-02T03:04:05.000Z"
+  };
+  await store.unsafeReplaceState(state);
+
+  await rollbackPlanReservation(manager, batch);
+
+  assert.deepEqual(
+    (await manager.getReservations(batch.reservation_ids)).map(reservation => reservation.status),
+    [reservationStatuses.Released, reservationStatuses.Released]
+  );
+});
+
+test("getReservations reads an exact owned set through one store snapshot", async () => {
+  const store = new MemoryReservationStore();
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1owner",
+    indexKey: "index-key-v1"
+  });
+  const batch = await manager.reservePlan({
+    plan: {
+      selection: {
+        inputs: [
+          noteFixture({ nullifier: "93".repeat(32), sequence: 93 }),
+          noteFixture({ nullifier: "94".repeat(32), sequence: 94 })
+        ]
+      }
+    },
+    kind: "payment"
+  });
+  const listReservations = store.listReservations.bind(store);
+  let listCalls = 0;
+  store.listReservations = async (...args) => {
+    listCalls += 1;
+    return listReservations(...args);
+  };
+  store.getReservation = async () => {
+    throw new Error("per-reservation reads must not be used for a batch snapshot");
+  };
+
+  const reservations = await manager.getReservations(batch.reservation_ids);
+
+  assert.equal(listCalls, 1);
+  assert.deepEqual(
+    reservations.map(reservation => reservation.reservation_id),
+    batch.reservation_ids
   );
 });
 

@@ -1,4 +1,5 @@
 import type { Hex } from "../core/crypto.js";
+import type { OperationEvidenceConflictDetails } from "../core/errors.js";
 import type { PreparedBatchTransferPayload } from "./batch-transfer.js";
 import type { PreparedBatchTransferProof } from "./batch-transfer.js";
 import type { NoteReservationManager, ReservationBatch, ReservationMetadata } from "./reservation.js";
@@ -442,6 +443,8 @@ export interface ReconciledOneProofPayrollOperationEvidence {
   status: "Pending" | "Succeeded" | "Failed" | "ManualReview";
   input_nullifiers: readonly { nullifier: Hex; spent: boolean }[];
   items: ReconciledPayrollItemEvidence[];
+  error_code?: "OPERATION_EVIDENCE_CONFLICT";
+  error_details?: OperationEvidenceConflictDetails;
 }
 
 export type OneProofPayrollReservationAction = "None" | "ConfirmedSpent" | "ReplanRequired" | "ManualReview" | "ManualReviewRequired";

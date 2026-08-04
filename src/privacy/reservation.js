@@ -14,6 +14,10 @@ import {
   canonicalizeShieldedAddressForOperationHash
 } from "../core/crypto.js";
 import {
+  OperationEvidenceConflictError,
+  OperationStateMixedError
+} from "../core/errors.js";
+import {
   activeCircuitSetIdV1,
   privacyFixedV1
 } from "./protocol-v1.js";
@@ -64,6 +68,50 @@ export const activeReservationStatuses = Object.freeze([
 
 const activeReservationStatusSet = new Set(activeReservationStatuses);
 const reservationStatusSet = new Set(Object.values(reservationStatuses));
+
+function operationStateDetails(reservations = []) {
+  return reservations.map(reservation => ({
+    reservation_id: String(reservation?.reservation_id || ""),
+    status: String(reservation?.status || ""),
+    ...(reservation?.metadata?.operation_status
+      ? { operation_status: String(reservation.metadata.operation_status) }
+      : {})
+  }));
+}
+
+function operationIDForReservations(reservations = []) {
+  const operationIDs = [...new Set(
+    reservations.map(reservation => String(reservation?.operation_id || "")).filter(Boolean)
+  )];
+  return operationIDs.length === 1 ? operationIDs[0] : "";
+}
+
+function mixedOperationStateError(reservations = [], message = "operation reservations have mixed states") {
+  const states = operationStateDetails(reservations);
+  const summary = states.map(state =>
+    `${state.reservation_id}=${state.status}${state.operation_status ? `/${state.operation_status}` : ""}`
+  ).join(", ");
+  return new OperationStateMixedError({
+    operation_id: operationIDForReservations(reservations),
+    reservations: states
+  }, `${message}: ${summary}`);
+}
+
+function assertOperationReservationStatesNotMixed(reservations = []) {
+  const groups = new Map();
+  for (const reservation of reservations) {
+    const operationID = String(reservation?.operation_id || "");
+    if (!operationID) continue;
+    const key = `${String(reservation?.owner_key_id || "")}\x00${operationID}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(reservation);
+  }
+  for (const group of groups.values()) {
+    if (group.length > 1 && new Set(group.map(reservation => reservation.status)).size > 1) {
+      throw mixedOperationStateError(group);
+    }
+  }
+}
 
 const allowedReservationTransitions = new Set([
   "Discovered\x00Available",
@@ -599,6 +647,8 @@ const initialLifecycleMetadataFields = new Set([
   "operationSuccessEvidenceMatches",
   "operation_success_evidence_errors",
   "operationSuccessEvidenceErrors",
+  "operation_success_evidence_conflicts",
+  "operationSuccessEvidenceConflicts",
   "operation_success_evidence_required",
   "operationSuccessEvidenceRequired",
   "manual_review_resolution_reason",
@@ -892,7 +942,8 @@ const operationSuccessPredicateFields = [
 const operationOutcomeMetadataFields = new Set([
   "operation_status",
   "operation_success_evidence_matches",
-  "operation_success_evidence_errors"
+  "operation_success_evidence_errors",
+  "operation_success_evidence_conflicts"
 ]);
 
 const protectedMetadataEvidenceFields = [
@@ -910,6 +961,8 @@ const protectedMetadataEvidenceFields = [
   "operationSuccessEvidenceMatches",
   "operation_success_evidence_errors",
   "operationSuccessEvidenceErrors",
+  "operation_success_evidence_conflicts",
+  "operationSuccessEvidenceConflicts",
   "operation_success_evidence_required",
   "operationSuccessEvidenceRequired",
   "operator_approved",
@@ -935,6 +988,7 @@ const managedLifecycleMetadataAliases = new Map([
   ["operationStatus", "operation_status"],
   ["operationSuccessEvidenceMatches", "operation_success_evidence_matches"],
   ["operationSuccessEvidenceErrors", "operation_success_evidence_errors"],
+  ["operationSuccessEvidenceConflicts", "operation_success_evidence_conflicts"],
   ["operationSuccessEvidenceRequired", "operation_success_evidence_required"],
   ["manualReviewResolutionReason", "manual_review_resolution_reason"],
   ["walletRejectedBeforeBroadcast", "wallet_rejected_before_broadcast"],
@@ -1587,7 +1641,7 @@ function reconciledSpentPatch(patch = {}, { operationReconcile = false } = {}) {
 
 function operationReconciliationOutcome(reservations, spentNotesByLookupKey) {
   const requiresEvidence = reservations.some(operationSuccessEvidenceRequired);
-  if (!requiresEvidence) return { evaluated: false, matches: true, errors: [] };
+  if (!requiresEvidence) return { evaluated: false, matches: true, errors: [], conflicts: [] };
   const evaluations = [];
   for (const reservation of reservations) {
     const note = spentNotesByLookupKey.get(reservation.nullifier_lookup_key);
@@ -1596,7 +1650,8 @@ function operationReconciliationOutcome(reservations, spentNotesByLookupKey) {
         evaluated: true,
         matches: false,
         operationStatus: operationStatuses.ManualReview,
-        errors: ["operation input evidence incomplete"]
+        errors: ["operation input evidence incomplete"],
+        conflicts: [operationEvidenceConflict(reservation, "operation_input", "missing")]
       };
     }
     const evidence = evaluateOperationSuccessEvidence(reservation, note);
@@ -1605,25 +1660,31 @@ function operationReconciliationOutcome(reservations, spentNotesByLookupKey) {
         evaluated: true,
         matches: false,
         operationStatus: operationStatuses.ManualReview,
-        errors: ["operation input evidence incomplete"]
+        errors: ["operation input evidence incomplete"],
+        conflicts: [operationEvidenceConflict(reservation, "operation_input", "missing")]
       };
     }
     evaluations.push(evidence);
   }
   const errors = [...new Set(evaluations.flatMap(evidence => evidence.errors))];
+  const conflicts = uniqueOperationEvidenceConflicts(
+    evaluations.flatMap(evidence => evidence.conflicts)
+  );
   if (evaluations.some(evidence => !evidence.matches)) {
     return {
       evaluated: true,
       matches: false,
       operationStatus: operationStatuses.ConflictSpent,
-      errors: errors.length ? errors : ["operation input evidence conflict"]
+      errors: errors.length ? errors : ["operation input evidence conflict"],
+      conflicts
     };
   }
   return {
     evaluated: true,
     matches: true,
     operationStatus: operationStatuses.Succeeded,
-    errors: []
+    errors: [],
+    conflicts: []
   };
 }
 
@@ -1639,7 +1700,10 @@ function operationReconciliationTransitions(reservations, spentNotesByLookupKey,
       reservation.metadata?.operation_success_evidence_matches === true
     );
     if (!allSucceeded) {
-      throw new Error("retry evidence conflicts with a succeeded operation reconciliation");
+      throw mixedOperationStateError(
+        reservations,
+        "retry found mixed reservation state after a succeeded operation reconciliation"
+      );
     }
     const explicitEvidenceKeys = [
       "operationSuccessEvidence", "operation_success_evidence", "successEvidence",
@@ -1661,6 +1725,7 @@ function operationReconciliationTransitions(reservations, spentNotesByLookupKey,
       "itemIndex", "item_index", "batchItemIndexKnown", "batch_item_index_known",
       "itemIndexKnown", "item_index_known"
     ];
+    const conflicts = [];
     for (const reservation of reservations) {
       const note = spentNotesByLookupKey.get(reservation.nullifier_lookup_key);
       if (!note) continue;
@@ -1670,8 +1735,17 @@ function operationReconciliationTransitions(reservations, spentNotesByLookupKey,
       if (!hasExplicitEvidence) continue;
       const evidence = evaluateOperationSuccessEvidence(reservation, note);
       if (!evidence.evaluated || !evidence.matches) {
-        throw new Error("retry evidence conflicts with a succeeded operation reconciliation");
+        conflicts.push(...(evidence.conflicts.length
+          ? evidence.conflicts
+          : [operationEvidenceConflict(reservation, "operation_input", "conflict")]));
       }
+    }
+    if (conflicts.length) {
+      throw evidenceConflictError(
+        reservations,
+        conflicts,
+        "retry evidence conflicts with a succeeded operation reconciliation"
+      );
     }
     return [];
   }
@@ -1689,7 +1763,8 @@ function operationReconciliationTransitions(reservations, spentNotesByLookupKey,
         ...(reservation.metadata || {}),
         operation_status: outcome.operationStatus,
         operation_success_evidence_matches: outcome.matches,
-        operation_success_evidence_errors: outcome.errors
+        operation_success_evidence_errors: outcome.errors,
+        operation_success_evidence_conflicts: outcome.conflicts
       };
     }
     transitions.push({
@@ -2089,6 +2164,48 @@ function normalizedIdentityValues(values = []) {
   return [...new Set(values.map(normalizedTxIdentity).filter(Boolean))];
 }
 
+function operationEvidenceConflictField(sourceField) {
+  if (["submitted_tx_hash", "tx_hash", "tx_bytes_hash", "sign_doc_hash", "tx_hash_or_tx_bytes"].includes(sourceField)) {
+    return "tx_hash";
+  }
+  if (sourceField === "expected_output_commitment") return "commitment";
+  if (["expected_disclosure_digest", "expected_operation_evidence_hash"].includes(sourceField)) return "digest";
+  if (["expected_amount", "expected_amount_hash"].includes(sourceField)) return "amount";
+  if (sourceField === "expected_recipient_hash") return "recipient_hash";
+  if (sourceField === "expected_denom") return "denom";
+  if (sourceField === "batch_item_index") return "batch_item_index";
+  if (sourceField === "transaction_outcome") return "transaction_outcome";
+  return sourceField || "operation_input";
+}
+
+function operationEvidenceConflict(reservation, sourceField, reason, { expected, actual } = {}) {
+  return {
+    reservation_id: String(reservation?.reservation_id || ""),
+    field: operationEvidenceConflictField(sourceField),
+    source_field: sourceField,
+    reason,
+    ...(expected !== undefined ? { expected } : {}),
+    ...(actual !== undefined ? { actual } : {})
+  };
+}
+
+function uniqueOperationEvidenceConflicts(conflicts = []) {
+  const unique = new Map();
+  for (const conflict of conflicts) {
+    const key = JSON.stringify(conflict);
+    if (!unique.has(key)) unique.set(key, conflict);
+  }
+  return [...unique.values()];
+}
+
+function evidenceConflictError(reservations, conflicts, message = "operation evidence conflicts with persisted evidence") {
+  const fields = [...new Set(conflicts.map(conflict => conflict.field))].join(", ");
+  return new OperationEvidenceConflictError({
+    operation_id: operationIDForReservations(reservations),
+    conflicts: uniqueOperationEvidenceConflicts(conflicts)
+  }, fields ? `${message}: ${fields}` : message);
+}
+
 function evaluateOperationTxIdentity(reservation = {}, actual = {}) {
   const expectedTxHash = normalizedTxIdentity(reservation.submitted_tx_hash);
   const expectedTxBytesHash = normalizedTxIdentity(reservation.tx_bytes_hash);
@@ -2102,26 +2219,51 @@ function evaluateOperationTxIdentity(reservation = {}, actual = {}) {
     actualSignDocs.length
   );
   const errors = [];
+  const conflicts = [];
   let matched = false;
 
   if (!actualIdentitySeen) {
     errors.push("tx_hash_or_tx_result identity missing");
+    conflicts.push(operationEvidenceConflict(reservation, "tx_hash_or_tx_bytes", "missing", {
+      expected: expectedTxHash || expectedTxBytesHash,
+      actual: ""
+    }));
   }
   if (!expectedTxHash && !expectedTxBytesHash) {
     errors.push("persisted tx_hash_or_tx_bytes identity missing");
+    conflicts.push(operationEvidenceConflict(reservation, "tx_hash_or_tx_bytes", "expected_missing", {
+      expected: "",
+      actual: [...actualTxHashes, ...actualTxBytesHashes]
+    }));
   }
   if (actualTxHashes.length > 1) {
     errors.push("tx_hash evidence conflict");
+    conflicts.push(operationEvidenceConflict(reservation, "tx_hash", "conflict", {
+      expected: expectedTxHash,
+      actual: actualTxHashes
+    }));
   }
   if (actualTxBytesHashes.length > 1) {
     errors.push("tx_bytes_hash evidence conflict");
+    conflicts.push(operationEvidenceConflict(reservation, "tx_bytes_hash", "conflict", {
+      expected: expectedTxBytesHash,
+      actual: actualTxBytesHashes
+    }));
   }
   if (actualSignDocs.length > 1) {
     errors.push("sign_doc_hash evidence conflict");
+    conflicts.push(operationEvidenceConflict(reservation, "sign_doc_hash", "conflict", {
+      expected: expectedSignDoc,
+      actual: actualSignDocs
+    }));
   }
   for (const actualTxHash of actualTxHashes) {
     if (!expectedTxHash || actualTxHash !== expectedTxHash) {
       errors.push("tx_hash_or_tx_bytes mismatch");
+      conflicts.push(operationEvidenceConflict(reservation, "tx_hash", "mismatch", {
+        expected: expectedTxHash,
+        actual: actualTxHash
+      }));
     } else {
       matched = true;
     }
@@ -2129,6 +2271,10 @@ function evaluateOperationTxIdentity(reservation = {}, actual = {}) {
   for (const actualTxBytesHash of actualTxBytesHashes) {
     if (!expectedTxBytesHash || actualTxBytesHash !== expectedTxBytesHash) {
       errors.push("tx_hash_or_tx_bytes mismatch");
+      conflicts.push(operationEvidenceConflict(reservation, "tx_bytes_hash", "mismatch", {
+        expected: expectedTxBytesHash,
+        actual: actualTxBytesHash
+      }));
     } else {
       matched = true;
     }
@@ -2137,13 +2283,25 @@ function evaluateOperationTxIdentity(reservation = {}, actual = {}) {
     for (const actualSignDoc of actualSignDocs) {
       if (actualSignDoc !== expectedSignDoc) {
         errors.push("sign_doc_hash mismatch");
+        conflicts.push(operationEvidenceConflict(reservation, "sign_doc_hash", "mismatch", {
+          expected: expectedSignDoc,
+          actual: actualSignDoc
+        }));
       }
     }
   }
   if (!matched && !errors.length) {
     errors.push("matching persisted tx identity missing");
+    conflicts.push(operationEvidenceConflict(reservation, "tx_hash_or_tx_bytes", "missing", {
+      expected: expectedTxHash || expectedTxBytesHash,
+      actual: [...actualTxHashes, ...actualTxBytesHashes]
+    }));
   }
-  return { matches: errors.length === 0 && matched, errors };
+  return {
+    matches: errors.length === 0 && matched,
+    errors,
+    conflicts: uniqueOperationEvidenceConflicts(conflicts)
+  };
 }
 
 function executionOutcomeErrors(txResult) {
@@ -2187,7 +2345,7 @@ function executionOutcomeErrors(txResult) {
 
 function evaluateOperationSuccessEvidence(reservation = {}, actualInput = {}) {
   if (!operationSuccessEvidenceRequired(reservation)) {
-    return { evaluated: false, matches: true, errors: [] };
+    return { evaluated: false, matches: true, errors: [], conflicts: [] };
   }
   const expected = expectedOperationSuccessEvidence(reservation);
   const actual = operationSuccessEvidence(actualInput);
@@ -2197,17 +2355,39 @@ function evaluateOperationSuccessEvidence(reservation = {}, actualInput = {}) {
     ...actual.aliasErrors,
     ...actual.txResults.flatMap(executionOutcomeErrors)
   ])];
+  const conflicts = [...txIdentity.conflicts];
+  for (const aliasError of actual.aliasErrors) {
+    const sourceField = aliasError.split(" ")[0] || "operation_input";
+    conflicts.push(operationEvidenceConflict(reservation, sourceField, "alias_conflict"));
+  }
+  for (const outcomeError of actual.txResults.flatMap(executionOutcomeErrors)) {
+    conflicts.push(operationEvidenceConflict(reservation, "transaction_outcome", "failure", {
+      actual: outcomeError
+    }));
+  }
   const check = (field, expectedValue, actualValue, options = {}) => {
     if (!expectedValue) {
       errors.push(`${field} expected value missing`);
+      conflicts.push(operationEvidenceConflict(reservation, field, "expected_missing", {
+        expected: "",
+        actual: String(actualValue || "")
+      }));
       return;
     }
     if (!actualValue) {
       errors.push(`${field} missing`);
+      conflicts.push(operationEvidenceConflict(reservation, field, "missing", {
+        expected: String(expectedValue),
+        actual: ""
+      }));
       return;
     }
     if (!operationEvidenceValuesEqual(expectedValue, actualValue, options)) {
       errors.push(`${field} mismatch`);
+      conflicts.push(operationEvidenceConflict(reservation, field, "mismatch", {
+        expected: String(expectedValue),
+        actual: String(actualValue)
+      }));
     }
   };
   if (expected.operationEvidenceHash) {
@@ -2221,18 +2401,35 @@ function evaluateOperationSuccessEvidence(reservation = {}, actualInput = {}) {
     check("expected_denom", expected.denom, actual.denom);
     if (expected.batchItemIndexKnown && !actual.batchItemIndexProvided) {
       errors.push("batch_item_index missing");
+      conflicts.push(operationEvidenceConflict(reservation, "batch_item_index", "missing", {
+        expected: expected.batchItemIndex,
+        actual: ""
+      }));
     } else if (expected.batchItemIndexKnown && !actual.batchItemIndexValid) {
       errors.push("batch_item_index invalid");
+      conflicts.push(operationEvidenceConflict(reservation, "batch_item_index", "mismatch", {
+        expected: expected.batchItemIndex,
+        actual: String(actualInput?.batchItemIndex ?? actualInput?.batch_item_index ?? "")
+      }));
     } else if (expected.batchItemIndexKnown && !actual.batchItemIndexKnown) {
       errors.push("batch_item_index missing");
+      conflicts.push(operationEvidenceConflict(reservation, "batch_item_index", "missing", {
+        expected: expected.batchItemIndex,
+        actual: ""
+      }));
     } else if (expected.batchItemIndexKnown && expected.batchItemIndex !== actual.batchItemIndex) {
       errors.push("batch_item_index mismatch");
+      conflicts.push(operationEvidenceConflict(reservation, "batch_item_index", "mismatch", {
+        expected: expected.batchItemIndex,
+        actual: actual.batchItemIndex
+      }));
     }
   }
   return {
     evaluated: true,
     matches: errors.length === 0,
-    errors
+    errors,
+    conflicts: uniqueOperationEvidenceConflicts(conflicts)
   };
 }
 
@@ -2505,6 +2702,23 @@ export class MemoryReservationStore {
       to: String(transition.to || ""),
       patch: transition.patch || {}
     }));
+    const preflightSeen = new Set();
+    const preflightReservations = [];
+    for (const transition of normalizedTransitions) {
+      if (!transition.reservationID) throw new Error("reservationID is required");
+      if (preflightSeen.has(transition.reservationID)) {
+        throw new Error(`duplicate reservation transition: ${transition.reservationID}`);
+      }
+      preflightSeen.add(transition.reservationID);
+      const current = this.state.reservations.find(candidate =>
+        candidate.reservation_id === transition.reservationID
+      );
+      if (!current) throw new Error(`reservation not found: ${transition.reservationID}`);
+      if (transition.patch?.[managedOperationReconciliation] !== true) {
+        preflightReservations.push(current);
+      }
+    }
+    assertOperationReservationStatesNotMixed(preflightReservations);
     const seen = new Set();
     const indexes = [];
     const updated = [];
@@ -3029,7 +3243,7 @@ export class NoteReservationManager {
     return reservation;
   }
 
-  async _ownedReservationsByID(reservationIDs = []) {
+  async _ownedReservationsByID(reservationIDs = [], { allowMixedOperationState = false } = {}) {
     const ids = [...new Set(reservationIDs || [])];
     if (!ids.length) return new Map();
     const reservations = await this.store.listReservations();
@@ -3043,7 +3257,17 @@ export class NoteReservationManager {
       this.assertReservationOwner(reservation);
       owned.set(reservationID, reservation);
     }
+    if (!allowMixedOperationState) {
+      assertOperationReservationStatesNotMixed([...owned.values()]);
+    }
     return owned;
+  }
+
+  async getReservations(reservationIDs = []) {
+    const currentByID = await this._ownedReservationsByID(reservationIDs, {
+      allowMixedOperationState: true
+    });
+    return [...currentByID.values()];
   }
 
   async reservationForNote(noteLike) {
@@ -3606,7 +3830,9 @@ export class NoteReservationManager {
 
   async releaseReservedOrProving(reservationIDs = [], metadata = {}) {
     const leaseToken = metadata.leaseToken || metadata.lease_token || "";
-    const currentByID = await this._ownedReservationsByID(reservationIDs);
+    const currentByID = await this._ownedReservationsByID(reservationIDs, {
+      allowMixedOperationState: true
+    });
     for (const reservationID of reservationIDs || []) {
       const current = currentByID.get(reservationID);
       if (current.status === reservationStatuses.Proving) {

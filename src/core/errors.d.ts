@@ -14,6 +14,8 @@ export const ClairveilErrorCode: Readonly<{
   PROVER_REJECTED: "PROVER_REJECTED";
   DISCLOSURE_UNAVAILABLE: "DISCLOSURE_UNAVAILABLE";
   TX_BROADCAST_FAILED: "TX_BROADCAST_FAILED";
+  OPERATION_STATE_MIXED: "OPERATION_STATE_MIXED";
+  OPERATION_EVIDENCE_CONFLICT: "OPERATION_EVIDENCE_CONFLICT";
 }>;
 
 export type ClairveilErrorCodeValue = typeof ClairveilErrorCode[keyof typeof ClairveilErrorCode];
@@ -25,6 +27,54 @@ export class ClairveilError extends Error {
   proverCode?: string;
   retryable?: boolean;
   constructor(code: ClairveilErrorCodeValue | string, message: string, details?: object);
+}
+
+export interface OperationReservationStateDetail {
+  reservation_id: string;
+  status: string;
+  operation_status?: string;
+}
+
+export interface OperationStateMixedDetails {
+  operation_id: string;
+  reservations: readonly OperationReservationStateDetail[];
+}
+
+export type OperationEvidenceConflictField =
+  | "tx_hash"
+  | "commitment"
+  | "digest"
+  | "amount"
+  | "recipient_hash"
+  | "denom"
+  | "batch_item_index"
+  | "transaction_outcome"
+  | "operation_input";
+
+export interface OperationEvidenceConflictDetail {
+  reservation_id: string;
+  field: OperationEvidenceConflictField | string;
+  source_field: string;
+  reason: "mismatch" | "missing" | "expected_missing" | "alias_conflict" | "conflict" | "failure" | string;
+  expected?: string | number | boolean | readonly string[];
+  actual?: string | number | boolean | readonly string[];
+}
+
+export interface OperationEvidenceConflictDetails {
+  operation_id: string;
+  conflicts: readonly OperationEvidenceConflictDetail[];
+}
+
+export class OperationStateMixedError extends ClairveilError {
+  code: "OPERATION_STATE_MIXED";
+  details: OperationStateMixedDetails;
+  constructor(details: OperationStateMixedDetails, message?: string);
+}
+
+export class OperationEvidenceConflictError extends ClairveilError {
+  code: "OPERATION_EVIDENCE_CONFLICT";
+  details: OperationEvidenceConflictDetails;
+  constructor(details: OperationEvidenceConflictDetails, message?: string);
 }
 
 export function clairveilError(code: ClairveilErrorCodeValue | string, message: string, details?: object): ClairveilError;

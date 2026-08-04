@@ -590,6 +590,11 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   });
   assert.equal(conflictingReconciliation.reconciliation.status, "ManualReview");
   assert.equal(conflictingReconciliation.reservation_action, "ManualReviewRequired");
+  assert.equal(conflictingReconciliation.reconciliation.error_code, "OPERATION_EVIDENCE_CONFLICT");
+  assert.deepEqual(
+    [...new Set(conflictingReconciliation.reconciliation.error_details.conflicts.map(conflict => conflict.field))],
+    ["tx_hash"]
+  );
   assert.equal(conflictingReconciliation.reservations[0].status, "ConfirmedSpent");
   assert.equal(conflictingReconciliation.reservations[0].metadata.operation_status, "ConflictSpent");
   const ambiguousReservation = await submittedReservationFor("PAYROLL-AMBIGUOUS");

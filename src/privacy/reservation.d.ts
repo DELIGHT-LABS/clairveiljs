@@ -552,6 +552,8 @@ export declare class NoteReservationManager {
   lookupKeyForNote(noteLike: object | FoundNote): Promise<Hex>;
   listActiveReservations(): Promise<NoteReservationRecord[]>;
   getReservation(reservationID: string): Promise<NoteReservationRecord>;
+  /** Reads an exact reservation set from one persistent-state snapshot. */
+  getReservations(reservationIDs?: readonly string[]): Promise<NoteReservationRecord[]>;
   reservationForNote(noteLike: object | FoundNote): Promise<NoteReservationRecord | null>;
   reservationStatusByNote(notes?: readonly (object | FoundNote)[]): Promise<Map<string, NoteReservationRecord | null>>;
   filterAvailableNotes<T extends object | FoundNote>(notes?: readonly T[]): Promise<T[]>;

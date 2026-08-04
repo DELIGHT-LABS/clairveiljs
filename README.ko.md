@@ -585,6 +585,8 @@ SDK는 1–16개의 서로 다른 commitment, 요청한 root/height 일치, 각 
 
 나중에 `reconcileSpentNotes(...)`를 호출할 때 tx/event evidence를 `operationSuccessEvidence` 또는 `successEvidence`에 넣으면 SDK가 expected evidence와 비교합니다. `operation_status: "Succeeded"`가 되려면 저장된 submitted `txHash` 또는 `txBytesHash`와 실제 tx identity가 일치해야 합니다. `signDocHash`는 보조 mismatch guard일 뿐 단독으로 chain 실행을 증명하지 못하며, `txResult: { code: 0 }`만 있는 경우도 identity가 없어 성공이 될 수 없습니다. Nullifier spent만으로는 충분하지 않습니다. 여러 input을 쓰는 operation은 같은 reconcile 호출에 연결된 모든 input의 spent evidence를 넣어야 합니다. 불완전한 evidence는 연결된 operation 전체를 `ManualReview`로 기록하고, tx identity나 expected output이 명시적으로 상충하면 `ConflictSpent`와 `operation_success_evidence_errors`를 기록합니다. 두 경우 모두 spent input은 `ConfirmedSpent`로 격리되며, 나중에 완전한 evidence가 들어오면 연결된 모든 reservation의 operation outcome을 원자적으로 통일합니다. Reservation을 note inventory lock으로만 쓴다면 `operationSuccessEvidenceRequired`를 켜지 말고, downstream operation DB에서 별도로 성공 판정을 하세요.
 
+Operation 단위 재시도 진단은 구조화되어 있습니다. `OPERATION_STATE_MIXED`는 `error.details.reservations`에 `{ reservation_id, status, operation_status? }`를 제공합니다. `OPERATION_EVIDENCE_CONFLICT`는 `error.details.conflicts`에 `reservation_id`, `tx_hash`·`commitment`·`digest`·`amount` 같은 표준 `field`, 정확한 `source_field`, `reason`, 가능한 경우 `expected`/`actual` 값을 제공합니다. 최초 reconcile에서 발견한 충돌은 반환 전에 먼저 안전하게 저장되며 같은 정보가 `metadata.operation_success_evidence_conflicts`에 남습니다. Reference Payroll에서 manual review가 필요한 경우에는 `reconciliation.error_code`와 `reconciliation.error_details`로도 반환됩니다.
+
 ## Handoff Conformance
 
 ClairveilJS는 Clairveil Go SDK conformance fixture를 replay하는 handoff test를 포함합니다. 기본 fixture 경로는 sibling Clairveil checkout입니다.

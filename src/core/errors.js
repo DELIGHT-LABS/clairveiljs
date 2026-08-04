@@ -13,7 +13,9 @@ export const ClairveilErrorCode = Object.freeze({
   PROVER_CANCELLED: "PROVER_CANCELLED",
   PROVER_REJECTED: "PROVER_REJECTED",
   DISCLOSURE_UNAVAILABLE: "DISCLOSURE_UNAVAILABLE",
-  TX_BROADCAST_FAILED: "TX_BROADCAST_FAILED"
+  TX_BROADCAST_FAILED: "TX_BROADCAST_FAILED",
+  OPERATION_STATE_MIXED: "OPERATION_STATE_MIXED",
+  OPERATION_EVIDENCE_CONFLICT: "OPERATION_EVIDENCE_CONFLICT"
 });
 
 export class ClairveilError extends Error {
@@ -22,6 +24,20 @@ export class ClairveilError extends Error {
     this.name = "ClairveilError";
     this.code = code;
     this.details = details;
+  }
+}
+
+export class OperationStateMixedError extends ClairveilError {
+  constructor(details, message = "operation reservations have mixed states") {
+    super(ClairveilErrorCode.OPERATION_STATE_MIXED, message, details);
+    this.name = "OperationStateMixedError";
+  }
+}
+
+export class OperationEvidenceConflictError extends ClairveilError {
+  constructor(details, message = "operation evidence conflicts with persisted evidence") {
+    super(ClairveilErrorCode.OPERATION_EVIDENCE_CONFLICT, message, details);
+    this.name = "OperationEvidenceConflictError";
   }
 }
 

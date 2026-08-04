@@ -1,5 +1,6 @@
 import { base64FromBytes, bytesFromBase64, hexFromBytes, randomBytes, sha256Hex, utf8Bytes } from "../core/browser-crypto.js";
 import { FIELD_MODULUS, bytesFromHex, bytesToBigIntBE, decodeShieldedAddress, unpackPoint } from "../core/crypto.js";
+import { ClairveilErrorCode, OperationStateMixedError } from "../core/errors.js";
 import {
   buildPreparedBatchTransferPayload,
   buildMsgBatchTransferFromPrepared,
@@ -973,8 +974,8 @@ function frozenReservationBatch(batch, reservations) {
 }
 
 async function payrollReservationSet(reservationManager, prepared, reservationBatch) {
-  if (!reservationManager || typeof reservationManager.getReservation !== "function" || typeof reservationManager.lookupKeyForNote !== "function") {
-    throw new Error("a NoteReservationManager with reservation lookup support is required");
+  if (!reservationManager || typeof reservationManager.getReservations !== "function" || typeof reservationManager.lookupKeyForNote !== "function") {
+    throw new Error("a NoteReservationManager with atomic reservation-set lookup support is required");
   }
   const normalized = expectedPayrollEvidenceForPreparedOperation(prepared);
   const reservationIDs = [...(reservationBatch?.reservation_ids || [])].map(value => text(value));
@@ -987,7 +988,15 @@ async function payrollReservationSet(reservationManager, prepared, reservationBa
   if (reservationIDs.length !== normalized.operation.input_notes.length) {
     throw new Error("one-proof payroll reservation batch input count does not match the prepared operation");
   }
-  const reservations = await Promise.all(reservationIDs.map(id => reservationManager.getReservation(id)));
+  const loadedReservations = await reservationManager.getReservations(reservationIDs);
+  const reservationsByID = new Map(loadedReservations.map(reservation => [text(reservation.reservation_id), reservation]));
+  if (loadedReservations.length !== reservationIDs.length || reservationsByID.size !== reservationIDs.length) {
+    throw new Error("one-proof payroll reservation batch lookup did not return the exact reservation set");
+  }
+  const reservations = reservationIDs.map(id => reservationsByID.get(id));
+  if (reservations.some(reservation => !reservation)) {
+    throw new Error("one-proof payroll reservation batch lookup did not return the exact reservation set");
+  }
   if (reservations.some(reservation => text(reservation.operation_id) !== normalized.operation.operation_id)) {
     throw new Error("one-proof payroll reservation does not belong to the prepared operation");
   }
@@ -1009,6 +1018,22 @@ async function payrollReservationSet(reservationManager, prepared, reservationBa
 
 function reservationStatusesAre(reservations, ...statuses) {
   return reservations.length > 0 && reservations.every(reservation => statuses.includes(String(reservation.status)));
+}
+
+function throwIfPayrollReservationStateMixed(reservations, message = "one-proof payroll reservations have mixed states") {
+  if (new Set(reservations.map(reservation => String(reservation.status))).size <= 1) return;
+  const states = reservations.map(reservation => ({
+    reservation_id: text(reservation.reservation_id),
+    status: text(reservation.status),
+    ...(reservation.metadata?.operation_status
+      ? { operation_status: text(reservation.metadata.operation_status) }
+      : {})
+  }));
+  const operationIDs = [...new Set(reservations.map(reservation => text(reservation.operation_id)).filter(Boolean))];
+  throw new OperationStateMixedError({
+    operation_id: operationIDs.length === 1 ? operationIDs[0] : "",
+    reservations: states
+  }, `${message}: ${states.map(state => `${state.reservation_id}=${state.status}`).join(", ")}`);
 }
 
 function payrollReservationMetadata(operationEvidence, metadata = {}) {
@@ -1135,6 +1160,7 @@ export async function markOneProofPayrollReservationProofReady(reservationManage
     return Object.freeze([...reservationSet.reservations]);
   }
   if (!reservationStatusesAre(reservationSet.reservations, "Proving")) {
+    throwIfPayrollReservationStateMixed(reservationSet.reservations);
     throw new Error("one-proof payroll reservations must all be Proving before they become ProofReady");
   }
   return Object.freeze(await reservationManager.markProofReady(reservationSet.reservationIDs, {
@@ -1178,6 +1204,7 @@ export async function markOneProofPayrollReservationBroadcastAttempting(reservat
   if (hasAttempt) return Object.freeze([...reservationSet.reservations]);
   if (!reservationStatusesAre(reservationSet.reservations, "ProofReady") ||
       reservationSet.reservations.some(reservation => reservation.broadcast_in_flight || Number(reservation.broadcast_attempt_count || 0) !== 0)) {
+    throwIfPayrollReservationStateMixed(reservationSet.reservations);
     throw new Error("one-proof payroll reservations require one clean ProofReady state before a broadcast attempt");
   }
   return Object.freeze(await reservationManager.markBroadcastAttempting(reservationSet.reservationIDs, {
@@ -1212,6 +1239,7 @@ export async function markOneProofPayrollReservationSubmitted(reservationManager
         reservation.broadcast_in_flight !== true ||
         Number(reservation.broadcast_attempt_count || 0) < 1
       )) {
+    throwIfPayrollReservationStateMixed(reservationSet.reservations);
     throw new Error("one-proof payroll reservations need a durable payload-bound broadcast attempt before submission");
   }
   return Object.freeze(await reservationManager.markSubmitted(reservationSet.reservationIDs, {
@@ -1953,12 +1981,35 @@ function manualReviewFromPersistedPayrollConflict(reconciliation, reservations) 
       ? reservation.metadata.operation_success_evidence_errors
       : []
   ))];
+  const conflictsByKey = new Map();
+  for (const conflict of reservations.flatMap(reservation =>
+    Array.isArray(reservation.metadata?.operation_success_evidence_conflicts)
+      ? reservation.metadata.operation_success_evidence_conflicts
+      : []
+  )) {
+    if (!conflict || typeof conflict !== "object" || Array.isArray(conflict)) continue;
+    const key = JSON.stringify([
+      text(conflict.reservation_id),
+      text(conflict.field),
+      text(conflict.source_field),
+      text(conflict.reason),
+      Object.prototype.hasOwnProperty.call(conflict, "expected") ? text(conflict.expected) : null,
+      Object.prototype.hasOwnProperty.call(conflict, "actual") ? text(conflict.actual) : null
+    ]);
+    if (!conflictsByKey.has(key)) conflictsByKey.set(key, conflict);
+  }
+  const conflicts = [...conflictsByKey.values()];
   const reason = errors.length
     ? `persisted payroll operation evidence conflict: ${errors.join(", ")}`
     : "persisted payroll operation evidence did not confirm the one-proof payroll operation";
   return Object.freeze({
     ...reconciliation,
     status: "ManualReview",
+    error_code: ClairveilErrorCode.OPERATION_EVIDENCE_CONFLICT,
+    error_details: Object.freeze({
+      operation_id: text(reservations[0]?.operation_id || reconciliation.operation_id),
+      conflicts: Object.freeze(conflicts.map(conflict => Object.freeze({ ...conflict })))
+    }),
     items: reconciliation.items.map(item => ({ ...item, status: "ManualReview", reason }))
   });
 }
@@ -1999,6 +2050,8 @@ export async function reconcileOneProofPayrollReservation({
   if (!manager || typeof manager.reconcileSpentNotes !== "function" || typeof manager.markReplanRequired !== "function" || typeof manager.markManualReview !== "function") {
     throw new Error("a NoteReservationManager with reconciliation support is required");
   }
+  const reservationSet = await payrollReservationSet(manager, prepared, batch);
+  throwIfPayrollReservationStateMixed(reservationSet.reservations);
   const reconciliation = await reconcileOneProofPayrollOperationEvidence({
     prepared,
     operation_evidence: evidence,
@@ -2010,7 +2063,6 @@ export async function reconcileOneProofPayrollReservation({
     observed_outputs,
     observedOutputs
   });
-  const reservationSet = await payrollReservationSet(manager, prepared, batch);
   if (reconciliation.status === "Pending") {
     return Object.freeze({
       reconciliation,
