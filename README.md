@@ -4,6 +4,8 @@ ClairveilJS is a JavaScript SDK for using Clairveil privacy features in browser 
 
 Korean documentation: [README.ko.md](./README.ko.md)
 
+Korean design documents: [System architecture](./docs/architecture.ko.md), [API mapping](./docs/api-mapping.ko.md), [Note reservation lifecycle](./docs/reservation-state-machine.ko.md)
+
 It uses CosmJS as the transport/signing foundation and provides Clairveil-specific privacy primitives and DApp-friendly APIs:
 
 - Telescope-generated `MsgDeposit`, `MsgTransfer`, `MsgBatchTransfer`, `MsgWithdraw`, and privacy query protobuf bindings
@@ -102,6 +104,8 @@ const clairveil = createClairveilClient({
 ```
 
 `prepareTransferBatch(...)` implements the Clairveil v0.2 `BatchTransfer` contract. It plans and atomically reserves 1–16 inputs, builds 1–32 ordered payment/change/padding outputs, calls one explicitly selected `proverAdapter.proveBatchTransfer(payload)` exactly once, and returns one Cosmos `MsgBatchTransfer`. It never expands the payments into multiple `MsgTransfer` proofs and does not perform automatic prover failover.
+
+One-proof batch transfer is currently **Cosmos-only**. An EVM-profile `prepareTransferBatch(...)` call is rejected; ClairveilJS does not expose an `IPrivacy.batchTransfer` ABI or an EVM batch fallback. Do not confuse this flow with the ordinary EVM `IPrivacy.transfer` path.
 
 The ordinary `prepareTransfer(...)` API remains the supported native 2×2 `MsgTransfer` path; native 2×2 is not deprecated. Its two input witnesses are fetched together from one verified exact-root `commitment_paths_at_root` snapshot. Clairveil's older multi-message `transfer-batch` orchestration remains a separate protocol meaning and is not aliased to `prepareTransferBatch(...)`.
 

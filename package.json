@@ -11,6 +11,7 @@
   "files": [
     "src",
     "examples",
+    "docs",
     "proto",
     "tools",
     "test/e2e-local.e2e.js",
@@ -40,6 +41,8 @@
     "selective-disclosure"
   ],
   "scripts": {
+    "docs:diagram:architecture": "node tools/generate-architecture-diagram.js",
+    "docs:diagram:reservation": "node tools/generate-reservation-state-diagram.js",
     "codegen:proto": "telescope transpile --config ./telescope.config.json && node tools/patch-generated-helpers.js codegen/generated/helpers.ts codegen/generated/varint.ts && tsc -p tsconfig.codegen.json && node tools/patch-generated-helpers.js src/generated/helpers.js",
     "check:codegen": "node tools/patch-generated-helpers.js --check codegen/generated/helpers.ts codegen/generated/varint.ts src/generated/helpers.js",
     "check:generated": "find src/generated -name '*.js' -exec node --check {} \\;",

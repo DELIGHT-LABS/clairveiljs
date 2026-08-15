@@ -4,6 +4,12 @@ ClairveilJS는 Clairveil privacy 기능을 브라우저와 Node.js 환경에서 
 
 English documentation: [README.md](./README.md)
 
+시스템 아키텍처: [docs/architecture.ko.md](./docs/architecture.ko.md)
+
+API 매핑: [docs/api-mapping.ko.md](./docs/api-mapping.ko.md)
+
+Note reservation 상태 전이: [docs/reservation-state-machine.ko.md](./docs/reservation-state-machine.ko.md)
+
 이 패키지는 Clairveil 전용 privacy primitive와 DApp 친화적인 API를 제공합니다.
 
 - Telescope로 생성한 `MsgDeposit`, `MsgTransfer`, `MsgBatchTransfer`, `MsgWithdraw`, privacy query protobuf binding
@@ -93,6 +99,8 @@ const clairveil = createClairveilClient({
 ```
 
 `prepareTransferBatch(...)`는 Clairveil v0.2 `BatchTransfer` 계약을 구현합니다. 입력 1~16개를 계획하고 원자적으로 예약하며, 순서가 고정된 payment/change/padding 출력 1~32개를 만들고, 명시적으로 선택한 `proverAdapter.proveBatchTransfer(payload)`를 정확히 한 번 호출해 Cosmos `MsgBatchTransfer` 한 건을 반환합니다. Payment를 여러 `MsgTransfer` proof로 확장하지 않고 prover 자동 failover도 하지 않습니다.
+
+현재 One-Proof Batch Transfer는 **Cosmos 전용**입니다. EVM profile의 `prepareTransferBatch(...)`는 요청을 거부하며, ClairveilJS는 `IPrivacy.batchTransfer` ABI 또는 EVM batch fallback을 제공하지 않습니다. EVM의 일반 `IPrivacy.transfer` 경로와 혼동하면 안 됩니다.
 
 일반 `prepareTransfer(...)`는 공식 native 2×2 `MsgTransfer` 경로로 계속 지원되며 native 2×2는 deprecated가 아닙니다. 두 입력 witness는 검증된 하나의 exact-root `commitment_paths_at_root` snapshot에서 함께 가져옵니다. Clairveil의 기존 multi-message `transfer-batch` orchestration은 별도 protocol 의미를 유지하고 `prepareTransferBatch(...)`의 alias가 아닙니다.
 
