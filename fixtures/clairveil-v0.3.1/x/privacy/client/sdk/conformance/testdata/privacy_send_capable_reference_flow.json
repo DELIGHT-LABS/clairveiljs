@@ -1,0 +1,88 @@
+{
+  "schema_version": "v2",
+  "phase": "phase-a-send-capable",
+  "topology": "remote-sidecar-first",
+  "service": {
+    "service_name": "clairveil-proverd",
+    "default_listen_address": "127.0.0.1:8080",
+    "health_path": "/healthz",
+    "readiness_path": "/readyz",
+    "transfer_path": "/v1/prover/transfer",
+    "withdraw_path": "/v1/prover/withdraw",
+    "max_request_bytes": 8388608
+  },
+  "transfer": {
+    "request_version": "v2",
+    "response_version": "v2",
+    "creator": "clair1qyqszqgpqyqszqgpqyqszqgpqyqszqgpq6pe73",
+    "payload_hash": "b92434782255b2976ecc6e36fdc22b76f10462bf1abc2f8a59274718f3903042",
+    "proof_payload_hash": "b92434782255b2976ecc6e36fdc22b76f10462bf1abc2f8a59274718f3903042",
+    "msg_creator": "clair1qyqszqgpqyqszqgpqyqszqgpqyqszqgpq6pe73",
+    "user_disclosure_mode": "recipient-encrypted",
+    "user_privacy_policy": "amount-from-to",
+    "user_disclosure": {
+      "plane": "user",
+      "policy": "amount-from-to",
+      "output_index": 0,
+      "commitment_hex": "21a894b9316c90cc61728074b13c9c9065881a8ae457a04a12d258e7971b7b34",
+      "digest_hex": "05b83541a45119a4fea6fbf873209cd223ad43db2ea1d656f169eaab584e9fe4",
+      "verified": true,
+      "disclosed_fields": [
+        "amount",
+        "from_shielded_address",
+        "to_shielded_address"
+      ],
+      "amount": "7",
+      "asset_id_hex": "238d5f23e4d918d40b0982ce3aef16a75c4d1760193d1c3b30b9f5df681903ca",
+      "from_shielded_address": "clairs1gpcgt6y20tmtywltcz7cqsfcn6y26dy6ky97za29ac7perad2chwek4r6nv80ufdkyavxwzc8xda7q2ge5y773hp9xnhf9c0arenutc2vvkkw",
+      "to_shielded_address": "clairs1ywk03azf5gd9q3f2l2j544eyzdmay59djqzc830sd0xsep57hq9vap4aw38tmn5kzq2mp24gpdvxecngufg68s4rt0gdzx4uqs6jdfqluyuty"
+    },
+    "audit_disclosure": {
+      "plane": "audit",
+      "policy": "amount-from-to",
+      "output_index": 0,
+      "commitment_hex": "21a894b9316c90cc61728074b13c9c9065881a8ae457a04a12d258e7971b7b34",
+      "digest_hex": "29bc2dd8a0a1163b83046860b472a69212598be44393414256f260e5e6d9dd15",
+      "verified": true,
+      "disclosed_fields": [
+        "amount",
+        "from_shielded_address",
+        "to_shielded_address"
+      ],
+      "amount": "7",
+      "asset_id_hex": "238d5f23e4d918d40b0982ce3aef16a75c4d1760193d1c3b30b9f5df681903ca",
+      "from_shielded_address": "clairs1gpcgt6y20tmtywltcz7cqsfcn6y26dy6ky97za29ac7perad2chwek4r6nv80ufdkyavxwzc8xda7q2ge5y773hp9xnhf9c0arenutc2vvkkw",
+      "to_shielded_address": "clairs1ywk03azf5gd9q3f2l2j544eyzdmay59djqzc830sd0xsep57hq9vap4aw38tmn5kzq2mp24gpdvxecngufg68s4rt0gdzx4uqs6jdfqluyuty"
+    },
+    "self_view_disclosure": {
+      "plane": "self-view",
+      "policy": "amount-from-to",
+      "output_index": 0,
+      "commitment_hex": "21a894b9316c90cc61728074b13c9c9065881a8ae457a04a12d258e7971b7b34",
+      "digest_hex": "29bc2dd8a0a1163b83046860b472a69212598be44393414256f260e5e6d9dd15",
+      "verified": true,
+      "disclosed_fields": [
+        "amount",
+        "from_shielded_address",
+        "to_shielded_address"
+      ],
+      "amount": "7",
+      "asset_id_hex": "238d5f23e4d918d40b0982ce3aef16a75c4d1760193d1c3b30b9f5df681903ca",
+      "from_shielded_address": "clairs1gpcgt6y20tmtywltcz7cqsfcn6y26dy6ky97za29ac7perad2chwek4r6nv80ufdkyavxwzc8xda7q2ge5y773hp9xnhf9c0arenutc2vvkkw",
+      "to_shielded_address": "clairs1ywk03azf5gd9q3f2l2j544eyzdmay59djqzc830sd0xsep57hq9vap4aw38tmn5kzq2mp24gpdvxecngufg68s4rt0gdzx4uqs6jdfqluyuty"
+    }
+  },
+  "withdraw": {
+    "validation_now_unix": 4102444800,
+    "request_version": "v2",
+    "response_version": "v2",
+    "payload_hash": "b2abf5f0f7af8cf3eb2c6e4a9946807d78660283e12dde9338753f4a3d84808a",
+    "proof_payload_hash": "b2abf5f0f7af8cf3eb2c6e4a9946807d78660283e12dde9338753f4a3d84808a",
+    "final_payload_hash": "972f31750697a211cdcd8966166b3ecfa2952e6de209167e33fd179a724bd45a",
+    "amount": "10uclair",
+    "asset_denom": "uclair",
+    "recipient": "clair1qgpqyqszqgpqyqszqgpqyqszqgpqyqsz378u48",
+    "chain_id": "clairveil-local-1",
+    "expires_at_unix": 4102448400
+  }
+}

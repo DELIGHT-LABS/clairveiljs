@@ -597,10 +597,14 @@ Operation 단위 재시도 진단은 구조화되어 있습니다. `OPERATION_ST
 
 ## Handoff Conformance
 
-ClairveilJS는 Clairveil Go SDK conformance fixture를 replay하는 handoff test를 포함합니다. 기본 fixture 경로는 sibling Clairveil checkout입니다.
+ClairveilJS는 Clairveil `v0.3.1` Go SDK conformance fixture와 wallet-contract
+JSON Schema의 immutable snapshot을 포함합니다. npm package에도 이 자료가
+포함되므로 conformance helper 사용자와 테스트 실행자는 Clairveil source
+checkout을 별도로 준비할 필요가 없습니다. 기본 fixture 경로는 다음과
+같습니다.
 
 ```bash
-../clairveil/x/privacy/client/sdk/conformance/testdata
+fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata
 ```
 
 로컬 개발에서는 다음을 실행하세요.
@@ -609,7 +613,8 @@ ClairveilJS는 Clairveil Go SDK conformance fixture를 replay하는 handoff test
 npm run test:conformance
 ```
 
-fixture directory가 없으면 local command는 명확한 메시지와 함께 skip됩니다.
+Maintainer가 다른 fixture를 의도적으로 비교할 때만
+`CLAIRVEIL_CONFORMANCE_FIXTURE_DIR=/path/to/testdata`로 경로를 덮어씁니다.
 
 Release handoff 또는 CI에서는 strict command를 사용하세요. fixture가 없으면 실패합니다.
 
@@ -617,10 +622,10 @@ Release handoff 또는 CI에서는 strict command를 사용하세요. fixture가
 npm run test:conformance:required
 ```
 
-`npm run verify:clairveil-source`는 sibling Clairveil checkout이 정확히
-`v0.3.1`인지 확인하고 복사된 Clairveil proto 4개를 byte-for-byte로
-검증합니다. 기본 sibling 경로가 아니면
-`CLAIRVEIL_SOURCE_DIR=/path/to/clairveil`을 지정하세요.
+`npm run verify:clairveil-source`라는 release script 이름은 호환성을 위해
+유지합니다. 검증 자체는 self-contained이며 고정 release/commit metadata와
+protobuf 4개, fixture 12개, JSON Schema 1개의 SHA-256 digest를 확인합니다.
+`CLAIRVEIL_SOURCE_DIR`나 별도 source checkout을 사용하지 않습니다.
 
 `prepublishOnly`는 `verify:release:integration`을 실행합니다. Package 검사,
 required conformance fixture, 필수 5-shape localnet one-proof matrix,

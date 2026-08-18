@@ -6393,6 +6393,7 @@ test("package metadata is ready for public npm publishing", () => {
   assert.ok(packageJson.bugs?.url?.includes("issues"));
   assert.ok(packageJson.files.includes("src"));
   assert.ok(packageJson.files.includes("proto"));
+  assert.ok(packageJson.files.includes("fixtures"));
   assert.ok(packageJson.files.includes("README.md"));
   assert.ok(packageJson.files.includes("README.ko.md"));
   assert.ok(packageJson.files.includes("LICENSE"));

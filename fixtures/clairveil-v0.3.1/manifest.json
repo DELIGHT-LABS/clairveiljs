@@ -1,0 +1,112 @@
+{
+  "manifest_version": 1,
+  "source": {
+    "repository": "https://github.com/DELIGHT-LABS/clairveil",
+    "release": "v0.3.1",
+    "commit": "1a6ce6a0a0e10b765c025072b44c2364e9711b48"
+  },
+  "files": [
+    {
+      "kind": "protobuf",
+      "local_path": "proto/clairveil/privacy/v1/batch_feasibility.proto",
+      "upstream_path": "proto/clairveil/privacy/v1/batch_feasibility.proto",
+      "sha256": "e277b7436f0d23c8a38902c7ffba6135430d40d33ecb448a1af4d82b0226cee7"
+    },
+    {
+      "kind": "protobuf",
+      "local_path": "proto/clairveil/privacy/v1/genesis.proto",
+      "upstream_path": "proto/clairveil/privacy/v1/genesis.proto",
+      "sha256": "aba42cd163f319c3213bb728e8a4db44eba690c2fc9d40fffaddb644690e7861"
+    },
+    {
+      "kind": "protobuf",
+      "local_path": "proto/clairveil/privacy/v1/query.proto",
+      "upstream_path": "proto/clairveil/privacy/v1/query.proto",
+      "sha256": "c1a577560432add4057040bb920233a4a030bcdf380d6f4a23d6e02ac4efba05"
+    },
+    {
+      "kind": "protobuf",
+      "local_path": "proto/clairveil/privacy/v1/tx.proto",
+      "upstream_path": "proto/clairveil/privacy/v1/tx.proto",
+      "sha256": "61e7c9479355ac6a0f6e50e9d9ce46bbf0765b88847d3b43a62fb6c55ca378e3"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_wallet_golden_vectors.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_wallet_golden_vectors.json",
+      "sha256": "86fd7cac738dbae56f0f2471d4975b8dbc0a9e1f68db3bbd0557199694ca4d6e"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_browser_signer_provider_contract.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_browser_signer_provider_contract.json",
+      "sha256": "cad681108e1f2341e394c4a693d25d4925caa2bcde25fae23d4e1e731d8b9f4d"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_wallet_readonly_reference_bundle.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_wallet_readonly_reference_bundle.json",
+      "sha256": "6fd6e1dac6a5afe2571418af6e31e289b43acf7ab1f2f4742fcd7f0bc71eac81"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_prover_example_bundle.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_prover_example_bundle.json",
+      "sha256": "d98ceff00c6833e4033c87c00de0dda8d0c04c58c4a8cbd044ed38907804c530"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_prover_http_api_contract.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_prover_http_api_contract.json",
+      "sha256": "9878df6c6503b109fa8119b439b277db302f5a58cc08520fd4dc4ae7d78cef13"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_send_capable_reference_flow.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_send_capable_reference_flow.json",
+      "sha256": "8515e3fe2397e009c2f690c2a1e10c41c0b1b6d354196c821e96724bbcd623ec"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_batch_joinsplit_v1_contract.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_batch_joinsplit_v1_contract.json",
+      "sha256": "75fbb3cc1f863eb9184a98d0c283eb913bf218caf2892b7de89c0ca9cca0a5a6"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_note_v1_contract.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_note_v1_contract.json",
+      "sha256": "e642500262b4e2890db70913f5dcdff61a278dee28b9ee2620c92c369ae9420f"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_disclosure_blinding_v1_contract.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_disclosure_blinding_v1_contract.json",
+      "sha256": "6811808e6f3c4023b58a170d0b1b657ef96042779d9d723cce858186212de8ec"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_batch_transfer_v1_contract.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_batch_transfer_v1_contract.json",
+      "sha256": "a9d9c2527a17f32004eae8da473c77e2bb8c73ade19c4535c9f70450aa3bcefa"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_note_reservation_contract.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_note_reservation_contract.json",
+      "sha256": "3ff15bb9688abf1b2d89a9ee9722b12ed12f52d0ba793ea0d5503cbf28ec3c83"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_relay_withdraw_contract.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_relay_withdraw_contract.json",
+      "sha256": "e4727cea248748b91a668154be07038ead5035c188d3d2a33944a600853e7d0b"
+    },
+    {
+      "kind": "json_schema",
+      "local_path": "fixtures/clairveil-v0.3.1/docs/schemas/clairveil-js-wallet-contract.schema.json",
+      "upstream_path": "docs/schemas/clairveil-js-wallet-contract.schema.json",
+      "sha256": "38a574f6781614ec158aa3a98a4374c287edd674ea7f5502b8dc2aa345c32234"
+    }
+  ]
+}

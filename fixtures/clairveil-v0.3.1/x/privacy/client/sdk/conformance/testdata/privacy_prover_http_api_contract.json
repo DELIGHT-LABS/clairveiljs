@@ -1,0 +1,31 @@
+{
+  "schema_version": "v2",
+  "content_type": "application/json",
+  "transfer_route": {
+    "method": "POST",
+    "path": "/v1/prover/transfer",
+    "request_version": "v2",
+    "response_version": "v2"
+  },
+  "withdraw_route": {
+    "method": "POST",
+    "path": "/v1/prover/withdraw",
+    "request_version": "v2",
+    "response_version": "v2"
+  },
+  "error_response": {
+    "version": "v1",
+    "codes": [
+      "invalid_request",
+      "method_not_allowed",
+      "not_found",
+      "unauthorized",
+      "unavailable",
+      "proof_failed",
+      "busy"
+    ],
+    "retryable_codes": [
+      "busy"
+    ]
+  }
+}

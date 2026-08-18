@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "active_reservation_statuses": [
+    "Reserved",
+    "Proving",
+    "ProofReady",
+    "Submitted",
+    "Unknown",
+    "ManualReview"
+  ],
+  "allowed_transitions": [
+    ["Discovered", "Available"],
+    ["Discovered", "Failed"],
+    ["Available", "Reserved"],
+    ["Reserved", "Proving"],
+    ["Reserved", "Released"],
+    ["Reserved", "ReplanRequired"],
+    ["Reserved", "ManualReview"],
+    ["Proving", "ProofReady"],
+    ["Proving", "Reserved"],
+    ["Proving", "ReplanRequired"],
+    ["Proving", "ManualReview"],
+    ["ProofReady", "Submitted"],
+    ["ProofReady", "Unknown"],
+    ["ProofReady", "ConfirmedSpent"],
+    ["ProofReady", "ReplanRequired"],
+    ["ProofReady", "ManualReview"],
+    ["Submitted", "ConfirmedSpent"],
+    ["Submitted", "Failed"],
+    ["Submitted", "Unknown"],
+    ["Submitted", "ReplanRequired"],
+    ["Submitted", "ManualReview"],
+    ["Unknown", "ConfirmedSpent"],
+    ["Unknown", "Failed"],
+    ["Unknown", "ReplanRequired"],
+    ["Unknown", "ManualReview"],
+    ["ManualReview", "ConfirmedSpent"],
+    ["ManualReview", "Failed"],
+    ["ManualReview", "Released"],
+    ["ManualReview", "ReplanRequired"],
+    ["Failed", "ReplanRequired"],
+    ["Released", "Available"],
+    ["ReplanRequired", "Reserved"],
+    ["ReplanRequired", "Failed"],
+    ["ReplanRequired", "ManualReview"]
+  ],
+  "rejected_transitions": [
+    ["Submitted", "Available"],
+    ["Proving", "Released"],
+    ["ProofReady", "Available"],
+    ["ProofReady", "Released"],
+    ["Unknown", "Available"],
+    ["Unknown", "Submitted"],
+    ["ManualReview", "Available"]
+  ],
+  "active_unique_key": ["owner_key_id", "nullifier_lookup_key"],
+  "batch_reserve": {
+    "atomic": true,
+    "error_policy": "if any reservation or operation in the batch is invalid, no reservation or operation is created",
+    "lock_requirement": "production stores must select and reserve notes in one database transaction or equivalent single-writer critical section"
+  },
+  "nullifier_lookup_key": {
+    "algorithm": "HMAC-SHA256",
+    "encoding": "hex",
+    "key_version_field": "nullifier_lookup_key_id",
+    "test_vectors": [
+      {
+        "index_key_utf8": "index-key-v1",
+        "nullifier_utf8": "nullifier-0001",
+        "lookup_key_hex": "be314f12370f9e73eac4d34dab5efbfded54b813389666e6e6e547762b61159a"
+      }
+    ]
+  },
+  "lease_transition_preconditions": {
+    "token_required_for": [
+      ["Reserved", "Proving"],
+      ["Proving", "ProofReady"],
+      ["ProofReady", "Submitted"],
+      ["ProofReady", "Unknown"]
+    ],
+    "fields": ["lease_owner", "lease_token", "lease_until", "last_heartbeat_at"],
+    "policy": "only the current non-expired lease token may advance worker-owned states"
+  },
+  "success_evidence_required": [
+    "tx_hash_or_tx_result",
+    "expected_output_commitment",
+    "expected_disclosure_digest",
+    "expected_recipient_hash",
+    "expected_amount_hash",
+    "expected_denom",
+    "batch_item_index",
+    "batch_item_index_known"
+  ],
+  "batch_item_index_policy": "PayrollOperation must set batch_item_index_known=true when batch_item_index is an expected success-evidence value. Payroll and batch-transfer operations set it true; direct integrations may leave it false only when batch item position is not part of the success predicate.",
+  "operation_success_examples": [
+    {
+      "name": "matching evidence marks operation succeeded",
+      "nullifier_spent": true,
+      "evidence_matches_expected_values": true,
+      "note_status": "ConfirmedSpent",
+      "operation_status": "Succeeded"
+    },
+    {
+      "name": "spent nullifier without matching operation evidence is conflict",
+      "nullifier_spent": true,
+      "evidence_matches_expected_values": false,
+      "note_status": "ConfirmedSpent",
+      "operation_status": "ConflictSpent"
+    }
+  ]
+}

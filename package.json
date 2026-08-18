@@ -13,6 +13,7 @@
     "examples",
     "docs",
     "proto",
+    "fixtures",
     "tools",
     "test/e2e-local.e2e.js",
     "telescope.config.json",

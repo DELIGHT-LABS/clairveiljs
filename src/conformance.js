@@ -3,9 +3,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const conformanceFixtureRelativePath = "x/privacy/client/sdk/conformance/testdata";
-export const defaultConformanceFixtureDir = `../clairveil/${conformanceFixtureRelativePath}`;
 export const supportedClairveilRelease = "v0.3.1";
 export const supportedClairveilCommit = "1a6ce6a0a0e10b765c025072b44c2364e9711b48";
+export const defaultConformanceFixtureDir = `fixtures/clairveil-${supportedClairveilRelease}/${conformanceFixtureRelativePath}`;
 
 export const batchTransferConformanceFixtureName = "privacy_batch_transfer_v1_contract.json";
 
@@ -33,7 +33,6 @@ function resolveConformanceFixturePath(fixtureDir, name) {
 export function suggestClairveilConformanceFixtureDirs({ cwd = process.cwd() } = {}) {
   return [
     resolve(packageRoot, defaultConformanceFixtureDir),
-    resolve(packageRoot, conformanceFixtureRelativePath),
     resolve(cwd, defaultConformanceFixtureDir),
     resolve(cwd, conformanceFixtureRelativePath)
   ];
@@ -55,7 +54,7 @@ export function clairveilConformanceFixturesAvailable(options = {}) {
 export function clairveilConformanceFixtureSkipReason(options = {}) {
   const fixtureDir = resolveClairveilConformanceFixtureDir(options);
   if (existsSync(fixtureDir)) return "";
-  return `Clairveil conformance fixtures not found at ${fixtureDir}. Set CLAIRVEIL_CONFORMANCE_FIXTURE_DIR to the Clairveil fixture testdata directory.`;
+  return `Bundled Clairveil ${supportedClairveilRelease} conformance fixtures not found at ${fixtureDir}. Set CLAIRVEIL_CONFORMANCE_FIXTURE_DIR only when intentionally testing another fixture directory.`;
 }
 
 export function readClairveilConformanceFixture(name, options = {}) {

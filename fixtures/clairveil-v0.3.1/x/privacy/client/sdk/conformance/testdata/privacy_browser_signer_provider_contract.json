@@ -1,0 +1,262 @@
+{
+  "schema_version": "v2",
+  "root_signer": {
+    "get_account_response": {
+      "transparent_address": "clair1lm4z6g0p7n0jq3m2t0y8m7s8u6x5w4v3c2r9q8",
+      "transparent_pubkey_hex": "0123456789abcdef"
+    },
+    "sign_request": {
+      "method": "sign_privacy_root",
+      "message_hex": "636c6169727665696c2d726f6f742d76310a616464726573733a636c616972316c6d347a36673070376e306a71336d32743079386d37733875367835773476336332723971380a7075626b65793a30313233343536373839616263646566"
+    },
+    "sign_response": {
+      "signature_hex": "73656e6465722d726f6f742d7369676e61747572652d7631"
+    },
+    "expected_derived": {
+      "root_seed_hex": "0b6c625559e0a67f6b3527c0fe826e29d113c7e20065a5ed8ccf1acf08a5234c",
+      "shielded_address": "clairs19x5u4mf4l4zqcpvr7d809fh4tjy5j50p2mwgky0nj38jpqpj7svndu3hqshu5e3s8w6pea5p30xek5p9flxjf7f44xh7cnfrlsd84pc7upgh3",
+      "disclosure_pubkey_hex": "59f491e8eee937c486cd81f599b8756ebcfa9b5af99e24b7629bf91c2dab691f"
+    }
+  },
+  "wallet_info_provider": {
+    "tree_state_response": {
+      "root_hex": "0000000000000000000000000000000000000000000000000000000000000005",
+      "leaf_count": 7,
+      "depth": 32,
+      "initialized": true,
+      "max_leaves": 4294967296,
+      "remaining_leaves": 4294967289
+    },
+    "commitment_info_request": {
+      "commitment_hex": "2a1e6d82d85daa4492b715757f758a1902fe07cddfcf52ac47aee47b489a58b4"
+    },
+    "commitment_info_response": {
+      "found": true,
+      "leaf_index": 9
+    },
+    "disclosure_config_response": {
+      "payload_version": "privacy-fixed-v1",
+      "audit_disclosure_required": true,
+      "supported_user_policies": [
+        "all-private",
+        "amount",
+        "to",
+        "amount-to",
+        "from",
+        "amount-from",
+        "from-to",
+        "amount-from-to"
+      ],
+      "supported_user_modes": [
+        "none",
+        "public",
+        "recipient-encrypted"
+      ]
+    },
+    "circuit_config_response": {
+      "schema_version": "v1",
+      "active_set_id": "privacy-note-v1",
+      "curve": "BN254",
+      "manifest_file": "",
+      "manifest_available": false,
+      "checksum_source": "consensus",
+      "generated_at": "",
+      "artifacts": [
+        {
+          "circuit_id": "deposit",
+          "artifact_type": "verifying_key",
+          "filename": "",
+          "checksum_env": "",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "circuit_id": "spend",
+          "artifact_type": "verifying_key",
+          "filename": "",
+          "checksum_env": "",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        {
+          "circuit_id": "joinsplit",
+          "artifact_type": "verifying_key",
+          "filename": "",
+          "checksum_env": "",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        {
+          "circuit_id": "batch-joinsplit-16x32-v1",
+          "artifact_type": "verifying_key",
+          "filename": "",
+          "checksum_env": "",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "circuit_set_identity": {
+        "schema_version": "v1",
+        "circuit_set_id": "privacy-note-v1",
+        "curve": "BN254",
+        "circuits": [
+          {
+            "circuit_id": "deposit",
+            "verifying_key_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "public_input_schema_sha256": "c3231fb5ae62539d2e4baeb78aa4be8a4c44e3cd8fa325ba60f13b7f563d5a1e"
+          },
+          {
+            "circuit_id": "spend",
+            "verifying_key_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "public_input_schema_sha256": "d0a033aa2f7b6e098873307a815545ee3e83d974026c0e52bf39a038e08f4872"
+          },
+          {
+            "circuit_id": "joinsplit",
+            "verifying_key_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "public_input_schema_sha256": "4946e23db34529c6fce0a95ce69f6df08563a305ddcc70c7b6b786471e03aa82"
+          },
+          {
+            "circuit_id": "batch-joinsplit-16x32-v1",
+            "verifying_key_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "public_input_schema_sha256": "5606327d69dcb06c00811f2135291d39a2ea1cedf554f114f7eb4a178098d333"
+          }
+        ]
+      }
+    }
+  },
+  "scan_provider": {
+    "latest_block_height_response": {
+      "height": 42
+    },
+    "scan_events_request": {
+      "after_height": 0,
+      "after_sequence": 0,
+      "limit": 50,
+      "event_types": [
+        "deposit",
+        "shielded_transfer"
+      ]
+    },
+    "scan_events_response": {
+      "events": [
+        {
+          "sequence": 1,
+          "height": 42,
+          "tx_hash_hex": "AABBCC",
+          "event_type": "deposit",
+          "outputs": [
+            {
+              "output_index": 0,
+              "commitment_hex": "2a1e6d82d85daa4492b715757f758a1902fe07cddfcf52ac47aee47b489a58b4",
+              "encrypted_note_hex": "91450cd503ada8484ee117467a50870300010100b608412e815010d26c2dee87150e86ea2168640d4592ce01e141cc305a136502e95aba210c817019197657acaa77cc79bac61df083f97dfd445ee9e8ad305aedddec773072d77020b17c015ca4986c1da2856902ee2059f895ca126c708c62f6ab8d06fe49e82522966c858ae290fff6fa758cf2761ff518165b83ca11edb3500034d0eca2dce3a4882746f020b137a1a3599d7c35d2775f90401fe8747fde87f00a044867d56f2f7e5e9c4a74dfedeaf99dc4ca6bb9873b1236e2d59ff468f6272011d00ebf6d63a2081fbad910ad1f9548ff3d30232ab7d218d41af17148e8b59eba3b8a9d35e9c1ff58ab6c0cecd1476f5c470f819606fad6050f2ea1a5ac96f47934cac2f0571f35aff2e6cf956d523bb0a19e66f956f95cf23f0c30696e25885112af8a5d616469e74fdeccd59558fb5c4b354dbc9b1c71bf9a7acb83289d8b7be9edea81ab36f089e94468756e7154870e17a16dc41c7fcb599b24ca76cdd67ea2a00d24aa760d0acf3d3fdae36f4208395821afa555f8",
+              "leaf_index_found": true
+            }
+          ],
+          "nullifier_hexes": []
+        },
+        {
+          "sequence": 2,
+          "height": 42,
+          "tx_hash_hex": "DDEEFF",
+          "event_type": "shielded_transfer",
+          "outputs": [
+            {
+              "output_index": 0,
+              "commitment_hex": "10b62825eac8a645278d300ec077885a123170460e9ca1048f4521a3f6fb6cb2",
+              "cipher_text_hex": "c0ffee",
+              "view_tag_hex": "13eb",
+              "leaf_index_found": true,
+              "leaf_index": 1
+            },
+            {
+              "output_index": 1,
+              "commitment_hex": "211dee8f0fe0b284c4c953a66a5facd9bb055f101d8dc94c0f55ae762093314b",
+              "cipher_text_hex": "decafbad",
+              "view_tag_hex": "0636",
+              "leaf_index_found": true,
+              "leaf_index": 2
+            }
+          ],
+          "nullifier_hexes": [
+            "10c686f41406a64f3132cbb11c2ce925443e220e0c48766538988500da1312eb",
+            "0000000000000000000000000000000000000000000000000000000000000001"
+          ]
+        }
+      ],
+      "next_height": 42,
+      "next_sequence": 2,
+      "limit": 50,
+      "has_more": false,
+      "scan_format_version": 1,
+      "view_tag_version": 1
+    },
+    "search_privacy_events_request": {
+      "after_height": 0,
+      "page": 1,
+      "limit": 50,
+      "event_types": [
+        "deposit",
+        "shielded_transfer"
+      ]
+    },
+    "search_privacy_events_response": {
+      "events": [
+        {
+          "sequence": 1,
+          "height": 42,
+          "tx_hash_hex": "AABBCC",
+          "event_type": "deposit",
+          "attributes": [
+            {
+              "key": "commitment",
+              "value": "2a1e6d82d85daa4492b715757f758a1902fe07cddfcf52ac47aee47b489a58b4"
+            },
+            {
+              "key": "encrypted_note",
+              "value": "91450cd503ada8484ee117467a50870300010100b608412e815010d26c2dee87150e86ea2168640d4592ce01e141cc305a136502e95aba210c817019197657acaa77cc79bac61df083f97dfd445ee9e8ad305aedddec773072d77020b17c015ca4986c1da2856902ee2059f895ca126c708c62f6ab8d06fe49e82522966c858ae290fff6fa758cf2761ff518165b83ca11edb3500034d0eca2dce3a4882746f020b137a1a3599d7c35d2775f90401fe8747fde87f00a044867d56f2f7e5e9c4a74dfedeaf99dc4ca6bb9873b1236e2d59ff468f6272011d00ebf6d63a2081fbad910ad1f9548ff3d30232ab7d218d41af17148e8b59eba3b8a9d35e9c1ff58ab6c0cecd1476f5c470f819606fad6050f2ea1a5ac96f47934cac2f0571f35aff2e6cf956d523bb0a19e66f956f95cf23f0c30696e25885112af8a5d616469e74fdeccd59558fb5c4b354dbc9b1c71bf9a7acb83289d8b7be9edea81ab36f089e94468756e7154870e17a16dc41c7fcb599b24ca76cdd67ea2a00d24aa760d0acf3d3fdae36f4208395821afa555f8"
+            }
+          ]
+        }
+      ],
+      "page": 1,
+      "limit": 50,
+      "has_more": false
+    },
+    "check_nullifiers_request": {
+      "nullifiers": [
+        "10c686f41406a64f3132cbb11c2ce925443e220e0c48766538988500da1312eb"
+      ]
+    },
+    "check_nullifiers_response": {
+      "statuses": [
+        {
+          "nullifier": "10c686f41406a64f3132cbb11c2ce925443e220e0c48766538988500da1312eb",
+          "used": false
+        }
+      ]
+    },
+    "check_nullifier_request": {
+      "nullifier_hex": "10c686f41406a64f3132cbb11c2ce925443e220e0c48766538988500da1312eb"
+    },
+    "check_nullifier_response": {
+      "used": false
+    }
+  },
+  "send_provider": {
+    "audit_config_response": {
+      "audit_master_pubkey_hex": "8cb0ef883bce364e0d946867ebd7a7f84ec153eeb28e5973ffe9381ec8d7940a",
+      "audit_key_id": "master",
+      "audit_key_epoch": "1"
+    },
+    "merkle_path_request": {
+      "commitment_hex": "2a1e6d82d85daa4492b715757f758a1902fe07cddfcf52ac47aee47b489a58b4"
+    },
+    "merkle_path_response": {
+      "root_hex": "0000000000000000000000000000000000000000000000000000000000000005",
+      "path": [
+        "01",
+        "02"
+      ],
+      "path_helper": [
+        0,
+        1
+      ]
+    }
+  }
+}

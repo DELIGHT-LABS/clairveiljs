@@ -171,10 +171,13 @@ For audit disclosure key generation in JS, see the repository example at [exampl
 
 ## Handoff Conformance
 
-ClairveilJS includes handoff tests that replay the Go SDK conformance fixtures from the Clairveil repository. By default the tests look for a sibling Clairveil checkout:
+ClairveilJS includes an immutable copy of the Clairveil `v0.3.1` Go SDK
+conformance fixtures and wallet-contract JSON Schema. The npm package ships
+this snapshot, so tests and consumers of the conformance helper do not need a
+Clairveil source checkout. The default fixture directory is:
 
 ```bash
-../clairveil/x/privacy/client/sdk/conformance/testdata
+fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata
 ```
 
 For local development, run:
@@ -183,12 +186,11 @@ For local development, run:
 npm run test:conformance
 ```
 
-If the fixture directory is missing, this local command skips with a clear message so the package can still be installed or smoke-tested without a sibling Clairveil checkout.
-
-If your Clairveil checkout lives elsewhere, point the SDK at that fixture directory:
+For maintainer experiments only, the fixture directory can be overridden
+explicitly:
 
 ```bash
-CLAIRVEIL_CONFORMANCE_FIXTURE_DIR=/path/to/clairveil/x/privacy/client/sdk/conformance/testdata npm run test:conformance
+CLAIRVEIL_CONFORMANCE_FIXTURE_DIR=/path/to/testdata npm run test:conformance
 ```
 
 For release handoff or CI, use the strict command. It sets `CLAIRVEIL_CONFORMANCE_REQUIRED=1`, so missing fixtures fail the job instead of producing an all-skip success:
@@ -197,10 +199,10 @@ For release handoff or CI, use the strict command. It sets `CLAIRVEIL_CONFORMANC
 npm run test:conformance:required
 ```
 
-`npm run verify:clairveil-source` additionally requires the sibling Clairveil
-checkout to be exactly `v0.3.1` and verifies all four copied Clairveil protobuf
-files byte-for-byte. Set `CLAIRVEIL_SOURCE_DIR=/path/to/clairveil` when the
-checkout is not the default sibling directory.
+`npm run verify:clairveil-source` is retained as the release-script name for
+compatibility. It is self-contained: it validates the pinned release and commit
+metadata plus SHA-256 digests for four protobufs, twelve fixtures, and one JSON
+Schema. It does not read `CLAIRVEIL_SOURCE_DIR` or require a source checkout.
 
 `prepublishOnly` runs `verify:release:integration`: package checks, required
 conformance fixtures, the required five-shape localnet one-proof matrix, and
@@ -215,7 +217,6 @@ Downstream packages can reuse the same fixture loading policy:
 import { runClairveilConformanceFixtures } from "clairveiljs/conformance";
 
 const result = await runClairveilConformanceFixtures({
-  fixtureDir: "/path/to/clairveil/x/privacy/client/sdk/conformance/testdata",
   fixtureNames: ["privacy_wallet_golden_vectors.json"]
 });
 

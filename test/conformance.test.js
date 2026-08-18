@@ -474,12 +474,17 @@ test("reservation contract fixture replays state, lease, and direct operation-ev
   assert.deepEqual(matching.metadata.operation_success_evidence_errors, []);
 });
 
-test("conformance helper defaults use repo-relative fixture discovery", () => {
+test("conformance helper defaults use the bundled v0.3.1 fixture snapshot", () => {
   assert.equal(conformanceFixtureRelativePath, "x/privacy/client/sdk/conformance/testdata");
-  assert.equal(defaultConformanceFixtureDir, `../clairveil/${conformanceFixtureRelativePath}`);
+  assert.equal(
+    defaultConformanceFixtureDir,
+    `fixtures/clairveil-v0.3.1/${conformanceFixtureRelativePath}`
+  );
   assert.equal(supportedClairveilRelease, "v0.3.1");
   assert.equal(supportedClairveilCommit, "1a6ce6a0a0e10b765c025072b44c2364e9711b48");
-  assert.ok(suggestClairveilConformanceFixtureDirs().some(candidate => candidate.endsWith(conformanceFixtureRelativePath)));
+  assert.ok(
+    suggestClairveilConformanceFixtureDirs()[0].endsWith(defaultConformanceFixtureDir)
+  );
 });
 
 test("browser signer provider contract derives the expected privacy material", fixtureTestOptions, async () => {
