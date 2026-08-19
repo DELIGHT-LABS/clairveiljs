@@ -140,6 +140,7 @@ const allowedReservationTransitions = new Set([
   "Unknown\x00Failed",
   "Unknown\x00ReplanRequired",
   "Unknown\x00ManualReview",
+  "ManualReview\x00ProofReady",
   "ManualReview\x00ConfirmedSpent",
   "ManualReview\x00Failed",
   "ManualReview\x00Released",
@@ -160,7 +161,8 @@ const leaseRequiredTransitions = new Set([
   "ProofReady\x00Submitted",
   "ProofReady\x00Unknown",
   "ProofReady\x00ReplanRequired",
-  "ProofReady\x00ManualReview"
+  "ProofReady\x00ManualReview",
+  "ManualReview\x00ProofReady"
 ]);
 
 const expiredLeaseRecoveryTransitions = new Set([
@@ -590,12 +592,60 @@ function operationSuccessEvidenceRequiredInputState(metadata = {}) {
   return direct.present ? direct : nested;
 }
 
+const reservationExecutionTransports = new Set(["cosmos", "evm", "external"]);
+
+function executionTransportMetadataState(metadata = {}) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return { present: false, value: "" };
+  }
+  const hasCanonical = Object.prototype.hasOwnProperty.call(metadata, "execution_transport");
+  const hasAlias = Object.prototype.hasOwnProperty.call(metadata, "executionTransport");
+  const normalize = (value, label) => {
+    const transport = String(value ?? "").trim().toLowerCase();
+    if (!reservationExecutionTransports.has(transport)) {
+      throw new Error(`${label} must be cosmos, evm, or external`);
+    }
+    return transport;
+  };
+  const canonical = hasCanonical
+    ? normalize(metadata.execution_transport, "execution_transport metadata")
+    : "";
+  const alias = hasAlias
+    ? normalize(metadata.executionTransport, "executionTransport metadata")
+    : "";
+  if (hasCanonical && hasAlias && canonical !== alias) {
+    throw new Error("execution transport metadata aliases conflict");
+  }
+  return {
+    present: hasCanonical || hasAlias,
+    value: hasCanonical ? canonical : alias
+  };
+}
+
+function executionTransportInputState(metadata = {}) {
+  const direct = executionTransportMetadataState(metadata);
+  const nested = executionTransportMetadataState(metadata.metadata || {});
+  if (direct.present && nested.present && direct.value !== nested.value) {
+    throw new Error("execution transport aliases conflict");
+  }
+  return direct.present ? direct : nested;
+}
+
+function reservationExecutionTransport(reservation = {}) {
+  return executionTransportMetadataState(reservation.metadata || {}).value;
+}
+
 function normalizeReservationMetadata(value) {
   const metadata = cloneReservationMetadata(value);
   const evidenceRequired = operationSuccessEvidenceRequiredMetadataState(metadata);
   if (evidenceRequired.present) {
     metadata.operation_success_evidence_required = evidenceRequired.value;
     delete metadata.operationSuccessEvidenceRequired;
+  }
+  const executionTransport = executionTransportMetadataState(metadata);
+  if (executionTransport.present) {
+    metadata.execution_transport = executionTransport.value;
+    delete metadata.executionTransport;
   }
   return metadata;
 }
@@ -708,6 +758,8 @@ const initialLifecycleMetadataFields = new Set([
   "operationSuccessEvidenceConflicts",
   "operation_success_evidence_required",
   "operationSuccessEvidenceRequired",
+  "execution_transport",
+  "executionTransport",
   "manual_review_resolution_reason",
   "manualReviewResolutionReason",
   "wallet_rejected_before_broadcast",
@@ -913,16 +965,17 @@ function assertCurrentLeaseToken(current, token, owner, now) {
 
 function assertLeaseTransitionAllowed(current, to, patch, now) {
   if (!requiresReservationLeaseToken(current.status, to)) return;
-  if (
-    current.status === reservationStatuses.Reserved &&
-    to === reservationStatuses.Proving &&
-    !current.lease_token
-  ) {
+  const startsProving = current.status === reservationStatuses.Reserved &&
+    to === reservationStatuses.Proving;
+  const recoversCheckpoint = current.status === reservationStatuses.ManualReview &&
+    to === reservationStatuses.ProofReady &&
+    patch[managedReservationEvidenceMutation] === "checkpoint_recovery";
+  if ((startsProving || recoversCheckpoint) && !current.lease_token) {
     const token = patchLeaseToken(patch);
     const owner = String(patch.lease_owner || patch.leaseOwner || "");
     const until = Date.parse(patch.lease_until || patch.leaseUntil || "");
     if (!token || !owner || !Number.isFinite(until)) {
-      throw new Error("a future lease owner, token, and expiry are required to start proving");
+      throw new Error("a future lease owner, token, and expiry are required to claim the reservation");
     }
     const expectedClaimHash = String(
       current.metadata?.[reservationClaimTokenHashField] || ""
@@ -1034,6 +1087,8 @@ const protectedMetadataEvidenceFields = [
   "operationSuccessEvidenceConflicts",
   "operation_success_evidence_required",
   "operationSuccessEvidenceRequired",
+  "execution_transport",
+  "executionTransport",
   "operator_approved",
   "operatorApproved",
   "operator_id",
@@ -1066,6 +1121,7 @@ const managedLifecycleMetadataAliases = new Map([
   ["operationSuccessEvidenceErrors", "operation_success_evidence_errors"],
   ["operationSuccessEvidenceConflicts", "operation_success_evidence_conflicts"],
   ["operationSuccessEvidenceRequired", "operation_success_evidence_required"],
+  ["executionTransport", "execution_transport"],
   ["manualReviewResolutionReason", "manual_review_resolution_reason"],
   ["walletRejectedBeforeBroadcast", "wallet_rejected_before_broadcast"],
   ["providerRejectionCode", "provider_rejection_code"]
@@ -1103,6 +1159,14 @@ function assertManagedLifecycleMetadataMutation(current, to, patch = {}, {
   if (current.status === reservationStatuses.Proving && to === reservationStatuses.ProofReady) {
     allowed.add("no_broadcast_attempt");
     allowed.add("operation_success_evidence_required");
+    allowed.add("execution_transport");
+  }
+  if (managedCheckpointRecovery) {
+    allowed.add("no_broadcast_attempt");
+    allowed.add("operation_success_evidence_required");
+    allowed.add("execution_transport");
+    allowed.add("batch_checkpoint_recovered");
+    allowed.add("batch_checkpoint_recovery_reason");
   }
   if (managedRelayHandoff) {
     allowed.add("relay_handed_off");
@@ -1285,7 +1349,14 @@ function comparablePredicateValue(field, value) {
 }
 
 function assertOperationSuccessPredicateImmutable(current, to, patch = {}) {
-  const initializing = current.status === reservationStatuses.Proving && to === reservationStatuses.ProofReady;
+  const initializing = (
+    current.status === reservationStatuses.Proving &&
+    to === reservationStatuses.ProofReady
+  ) || (
+    current.status === reservationStatuses.ManualReview &&
+    to === reservationStatuses.ProofReady &&
+    patch[managedReservationEvidenceMutation] === "checkpoint_recovery"
+  );
   for (const aliases of operationSuccessPredicateFields) {
     if (!patchHasAnyOwnProperty(patch, aliases)) continue;
     const field = aliases[0];
@@ -1360,6 +1431,7 @@ function allowedReservationPatchFields(current, to, {
   managedRelayHandoff = false,
   managedRelayEvidence = false,
   managedBroadcastAttempt = false,
+  managedCheckpointRecovery = false,
   managedOperationReconcile = false
 } = {}) {
   if (managedRelayEvidence) {
@@ -1372,7 +1444,9 @@ function allowedReservationPatchFields(current, to, {
     ]);
   }
   const allowed = new Set(commonReservationPatchFields);
-  if (to === reservationStatuses.ProofReady && current.status === reservationStatuses.Proving) {
+  if (to === reservationStatuses.ProofReady && (
+    current.status === reservationStatuses.Proving || managedCheckpointRecovery
+  )) {
     for (const aliases of operationSuccessPredicateFields) {
       for (const alias of aliases) allowed.add(alias);
     }
@@ -1382,6 +1456,9 @@ function allowedReservationPatchFields(current, to, {
     allowed.add("signDocHash");
     allowed.add("tx_bytes_hash");
     allowed.add("txBytesHash");
+  }
+  if (managedCheckpointRecovery) {
+    for (const field of reconciliationReservationPatchFields) allowed.add(field);
   }
   if (managedRelayHandoff) {
     allowed.add("payload_hash");
@@ -1491,6 +1568,51 @@ function assertManagedBroadcastAttemptMutation(current, to, patch, now) {
     throw new Error("broadcast attempt must clear no_broadcast_attempt evidence");
   }
   assertCurrentLeaseToken(current, patchLeaseToken(patch), patchLeaseOwner(patch), now);
+  return true;
+}
+
+function isManagedCheckpointRecoveryMutation(current, to, patch = {}) {
+  return patch[managedReservationEvidenceMutation] === "checkpoint_recovery" &&
+    current.status === reservationStatuses.ManualReview &&
+    to === reservationStatuses.ProofReady;
+}
+
+function assertManagedCheckpointRecoveryMutation(current, to, patch = {}) {
+  const managed = isManagedCheckpointRecoveryMutation(current, to, patch);
+  if (current.status === reservationStatuses.ManualReview &&
+      to === reservationStatuses.ProofReady && !managed) {
+    throw new Error("ManualReview -> ProofReady requires managed checkpoint recovery");
+  }
+  if (!managed) {
+    if (patch[managedReservationEvidenceMutation] === "checkpoint_recovery") {
+      throw new Error("checkpoint recovery is only valid for ManualReview -> ProofReady");
+    }
+    return false;
+  }
+  const reason = "batch_checkpointed_artifact_requires_recovery";
+  if (String(current.metadata?.reconcile_reason || "") !== reason ||
+      String(current.last_broadcast_error || "") !== reason) {
+    throw new Error("checkpoint recovery requires the original batch checkpoint quarantine evidence");
+  }
+  if (current.metadata?.batch_payload_checkpoint_started !== true) {
+    throw new Error("checkpoint recovery requires a started batch payload checkpoint");
+  }
+  const payloadHash = String(patch.payload_hash || patch.payloadHash || "").trim();
+  if (!payloadHash ||
+      String(current.metadata?.batch_transfer_payload_hash || "").trim() !== payloadHash) {
+    throw new Error("checkpoint recovery payload hash does not match the quarantined batch");
+  }
+  if (current.submitted_tx_hash || current.broadcast_in_flight ||
+      Number(current.broadcast_attempt_count || 0) > 0 ||
+      current.metadata?.relay_handed_off === true) {
+    throw new Error("checkpoint recovery is forbidden after a broadcast or relay handoff");
+  }
+  if (patch.metadata?.no_broadcast_attempt !== true ||
+      patch.metadata?.batch_checkpoint_recovered !== true ||
+      patch.metadata?.batch_checkpoint_recovery_reason !== reason ||
+      !booleanEvidence(patch.nullifier_unspent_confirmed ?? patch.nullifierUnspentConfirmed)) {
+    throw new Error("checkpoint recovery requires no-broadcast and unspent-nullifier evidence");
+  }
   return true;
 }
 
@@ -2335,6 +2457,31 @@ function operationEvidenceAliasConflict(sources = [], keys = [], {
   return new Set(values).size > 1;
 }
 
+function operationVerificationEvidence(sources = [], directKeys = [], nestedKeys = []) {
+  const values = [];
+  for (const source of sources) {
+    if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+    for (const key of directKeys) {
+      if (Object.prototype.hasOwnProperty.call(source, key) && source[key] != null) {
+        values.push(source[key]);
+      }
+    }
+    for (const key of nestedKeys) {
+      const nested = source[key];
+      if (nested && typeof nested === "object" && !Array.isArray(nested) &&
+          Object.prototype.hasOwnProperty.call(nested, "verified") && nested.verified != null) {
+        values.push(nested.verified);
+      }
+    }
+  }
+  const normalized = values.map(booleanEvidence);
+  return {
+    provided: values.length > 0,
+    verified: normalized.includes(true),
+    conflict: new Set(normalized).size > 1
+  };
+}
+
 function operationSuccessEvidence(input = {}) {
   const nested = nestedOperationEvidence(input);
   const evidenceSource = nested || input;
@@ -2342,6 +2489,27 @@ function operationSuccessEvidence(input = {}) {
   const aliasSources = [evidenceSource];
   const txResults = executionResultObjects(evidenceSource);
   const txResult = txResults[0] || null;
+  const verificationSources = [...new Set([
+    evidenceSource,
+    ...txResults,
+    ...txResults.flatMap(executionResultContainers)
+  ])];
+  const evmTransactionVerification = operationVerificationEvidence(
+    verificationSources,
+    [
+      "evmTransactionVerified", "evm_transaction_verified",
+      "transactionVerified", "transaction_verified"
+    ],
+    ["transactionVerification", "transaction_verification"]
+  );
+  const evmPrivacyReceiptVerification = operationVerificationEvidence(
+    verificationSources,
+    [
+      "evmPrivacyReceiptVerified", "evm_privacy_receipt_verified",
+      "privacyReceiptVerified", "privacy_receipt_verified"
+    ],
+    ["privacyReceipt", "privacy_receipt"]
+  );
   const txHashKeys = [
     "txHash", "tx_hash", "txhash", "hash", "submittedTxHash",
     "submitted_tx_hash", "txHashSubmitted", "transactionHash",
@@ -2405,6 +2573,12 @@ function operationSuccessEvidence(input = {}) {
     "assetDenom", "asset_denom"
   ];
   const aliasErrors = [];
+  if (evmTransactionVerification.conflict) {
+    aliasErrors.push("evm_transaction_verification evidence aliases conflict");
+  }
+  if (evmPrivacyReceiptVerification.conflict) {
+    aliasErrors.push("evm_privacy_receipt_verification evidence aliases conflict");
+  }
   for (const [field, keys, options] of [
     ["expected_operation_evidence_hash", operationEvidenceHashKeys, { caseInsensitive: true }],
     ["expected_output_commitment", outputCommitmentKeys, { caseInsensitive: true }],
@@ -2437,6 +2611,10 @@ function operationSuccessEvidence(input = {}) {
     amount: aliasValue(amountKeys),
     amountHash: aliasValue(amountHashKeys),
     denom: aliasValue(denomKeys),
+    evmTransactionVerified: evmTransactionVerification.provided &&
+      evmTransactionVerification.verified,
+    evmPrivacyReceiptVerified: evmPrivacyReceiptVerification.provided &&
+      evmPrivacyReceiptVerification.verified,
     aliasErrors,
     batchItemIndexRaw: batchItemIndex,
     batchItemIndex: normalizedItemIndex.value,
@@ -2507,6 +2685,8 @@ function operationEvidenceConflictField(sourceField) {
   if (sourceField === "expected_recipient_hash") return "recipient_hash";
   if (sourceField === "expected_denom") return "denom";
   if (sourceField === "batch_item_index") return "batch_item_index";
+  if (sourceField === "evm_transaction_verification") return "tx_hash";
+  if (sourceField === "evm_privacy_receipt_verification") return "transaction_outcome";
   if (sourceField === "transaction_outcome") return "transaction_outcome";
   return sourceField || "operation_input";
 }
@@ -2540,6 +2720,7 @@ function evidenceConflictError(reservations, conflicts, message = "operation evi
 }
 
 function evaluateOperationTxIdentity(reservation = {}, actual = {}) {
+  const executionTransport = reservationExecutionTransport(reservation);
   const expectedTxHash = normalizedTxIdentity(reservation.submitted_tx_hash);
   const expectedTxBytesHash = normalizedTxIdentity(reservation.tx_bytes_hash);
   const actualTxHashes = normalizedIdentityValues(actual.txHashes || [actual.txHash]);
@@ -2554,6 +2735,91 @@ function evaluateOperationTxIdentity(reservation = {}, actual = {}) {
   const errors = [];
   const conflicts = [];
   let matched = false;
+
+  if (executionTransport === "evm") {
+    let txHashMatched = false;
+    let txBytesHashMatched = false;
+    if (!expectedTxHash) {
+      errors.push("persisted EVM network tx_hash identity missing");
+      conflicts.push(operationEvidenceConflict(reservation, "tx_hash", "expected_missing", {
+        expected: "",
+        actual: actualTxHashes
+      }));
+    }
+    if (!expectedTxBytesHash) {
+      errors.push("persisted EVM tx_bytes_hash artifact binding missing");
+      conflicts.push(operationEvidenceConflict(reservation, "tx_bytes_hash", "expected_missing", {
+        expected: "",
+        actual: actualTxBytesHashes
+      }));
+    }
+    if (!actualTxHashes.length) {
+      errors.push("EVM network tx_hash evidence missing");
+      conflicts.push(operationEvidenceConflict(reservation, "tx_hash", "missing", {
+        expected: expectedTxHash,
+        actual: ""
+      }));
+    }
+    if (!actualTxBytesHashes.length) {
+      errors.push("EVM tx_bytes_hash artifact evidence missing");
+      conflicts.push(operationEvidenceConflict(reservation, "tx_bytes_hash", "missing", {
+        expected: expectedTxBytesHash,
+        actual: ""
+      }));
+    }
+    if (actualTxHashes.length > 1) {
+      errors.push("tx_hash evidence conflict");
+      conflicts.push(operationEvidenceConflict(reservation, "tx_hash", "conflict", {
+        expected: expectedTxHash,
+        actual: actualTxHashes
+      }));
+    }
+    if (actualTxBytesHashes.length > 1) {
+      errors.push("tx_bytes_hash evidence conflict");
+      conflicts.push(operationEvidenceConflict(reservation, "tx_bytes_hash", "conflict", {
+        expected: expectedTxBytesHash,
+        actual: actualTxBytesHashes
+      }));
+    }
+    for (const actualTxHash of actualTxHashes) {
+      if (!expectedTxHash || actualTxHash !== expectedTxHash) {
+        errors.push("EVM network tx_hash mismatch");
+        conflicts.push(operationEvidenceConflict(reservation, "tx_hash", "mismatch", {
+          expected: expectedTxHash,
+          actual: actualTxHash
+        }));
+      } else {
+        txHashMatched = true;
+      }
+    }
+    for (const actualTxBytesHash of actualTxBytesHashes) {
+      if (!expectedTxBytesHash || actualTxBytesHash !== expectedTxBytesHash) {
+        errors.push("EVM tx_bytes_hash artifact mismatch");
+        conflicts.push(operationEvidenceConflict(reservation, "tx_bytes_hash", "mismatch", {
+          expected: expectedTxBytesHash,
+          actual: actualTxBytesHash
+        }));
+      } else {
+        txBytesHashMatched = true;
+      }
+    }
+    if (expectedSignDoc) {
+      for (const actualSignDoc of actualSignDocs) {
+        if (actualSignDoc !== expectedSignDoc) {
+          errors.push("sign_doc_hash mismatch");
+          conflicts.push(operationEvidenceConflict(reservation, "sign_doc_hash", "mismatch", {
+            expected: expectedSignDoc,
+            actual: actualSignDoc
+          }));
+        }
+      }
+    }
+    return {
+      matches: errors.length === 0 && txHashMatched && txBytesHashMatched,
+      errors: [...new Set(errors)],
+      conflicts: uniqueOperationEvidenceConflicts(conflicts)
+    };
+  }
 
   if (!actualIdentitySeen) {
     errors.push("tx_hash_or_tx_result identity missing");
@@ -2637,6 +2903,17 @@ function evaluateOperationTxIdentity(reservation = {}, actual = {}) {
   };
 }
 
+function evmReceiptStatusSucceeded(receiptStatus) {
+  const normalized = String(receiptStatus).trim().toLowerCase();
+  return receiptStatus === true ||
+    receiptStatus === 1 ||
+    receiptStatus === 1n ||
+    normalized === "1" ||
+    normalized === "true" ||
+    normalized === "success" ||
+    /^0x0*1$/.test(normalized);
+}
+
 function executionOutcomeErrors(txResult) {
   if (!txResult || typeof txResult !== "object") return [];
   const errors = [];
@@ -2663,17 +2940,34 @@ function executionOutcomeErrors(txResult) {
     ])
     .filter(status => status !== undefined && status !== null && String(status).trim() !== "");
   for (const receiptStatus of receiptStatuses) {
-    const normalized = String(receiptStatus).trim().toLowerCase();
-    const succeeded = receiptStatus === true ||
-      receiptStatus === 1 ||
-      receiptStatus === 1n ||
-      normalized === "1" ||
-      normalized === "true" ||
-      normalized === "success" ||
-      /^0x0*1$/.test(normalized);
-    if (!succeeded) errors.push("evm_receipt_status indicates failure");
+    if (!evmReceiptStatusSucceeded(receiptStatus)) {
+      errors.push("evm_receipt_status indicates failure");
+    }
   }
   return [...new Set(errors)];
+}
+
+function hasExplicitSuccessfulEvmReceipt(txResults = []) {
+  const receipts = [];
+  for (const result of txResults) {
+    if (!result || typeof result !== "object" || Array.isArray(result)) continue;
+    for (const key of ["receipt", "transactionReceipt", "transaction_receipt"]) {
+      const receipt = result[key];
+      if (receipt && typeof receipt === "object" && !Array.isArray(receipt) && !receipts.includes(receipt)) {
+        receipts.push(receipt);
+      }
+    }
+    const looksLikeReceipt = Object.prototype.hasOwnProperty.call(result, "status") &&
+      ["transactionHash", "transaction_hash", "txHash", "tx_hash", "logs"]
+        .some(key => Object.prototype.hasOwnProperty.call(result, key));
+    if (looksLikeReceipt && !receipts.includes(result)) receipts.push(result);
+  }
+  return receipts.some(receipt =>
+    Object.prototype.hasOwnProperty.call(receipt, "status") &&
+    receipt.status != null &&
+    String(receipt.status).trim() !== "" &&
+    evmReceiptStatusSucceeded(receipt.status)
+  );
 }
 
 function evaluateOperationSuccessEvidence(reservation = {}, actualInput = {}) {
@@ -2697,6 +2991,35 @@ function evaluateOperationSuccessEvidence(reservation = {}, actualInput = {}) {
     conflicts.push(operationEvidenceConflict(reservation, "transaction_outcome", "failure", {
       actual: outcomeError
     }));
+  }
+  if (reservationExecutionTransport(reservation) === "evm") {
+    if (!hasExplicitSuccessfulEvmReceipt(actual.txResults)) {
+      errors.push("explicit successful EVM receipt evidence missing");
+      conflicts.push(operationEvidenceConflict(
+        reservation,
+        "transaction_outcome",
+        "missing",
+        { expected: "successful EVM receipt", actual: "" }
+      ));
+    }
+    if (!actual.evmTransactionVerified) {
+      errors.push("EVM transaction identity verification missing");
+      conflicts.push(operationEvidenceConflict(
+        reservation,
+        "evm_transaction_verification",
+        "missing",
+        { expected: true, actual: false }
+      ));
+    }
+    if (!actual.evmPrivacyReceiptVerified) {
+      errors.push("EVM privacy receipt verification missing");
+      conflicts.push(operationEvidenceConflict(
+        reservation,
+        "evm_privacy_receipt_verification",
+        "missing",
+        { expected: true, actual: false }
+      ));
+    }
   }
   const check = (field, expectedValue, actualValue, options = {}) => {
     if (!expectedValue) {
@@ -2766,7 +3089,7 @@ function evaluateOperationSuccessEvidence(reservation = {}, actualInput = {}) {
   return {
     evaluated: true,
     matches: errors.length === 0,
-    errors,
+    errors: [...new Set(errors)],
     conflicts: uniqueOperationEvidenceConflicts(conflicts)
   };
 }
@@ -3053,6 +3376,12 @@ function proofReadyTransitionPatch(metadata = {}) {
   const operationEvidenceRequired = operationEvidenceRequiredState.present
     ? operationEvidenceRequiredState.value
     : false;
+  const executionTransportState = executionTransportInputState(metadata);
+  const nestedMetadata = {
+    ...(metadata.metadata || {})
+  };
+  delete nestedMetadata.executionTransport;
+  delete nestedMetadata.execution_transport;
   return {
     lease_token: metadata.leaseToken || metadata.lease_token || "",
     payload_hash: metadata.payloadHash || metadata.payload_hash || "",
@@ -3068,9 +3397,12 @@ function proofReadyTransitionPatch(metadata = {}) {
     batch_item_index: evidence.batchItemIndex,
     batch_item_index_known: evidence.batchItemIndexKnown,
     metadata: {
-      ...(metadata.metadata || {}),
+      ...nestedMetadata,
       no_broadcast_attempt: true,
-      ...(operationEvidenceRequired ? { operation_success_evidence_required: true } : {})
+      ...(operationEvidenceRequired ? { operation_success_evidence_required: true } : {}),
+      ...(executionTransportState.present
+        ? { execution_transport: executionTransportState.value }
+        : {})
     }
   };
 }
@@ -3317,6 +3649,7 @@ export class MemoryReservationStore {
         managedRelayHandoff,
         managedRelayEvidence,
         managedBroadcastAttempt,
+        managedCheckpointRecovery,
         managedOperationReconcile
       });
       if (!managedBroadcastRejection && !managedRelayEvidence) {
@@ -3978,6 +4311,7 @@ export class NoteReservationManager {
       }
       for (const reservationID of reservationIDs || []) {
         const current = currentByID.get(reservationID);
+        assertManagedCheckpointRecoveryMutation(current, to, transitionPatch);
         assertLeaseTransitionAllowed(current, to, transitionPatch, now);
         assertReplanTransitionEvidence(current.status, to, patch);
         assertInactiveTransitionEvidence(current, to, patch);
@@ -4221,6 +4555,41 @@ export class NoteReservationManager {
     });
   }
 
+  async recoverCheckpointedProofReady(reservationIDs = [], metadata = {}) {
+    const reason = "batch_checkpointed_artifact_requires_recovery";
+    const nullifierUnspentConfirmed = consistentMetadataAliasValue(
+      metadata,
+      ["nullifierUnspentConfirmed", "nullifier_unspent_confirmed"],
+      "checkpoint recovery nullifier unspent evidence",
+      { boolean: true }
+    );
+    if (nullifierUnspentConfirmed !== true) {
+      throw new Error("checkpoint recovery requires explicit unspent-nullifier evidence");
+    }
+    const patch = {
+      ...proofReadyTransitionPatch({
+        ...metadata,
+        metadata: {
+          ...(metadata.metadata || {}),
+          no_broadcast_attempt: true,
+          batch_checkpoint_recovered: true,
+          batch_checkpoint_recovery_reason: reason
+        }
+      }),
+      nullifier_unspent_confirmed: nullifierUnspentConfirmed
+    };
+    Object.defineProperty(patch, managedReservationEvidenceMutation, {
+      value: "checkpoint_recovery",
+      enumerable: true
+    });
+    return this.transitionBatch(
+      reservationIDs,
+      reservationStatuses.ManualReview,
+      reservationStatuses.ProofReady,
+      patch
+    );
+  }
+
   async markProofReady(reservationIDs = [], metadata = {}) {
     return this.transitionBatch(
       reservationIDs,
@@ -4355,6 +4724,13 @@ export class NoteReservationManager {
   async markSubmitted(reservationIDs = [], metadata = {}) {
     assertSubmittedBroadcastAttemptMetadata(metadata, "markSubmitted");
     const attempt = broadcastAttemptMetadata(metadata);
+    const currentByID = await this._ownedReservationsByID(reservationIDs);
+    const evmReservation = [...currentByID.values()].find(reservation =>
+      reservationExecutionTransport(reservation) === "evm"
+    );
+    if (evmReservation && !attempt.txHash) {
+      throw new Error("markSubmitted requires the network tx hash for EVM reservations");
+    }
     const patch = {
       lease_token: metadata.leaseToken || metadata.lease_token || "",
       broadcast_in_flight: false,

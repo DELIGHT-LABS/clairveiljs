@@ -1,0 +1,34 @@
+{
+  "schema_version": "clairveil-evm-privacy-contract-v1",
+  "contract_version": "0.3.1",
+  "precompile_address": "0x100000000000000000000000000000000000000b",
+  "canonical_abi_sha256": "ee29aa6ab3e0ddca3c43e6457a51d05b15f405bbf192a6076d01894aecfcb31b",
+  "source": {
+    "solidity": {
+      "path": "precompiles/privacy/IPrivacy.sol",
+      "sha256": "43b893c4fee86a078a7afed6d76eaee73d238f1a3a6b6557df507884cf116c0b"
+    },
+    "abi": {
+      "path": "precompiles/privacy/IPrivacy.json",
+      "sha256": "2cf8c3b67c83494cbaec7af035cb7186a6c3baaec3c229d13c9f956aeb154ec2"
+    }
+  },
+  "selectors": {
+    "deposit": "e6eb7771",
+    "transfer": "43fd6967",
+    "withdraw": "ce4f349c",
+    "transferWithAuthorization": "8ad7ab1c",
+    "withdrawWithAuthorization": "b680b59a",
+    "batchTransfer": "9750e2e0",
+    "batchTransferWithAuthorization": "1252f954",
+    "singleProofBatchTransfer": "3bbb329b",
+    "singleProofBatchTransferWithAuthorization": "0272cf35"
+  },
+  "events": {
+    "PrivacyDeposit": "PrivacyDeposit(address,address,string,bytes)",
+    "PrivacyTransfer": "PrivacyTransfer(address,address,bytes)",
+    "PrivacyWithdraw": "PrivacyWithdraw(address,address,address,string)",
+    "PrivacyBatchTransferItem": "PrivacyBatchTransferItem(address,address,bytes32,uint64,bytes32,bytes)",
+    "PrivacySingleProofBatchTransfer": "PrivacySingleProofBatchTransfer(address,address,bytes32,bytes,uint8,uint8)"
+  }
+}

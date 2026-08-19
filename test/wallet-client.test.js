@@ -85,6 +85,8 @@ function webEvmProfile(overrides = {}) {
     evmChainId: "0x539",
     evmChainName: "Clairveil EVM Test",
     evmPrivacyPrecompileAddress: "0x0000000000000000000000000000000000000900",
+    evmDepositMode: "payable-exact-value",
+    evmNativeDenom: "uclair",
     evmGasLimit: "0x989680",
     evmSendGasLimit: "0x5208",
     ...overrides
@@ -145,25 +147,73 @@ test("browser Web config validation resolves one complete active profile and rej
   );
 });
 
-test("waitForEvmTransaction treats padded success status as successful", async () => {
-  const client = browserClient();
-  client.waitForEvmReceipt = async () => ({ status: "0x01" });
+test("waitForEvmTransaction requires RPC identity and privacy-event verification", async () => {
+  const client = browserClient({ profile: webEvmProfile() });
+  const txHash = `0x${"ab".repeat(32)}`;
+  const sender = "0x1111111111111111111111111111111111111111";
+  const privacyTransaction = {
+    to: "0x0000000000000000000000000000000000000900",
+    data: "0x1234",
+    value: "0x0",
+    chainId: "0x539"
+  };
+  const rpcTransaction = {
+    hash: txHash,
+    from: sender,
+    to: privacyTransaction.to,
+    input: privacyTransaction.data,
+    value: privacyTransaction.value,
+    chainId: privacyTransaction.chainId
+  };
+  client.waitForEvmReceipt = async () => ({ transactionHash: txHash, status: "0x01", logs: [] });
+  client.evmJsonRpc = async method => method === "eth_chainId" ? "0x539" : rpcTransaction;
+  client.evm.verifyTransactionIdentity = () => ({ verified: true, txHash });
+  client.evm.verifyPrivacyReceipt = () => ({ verified: true, event: "PrivacyTransfer", operation: "transfer" });
 
-  const result = await client.waitForEvmTransaction("0xabc");
+  const result = await client.waitForEvmTransaction(txHash, { privacyTransaction, sender });
 
   assert.equal(result.ok, true);
   assert.equal(result.error, "");
+  assert.equal(result.tx, rpcTransaction);
+  assert.equal(result.evmTransactionVerified, true);
+  assert.equal(result.evmPrivacyReceiptVerified, true);
 });
 
 test("waitForEvmTransaction keeps missing receipt status ambiguous", async () => {
-  const client = browserClient();
-  client.waitForEvmReceipt = async () => ({});
+  const client = browserClient({ profile: webEvmProfile() });
+  const txHash = `0x${"bc".repeat(32)}`;
+  const sender = "0x1111111111111111111111111111111111111111";
+  const privacyTransaction = {
+    to: "0x0000000000000000000000000000000000000900",
+    data: "0x1234",
+    value: "0x0",
+    chainId: "0x539"
+  };
+  client.waitForEvmReceipt = async () => ({ transactionHash: txHash, logs: [] });
+  client.evmJsonRpc = async method => method === "eth_chainId" ? "0x539" : ({
+    hash: txHash,
+    from: sender,
+    to: privacyTransaction.to,
+    input: privacyTransaction.data,
+    value: privacyTransaction.value,
+    chainId: privacyTransaction.chainId
+  });
+  client.evm.verifyTransactionIdentity = () => ({ verified: true, txHash });
 
-  const result = await client.waitForEvmTransaction("0xabc");
+  const result = await client.waitForEvmTransaction(txHash, { privacyTransaction, sender });
 
   assert.equal(result.ok, false);
   assert.match(result.error, /explicit successful receipt status/);
   assert.doesNotMatch(result.error, /failed with receipt status/);
+  assert.equal(result.evmPrivacyReceiptVerified, false);
+});
+
+test("waitForEvmTransaction rejects receipt-status-only confirmation", async () => {
+  const client = browserClient({ profile: webEvmProfile() });
+  await assert.rejects(
+    () => client.waitForEvmTransaction(`0x${"cd".repeat(32)}`),
+    /original SDK-prepared privacyTransaction/
+  );
 });
 
 test("evmJsonRpc forwards only allowlisted read-only methods", async () => {
@@ -703,6 +753,7 @@ test("EVM prepareDeposit forwards its required proof into the canonical precompi
       material: {
         shieldedAddress: "clairs1sender",
         note_commitment_hex: "11".repeat(32),
+        encrypted_note_hex: "22".repeat(48),
         amount: "1uclair"
       },
       transaction: { to: webEvmProfile().evmPrivacyPrecompileAddress, data: "0x1234" }
@@ -717,6 +768,7 @@ test("EVM prepareDeposit forwards its required proof into the canonical precompi
 
   assert.equal(captured.proof, "ab");
   assert.equal(prepared.transaction.data, "0x1234");
+  assert.equal(prepared.prepared.encryptedNoteHex, "22".repeat(48));
 });
 
 test("browser DApp profiles reject schema-incomplete or transport-incompatible configuration", () => {

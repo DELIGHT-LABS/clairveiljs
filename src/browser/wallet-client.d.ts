@@ -16,6 +16,7 @@ import type {
   BatchTransferOperationEvidence,
   PreparedBatchTransferPayloadCheckpoint,
   PreparedBatchTransferProofCheckpoint,
+  FinalizedPreparedBatchTransfer as FinalizedTransportPreparedBatchTransfer,
   TransferBatchPaymentInput,
   BroadcastSignedTxResult,
   ReservationBroadcastOptions,
@@ -36,10 +37,16 @@ import type {
 } from "../privacy/asset-registry.js";
 import type {
   EvmDepositMode,
+  EvmPrivacyAuthorizationTypedDataDomain,
   Eip1193WalletAdapter,
+  EvmPrivacyActionAuthorization,
+  EvmPrivacyAuthorizationRequest,
+  EvmPrivacyAuthorizationTypedData,
   EvmPrivacyTransactionOptions,
   EvmReservationBroadcastOptions,
+  EvmRpcTransaction,
   EvmTransactionRequest,
+  EvmTransactionIdentityVerification,
   EvmTransactionWallet,
   EvmWithdrawMessage
 } from "../transport/evm.js";
@@ -142,18 +149,20 @@ interface BrowserEvmWalletProfileBase extends BrowserWalletProfileBase {
   evmSendGasLimit: string;
 }
 
-export type BrowserEvmWalletProfile = BrowserEvmWalletProfileBase & (
-  | {
-      evmDepositMode?: "nonpayable";
-      evmNativeDenom?: string;
-    }
-  | {
-      /** Explicitly opt into downstream Clairveil v0.3.1 escrow-funded deposits. */
-      evmDepositMode: "payable-exact-value";
-      /** Must equal denom so the minimal-unit amount can bind exactly to msg.value. */
-      evmNativeDenom: string;
-    }
-);
+export interface BrowserEvmAuthorizationProfile {
+  /** EIP-712 domain selected by the target EVM privacy contract. */
+  typedDataDomain?: EvmPrivacyAuthorizationTypedDataDomain;
+  /** Target-chain authorization-kind allowlist. Omit to permit every uint8 kind. */
+  supportedAuthorizationKinds?: Array<string | number>;
+}
+
+/** The canonical EVM precompile has no amount tuple field: msg.value is mandatory. */
+export type BrowserEvmWalletProfile = BrowserEvmWalletProfileBase & {
+  evmDepositMode?: "payable-exact-value";
+  /** Must equal denom so the minimal-unit amount can bind exactly to msg.value. */
+  evmNativeDenom: string;
+  evmAuthorizationProfile?: BrowserEvmAuthorizationProfile;
+};
 
 /** A complete, document-validated browser DApp profile. */
 export type BrowserWalletProfile = BrowserCosmosWalletProfile | BrowserEvmWalletProfile;
@@ -207,6 +216,7 @@ export interface ClairveilWebClientConfig {
   evmPrivacyPrecompileAddress?: string;
   evmDepositMode?: EvmDepositMode;
   evmNativeDenom?: string;
+  evmAuthorizationProfile?: BrowserEvmAuthorizationProfile;
   evmGasLimit?: string;
   evmSendGasLimit?: string;
 }
@@ -248,6 +258,7 @@ export interface ClairveilBrowserClientOptions {
   evmPrivacyPrecompileAddress?: string;
   evmDepositMode?: EvmDepositMode;
   evmNativeDenom?: string;
+  evmAuthorizationProfile?: BrowserEvmAuthorizationProfile;
   evmGasLimit?: string;
   evmSendGasLimit?: string;
   enableExperimentalBatchTransfer?: boolean;
@@ -295,10 +306,19 @@ export interface BrowserBalancesResponse {
 }
 
 export interface BrowserEvmTransactionWaitResult {
+  executionTransport: "evm";
   txHash: Hex | string;
   evmTxHash: Hex | string;
+  /** Binding of the original prepared request; not a network transaction hash. */
+  txBytesHash: Hex | string;
   receipt: object | null;
-  tx: null;
+  /** Exact hash/from/to/input/value/chain verification against RPC transaction data. */
+  transactionVerification: Readonly<EvmTransactionIdentityVerification> | null;
+  /** Action-specific EVM privacy-event verification. */
+  privacyReceipt: Readonly<{ verified: true; event: string; operation: string }> | null;
+  tx: EvmRpcTransaction | object | null;
+  evmTransactionVerified: boolean;
+  evmPrivacyReceiptVerified: boolean;
   ok: boolean;
   error: string;
   errors: string[];
@@ -325,6 +345,9 @@ export type DepositProofProvider = DepositProofProviderContract;
 
 /** The connected EVM signing wallet required before an EVM prepare request. */
 export type EvmNetworkWallet = Pick<Eip1193WalletAdapter, "getChainId">;
+
+/** Optional signer for an EIP-712 batch-executor authorization without a pre-supplied signature. */
+export type EvmBatchAuthorizationSigner = Pick<Eip1193WalletAdapter, "signTypedData">;
 
 /** Connected EVM wallet required for browser-facade transaction submission. */
 export type BrowserEvmTransactionWallet = EvmNetworkWallet & EvmTransactionWallet;
@@ -412,7 +435,10 @@ export interface PreparedCosmosDeposit {
 export interface PreparedEvmDeposit {
   signDoc?: never;
   transaction: EvmTransactionRequest;
-  prepared: PreparedDepositSummary;
+  prepared: PreparedDepositSummary & {
+    /** Exact encrypted deposit output required for receipt/state recovery. */
+    encryptedNoteHex: Hex;
+  };
 }
 
 export type PreparedDeposit = PreparedCosmosDeposit | PreparedEvmDeposit;
@@ -544,6 +570,7 @@ export interface PreparedCosmosTransfer extends ReservationReconciliationState {
 export interface PreparedEvmTransfer extends ReservationReconciliationState {
   signDoc?: never;
   transaction: EvmTransactionRequest;
+  txBytesHash: string;
   reservation?: ReservationBatch | null;
   prepared: PreparedTransferSummary;
   plan: TransferPlan;
@@ -626,17 +653,42 @@ export type PrepareCosmosTransferBatchInput = DistributiveOmit<PrepareTransferBa
   wallet_type?: "cosmos";
 };
 
+export type PrepareEvmTransferBatchInput = DistributiveOmit<PrepareTransferBatchInput, "walletType" | "wallet_type"> &
+  EvmNetworkWalletBinding & (
+    | { walletType: "evm"; wallet_type?: "evm" }
+    | { walletType?: "evm"; wallet_type: "evm" }
+  ) & {
+    transactionOptions?: EvmPrivacyTransactionOptions;
+    transaction_options?: EvmPrivacyTransactionOptions;
+    authorization?: EvmPrivacyAuthorizationRequest;
+    privacy_authorization?: EvmPrivacyAuthorizationRequest;
+    authorizationSigner?: EvmBatchAuthorizationSigner;
+    authorization_signer?: EvmBatchAuthorizationSigner;
+  };
+
+export type PrepareDefaultEvmProfileTransferBatchInput = DistributiveOmit<PrepareTransferBatchInput, "walletType" | "wallet_type"> &
+  EvmNetworkWalletBinding & {
+    walletType?: undefined;
+    wallet_type?: undefined;
+    transactionOptions?: EvmPrivacyTransactionOptions;
+    transaction_options?: EvmPrivacyTransactionOptions;
+    authorization?: EvmPrivacyAuthorizationRequest;
+    privacy_authorization?: EvmPrivacyAuthorizationRequest;
+    authorizationSigner?: EvmBatchAuthorizationSigner;
+    authorization_signer?: EvmBatchAuthorizationSigner;
+  };
+
 export type PrepareExplicitCosmosTransferBatchInput = DistributiveOmit<PrepareTransferBatchInput, "walletType" | "wallet_type"> & (
   | { walletType: "cosmos"; wallet_type?: "cosmos" }
   | { walletType?: "cosmos"; wallet_type: "cosmos" }
 );
 
 export type PrepareTransferBatchInputForDefault<TDefaultWalletType extends BrowserWalletType = "cosmos"> =
-  TDefaultWalletType extends "evm" ? never : PrepareCosmosTransferBatchInput;
+  TDefaultWalletType extends "evm" ? PrepareDefaultEvmProfileTransferBatchInput : PrepareCosmosTransferBatchInput;
 
-export type FinalizePreparedBatchTransferInput = Omit<
+type FinalizePreparedBatchTransferBaseInput = DistributiveOmit<
   Parameters<ClairveilJS["finalizePreparedBatchTransfer"]>[0],
-  "signer" | "pubKeyHex" | "gasLimit" | "denom" | "userPrivacyPolicy" | "userDisclosureMode" | "userDisclosureTargetPubKeyHex"
+  "signer" | "pubKeyHex" | "gasLimit" | "denom" | "userPrivacyPolicy" | "userDisclosureMode" | "userDisclosureTargetPubKeyHex" | "executionBuilder"
 > & {
   signer?: ClairAddress | string;
   address?: ClairAddress | string;
@@ -651,12 +703,42 @@ export type FinalizePreparedBatchTransferInput = Omit<
   disclosure_mode?: TransferUserDisclosureMode;
   disclosurePubKeyHex?: Hex;
   disclosure_pubkey_hex?: Hex;
+};
+
+export type FinalizePreparedBatchTransferInput = FinalizePreparedBatchTransferBaseInput & {
   walletType?: "cosmos";
   wallet_type?: "cosmos";
 };
 
+export type FinalizeEvmPreparedBatchTransferInput = FinalizePreparedBatchTransferBaseInput &
+  EvmNetworkWalletBinding & (
+    | { walletType: "evm"; wallet_type?: "evm" }
+    | { walletType?: "evm"; wallet_type: "evm" }
+  ) & {
+    transactionOptions?: EvmPrivacyTransactionOptions;
+    transaction_options?: EvmPrivacyTransactionOptions;
+    authorization?: EvmPrivacyAuthorizationRequest;
+    privacy_authorization?: EvmPrivacyAuthorizationRequest;
+    authorizationSigner?: EvmBatchAuthorizationSigner;
+    authorization_signer?: EvmBatchAuthorizationSigner;
+  };
+
+export type FinalizeDefaultEvmProfilePreparedBatchTransferInput = FinalizePreparedBatchTransferBaseInput &
+  EvmNetworkWalletBinding & {
+    walletType?: undefined;
+    wallet_type?: undefined;
+    transactionOptions?: EvmPrivacyTransactionOptions;
+    transaction_options?: EvmPrivacyTransactionOptions;
+    authorization?: EvmPrivacyAuthorizationRequest;
+    privacy_authorization?: EvmPrivacyAuthorizationRequest;
+    authorizationSigner?: EvmBatchAuthorizationSigner;
+    authorization_signer?: EvmBatchAuthorizationSigner;
+  };
+
 export type FinalizePreparedBatchTransferInputForDefault<TDefaultWalletType extends BrowserWalletType = "cosmos"> =
-  TDefaultWalletType extends "evm" ? never : FinalizePreparedBatchTransferInput;
+  TDefaultWalletType extends "evm"
+    ? FinalizeDefaultEvmProfilePreparedBatchTransferInput
+    : FinalizePreparedBatchTransferInput;
 
 export interface PreparedTransferBatchSummary {
   shieldedAddress: ShieldedAddress;
@@ -692,6 +774,42 @@ export interface PreparedCosmosTransferBatch extends ReservationReconciliationSt
   prepared: PreparedTransferBatchSummary;
   plan: TransferBatchPlan;
 }
+
+export interface PreparedEvmTransferBatch extends ReservationReconciliationState {
+  signDoc?: never;
+  transaction: EvmTransactionRequest;
+  /** SHA-256 binding of the exact canonical transaction fields persisted with every input reservation. */
+  txBytesHash: string;
+  /** The resolved executor authorization, including a signature if the SDK requested one. */
+  authorization?: EvmPrivacyActionAuthorization;
+  /** The exact EIP-712 payload signed during preparation, when authorizationSigner was used. */
+  authorizationTypedData?: EvmPrivacyAuthorizationTypedData;
+  reservation?: ReservationBatch | null;
+  prepared: PreparedTransferBatchSummary;
+  plan: TransferBatchPlan;
+}
+
+export type PreparedTransferBatch = PreparedCosmosTransferBatch | PreparedEvmTransferBatch;
+
+export type FinalizedCosmosPreparedBatchTransfer = Extract<
+  FinalizedTransportPreparedBatchTransfer,
+  { signDoc: SignDocBase64 }
+>;
+
+export type FinalizedEvmPreparedBatchTransfer = Extract<
+  FinalizedTransportPreparedBatchTransfer,
+  { execution: object }
+> & {
+  transaction: EvmTransactionRequest;
+  /** Same transaction binding persisted during checkpoint recovery. */
+  txBytesHash: string;
+  authorization?: EvmPrivacyActionAuthorization;
+  authorizationTypedData?: EvmPrivacyAuthorizationTypedData;
+};
+
+export type FinalizedPreparedBatchTransfer =
+  | FinalizedCosmosPreparedBatchTransfer
+  | FinalizedEvmPreparedBatchTransfer;
 
 export interface PrepareWithdrawInput extends BrowserWalletIdentityInput {
   amount: CoinString;
@@ -761,6 +879,7 @@ export interface PreparedCosmosWithdraw extends ReservationReconciliationState {
 export interface PreparedEvmWithdraw extends ReservationReconciliationState {
   signDoc?: never;
   transaction: EvmTransactionRequest;
+  txBytesHash: string;
   payload: PreparedWithdrawPayload;
   proof: PreparedWithdrawProof;
   message: WithdrawMessage;
@@ -943,19 +1062,29 @@ type PrepareTransferBatchInputForProfile<
   TDefaultWalletType extends BrowserWalletType,
   TProfileTransport extends BrowserProfileTransport
 > = TProfileTransport extends "evm"
-  ? never
+  ? PrepareEvmTransferBatchInput | PrepareDefaultEvmProfileTransferBatchInput
   : TProfileTransport extends "cosmos"
     ? PrepareCosmosTransferBatchInput
     : PrepareTransferBatchInputForDefault<TDefaultWalletType>;
+
+type PreparedTransferBatchForProfile<TProfileTransport extends BrowserProfileTransport> =
+  TProfileTransport extends "evm" ? PreparedEvmTransferBatch
+    : TProfileTransport extends "cosmos" ? PreparedCosmosTransferBatch
+      : PreparedTransferBatch;
 
 type FinalizePreparedBatchTransferInputForProfile<
   TDefaultWalletType extends BrowserWalletType,
   TProfileTransport extends BrowserProfileTransport
 > = TProfileTransport extends "evm"
-  ? never
+  ? FinalizeEvmPreparedBatchTransferInput | FinalizeDefaultEvmProfilePreparedBatchTransferInput
   : TProfileTransport extends "cosmos"
     ? FinalizePreparedBatchTransferInput
     : FinalizePreparedBatchTransferInputForDefault<TDefaultWalletType>;
+
+type FinalizedPreparedBatchTransferForProfile<TProfileTransport extends BrowserProfileTransport> =
+  TProfileTransport extends "evm" ? FinalizedEvmPreparedBatchTransfer
+    : TProfileTransport extends "cosmos" ? FinalizedCosmosPreparedBatchTransfer
+      : FinalizedPreparedBatchTransfer;
 
 type PrepareWithdrawInputForProfile<TProfileTransport extends BrowserProfileTransport> =
   TProfileTransport extends "evm"
@@ -1040,7 +1169,14 @@ export class ClairveilBrowserClient<
   derivePrivacyAccount(input: BrowserWalletIdentityInput): DerivedPrivacyAccount;
   getBalances(address: ClairAddress): Promise<BrowserBalancesResponse>;
   waitForTx(txHash: Hex, options?: { attempts?: number; intervalMs?: number }): Promise<TxSearchResult | null>;
-  waitForEvmTransaction(txHash: Hex): Promise<BrowserEvmTransactionWaitResult>;
+  waitForEvmTransaction(txHash: Hex, options: {
+    /** Original SDK-prepared transaction; required for exact RPC identity and event verification. */
+    privacyTransaction: EvmTransactionRequest;
+    /** Actual EOA/executor that submitted the transaction. */
+    sender: string;
+    attempts?: number;
+    intervalMs?: number;
+  }): Promise<BrowserEvmTransactionWaitResult>;
   /**
    * Executes an allowlisted read request against the configured EVM JSON-RPC endpoint.
    * Prefer a higher-level browser-client method when one is available; this
@@ -1092,15 +1228,23 @@ export class ClairveilBrowserClient<
   prepareTransfer(input: TProfileTransport extends "evm" ? PrepareEvmTransferInput : TProfileTransport extends "cosmos" ? never : PrepareEvmTransferInput): Promise<PreparedEvmTransfer>;
   prepareTransfer(input: TProfileTransport extends "evm" ? never : PrepareCosmosTransferInput): Promise<PreparedCosmosTransfer>;
   prepareTransfer(input: PrepareTransferInputForProfile<TProfileTransport>): Promise<PreparedTransferForProfile<TProfileTransport>>;
-  prepareTransferBatch(input: PrepareTransferBatchInputForProfile<TDefaultWalletType, TProfileTransport>): Promise<PreparedCosmosTransferBatch>;
+  prepareTransferBatch(input: TProfileTransport extends "evm"
+    ? PrepareEvmTransferBatchInput | PrepareDefaultEvmProfileTransferBatchInput
+    : TProfileTransport extends "cosmos" ? never : PrepareEvmTransferBatchInput): Promise<PreparedEvmTransferBatch>;
+  prepareTransferBatch(input: TProfileTransport extends "evm" ? never : PrepareCosmosTransferBatchInput): Promise<PreparedCosmosTransferBatch>;
+  prepareTransferBatch(input: PrepareTransferBatchInputForProfile<TDefaultWalletType, TProfileTransport>): Promise<PreparedTransferBatchForProfile<TProfileTransport>>;
   provePreparedBatchTransfer(input: Omit<Parameters<ClairveilJS["provePreparedBatchTransfer"]>[0], "proverAdapter"> & {
     proverAdapter?: Parameters<ClairveilJS["provePreparedBatchTransfer"]>[0]["proverAdapter"];
     prover_adapter?: Parameters<ClairveilJS["provePreparedBatchTransfer"]>[0]["proverAdapter"];
     address?: ClairAddress | string;
   }): ReturnType<ClairveilJS["provePreparedBatchTransfer"]>;
+  finalizePreparedBatchTransfer(input: TProfileTransport extends "evm"
+    ? FinalizeEvmPreparedBatchTransferInput | FinalizeDefaultEvmProfilePreparedBatchTransferInput
+    : TProfileTransport extends "cosmos" ? never : FinalizeEvmPreparedBatchTransferInput): Promise<FinalizedEvmPreparedBatchTransfer>;
+  finalizePreparedBatchTransfer(input: TProfileTransport extends "evm" ? never : FinalizePreparedBatchTransferInput): Promise<FinalizedCosmosPreparedBatchTransfer>;
   finalizePreparedBatchTransfer(
     input: FinalizePreparedBatchTransferInputForProfile<TDefaultWalletType, TProfileTransport>
-  ): ReturnType<ClairveilJS["finalizePreparedBatchTransfer"]>;
+  ): Promise<FinalizedPreparedBatchTransferForProfile<TProfileTransport>>;
   prepareWithdraw(input: TProfileTransport extends "evm" ? PrepareDefaultEvmProfileWithdrawInput : never): Promise<PreparedEvmWithdraw>;
   prepareWithdraw(input: TProfileTransport extends "evm" ? PrepareEvmWithdrawInput : TProfileTransport extends "cosmos" ? never : PrepareEvmWithdrawInput): Promise<PreparedEvmWithdraw>;
   prepareWithdraw(input: TProfileTransport extends "evm" ? never : PrepareCosmosWithdrawInput): Promise<PreparedCosmosWithdraw>;

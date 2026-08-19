@@ -2139,6 +2139,8 @@ function withdrawProofReadyMetadata(built, context = {}) {
   return {
     payloadHash: payload.payload_hash || "",
     signDocHash: context.signDocHash ?? context.sign_doc_hash ?? "",
+    txBytesHash: context.txBytesHash ?? context.tx_bytes_hash ?? "",
+    ...(executionTransport ? { executionTransport } : {}),
     expectedOutputCommitment: "",
     expectedDisclosureDigest: "",
     expectedRecipientHash: bindOperationSuccess
@@ -3599,8 +3601,30 @@ export class ClairveilJS {
     feeAmount,
     fee_amount,
     reservationManager,
-    reservation_manager
+    reservation_manager,
+    executionBuilder
   } = {}) {
+    if (executionBuilder != null && typeof executionBuilder !== "function") {
+      throw new Error("executionBuilder must be a function");
+    }
+    for (const [value, label] of [
+      [disableSelfViewDisclosure, "disableSelfViewDisclosure"],
+      [disable_self_view_disclosure, "disable_self_view_disclosure"]
+    ]) {
+      if (value != null && typeof value !== "boolean") {
+        throw new Error(`${label} must be a boolean`);
+      }
+    }
+    if (disableSelfViewDisclosure != null && disable_self_view_disclosure != null &&
+        disableSelfViewDisclosure !== disable_self_view_disclosure) {
+      throw new Error("disableSelfViewDisclosure aliases conflict");
+    }
+    if (selfViewDisclosureTargetPubKeyHex != null &&
+        self_view_disclosure_target_pubkey != null &&
+        comparableBatchHex(selfViewDisclosureTargetPubKeyHex) !==
+          comparableBatchHex(self_view_disclosure_target_pubkey)) {
+      throw new Error("selfViewDisclosureTargetPubKeyHex aliases conflict");
+    }
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
     const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 8000000);
     // Snapshot and canonicalize fee coins before any scan/prover await. The
@@ -3669,6 +3693,9 @@ export class ClairveilJS {
       strictPrivacyScan,
       strict_privacy_scan
     });
+    const transferProtocolConfig = await this.assertTransferProtocolConfig(
+      denom ?? this.defaultDenom
+    );
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
       ...scanOptions,
@@ -3768,7 +3795,6 @@ export class ClairveilJS {
             ? reservationRequiredCosmosMemo("Clairveil veiled transfer")
             : "Clairveil veiled transfer"
         });
-        const signDocHash = cosmosSignDocBindingHash(signDoc);
         await heartbeatNow();
         await markReservationProofReady(resolvedReservationManager, reservationBatch, transferProofReadyMetadata(built, {
           amount: stepAmount,
@@ -3779,20 +3805,24 @@ export class ClairveilJS {
         }, "signDocHash"));
         return {
           built,
-          signDoc: markCosmosSignDocReservationRequired(
-            signDoc,
-            reservationBatch
-          )
+          ...(artifact.signDoc ? {
+            signDoc: markCosmosSignDocReservationRequired(
+              artifact.signDoc,
+              reservationBatch
+            )
+          } : {}),
+          ...(artifact.execution ? { execution: artifact.execution } : {})
         };
       });
-      const { built, signDoc } = heartbeatResult;
+      const { built, signDoc, execution } = heartbeatResult;
 
       return {
         ...reservationReconciliationFields(heartbeatResult),
         status: "ready",
         plan,
         scan: scanResult,
-        signDoc,
+        ...(signDoc ? { signDoc } : {}),
+        ...(execution ? { execution } : {}),
         payload: built.payload,
         proof: built.proof,
         message: built.message,
@@ -3882,7 +3912,8 @@ export class ClairveilJS {
     selfViewDisclosureTargetPubKeyHex,
     self_view_disclosure_target_pubkey,
     reservationManager,
-    reservation_manager
+    reservation_manager,
+    executionBuilder
   } = {}) {
     if (!this.enableExperimentalBatchTransfer) {
       throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
@@ -4314,12 +4345,35 @@ export class ClairveilJS {
           shieldedPrefix: this.shieldedPrefix,
           nowUnix: resolvedNowUnix
         });
+        const artifact = await buildPreparedExecutionArtifact({
+          executionBuilder,
+          executionInput: {
+            payload,
+            proof,
+            message,
+            operationEvidence: operationEvidence.evidence,
+            operationEvidenceHash: operationEvidence.evidenceHash,
+            reservation: reservationBatchSummary(reservationBatch)
+          },
+          buildSignDoc: () => this.buildDirectSignDoc({
+            signer: privacy.address,
+            pubKeyHex: privacy.pubKeyHex,
+            gasLimit,
+            messages: [{
+              typeUrl: msgBatchTransferTypeUrl,
+              value: MsgBatchTransfer.fromPartial(message)
+            }],
+            memo: reservationBatch
+              ? reservationRequiredCosmosMemo("Clairveil batch veiled transfer")
+              : "Clairveil batch veiled transfer"
+          })
+        });
         await heartbeatNow();
         await markReservationProofReadyForBatchItems(resolvedReservationManager, reservationBatch, [{
           notes: selectedInputs,
           metadata: {
             payloadHash: payload.payload_hash,
-            signDocHash,
+            ...artifact.executionBinding,
             expectedOperationEvidenceHash: operationEvidence.evidenceHash,
             operationSuccessEvidenceRequired: true,
             metadata: {
@@ -4340,10 +4394,10 @@ export class ClairveilJS {
           message,
           operationEvidence: operationEvidence.evidence,
           operationEvidenceHash: operationEvidence.evidenceHash,
-          signDoc: markCosmosSignDocReservationRequired(
-            signDoc,
-            reservationBatch
-          )
+          ...(artifact.signDoc ? {
+            signDoc: markCosmosSignDocReservationRequired(artifact.signDoc, reservationBatch)
+          } : {}),
+          ...(artifact.execution ? { execution: artifact.execution } : {})
         };
       });
       const {
@@ -4351,6 +4405,7 @@ export class ClairveilJS {
         proof,
         message,
         signDoc,
+        execution,
         operationEvidence,
         operationEvidenceHash
       } = heartbeatResult;
@@ -4360,7 +4415,8 @@ export class ClairveilJS {
         status: "ready",
         plan,
         scan: scanResult,
-        signDoc,
+        ...(signDoc ? { signDoc } : {}),
+        ...(execution ? { execution } : {}),
         payload,
         proof,
         message,
@@ -4535,9 +4591,9 @@ export class ClairveilJS {
   /**
    * Complete the local stage after a checkpointed batch proof has been
    * restored. This derives the message and operation evidence from the exact
-   * payload/proof, creates the reservation-bound sign doc, and atomically
-   * advances every reserved input to ProofReady. It performs no wallet or
-   * broadcast request.
+   * payload/proof, creates either the reservation-bound Cosmos sign doc or a
+   * caller-supplied execution artifact, and atomically advances every reserved
+   * input to ProofReady. It performs no broadcast request.
    */
   async finalizePreparedBatchTransfer({
     payload,
@@ -4570,7 +4626,8 @@ export class ClairveilJS {
     reservationBatch,
     reservation_batch,
     chainNowUnix,
-    chain_now_unix
+    chain_now_unix,
+    executionBuilder
   } = {}) {
     if (!this.enableExperimentalBatchTransfer) {
       throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
@@ -4610,7 +4667,13 @@ export class ClairveilJS {
       throw new Error("prepared batch transfer operationId does not match the reservation batch");
     }
     const resolvedSigner = String(signer || "").trim();
-    if (!resolvedSigner) throw new Error("finalizePreparedBatchTransfer requires the original Cosmos signer");
+    if (!resolvedSigner) {
+      throw new Error(
+        executionBuilder
+          ? "finalizePreparedBatchTransfer requires the original batch creator"
+          : "finalizePreparedBatchTransfer requires the original Cosmos signer"
+      );
+    }
     const resolvedNowUnix = normalizedBatchNowUnix(
       chainNowUnix ?? chain_now_unix ?? Math.floor(Date.now() / 1000)
     );
@@ -4717,13 +4780,34 @@ export class ClairveilJS {
       await this.checkNullifiers(effects.nullifier_hexes),
       effects.nullifier_hexes
     );
+    const artifact = await buildPreparedExecutionArtifact({
+      executionBuilder,
+      executionInput: {
+        payload,
+        proof: normalizedProof,
+        message,
+        operationEvidence: operationEvidence.evidence,
+        operationEvidenceHash: operationEvidence.evidenceHash,
+        reservation: reservationBatchSummary(resolvedReservation)
+      },
+      buildSignDoc: () => this.createBatchTransferSignDoc({
+        signer: resolvedSigner,
+        pubKeyHex,
+        gasLimit,
+        message,
+        memo,
+        expectedCircuitIdentity:
+          transferProtocolConfig.circuit_config.circuit_set_identity,
+        chainNowUnix: resolvedNowUnix
+      })
+    });
     const persistedOutputMode = String(
       authoritativeReservation.reservations?.[0]?.metadata?.batch_transfer_output_mode ||
       (payload.outputs.length === 32 ? "exact32" : "compact")
     );
     await markReservationProofReady(resolvedReservationManager, authoritativeReservation, {
       payloadHash: payload.payload_hash,
-      signDocHash: cosmosSignDocBindingHash(signDoc),
+      ...artifact.executionBinding,
       expectedOperationEvidenceHash: operationEvidence.evidenceHash,
       operationSuccessEvidenceRequired: true,
       metadata: {
@@ -4788,8 +4872,12 @@ export class ClairveilJS {
     feeAmount,
     fee_amount,
     reservationManager,
-    reservation_manager
+    reservation_manager,
+    executionBuilder
   } = {}) {
+    if (executionBuilder != null && typeof executionBuilder !== "function") {
+      throw new Error("executionBuilder must be a function");
+    }
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
     const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 5000000);
     const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
@@ -4882,7 +4970,6 @@ export class ClairveilJS {
             ? reservationRequiredCosmosMemo("Clairveil veiled withdraw")
             : "Clairveil veiled withdraw"
         });
-        const signDocHash = cosmosSignDocBindingHash(signDoc);
         await heartbeatNow();
         await markReservationProofReady(
           resolvedReservationManager,
@@ -4895,20 +4982,24 @@ export class ClairveilJS {
         );
         return {
           built,
-          signDoc: markCosmosSignDocReservationRequired(
-            signDoc,
-            reservationBatch
-          )
+          ...(artifact.signDoc ? {
+            signDoc: markCosmosSignDocReservationRequired(
+              artifact.signDoc,
+              reservationBatch
+            )
+          } : {}),
+          ...(artifact.execution ? { execution: artifact.execution } : {})
         };
       });
-      const { built, signDoc } = heartbeatResult;
+      const { built, signDoc, execution } = heartbeatResult;
 
       return {
         ...reservationReconciliationFields(heartbeatResult),
         status: "ready",
         plan,
         scan: scanResult,
-        signDoc,
+        ...(signDoc ? { signDoc } : {}),
+        ...(execution ? { execution } : {}),
         proverPayload: built.proverPayload,
         proof: built.proof,
         payload: built.payload,

@@ -206,7 +206,7 @@ conflict는 operation을 바꾸지 않는다.
 
 `ConfirmedSpent`는 input note의 nullifier가 온체인에서 소비됐다는 뜻이다. 다음 항목을 검증하기 전에는 payment, payroll item 또는 transfer가 의도대로 성공했다고 보고하지 않는다.
 
-- 저장된 `txHash` 또는 `txBytesHash`와 reconcile evidence의 같은 identity. 현재 generic matcher는 transport를 구분하지 않으므로 EVM network `txHash`/receipt 의무는 caller가 별도 강제
+- Cosmos/legacy는 저장된 transaction identity와 reconcile evidence의 일치. EVM tag는 저장된 network `txHash`와 prepared `txBytesHash`가 각각 일치하고 successful receipt, RPC transaction identity, privacy event 검증이 모두 참이어야 함
 - expected output commitment
 - recipient, amount, denom 또는 그 binding hash
 - disclosure digest와 policy evidence
@@ -223,6 +223,8 @@ Evidence가 부족하면 spent input을 재사용하지 못하게 유지하면�
 - 감사 로그를 위한 `reason` 권장
 
 Operator는 저장된 payload/proof hash, transaction identity, relay handoff, chain height, nullifier와 output evidence를 확인한다. 단순 TTL 만료, 로컬 취소 또는 “오래 기다렸다”는 이유만으로 note를 release하지 않는다.
+
+유일한 자동 예외는 SDK 자체의 `batch_checkpointed_artifact_requires_recovery` quarantine을 `finalizePreparedBatchTransfer(...)`가 복구하는 경우다. 저장된 payload hash와 원래 reservation claim token이 일치하고 broadcast·relay handoff 이력이 없으며 모든 input nullifier를 체인에서 미사용으로 다시 확인해야 한다. 저수준 `recoverCheckpointedProofReady(...)`를 직접 호출할 때도 `nullifierUnspentConfirmed: true` evidence를 명시해야 하며, 이 조건을 충족한 전체 batch만 `ProofReady`로 원자적으로 돌아간다.
 
 ## 안전한 로그와 사용자 메시지
 

@@ -38,6 +38,26 @@ export interface EvmTransactionRequest {
   chainId?: EvmQuantity;
 }
 
+export interface EvmRpcTransaction extends Partial<EvmTransactionRequest> {
+  hash: Hex | string;
+  from: string;
+  to: string;
+  input?: string;
+  value: EvmQuantity;
+}
+
+export interface EvmTransactionIdentityVerification {
+  readonly verified: true;
+  readonly operation: string;
+  readonly txHash: Hex | string;
+  readonly sender: string;
+  readonly to: string;
+  readonly data: string;
+  readonly value: EvmQuantity;
+  readonly chainId: EvmQuantity;
+  readonly txBytesHash: Hex;
+}
+
 type EvmReservationManagerBinding =
   | { reservationManager: NoteReservationManager; reservation_manager?: NoteReservationManager | null }
   | { reservationManager?: NoteReservationManager | null; reservation_manager: NoteReservationManager };
@@ -188,11 +208,119 @@ export type EvmDepositEncoder = (message: EvmDepositMessage, options?: EvmPrivac
 export type EvmTransferEncoder = (message: TransferMessage, options?: EvmPrivacyTransactionOptions) => Hex;
 export type EvmWithdrawEncoder = (message: EvmWithdrawMessage, options?: EvmPrivacyTransactionOptions) => Hex;
 
+/** EIP-712 authorization envelope accepted by an EVM privacy contract. */
+export interface EvmPrivacyActionAuthorization {
+  effectiveSender: string;
+  executor: string;
+  nonce: string | number | bigint;
+  deadline: string | number | bigint;
+  authorizationKind: string | number | bigint;
+  signature: BytesLike;
+}
+
+export type EvmPrivacyAuthorizationRequest = Omit<EvmPrivacyActionAuthorization, "signature"> & {
+  signature?: BytesLike;
+};
+
+export interface EvmNormalizedPrivacyAuthorization {
+  effectiveSender: string;
+  executor: string;
+  nonce: bigint;
+  deadline: bigint;
+  authorizationKind: bigint;
+  signature: BytesLike;
+}
+
+export type EvmPrivacyAuthorizationAction =
+  | "transfer"
+  | "withdraw"
+  | "batchTransfer"
+  | "singleProofBatchTransfer";
+
+export interface EvmPrivacyAuthorizationTypedDataDomain {
+  name: string;
+  version?: string;
+}
+
+export interface EvmPrivacyAuthorizationTypedDataRequest {
+  action: EvmPrivacyAuthorizationAction;
+  request: TransferMessage | EvmWithdrawMessage | EvmSingleProofBatchTransferMessage;
+  authorization: EvmPrivacyAuthorizationRequest;
+  cosmosChainId: string;
+  evmChainId: EvmQuantity;
+  contractAddress?: string;
+  batchId?: BytesLike;
+  batchItemIndex?: string | number | bigint;
+}
+
+export type EvmPrivacyAuthorizationTypedDataInput = EvmPrivacyAuthorizationTypedDataRequest & {
+  domain: EvmPrivacyAuthorizationTypedDataDomain;
+};
+
+export interface EvmPrivacyAuthorizationTypedData {
+  types: Readonly<Record<string, readonly { name: string; type: string }[]>>;
+  primaryType: "PrivacyActionAuthorization";
+  domain: Readonly<{
+    name: string;
+    version: string;
+    chainId: string;
+    verifyingContract: string;
+  }>;
+  message: Readonly<Record<string, string>>;
+}
+
+export interface EvmAuthorizationProfile {
+  /** Must be pure: validation can run for signing and again for transaction construction. */
+  validate?(authorization: EvmNormalizedPrivacyAuthorization): void;
+  buildTypedData?(input: EvmPrivacyAuthorizationTypedDataRequest): EvmPrivacyAuthorizationTypedData;
+}
+
+export interface EvmAuthorizationProfileOptions {
+  /** Optional target-chain allowlist. Omit it to accept every ABI-valid uint8 kind. */
+  supportedAuthorizationKinds?: Array<string | number | bigint>;
+  /** Canonical EIP-712 domain for contracts using the Clairveil authorization envelope. */
+  typedDataDomain?: EvmPrivacyAuthorizationTypedDataDomain;
+  /** Optional target-chain policy in addition to supportedAuthorizationKinds. */
+  validate?: (authorization: EvmNormalizedPrivacyAuthorization) => void;
+}
+
+export interface EvmAuthorizedTransferItem {
+  request: TransferMessage;
+  authorization: EvmPrivacyActionAuthorization;
+}
+
+/** Lossless EVM representation of Clairveil v0.3.1 MsgBatchTransfer. */
+export interface EvmSingleProofBatchTransferOutput {
+  commitment: BytesLike;
+  ciphertext: BytesLike;
+  viewTag: BytesLike;
+  userPrivacyPolicy: number;
+  userDisclosureMode: number;
+  userDisclosureDigest?: BytesLike;
+  userDisclosureTargetPubkey?: BytesLike;
+  userDisclosurePayload?: BytesLike;
+  fullDisclosureDigest: BytesLike;
+  auditDisclosurePayload: BytesLike;
+  selfViewDisclosurePayload?: BytesLike;
+}
+
+export interface EvmSingleProofBatchTransferMessage {
+  proof: BytesLike;
+  root: BytesLike;
+  nullifiers: BytesLike[];
+  outputs: EvmSingleProofBatchTransferOutput[];
+  auditKeyId: string;
+  auditKeyEpoch: string | number | bigint;
+  auditDisclosureTargetPubkey: BytesLike;
+  expiresAtUnix: string | number | bigint;
+}
+
 export interface Eip1193WalletAdapter {
   getAddress(): Promise<string>;
   /** Returns the connected wallet's EIP-155 chain ID before transaction submission. */
   getChainId(): Promise<EvmQuantity>;
   signPrivacyRoot(messageBytes: Uint8Array): Promise<PrefixedHex>;
+  signTypedData(typedData: EvmPrivacyAuthorizationTypedData): Promise<Hex | string>;
   sendTransaction(transaction: EvmTransactionRequest): Promise<Hex | string>;
   call(transaction: EvmCallRequest, blockTag?: EvmBlockTag): Promise<Hex | string>;
   getLogs(filter: EvmLogFilter): Promise<EvmLog[]>;
@@ -205,9 +333,16 @@ export type EvmTransactionWallet = Pick<Eip1193WalletAdapter, "sendTransaction">
 export interface EvmContractAdapter {
   contractAddress: string;
   abi?: readonly AbiItem[];
+  authorizationProfile?: EvmAuthorizationProfile;
   buildDepositTransaction(message: EvmDepositMessage, options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
   buildTransferTransaction(message: TransferMessage, options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
   buildWithdrawTransaction(message: EvmWithdrawMessage, options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
+  buildTransferWithAuthorizationTransaction?(message: TransferMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
+  buildWithdrawWithAuthorizationTransaction?(message: EvmWithdrawMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
+  buildBatchTransferTransaction?(batchId: BytesLike, requests: TransferMessage[], options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
+  buildBatchTransferWithAuthorizationTransaction?(batchId: BytesLike, items: EvmAuthorizedTransferItem[], options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
+  buildSingleProofBatchTransferTransaction?(message: EvmSingleProofBatchTransferMessage, options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
+  buildSingleProofBatchTransferWithAuthorizationTransaction?(message: EvmSingleProofBatchTransferMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
 }
 
 export interface EvmPublicPrivacyAccount {
@@ -351,7 +486,7 @@ export const evmPrivacyPrecompileAddress: "0x10000000000000000000000000000000000
 export const defaultEvmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b";
 export const evmDepositModeNonpayable: "nonpayable";
 export const evmDepositModePayableExactValue: "payable-exact-value";
-export const defaultEvmDepositMode: "nonpayable";
+export const defaultEvmDepositMode: "payable-exact-value";
 export const evmDepositModes: readonly EvmDepositMode[];
 export const evmPrivacyPrecompileAbi: readonly AbiItem[];
 export const evmPrivacyPrecompilePayableDepositAbi: readonly AbiItem[];
@@ -368,11 +503,33 @@ export function bech32AddressToEvm(address: string, expectedPrefix?: string): st
 export function encodeEvmPrivacyDeposit(message: EvmDepositMessage, options?: EvmPrivacyTransactionOptions): Hex;
 export function encodeEvmPrivacyTransfer(message: TransferMessage, options?: EvmPrivacyTransactionOptions): Hex;
 export function encodeEvmPrivacyWithdraw(message: EvmWithdrawMessage, options?: EvmPrivacyTransactionOptions): Hex;
+export function encodeEvmPrivacyTransferWithAuthorization(message: TransferMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions): Hex;
+export function encodeEvmPrivacyWithdrawWithAuthorization(message: EvmWithdrawMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions): Hex;
+export function encodeEvmPrivacyBatchTransfer(batchId: BytesLike, requests: TransferMessage[], options?: EvmPrivacyTransactionOptions): Hex;
+export function encodeEvmPrivacyBatchTransferWithAuthorization(batchId: BytesLike, items: EvmAuthorizedTransferItem[], options?: EvmPrivacyTransactionOptions): Hex;
+export function encodeEvmPrivacySingleProofBatchTransfer(message: EvmSingleProofBatchTransferMessage, options?: EvmPrivacyTransactionOptions): Hex;
+export function encodeEvmPrivacySingleProofBatchTransferWithAuthorization(message: EvmSingleProofBatchTransferMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions): Hex;
+export function buildEvmPrivacyAuthorizationTypedData(input: EvmPrivacyAuthorizationTypedDataInput): EvmPrivacyAuthorizationTypedData;
+export function createEvmAuthorizationProfile(input?: EvmAuthorizationProfileOptions): EvmAuthorizationProfile;
 export function defaultEncodeEvmDeposit(message: EvmDepositMessage, options?: EvmPrivacyTransactionOptions): Hex;
 export function defaultEncodeEvmTransfer(message: TransferMessage, options?: EvmPrivacyTransactionOptions): Hex;
 export function defaultEncodeEvmWithdraw(message: EvmWithdrawMessage, options?: EvmPrivacyTransactionOptions): Hex;
 export function evmTransactionBindingHash(transaction: EvmTransactionRequest): Hex;
 export function markEvmTransactionReservationRequired<T extends EvmTransactionRequest>(transaction: T): T;
+export function verifyEvmTransactionIdentity(input: {
+  transaction: EvmTransactionRequest;
+  rpcTransaction: EvmRpcTransaction | object;
+  txHash: Hex | string;
+  sender: string;
+  expectedChainId?: EvmQuantity;
+  actualChainId: EvmQuantity;
+}): Readonly<EvmTransactionIdentityVerification>;
+export function verifyEvmPrivacyReceipt(input: {
+  transaction: EvmTransactionRequest;
+  receipt: { status?: EvmQuantity; logs?: EvmLog[] };
+  sender: string;
+  contractAddress?: string;
+}): Readonly<{ verified: true; event: string; operation: string }>;
 export function createEip1193WalletAdapter(input?: { provider: Eip1193Provider; account?: string }): Eip1193WalletAdapter;
 export function createEvmContractAdapter(input?: {
   contractAddress?: string;
@@ -380,9 +537,16 @@ export function createEvmContractAdapter(input?: {
   chainId?: string | number;
   depositMode?: EvmDepositMode;
   nativeDenom?: string;
+  authorizationProfile?: EvmAuthorizationProfile;
   encodeDeposit?: EvmDepositEncoder;
   encodeTransfer?: EvmTransferEncoder;
   encodeWithdraw?: EvmWithdrawEncoder;
+  encodeTransferWithAuthorization?: (message: TransferMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions) => Hex;
+  encodeWithdrawWithAuthorization?: (message: EvmWithdrawMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions) => Hex;
+  encodeBatchTransfer?: (batchId: BytesLike, requests: TransferMessage[], options?: EvmPrivacyTransactionOptions) => Hex;
+  encodeBatchTransferWithAuthorization?: (batchId: BytesLike, items: EvmAuthorizedTransferItem[], options?: EvmPrivacyTransactionOptions) => Hex;
+  encodeSingleProofBatchTransfer?: (message: EvmSingleProofBatchTransferMessage, options?: EvmPrivacyTransactionOptions) => Hex;
+  encodeSingleProofBatchTransferWithAuthorization?: (message: EvmSingleProofBatchTransferMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions) => Hex;
 }): EvmContractAdapter;
 export function createEvmPrivacyPrecompileAdapter(input?: {
   contractAddress?: string;
@@ -390,9 +554,16 @@ export function createEvmPrivacyPrecompileAdapter(input?: {
   chainId?: string | number;
   depositMode?: EvmDepositMode;
   nativeDenom?: string;
+  authorizationProfile?: EvmAuthorizationProfile;
   encodeDeposit?: EvmDepositEncoder;
   encodeTransfer?: EvmTransferEncoder;
   encodeWithdraw?: EvmWithdrawEncoder;
+  encodeTransferWithAuthorization?: (message: TransferMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions) => Hex;
+  encodeWithdrawWithAuthorization?: (message: EvmWithdrawMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions) => Hex;
+  encodeBatchTransfer?: (batchId: BytesLike, requests: TransferMessage[], options?: EvmPrivacyTransactionOptions) => Hex;
+  encodeBatchTransferWithAuthorization?: (batchId: BytesLike, items: EvmAuthorizedTransferItem[], options?: EvmPrivacyTransactionOptions) => Hex;
+  encodeSingleProofBatchTransfer?: (message: EvmSingleProofBatchTransferMessage, options?: EvmPrivacyTransactionOptions) => Hex;
+  encodeSingleProofBatchTransferWithAuthorization?: (message: EvmSingleProofBatchTransferMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions) => Hex;
 }): EvmContractAdapter;
 
 export class ClairveilEvmClient {
@@ -406,11 +577,12 @@ export class ClairveilEvmClient {
     bech32Prefix?: string;
     shieldedPrefix?: string;
     defaultDenom?: string;
-    /** Nonpayable by default; opt into Clairveil v0.3.1 downstream escrow funding explicitly. */
+    /** Clairveil-compatible EVM precompiles use payable exact-value deposits by default. */
     depositMode?: EvmDepositMode;
     /** Runtime-native minimal denom whose amount must equal EVM msg.value. */
     nativeDenom?: string;
     contractAdapter?: EvmContractAdapter;
+    authorizationProfile?: EvmAuthorizationProfile;
   });
   buildDepositMaterial(input?: {
     creator?: string;
@@ -423,10 +595,27 @@ export class ClairveilEvmClient {
   }): DepositMaterial;
   buildDepositTransaction(input?: EvmDepositTransactionInput): EvmDepositTransactionResult;
   buildPreparedTransferPayload(input?: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;
+  validateAuthorization(authorization: EvmPrivacyAuthorizationRequest, options?: { requireSignature?: boolean }): EvmNormalizedPrivacyAuthorization;
+  buildAuthorizationTypedData(input: EvmPrivacyAuthorizationTypedDataRequest): EvmPrivacyAuthorizationTypedData;
   buildTransferTransaction(input?: EvmTransferTransactionInput): Promise<EvmTransferTransactionResult>;
   buildPreparedWithdrawProverPayload(input?: PreparedWithdrawProverPayloadInput): Promise<PreparedWithdrawProverPayloadResult>;
   buildWithdrawTransaction(input?: EvmWithdrawTransactionInput): Promise<EvmWithdrawTransactionResult>;
+  buildTransferWithAuthorizationTransaction(input: { message: TransferMessage; authorization: EvmPrivacyActionAuthorization; transactionOptions?: EvmPrivacyTransactionOptions }): { status: "ready"; message: TransferMessage; authorization: EvmPrivacyActionAuthorization; transaction: EvmTransactionRequest };
+  buildWithdrawWithAuthorizationTransaction(input: { message: EvmWithdrawMessage; authorization: EvmPrivacyActionAuthorization; transactionOptions?: EvmPrivacyTransactionOptions }): { status: "ready"; message: EvmWithdrawMessage; authorization: EvmPrivacyActionAuthorization; transaction: EvmTransactionRequest };
+  buildBatchTransferTransaction(input: { batchId: BytesLike; requests: TransferMessage[]; transactionOptions?: EvmPrivacyTransactionOptions }): { status: "ready"; batchId: BytesLike; requests: TransferMessage[]; transaction: EvmTransactionRequest };
+  buildBatchTransferWithAuthorizationTransaction(input: { batchId: BytesLike; items: EvmAuthorizedTransferItem[]; transactionOptions?: EvmPrivacyTransactionOptions }): { status: "ready"; batchId: BytesLike; items: EvmAuthorizedTransferItem[]; transaction: EvmTransactionRequest };
+  buildSingleProofBatchTransferTransaction(input: { message: EvmSingleProofBatchTransferMessage; transactionOptions?: EvmPrivacyTransactionOptions }): { status: "ready"; message: EvmSingleProofBatchTransferMessage; transaction: EvmTransactionRequest };
+  buildSingleProofBatchTransferWithAuthorizationTransaction(input: { message: EvmSingleProofBatchTransferMessage; authorization: EvmPrivacyActionAuthorization; transactionOptions?: EvmPrivacyTransactionOptions }): { status: "ready"; message: EvmSingleProofBatchTransferMessage; authorization: EvmPrivacyActionAuthorization; transaction: EvmTransactionRequest };
   sendTransaction(wallet: EvmTransactionWallet | null | undefined, transaction: EvmTransactionRequest, reservationOptions?: EvmReservationBroadcastOptions): Promise<Hex | string>;
+  verifyTransactionIdentity(input: {
+    transaction: EvmTransactionRequest;
+    rpcTransaction: EvmRpcTransaction | object;
+    txHash: Hex | string;
+    sender: string;
+    expectedChainId?: EvmQuantity;
+    actualChainId: EvmQuantity;
+  }): Readonly<EvmTransactionIdentityVerification>;
+  verifyPrivacyReceipt(input: { transaction: EvmTransactionRequest; receipt: { status?: EvmQuantity; logs?: EvmLog[] }; sender: string }): Readonly<{ verified: true; event: string; operation: string }>;
   privacyAccount(material: PrivacyMaterial): EvmPublicPrivacyAccount;
 }
 

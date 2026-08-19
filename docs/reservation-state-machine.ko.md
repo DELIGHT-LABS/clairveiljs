@@ -25,7 +25,7 @@
 | `Reserved` | 선택된 note를 durable inventory lock으로 확보한 상태 | persisted reservation lifecycle의 시작이다. worker lease는 아직 없고 취소 시 `Released`로 이동할 수 있다. |
 | `Proving` | prover 실행을 위해 batch lease를 획득한 상태 | lease token이 필요한 상태다. 준비 실패 결과가 불명확하면 `ManualReview`로 격리하며 자동 release하지 않는다. |
 | `ProofReady` | proof와 prepared payload가 준비된 상태 | broadcast 전 proof 폐기, wallet 거절, relay handoff를 안전하게 기록·처리해야 한다. |
-| `Submitted` | manager에 제출 metadata가 기록된 상태 | 저수준 manager는 transport를 구분하지 않고 `txHash` 또는 `txBytesHash` 중 하나를 요구한다. `signDocHash`만으로는 만들 수 없다. |
+| `Submitted` | manager에 제출 metadata가 기록된 상태 | `execution_transport: "evm"` reservation은 network `txHash`가 필수다. Legacy/external record는 `txHash` 또는 `txBytesHash` 중 하나를 요구한다. `signDocHash`만으로는 만들 수 없다. |
 | `Unknown` | transaction이 네트워크에 도달했을 가능성이 있으나 결과를 확정할 수 없는 상태 | 재전송하기 전에 transaction과 nullifier 상태를 reconcile해야 한다. |
 | `ConfirmedSpent` | 온체인 evidence로 입력 note의 소비가 확인된 상태 | terminal 상태다. |
 | `ReplanRequired` | 새 transaction 계획이 필요한 상태 | 새 계획은 다시 `Reserved`로 시작한다. |
@@ -39,7 +39,7 @@
 
 `ConfirmedSpent`는 input note의 nullifier가 온체인에서 사용됐다는 뜻이다. 이것만으로 payment 또는 payroll item의 성공을 의미하지 않는다.
 
-현재 `reconcileSpentNotes(...)`의 generic matcher는 transport를 저장하거나 구분하지 않는다. 저장된 `submitted_tx_hash` 또는 `tx_bytes_hash` 중 하나와 reconcile evidence의 같은 identity가 일치하고 예상 output commitment, disclosure digest, recipient/amount/denom evidence가 모두 맞으면 operation 성공으로 판정할 수 있다. 따라서 EVM의 서명 전 canonical request binding인 `txBytesHash`도 manager 내부에서는 identity match로 계산된다. 고수준 EVM send helper는 wallet이 반환한 network `txHash`를 `Submitted`에 기록하지만, EVM receipt나 RPC identity를 반드시 요구하는 정책은 caller의 operation DB 또는 reconcile 입력 검증에서 별도로 강제해야 한다. Evidence가 부족하면 reservation은 spent 상태로 격리하면서 operation은 `ManualReview`가 될 수 있고, 명시적인 불일치는 `ConflictSpent`가 된다.
+고수준 prepare 경로는 `ProofReady`에서 `execution_transport`를 저장한다. Cosmos는 sign-doc binding을 유지하고, EVM은 prepared request의 `tx_bytes_hash`를 유지한다. EVM operation 성공은 저장된 network `submitted_tx_hash`와 `tx_bytes_hash`가 reconcile evidence와 각각 일치하고, explicit successful receipt, exact RPC transaction identity 검증, action별 privacy event 검증, 예상 output evidence가 모두 맞아야 한다. `txBytesHash`만으로는 EVM 성공이 될 수 없다. Transport tag가 없는 기존 record는 호환을 위해 generic matcher를 유지한다. Evidence가 부족하면 reservation은 spent 상태로 격리하면서 operation은 `ManualReview`가 될 수 있고, 명시적인 불일치는 `ConflictSpent`가 된다.
 
 | 구분 | 대표 상태 | 의미 |
 | --- | --- | --- |
@@ -61,7 +61,7 @@
 | `recordRelayHandoff(...)` | `ProofReady` 유지, relay payload handoff evidence 기록 | payload hash 일치, broadcast 시작 전, 유효한 lease |
 | `recordRelayTransactionEvidence(...)` | 하나의 relay operation에 연결된 모든 reservation을 `ProofReady`에서 `Submitted`로 원자적으로 전이 | Exact payload transaction 포함과 기록된 external handoff 또는 durable same-origin local-relay attempt가 필요하다. Lease 없이 transaction evidence만 기록하며 성공·release는 reconcile이 판정한다. |
 | `markBroadcastAttempting(...)` | `ProofReady` 유지, `broadcast_in_flight`와 attempt count 기록 | 외부 broadcast 경계를 넘기기 직전 호출, 유효한 lease |
-| `markSubmitted(...)` | `ProofReady → Submitted` | 사전 `markBroadcastAttempting(...)` 기록, 유효한 lease와 `txHash` 또는 `txBytesHash`. manager는 transport나 hash 의미를 구분하지 않음 |
+| `markSubmitted(...)` | `ProofReady → Submitted` | 사전 `markBroadcastAttempting(...)` 기록과 유효한 lease. EVM tag가 있으면 network `txHash` 필수, 그 외에는 `txHash` 또는 `txBytesHash` |
 | `markUnknown(...)` | `ProofReady/Submitted → Unknown` | 사전 broadcast attempt, 유효한 lease와 `txHash` 또는 `txBytesHash`. `signDocHash`만으로는 부족 |
 | `markBroadcastRejected(...)` | `ProofReady → ReplanRequired` | wallet이 broadcast 전에 거절했고 proof 폐기를 기록할 수 있어야 한다. |
 | `markBroadcastFailed(...)` | `ProofReady/Submitted/Unknown → ReplanRequired` | 정확한 실패/부재 transaction identity와 전체 input의 명시적 unspent evidence. Live `ProofReady`는 현재 manager의 일치하는 미만료 lease도 필요하고 `Submitted`/`Unknown`은 lease가 필요 없다. |
@@ -70,8 +70,9 @@
 | `transitionBatch(...)` | 허용된 일반 전이를 여러 reservation에 원자적으로 적용 | 전용 helper가 없는 전이에만 사용하는 저수준 CAS API. 허용 전이, lease, source 상태별 evidence 규칙을 그대로 검증한다. |
 | `releaseReservedOrProving(...)` | `Reserved → Released` | 호환용 이름이며 `Proving`은 release하지 않고 거부 |
 | `markManualReview(...)` | 허용된 상태에서 `ManualReview` | lease가 필요한 source 상태에서는 현재 lease 필요 |
+| `recoverCheckpointedProofReady(...)` | `ManualReview → ProofReady` | SDK checkpoint quarantine 사유, 일치하는 payload hash와 원래 claim token, broadcast/relay handoff 부재, 모든 nullifier의 명시적 미사용 확인 |
 | `resolveManualReview(...)` | `ManualReview → Released/ReplanRequired/Failed` | `operatorId`, `approvalReference`; `reason` 기록 권장 |
-| `reconcileSpentNotes(...)` | 허용된 상태에서 `ConfirmedSpent`, operation evidence에 따라 quarantine/성공 판정 | literal spent evidence와 저장된 `txHash`/`txBytesHash` 중 하나에 대한 match 및 필요한 output evidence. transport별 network identity는 별도로 강제하지 않음 |
+| `reconcileSpentNotes(...)` | 허용된 상태에서 `ConfirmedSpent`, operation evidence에 따라 quarantine/성공 판정 | literal spent evidence와 필요한 output evidence. EVM tag는 network `txHash` + artifact `txBytesHash` + successful receipt + RPC call identity + privacy event 검증을 모두 요구 |
 
 ## 안전 규칙
 
@@ -80,7 +81,7 @@
 3. `ProofReady`에서 wallet이 거절하거나 proof를 폐기했다면, proof가 실제로 폐기됐음을 증명할 수 있을 때만 `ReplanRequired`로 이동한다. 그렇지 않으면 `ManualReview`로 격리한다.
 4. `Submitted`/`Unknown`을 `ReplanRequired`/`Failed`로 바꾸려면 input nullifier 미사용과 기록된 transaction 부재/실패를 모두 확인한다. Live `ProofReady`는 active submitter의 input을 풀지 않도록 현재 manager 소유의 일치하는 미만료 lease도 요구한다.
 5. Relay payload를 relayer에 전달한 뒤에는 TTL 만료나 로컬 취소만으로 note를 release하지 않는다. relayer가 제출했을 가능성을 포함해 온체인 evidence로 reconcile한다.
-6. `ManualReview` 해제에는 `operatorId`와 `approvalReference`가 필수이며 `reason`도 운영 감사용으로 기록하는 것이 좋다.
+6. 일반적인 `ManualReview` 해제에는 `operatorId`와 `approvalReference`가 필수이며 `reason`도 운영 감사용으로 기록하는 것이 좋다. 유일한 자동 예외는 SDK 자체의 정확한 checkpoint quarantine을 원래 claim token, 일치하는 payload hash, broadcast/relay handoff 부재, 모든 nullifier의 미사용 evidence로 검증해 `ProofReady`로 복구하는 경로다.
 7. `ConfirmedSpent`와 operation `Succeeded`를 같은 의미로 사용하지 않는다. 다중 input operation은 모든 linked reservation과 output evidence를 한 번에 reconcile한다.
 8. 준비 실패 시 `rollbackPlanReservation(...)`은 `Reserved`만 release한다. 유효한 lease가 있으면 `Proving`/`ProofReady`를 `ManualReview`로 격리하고, 아니면 reconcile 전까지 잠근다.
 

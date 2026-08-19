@@ -109,8 +109,11 @@ handoff 이전 형식을 다시 허용하지 않습니다.
 Clairveil v0.3.1의 `Keeper.DepositWithFunder`는 trusted in-process Go
 integration API이며 protobuf, gRPC, CLI 또는 client `funder` field가
 아닙니다. 따라서 ClairveilJS의 Cosmos message surface는 바꾸지 않고,
-새 흐름은 fixed payable privacy precompile을 제공하는 downstream
-chain에서만 활성화합니다.
+새 흐름은 대상 체인의 payable privacy precompile에서 사용합니다. Deposit
+ABI는 정확히 `deposit((bytes,bytes,bytes))`이며 amount tuple field는 없고
+최소 단위 `msg.value`만 amount source입니다. SDK는 canonical Clairveil EVM
+ABI surface로 direct/authorized transfer·withdraw, multi-proof batch,
+Clairveil v0.3.1 single-proof batch를 함께 고정합니다.
 
 ## 예제 코드
 
@@ -134,9 +137,18 @@ const clairveil = createClairveilClient({
 });
 ```
 
-`prepareTransferBatch(...)`는 Clairveil v0.3.1에서 공개한 frozen One-Proof `BatchTransfer` V1 계약을 구현합니다. 입력 1~16개를 계획하고 원자적으로 예약하며, 순서가 고정된 payment/change/padding 출력 1~32개를 만들고, 명시적으로 선택한 `proverAdapter.proveBatchTransfer(payload)`를 정확히 한 번 호출해 Cosmos `MsgBatchTransfer` 한 건을 반환합니다. Payment를 여러 `MsgTransfer` proof로 확장하지 않고 prover 자동 failover도 하지 않습니다.
+`prepareTransferBatch(...)`는 Clairveil v0.3.1에서 공개한 frozen One-Proof `BatchTransfer` V1 계약을 구현합니다. 입력 1~16개를 계획하고 원자적으로 예약하며, 순서가 고정된 payment/change/padding 출력 1~32개를 만들고, 명시적으로 선택한 `proverAdapter.proveBatchTransfer(payload)`를 정확히 한 번 호출합니다. Cosmos profile은 `MsgBatchTransfer` 한 건을, EVM profile은 동일한 proof와 operation evidence에 binding된 `singleProofBatchTransfer` transaction을 반환합니다. Payment를 여러 독립 transfer proof로 확장하지 않고 prover 자동 failover도 하지 않습니다.
 
-현재 One-Proof Batch Transfer는 **Cosmos 전용**입니다. EVM profile의 `prepareTransferBatch(...)`는 요청을 거부하며, ClairveilJS는 `IPrivacy.batchTransfer` ABI 또는 EVM batch fallback을 제공하지 않습니다. EVM의 일반 `IPrivacy.transfer` 경로와 혼동하면 안 됩니다.
+browser `prepareTransferBatch(...)`는 Cosmos profile에서는 `MsgBatchTransfer`
+sign doc을, EVM profile에서는 같은 proof를 가진
+`singleProofBatchTransfer` transaction을 반환합니다. EVM transport는 canonical
+`batchTransfer`, `batchTransferWithAuthorization`,
+`singleProofBatchTransfer`, `singleProofBatchTransferWithAuthorization`
+calldata builder도 제공합니다. EIP-712 executor와 receipt barrier를 소유한
+application은 이를 사용할 수 있으며, broadcast 뒤에는 반드시
+`verifyEvmPrivacyReceipt(...)` 또는
+`waitForEvmTransaction(..., { privacyTransaction, sender })`로 action별
+privacy event를 검증해야 합니다. receipt status만으로는 성공 증거가 아닙니다.
 
 일반 `prepareTransfer(...)`는 공식 native 2×2 `MsgTransfer` 경로로 계속 지원되며 native 2×2는 deprecated가 아닙니다. 두 입력 witness는 검증된 하나의 exact-root `commitment_paths_at_root` snapshot에서 함께 가져옵니다. Clairveil의 기존 multi-message `transfer-batch` orchestration은 별도 protocol 의미를 유지하고 `prepareTransferBatch(...)`의 alias가 아닙니다.
 
@@ -294,12 +306,11 @@ transaction은 provider를 직접 호출하지 말고
 제출하세요. 이 API가 configured network를 다시 확인하고 reserved note의
 broadcast lifecycle 상태를 보존합니다.
 
-v0.3.1 payable deposit profile에서는
-`evmDepositMode: "payable-exact-value"`와 profile의 최소단위 `denom`과
-같은 `evmNativeDenom`도 설정하세요. 두 값은 per-request funding input이
-아니라 고정 profile 설정입니다.
+EVM profile은 `evmDepositMode: "payable-exact-value"`와 profile의
+최소단위 `denom`과 같은 `evmNativeDenom`을 반드시 설정해야 합니다. 이 값은
+per-request funding input이 아니라 고정 profile 설정입니다.
 
-`waitForEvmTransaction(...)`이 일반적인 EVM confirmation API입니다. 더 높은 수준의 ClairveilJS wrapper가 없는 read-only EVM JSON-RPC method에는 browser client의 `evmJsonRpc<TResult>(method, params)`를 사용할 수 있습니다. 이 API는 설정된 `evmRpc` endpoint와 client query timeout을 사용하며 injected wallet provider를 사용하지 않고 read-only allowlist 밖의 method와 비어 있는 `evmRpc` endpoint를 거부합니다. account 접근, 서명, subscription, transaction 제출에는 사용하면 안 됩니다.
+`waitForEvmTransaction(txHash, { privacyTransaction, sender })`이 일반적인 EVM confirmation API입니다. 원래 SDK가 준비한 transaction과 실제 제출 EOA/executor가 필수이며, receipt·전체 RPC transaction·현재 chain ID를 조회한 뒤 receipt status, hash/from/to/input/value/network identity, action별 privacy event가 모두 일치할 때만 성공합니다. 더 높은 수준의 ClairveilJS wrapper가 없는 read-only EVM JSON-RPC method에는 browser client의 `evmJsonRpc<TResult>(method, params)`를 사용할 수 있습니다. 이 API는 설정된 `evmRpc` endpoint와 client query timeout을 사용하며 injected wallet provider를 사용하지 않고 read-only allowlist 밖의 method와 비어 있는 `evmRpc` endpoint를 거부합니다. account 접근, 서명, subscription, transaction 제출에는 사용하면 안 됩니다.
 
 ```ts
 const receipt = await clairveil.evmJsonRpc<{ blockNumber: string } | null>(
@@ -314,21 +325,22 @@ const receipt = await clairveil.evmJsonRpc<{ blockNumber: string } | null>(
 
 EVM Clairveil chain은 state-changing privacy action을 Cosmos SDK tx broadcast가 아니라 EVM privacy precompile로 제출합니다.
 
-ClairveilJS는 브라우저에서 privacy payload를 준비한 뒤, prepared message를 `IPrivacy.deposit`, `IPrivacy.transfer`, `IPrivacy.withdraw` calldata로 변환합니다.
+ClairveilJS는 브라우저에서 privacy payload를 준비한 뒤, prepared message를
+`IPrivacy.deposit`, direct/authorized `transfer`·`withdraw`, multi-proof batch,
+single-proof batch calldata로 변환합니다.
 
 지원 범위:
 
 - 대상 EVM chain은 canonical Clairveil v0.3.1-compatible `IPrivacy` precompile ABI와 payload semantic을 제공해야 합니다.
-- 기본 adapter는 `deposit((string,bytes,bytes,bytes))`, `transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))`, `withdraw((bytes,bytes,bytes,string,address,string,uint64))`를 encode합니다.
+- 기본 adapter는 canonical payable `deposit((bytes,bytes,bytes))`, `transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))`, `withdraw((bytes,bytes,bytes,string,address,string,uint64))`와 authorization/batch method를 손실 없이 encode합니다.
 - precompile address는 chain config에서 제공하거나 SDK 기본값 `0x100000000000000000000000000000000000000b`를 사용할 수 있습니다.
-- ABI shape가 다른 EVM chain은 profile 설정만으로 지원 범위에 넣을 수 없습니다.
+- ABI shape가 다른 EVM chain은 `createEvmContractAdapter(...)`를 제공해야 하며, custom adapter가 contract encoding과 non-canonical receipt proof를 소유합니다.
 
-지원되는 EVM `IPrivacy.deposit` tuple에는 Cosmos `MsgDeposit`과 같은 필수 `DepositCircuit` proof가 포함됩니다: `{ amount, noteCommitment, encryptedNote, proof }`.
-
-기본 deposit mode는 기존 배포를 위한 `nonpayable`입니다. EVM
-`msg.value`를 fixed precompile escrow로 이동한 뒤 Clairveil v0.3.1
-`Keeper.DepositWithFunder`를 호출하는 downstream chain에서는 다음처럼
-명시적으로 활성화합니다.
+지원되는 EVM `IPrivacy.deposit` tuple에는 Cosmos `MsgDeposit`과 같은 필수
+`DepositCircuit` proof가 포함됩니다. 다만 tuple은
+`{ noteCommitment, encryptedNote, proof }`만 가지며 deposit amount는
+transaction `msg.value`로만 bind됩니다. 기본 deposit mode도
+`payable-exact-value`입니다.
 
 ```js
 const evmClairveil = createClairveilEvmClient({
@@ -362,6 +374,46 @@ non-zero value는 거부합니다.
 지원되는 EVM `IPrivacy.transfer` tuple에는 encrypted output note, `newCommitments`/`cipherTexts` 순서에 맞춘 2-byte `viewTags`, user/audit disclosure, sender `selfViewDisclosureDigest`/`selfViewDisclosurePayload`, absolute `expiresAtUnix`가 들어갑니다. self-view disclosure는 기본 포함되고 명시적 opt-out에서만 빠집니다. `IPrivacy.withdraw` tuple에는 legacy output-note field가 없으므로 dummy `newNoteCommitment`나 `encryptedNote` bytes를 보내면 안 됩니다.
 
 EVM transfer/withdraw도 note scan, planner, disclosure, prover adapter 흐름은 Cosmos와 같습니다. 마지막 submit 단계만 Cosmos sign doc이 아니라 canonical precompile calldata 전송으로 달라집니다. 필수 proof, self-view, expiry, exact withdraw tuple이 없는 legacy precompile은 기본 adapter가 지원하지 않으므로 해당 profile을 활성화하기 전에 배포를 업그레이드해야 합니다.
+
+### EVM Authorization Profile
+
+`authorizationKind`는 ABI의 `uint8`일 뿐 SDK가 전역 의미를 부여하지
+않습니다. 지갑에 authorization 서명을 요청하는 chain은 지원 kind와 EIP-712
+domain을 profile로 명시해야 합니다.
+
+```js
+import {
+  createClairveilEvmClient,
+  createEvmAuthorizationProfile
+} from "clairveiljs/evm";
+
+const authorizationProfile = createEvmAuthorizationProfile({
+  supportedAuthorizationKinds: [1, 2, 3],
+  typedDataDomain: { name: "Target EVM Privacy", version: "1" }
+});
+
+const evmClairveil = createClairveilEvmClient({
+  chainId: "target-chain-1",
+  evmChainId: "0x539",
+  authorizationProfile
+});
+```
+
+`supportedAuthorizationKinds`를 생략하면 모든 `uint8` 값을 허용합니다.
+Profile의 public `buildTypedData(...)`도 transaction 생성과 같은 kind 및 custom
+validation 정책을 적용합니다. 다른 EIP-712 형식은 custom `EvmAuthorizationProfile`의
+`buildTypedData(...)` callback으로 제공합니다. 이미 서명된 authorization은
+typed-data builder 없이도 제출할 수 있습니다.
+
+Browser client에서는 같은 JSON-safe 형식을
+`profile.evmAuthorizationProfile`에 넣습니다.
+
+```js
+evmAuthorizationProfile: {
+  typedDataDomain: { name: "Target EVM Privacy", version: "1" },
+  supportedAuthorizationKinds: [1, 2, 3]
+}
+```
 
 ## Prover
 
@@ -659,7 +711,7 @@ const firstPath = await pathProvider.lookupMerklePath(selectedNotes[0].commitmen
 
 SDK는 1–16개의 서로 다른 commitment, 요청한 root/height 일치, 각 depth-32 path의 root 재구성을 모두 검증한 뒤 provider를 반환합니다. 원격 path query는 query provider에게 input note 간 linkage를 노출할 수 있으므로, privacy policy에 맞는 endpoint와 네트워크 경로를 사용하세요.
 
-나중에 `reconcileSpentNotes(...)`를 호출할 때 tx/event evidence를 `operationSuccessEvidence` 또는 `successEvidence`에 넣으면 SDK가 expected evidence와 비교합니다. 현재 generic matcher는 transport를 구분하지 않고 저장된 submitted `txHash` 또는 `txBytesHash` 중 하나와 실제 evidence의 같은 필드가 일치하면 transaction identity match로 계산합니다. 따라서 EVM request binding인 `txBytesHash`만으로도 다른 expected output/disclosure evidence가 모두 맞으면 `operation_status: "Succeeded"`가 될 수 있습니다. 고수준 EVM 흐름은 network `txHash`를 저장하지만, EVM receipt 또는 RPC identity를 반드시 요구하는 제품은 caller-side operation 정책에서도 이를 별도로 강제해야 합니다. `signDocHash`는 보조 mismatch guard일 뿐 단독으로 chain 실행을 증명하지 못하며, `txResult: { code: 0 }`만 있는 경우도 identity가 없어 성공이 될 수 없습니다. Nullifier spent만으로는 충분하지 않습니다. 여러 input을 쓰는 operation은 같은 reconcile 호출에 연결된 모든 input의 spent evidence를 넣어야 합니다. 불완전한 evidence는 연결된 operation 전체를 `ManualReview`로 기록하고, tx identity나 expected output이 명시적으로 상충하면 `ConflictSpent`와 `operation_success_evidence_errors`를 기록합니다. 두 경우 모두 spent input은 `ConfirmedSpent`로 격리되며, 나중에 완전한 evidence가 들어오면 연결된 모든 reservation의 operation outcome을 원자적으로 통일합니다. Reservation을 note inventory lock으로만 쓴다면 `operationSuccessEvidenceRequired`를 켜지 말고, downstream operation DB에서 별도로 성공 판정을 하세요.
+나중에 `reconcileSpentNotes(...)`를 호출할 때 tx/event evidence를 `operationSuccessEvidence` 또는 `successEvidence`에 넣으면 SDK가 expected evidence와 비교합니다. EVM tag가 있는 reservation은 저장된 network `txHash`와 prepared `txBytesHash`가 모두 일치하고, 명시적 successful receipt, `evmTransactionVerified: true`, `evmPrivacyReceiptVerified: true`, expected operation/output evidence가 전부 맞아야 `operation_status: "Succeeded"`가 됩니다. `waitForEvmTransaction(...)`의 구조화된 결과에는 이 EVM 필드가 들어 있으므로 `txResult`로 전달할 수 있습니다. Request binding hash나 receipt status만으로는 성공할 수 없습니다. Transport tag가 없는 legacy/external reservation은 generic identity matcher를 유지합니다. `signDocHash`는 보조 mismatch guard일 뿐 단독으로 chain 실행을 증명하지 못하며, `txResult: { code: 0 }`만 있는 경우도 identity가 없어 성공이 될 수 없습니다. Nullifier spent만으로는 충분하지 않습니다. 여러 input을 쓰는 operation은 같은 reconcile 호출에 연결된 모든 input의 spent evidence를 넣어야 합니다. 불완전한 evidence는 연결된 operation 전체를 `ManualReview`로 기록하고, tx identity나 expected output이 명시적으로 상충하면 `ConflictSpent`와 `operation_success_evidence_errors`를 기록합니다. 두 경우 모두 spent input은 `ConfirmedSpent`로 격리되며, 나중에 완전한 evidence가 들어오면 연결된 모든 reservation의 operation outcome을 원자적으로 통일합니다. Reservation을 note inventory lock으로만 쓴다면 `operationSuccessEvidenceRequired`를 켜지 말고, downstream operation DB에서 별도로 성공 판정을 하세요.
 
 Operation 단위 재시도 진단은 구조화되어 있습니다. `OPERATION_STATE_MIXED`는 `error.details.reservations`에 `{ reservation_id, status, operation_status? }`를 제공합니다. `OPERATION_EVIDENCE_CONFLICT`는 `error.details.conflicts`에 `reservation_id`, `tx_hash`·`commitment`·`digest`·`amount` 같은 표준 `field`, 정확한 `source_field`, `reason`, 가능한 경우 `expected`/`actual` 값을 제공합니다. 최초 reconcile에서 발견한 충돌은 반환 전에 먼저 안전하게 저장되며 같은 정보가 `metadata.operation_success_evidence_conflicts`에 남습니다. Reference Payroll에서 manual review가 필요한 경우에는 `reconciliation.error_code`와 `reconciliation.error_details`로도 반환됩니다.
 

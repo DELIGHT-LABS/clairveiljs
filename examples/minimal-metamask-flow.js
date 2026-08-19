@@ -171,7 +171,10 @@ export async function runMinimalMetaMaskFlow({
     transaction: deposit.transaction
   });
   const depositReceipt = waitForDeposit
-    ? await clairveil.waitForEvmTransaction(depositTxHash)
+    ? await clairveil.waitForEvmTransaction(depositTxHash, {
+        privacyTransaction: deposit.transaction,
+        sender: evmAccount
+      })
     : null;
   if (waitForDeposit && !depositReceipt?.ok) {
     throw new Error(depositReceipt?.error || depositReceipt?.errors?.[0] || "EVM deposit was not confirmed");
@@ -201,7 +204,10 @@ export async function runMinimalMetaMaskFlow({
       transaction: transfer.transaction
     });
     transferReceipt = waitForTransfer
-      ? await clairveil.waitForEvmTransaction(transferTxHash)
+      ? await clairveil.waitForEvmTransaction(transferTxHash, {
+          privacyTransaction: transfer.transaction,
+          sender: evmAccount
+        })
       : null;
     if (waitForTransfer && !transferReceipt?.ok) {
       throw new Error(transferReceipt?.error || transferReceipt?.errors?.[0] || "EVM transfer was not confirmed");

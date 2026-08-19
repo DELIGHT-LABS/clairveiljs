@@ -25,15 +25,22 @@ import { sha256Hex } from "../core/browser-crypto.js";
 const { keccak_256: keccak256 } = sha3;
 const zeroWord = "0".repeat(64);
 const emptyBytes = new Uint8Array();
-const evmPrivacyDepositSignature = "deposit((string,bytes,bytes,bytes))";
+const evmPrivacyDepositSignature = "deposit((bytes,bytes,bytes))";
 const evmPrivacyTransferSignature = "transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))";
 const evmPrivacyWithdrawSignature = "withdraw((bytes,bytes,bytes,string,address,string,uint64))";
+const evmPrivacyTransferWithAuthorizationSignature = "transferWithAuthorization((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64),(address,address,uint256,uint64,uint8,bytes))";
+const evmPrivacyWithdrawWithAuthorizationSignature = "withdrawWithAuthorization((bytes,bytes,bytes,string,address,string,uint64),(address,address,uint256,uint64,uint8,bytes))";
+const evmPrivacyBatchTransferSignature = "batchTransfer(bytes32,(bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64)[])";
+const evmPrivacyBatchTransferWithAuthorizationSignature = "batchTransferWithAuthorization(bytes32,((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64),(address,address,uint256,uint64,uint8,bytes))[])";
+const evmPrivacySingleProofBatchTransferSignature = "singleProofBatchTransfer((bytes,bytes,bytes[],(bytes,bytes,bytes,uint32,uint8,bytes,bytes,bytes,bytes,bytes,bytes)[],string,uint64,bytes,uint64))";
+const evmPrivacySingleProofBatchTransferWithAuthorizationSignature = "singleProofBatchTransferWithAuthorization((bytes,bytes,bytes[],(bytes,bytes,bytes,uint32,uint8,bytes,bytes,bytes,bytes,bytes,bytes)[],string,uint64,bytes,uint64),(address,address,uint256,uint64,uint8,bytes))";
 const evmTransactionMarker = Symbol("clairveil.evm-transaction");
 const evmTransactionMetadataField = "__clairveilEvmTransaction";
 
 export const evmDepositModeNonpayable = "nonpayable";
 export const evmDepositModePayableExactValue = "payable-exact-value";
-export const defaultEvmDepositMode = evmDepositModeNonpayable;
+/** The canonical Clairveil EVM precompile binds payable deposits to exact msg.value. */
+export const defaultEvmDepositMode = evmDepositModePayableExactValue;
 export const evmDepositModes = Object.freeze([
   evmDepositModeNonpayable,
   evmDepositModePayableExactValue
@@ -233,9 +240,10 @@ function broadcastReservationContext(options = {}) {
 }
 
 function isKnownWithdrawTransaction(transaction) {
-  if (evmTransactionMetadata(transaction).operation === "withdraw") return true;
+  if (["withdraw", "withdrawWithAuthorization"].includes(evmTransactionMetadata(transaction).operation)) return true;
   const data = String(transaction?.data || "").trim().replace(/^0x/i, "").toLowerCase();
-  return data.startsWith(functionSelector(evmPrivacyWithdrawSignature).toLowerCase());
+  return [evmPrivacyWithdrawSignature, evmPrivacyWithdrawWithAuthorizationSignature]
+    .some(signature => data.startsWith(functionSelector(signature).toLowerCase()));
 }
 
 function knownPrivacyTransactionOperation(transaction) {
@@ -243,12 +251,28 @@ function knownPrivacyTransactionOperation(transaction) {
   for (const [operation, signature] of [
     ["deposit", evmPrivacyDepositSignature],
     ["transfer", evmPrivacyTransferSignature],
-    ["withdraw", evmPrivacyWithdrawSignature]
+    ["withdraw", evmPrivacyWithdrawSignature],
+    ["transferWithAuthorization", evmPrivacyTransferWithAuthorizationSignature],
+    ["withdrawWithAuthorization", evmPrivacyWithdrawWithAuthorizationSignature],
+    ["batchTransfer", evmPrivacyBatchTransferSignature],
+    ["batchTransferWithAuthorization", evmPrivacyBatchTransferWithAuthorizationSignature],
+    ["singleProofBatchTransfer", evmPrivacySingleProofBatchTransferSignature],
+    ["singleProofBatchTransferWithAuthorization", evmPrivacySingleProofBatchTransferWithAuthorizationSignature]
   ]) {
     if (data.startsWith(functionSelector(signature).toLowerCase())) return operation;
   }
   const operation = evmTransactionMetadata(transaction).operation;
-  if (["deposit", "transfer", "withdraw"].includes(operation)) return operation;
+  if ([
+    "deposit",
+    "transfer",
+    "withdraw",
+    "transferWithAuthorization",
+    "withdrawWithAuthorization",
+    "batchTransfer",
+    "batchTransferWithAuthorization",
+    "singleProofBatchTransfer",
+    "singleProofBatchTransferWithAuthorization"
+  ].includes(operation)) return operation;
   return "";
 }
 
@@ -500,116 +524,168 @@ async function markBroadcastReservationSubmitted(context, txHash) {
 
 export const evmPrivacyPrecompileAddress = "0x100000000000000000000000000000000000000b";
 export const defaultEvmPrivacyPrecompileAddress = evmPrivacyPrecompileAddress;
-export const evmPrivacyPrecompileAbi = Object.freeze([
-  {
-    type: "function",
-    name: "deposit",
-    stateMutability: "nonpayable",
-    inputs: [
-      {
-        name: "request",
-        type: "tuple",
-        components: [
-          { name: "amount", type: "string" },
-          { name: "noteCommitment", type: "bytes" },
-          { name: "encryptedNote", type: "bytes" },
-          { name: "proof", type: "bytes" }
-        ]
-      }
-    ],
-    outputs: [{ name: "success", type: "bool" }]
-  },
-  {
-    type: "function",
-    name: "transfer",
-    stateMutability: "nonpayable",
-    inputs: [
-      {
-        name: "request",
-        type: "tuple",
-        components: [
-          { name: "proof", type: "bytes" },
-          { name: "root", type: "bytes" },
-          { name: "nullifiers", type: "bytes[]" },
-          { name: "newCommitments", type: "bytes[]" },
-          { name: "cipherTexts", type: "bytes[]" },
-          { name: "viewTags", type: "bytes[]" },
-          { name: "userPrivacyPolicy", type: "uint32" },
-          { name: "userDisclosureDigest", type: "bytes" },
-          { name: "userDisclosureMode", type: "uint8" },
-          { name: "userDisclosureTargetPubkey", type: "bytes" },
-          { name: "userDisclosurePayload", type: "bytes" },
-          { name: "auditDisclosureDigest", type: "bytes" },
-          { name: "auditDisclosureTargetPubkey", type: "bytes" },
-          { name: "auditDisclosurePayload", type: "bytes" },
-          { name: "selfViewDisclosureDigest", type: "bytes" },
-          { name: "selfViewDisclosurePayload", type: "bytes" },
-          { name: "expiresAtUnix", type: "uint64" }
-        ]
-      }
-    ],
-    outputs: [{ name: "success", type: "bool" }]
-  },
-  {
-    type: "function",
-    name: "withdraw",
-    stateMutability: "nonpayable",
-    inputs: [
-      {
-        name: "request",
-        type: "tuple",
-        components: [
-          { name: "proof", type: "bytes" },
-          { name: "root", type: "bytes" },
-          { name: "nullifier", type: "bytes" },
-          { name: "amount", type: "string" },
-          { name: "recipient", type: "address" },
-          { name: "chainId", type: "string" },
-          { name: "expiresAtUnix", type: "uint64" }
-        ]
-      }
-    ],
-    outputs: [{ name: "success", type: "bool" }]
-  },
-  {
-    type: "event",
-    name: "PrivacyDeposit",
-    inputs: [
-      { name: "caller", type: "address", indexed: true },
-      { name: "amount", type: "string", indexed: false },
-      { name: "noteCommitment", type: "bytes", indexed: false }
-    ],
-    anonymous: false
-  },
-  {
-    type: "event",
-    name: "PrivacyTransfer",
-    inputs: [
-      { name: "caller", type: "address", indexed: true },
-      { name: "root", type: "bytes", indexed: false }
-    ],
-    anonymous: false
-  },
-  {
-    type: "event",
-    name: "PrivacyWithdraw",
-    inputs: [
-      { name: "caller", type: "address", indexed: true },
-      { name: "recipient", type: "address", indexed: true },
-      { name: "amount", type: "string", indexed: false }
-    ],
-    anonymous: false
-  }
-]);
-export const evmPrivacyPrecompilePayableDepositAbi = Object.freeze(
-  evmPrivacyPrecompileAbi.map((item, index) => (
-    index === 0 ? Object.freeze({ ...item, stateMutability: "payable" }) : item
-  ))
-);
 
-const evmPrivacyDepositTuple = evmPrivacyPrecompileAbi[0].inputs[0];
-const evmPrivacyTransferTuple = evmPrivacyPrecompileAbi[1].inputs[0];
-const evmPrivacyWithdrawTuple = evmPrivacyPrecompileAbi[2].inputs[0];
+const evmPrivacyDepositTuple = {
+  name: "request",
+  type: "tuple",
+  components: [
+    { name: "noteCommitment", type: "bytes" },
+    { name: "encryptedNote", type: "bytes" },
+    { name: "proof", type: "bytes" }
+  ]
+};
+const evmPrivacyTransferTuple = {
+  name: "request",
+  type: "tuple",
+  components: [
+    { name: "proof", type: "bytes" },
+    { name: "root", type: "bytes" },
+    { name: "nullifiers", type: "bytes[]" },
+    { name: "newCommitments", type: "bytes[]" },
+    { name: "cipherTexts", type: "bytes[]" },
+    { name: "viewTags", type: "bytes[]" },
+    { name: "userPrivacyPolicy", type: "uint32" },
+    { name: "userDisclosureDigest", type: "bytes" },
+    { name: "userDisclosureMode", type: "uint8" },
+    { name: "userDisclosureTargetPubkey", type: "bytes" },
+    { name: "userDisclosurePayload", type: "bytes" },
+    { name: "auditDisclosureDigest", type: "bytes" },
+    { name: "auditDisclosureTargetPubkey", type: "bytes" },
+    { name: "auditDisclosurePayload", type: "bytes" },
+    { name: "selfViewDisclosureDigest", type: "bytes" },
+    { name: "selfViewDisclosurePayload", type: "bytes" },
+    { name: "expiresAtUnix", type: "uint64" }
+  ]
+};
+const evmPrivacyWithdrawTuple = {
+  name: "request",
+  type: "tuple",
+  components: [
+    { name: "proof", type: "bytes" },
+    { name: "root", type: "bytes" },
+    { name: "nullifier", type: "bytes" },
+    { name: "amount", type: "string" },
+    { name: "recipient", type: "address" },
+    { name: "chainId", type: "string" },
+    { name: "expiresAtUnix", type: "uint64" }
+  ]
+};
+const evmPrivacyAuthorizationTuple = {
+  name: "authorization",
+  type: "tuple",
+  components: [
+    { name: "effectiveSender", type: "address" },
+    { name: "executor", type: "address" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint64" },
+    { name: "authorizationKind", type: "uint8" },
+    { name: "signature", type: "bytes" }
+  ]
+};
+const evmPrivacySingleProofBatchOutputTuple = {
+  name: "output",
+  type: "tuple",
+  components: [
+    { name: "commitment", type: "bytes" },
+    { name: "ciphertext", type: "bytes" },
+    { name: "viewTag", type: "bytes" },
+    { name: "userPrivacyPolicy", type: "uint32" },
+    { name: "userDisclosureMode", type: "uint8" },
+    { name: "userDisclosureDigest", type: "bytes" },
+    { name: "userDisclosureTargetPubkey", type: "bytes" },
+    { name: "userDisclosurePayload", type: "bytes" },
+    { name: "fullDisclosureDigest", type: "bytes" },
+    { name: "auditDisclosurePayload", type: "bytes" },
+    { name: "selfViewDisclosurePayload", type: "bytes" }
+  ]
+};
+const evmPrivacySingleProofBatchTuple = {
+  name: "request",
+  type: "tuple",
+  components: [
+    { name: "proof", type: "bytes" },
+    { name: "root", type: "bytes" },
+    { name: "nullifiers", type: "bytes[]" },
+    { name: "outputs", type: "tuple[]", components: evmPrivacySingleProofBatchOutputTuple.components },
+    { name: "auditKeyId", type: "string" },
+    { name: "auditKeyEpoch", type: "uint64" },
+    { name: "auditDisclosureTargetPubkey", type: "bytes" },
+    { name: "expiresAtUnix", type: "uint64" }
+  ]
+};
+const evmPrivacyAuthorizedTransferItemTuple = {
+  name: "item",
+  type: "tuple",
+  components: [evmPrivacyTransferTuple, evmPrivacyAuthorizationTuple]
+};
+
+function evmPrivacyFunction(name, inputs, stateMutability = "nonpayable") {
+  return {
+    type: "function",
+    name,
+    stateMutability,
+    inputs,
+    outputs: [{ name: "success", type: "bool" }]
+  };
+}
+
+function evmPrivacyEvent(name, inputs) {
+  return { type: "event", name, inputs, anonymous: false };
+}
+
+/** Canonical ABI surface for Clairveil-compatible EVM privacy precompiles. */
+export const evmPrivacyPrecompileAbi = Object.freeze([
+  evmPrivacyFunction("deposit", [evmPrivacyDepositTuple], "payable"),
+  evmPrivacyFunction("transfer", [evmPrivacyTransferTuple]),
+  evmPrivacyFunction("withdraw", [evmPrivacyWithdrawTuple]),
+  evmPrivacyFunction("transferWithAuthorization", [evmPrivacyTransferTuple, evmPrivacyAuthorizationTuple]),
+  evmPrivacyFunction("withdrawWithAuthorization", [evmPrivacyWithdrawTuple, evmPrivacyAuthorizationTuple]),
+  evmPrivacyFunction("singleProofBatchTransfer", [evmPrivacySingleProofBatchTuple]),
+  evmPrivacyFunction("singleProofBatchTransferWithAuthorization", [evmPrivacySingleProofBatchTuple, evmPrivacyAuthorizationTuple]),
+  evmPrivacyFunction("batchTransfer", [
+    { name: "batchId", type: "bytes32" },
+    { name: "requests", type: "tuple[]", components: evmPrivacyTransferTuple.components }
+  ]),
+  evmPrivacyFunction("batchTransferWithAuthorization", [
+    { name: "batchId", type: "bytes32" },
+    { name: "items", type: "tuple[]", components: evmPrivacyAuthorizedTransferItemTuple.components }
+  ]),
+  evmPrivacyEvent("PrivacyDeposit", [
+    { name: "effectiveSender", type: "address", indexed: true },
+    { name: "operator", type: "address", indexed: true },
+    { name: "amount", type: "string", indexed: false },
+    { name: "noteCommitment", type: "bytes", indexed: false }
+  ]),
+  evmPrivacyEvent("PrivacyTransfer", [
+    { name: "effectiveSender", type: "address", indexed: true },
+    { name: "operator", type: "address", indexed: true },
+    { name: "root", type: "bytes", indexed: false }
+  ]),
+  evmPrivacyEvent("PrivacyWithdraw", [
+    { name: "effectiveSender", type: "address", indexed: true },
+    { name: "operator", type: "address", indexed: true },
+    { name: "recipient", type: "address", indexed: true },
+    { name: "amount", type: "string", indexed: false }
+  ]),
+  evmPrivacyEvent("PrivacyBatchTransferItem", [
+    { name: "effectiveSender", type: "address", indexed: true },
+    { name: "operator", type: "address", indexed: true },
+    { name: "batchId", type: "bytes32", indexed: true },
+    { name: "itemIndex", type: "uint64", indexed: false },
+    { name: "requestHash", type: "bytes32", indexed: false },
+    { name: "root", type: "bytes", indexed: false }
+  ]),
+  evmPrivacyEvent("PrivacySingleProofBatchTransfer", [
+    { name: "effectiveSender", type: "address", indexed: true },
+    { name: "operator", type: "address", indexed: true },
+    { name: "requestHash", type: "bytes32", indexed: true },
+    { name: "root", type: "bytes", indexed: false },
+    { name: "inputCount", type: "uint8", indexed: false },
+    { name: "outputCount", type: "uint8", indexed: false }
+  ])
+]);
+/** Retained as a compatibility export; deposit is already payable in the canonical ABI. */
+export const evmPrivacyPrecompilePayableDepositAbi = evmPrivacyPrecompileAbi;
 
 function strip0x(value) {
   return String(value || "").trim().replace(/^0x/i, "");
@@ -697,27 +773,41 @@ function encodeBytes(hex) {
   return `${uintWord(clean.length / 2)}${padRightWord(clean)}`;
 }
 
+function arrayElementAbiType(type) {
+  const name = abiTypeName(type);
+  if (!name.endsWith("[]")) throw new Error(`ABI type ${name} is not an array`);
+  const elementName = name.slice(0, -2);
+  return elementName === "tuple"
+    ? { type: "tuple", components: abiComponents(type) }
+    : elementName;
+}
+
+function encodeDynamicArray(type, value) {
+  if (!Array.isArray(value)) {
+    throw new Error(`${abiTypeName(type)} value must be an array`);
+  }
+  const elementType = arrayElementAbiType(type);
+  const encodedItems = value.map(item => isDynamicAbiType(elementType)
+    ? encodeDynamicAbi(elementType, item)
+    : encodeStaticAbi(elementType, item));
+  if (!isDynamicAbiType(elementType)) {
+    return `${uintWord(value.length)}${encodedItems.join("")}`;
+  }
+  const heads = [];
+  let offset = 32 * value.length;
+  for (const encoded of encodedItems) {
+    heads.push(uintWord(offset));
+    offset += encoded.length / 2;
+  }
+  return `${uintWord(value.length)}${heads.join("")}${encodedItems.join("")}`;
+}
+
 function encodeDynamicAbi(type, value) {
   const name = abiTypeName(type);
   if (name === "tuple") return encodeTupleAbi(type, value);
   if (name === "bytes") return encodeBytes(bytesLikeToHex(value));
   if (name === "string") return encodeBytes(utf8Hex(value));
-  if (name === "bytes32[]") {
-    return `${uintWord(value.length)}${value.map((item, index) => bytes32Word(item, `bytes32[${index}]`)).join("")}`;
-  }
-  if (name === "bytes[]") {
-    const values = [...value];
-    const heads = [];
-    const tails = [];
-    let offset = 32 * values.length;
-    for (const item of values) {
-      const encoded = encodeBytes(bytesLikeToHex(item));
-      heads.push(uintWord(offset));
-      tails.push(encoded);
-      offset += encoded.length / 2;
-    }
-    return `${uintWord(values.length)}${heads.join("")}${tails.join("")}`;
-  }
+  if (name.endsWith("[]")) return encodeDynamicArray(type, value);
   throw new Error(`unsupported dynamic ABI type ${name}`);
 }
 
@@ -814,10 +904,18 @@ function requiredBytes(value, label, byteLength) {
 }
 
 function optionalBytes(value) {
-  return value == null ? emptyBytes : value;
+  // Solidity JSON values commonly spell an omitted `bytes` value as "0x".
+  // Preserve its meaning as an empty byte array instead of routing it through
+  // the general hex normalizer, which correctly rejects an empty hex body for
+  // required byte fields.
+  if (value == null) return emptyBytes;
+  if (typeof value === "string" && value.trim().toLowerCase() === "0x") {
+    return emptyBytes;
+  }
+  return value;
 }
 
-function requiredUint64(value, label) {
+function requiredUint(value, label, bits = 256) {
   if (value == null || String(value).trim() === "") {
     throw new Error(`${label} is required`);
   }
@@ -825,10 +923,10 @@ function requiredUint64(value, label) {
   try {
     parsed = BigInt(value);
   } catch {
-    throw new Error(`${label} must be a uint64`);
+    throw new Error(`${label} must be a uint${bits}`);
   }
-  if (parsed < 0n || parsed > 0xffffffffffffffffn) {
-    throw new Error(`${label} must be a uint64`);
+  if (parsed < 0n || parsed >= (1n << BigInt(bits))) {
+    throw new Error(`${label} must be a uint${bits}`);
   }
   return parsed;
 }
@@ -951,52 +1049,49 @@ function withdrawRecipientToEvmAddress(message, options = {}) {
   return bech32AddressToEvm(fallback, options.accountPrefix);
 }
 
-export function encodeEvmPrivacyDeposit(message, options = {}) {
-  const request = {
-    amount: String(valueFrom(message, ["amount"], "")),
+function evmPrivacyDepositRequest(message) {
+  return {
     noteCommitment: requiredBytes(valueFrom(message, ["noteCommitment", "note_commitment"], null), "note commitment", 32),
     encryptedNote: requiredBytes(valueFrom(message, ["encryptedNote", "encrypted_note"], null), "encrypted note"),
     proof: requiredBytes(valueFrom(message, ["proof", "depositProof", "deposit_proof"], null), "deposit proof")
   };
-  return encodeFunctionData(
-    options.signature || evmPrivacyDepositSignature,
-    [evmPrivacyDepositTuple],
-    [request]
-  );
 }
 
-export function encodeEvmPrivacyTransfer(message, options = {}) {
-  const request = {
-    proof: requiredBytes(message.proof, "transfer proof"),
-    root: requiredBytes(message.root, "transfer root", 32),
-    nullifiers: bytesArray(message.nullifiers, "transfer nullifiers", 32),
-    newCommitments: bytesArray(message.newCommitments, "transfer new commitments", 32),
-    cipherTexts: bytesArray(message.cipherTexts, "transfer cipher texts"),
-    viewTags: bytesArray(message.viewTags, "transfer view tags", 2),
-    userPrivacyPolicy: message.userPrivacyPolicy ?? 0,
-    userDisclosureDigest: optionalBytes(message.userDisclosureDigest),
-    userDisclosureMode: message.userDisclosureMode ?? 0,
-    userDisclosureTargetPubkey: optionalBytes(message.userDisclosureTargetPubkey),
-    userDisclosurePayload: optionalBytes(message.userDisclosurePayload),
-    auditDisclosureDigest: optionalBytes(message.auditDisclosureDigest),
-    auditDisclosureTargetPubkey: optionalBytes(message.auditDisclosureTargetPubkey),
-    auditDisclosurePayload: optionalBytes(message.auditDisclosurePayload),
-    selfViewDisclosureDigest: optionalBytes(message.selfViewDisclosureDigest ?? message.self_view_disclosure_digest),
-    selfViewDisclosurePayload: optionalBytes(message.selfViewDisclosurePayload ?? message.self_view_disclosure_payload),
+function evmPrivacyTransferRequest(message) {
+  return {
+    proof: requiredBytes(valueFrom(message, ["proof"], null), "transfer proof"),
+    root: requiredBytes(valueFrom(message, ["root"], null), "transfer root", 32),
+    nullifiers: bytesArray(valueFrom(message, ["nullifiers"], null), "transfer nullifiers", 32),
+    newCommitments: bytesArray(valueFrom(message, ["newCommitments", "new_commitments"], null), "transfer new commitments", 32),
+    cipherTexts: bytesArray(valueFrom(message, ["cipherTexts", "cipher_texts"], null), "transfer cipher texts"),
+    viewTags: bytesArray(valueFrom(message, ["viewTags", "view_tags"], null), "transfer view tags", 2),
+    userPrivacyPolicy: requiredUint(
+      valueFrom(message, ["userPrivacyPolicy", "user_privacy_policy"], 0),
+      "transfer user privacy policy",
+      32
+    ),
+    userDisclosureDigest: optionalBytes(valueFrom(message, ["userDisclosureDigest", "user_disclosure_digest"], null)),
+    userDisclosureMode: requiredUint(
+      valueFrom(message, ["userDisclosureMode", "user_disclosure_mode"], 0),
+      "transfer user disclosure mode",
+      8
+    ),
+    userDisclosureTargetPubkey: optionalBytes(valueFrom(message, ["userDisclosureTargetPubkey", "user_disclosure_target_pubkey"], null)),
+    userDisclosurePayload: optionalBytes(valueFrom(message, ["userDisclosurePayload", "user_disclosure_payload"], null)),
+    auditDisclosureDigest: optionalBytes(valueFrom(message, ["auditDisclosureDigest", "audit_disclosure_digest"], null)),
+    auditDisclosureTargetPubkey: optionalBytes(valueFrom(message, ["auditDisclosureTargetPubkey", "audit_disclosure_target_pubkey"], null)),
+    auditDisclosurePayload: optionalBytes(valueFrom(message, ["auditDisclosurePayload", "audit_disclosure_payload"], null)),
+    selfViewDisclosureDigest: optionalBytes(valueFrom(message, ["selfViewDisclosureDigest", "self_view_disclosure_digest"], null)),
+    selfViewDisclosurePayload: optionalBytes(valueFrom(message, ["selfViewDisclosurePayload", "self_view_disclosure_payload"], null)),
     expiresAtUnix: requiredUint64(
-      message.expiresAtUnix ?? message.expires_at_unix,
+      valueFrom(message, ["expiresAtUnix", "expires_at_unix"], null),
       "transfer expiresAtUnix"
     )
   };
-  return encodeFunctionData(
-    options.signature || evmPrivacyTransferSignature,
-    [evmPrivacyTransferTuple],
-    [request]
-  );
 }
 
-export function encodeEvmPrivacyWithdraw(message, options = {}) {
-  const request = {
+function evmPrivacyWithdrawRequest(message, options = {}) {
+  return {
     proof: requiredBytes(message.proof, "withdraw proof"),
     root: requiredBytes(message.root, "withdraw root", 32),
     nullifier: requiredBytes(message.nullifier, "withdraw nullifier", 32),
@@ -1008,10 +1103,172 @@ export function encodeEvmPrivacyWithdraw(message, options = {}) {
       "withdraw expiresAtUnix"
     )
   };
+}
+
+function evmPrivacyAuthorization(authorization, { requireSignature = true } = {}) {
+  if (!authorization || typeof authorization !== "object") {
+    throw new Error("privacy authorization is required");
+  }
+  const effectiveSender = normalizeEvmAddress(
+    valueFrom(authorization, ["effectiveSender", "effective_sender"], null),
+    "authorization effectiveSender"
+  );
+  const executor = normalizeEvmAddress(
+    valueFrom(authorization, ["executor"], null),
+    "authorization executor"
+  );
+  const deadline = requiredUint64(valueFrom(authorization, ["deadline"], null), "authorization deadline");
+  const authorizationKind = requiredUint(
+    valueFrom(authorization, ["authorizationKind", "authorization_kind"], null),
+    "authorization kind",
+    8
+  );
+  if (effectiveSender === `0x${"0".repeat(40)}` || executor === `0x${"0".repeat(40)}`) {
+    throw new Error("authorization effectiveSender and executor must not be zero");
+  }
+  if (deadline === 0n) throw new Error("authorization deadline must be positive");
+  const signature = valueFrom(authorization, ["signature"], null);
+  if (requireSignature && signature == null) {
+    throw new Error("authorization signature is required");
+  }
+  return {
+    effectiveSender,
+    executor,
+    nonce: requiredUint(valueFrom(authorization, ["nonce"], null), "authorization nonce"),
+    deadline,
+    authorizationKind,
+    signature: requireSignature
+      ? requiredBytes(signature, "authorization signature")
+      : optionalBytes(signature)
+  };
+}
+
+function evmPrivacySingleProofBatchRequest(message) {
+  const outputs = valueFrom(message, ["outputs"], null);
+  if (!Array.isArray(outputs) || outputs.length < 1 || outputs.length > 32) {
+    throw new Error("single-proof batch outputs must contain 1..32 items");
+  }
+  const nullifiers = bytesArray(valueFrom(message, ["nullifiers"], null), "single-proof batch nullifiers", 32);
+  if (nullifiers.length < 1 || nullifiers.length > 16) {
+    throw new Error("single-proof batch nullifiers must contain 1..16 items");
+  }
+  return {
+    proof: requiredBytes(valueFrom(message, ["proof"], null), "single-proof batch proof"),
+    root: requiredBytes(valueFrom(message, ["root"], null), "single-proof batch root", 32),
+    nullifiers,
+    outputs: outputs.map((output, index) => ({
+      commitment: requiredBytes(valueFrom(output, ["commitment"], null), `single-proof batch output ${index} commitment`, 32),
+      ciphertext: requiredBytes(valueFrom(output, ["ciphertext"], null), `single-proof batch output ${index} ciphertext`, 430),
+      viewTag: requiredBytes(valueFrom(output, ["viewTag", "view_tag"], null), `single-proof batch output ${index} view tag`, 2),
+      userPrivacyPolicy: requiredUint(valueFrom(output, ["userPrivacyPolicy", "user_privacy_policy"], 0), `single-proof batch output ${index} user privacy policy`, 32),
+      userDisclosureMode: requiredUint(valueFrom(output, ["userDisclosureMode", "user_disclosure_mode"], 0), `single-proof batch output ${index} user disclosure mode`, 8),
+      userDisclosureDigest: optionalBytes(valueFrom(output, ["userDisclosureDigest", "user_disclosure_digest"], null)),
+      userDisclosureTargetPubkey: optionalBytes(valueFrom(output, ["userDisclosureTargetPubkey", "user_disclosure_target_pubkey"], null)),
+      userDisclosurePayload: optionalBytes(valueFrom(output, ["userDisclosurePayload", "user_disclosure_payload"], null)),
+      fullDisclosureDigest: requiredBytes(valueFrom(output, ["fullDisclosureDigest", "full_disclosure_digest"], null), `single-proof batch output ${index} full disclosure digest`, 32),
+      auditDisclosurePayload: requiredBytes(valueFrom(output, ["auditDisclosurePayload", "audit_disclosure_payload"], null), `single-proof batch output ${index} audit disclosure payload`, 472),
+      selfViewDisclosurePayload: optionalBytes(valueFrom(output, ["selfViewDisclosurePayload", "self_view_disclosure_payload"], null))
+    })),
+    auditKeyId: String(valueFrom(message, ["auditKeyId", "audit_key_id"], "")).trim(),
+    auditKeyEpoch: requiredUint64(valueFrom(message, ["auditKeyEpoch", "audit_key_epoch"], null), "single-proof batch audit key epoch"),
+    auditDisclosureTargetPubkey: requiredBytes(valueFrom(message, ["auditDisclosureTargetPubkey", "audit_disclosure_target_pubkey"], null), "single-proof batch audit disclosure target pubkey"),
+    expiresAtUnix: requiredUint64(valueFrom(message, ["expiresAtUnix", "expires_at_unix"], null), "single-proof batch expiresAtUnix")
+  };
+}
+
+function evmPrivacyBatchId(batchId) {
+  const normalized = bytes32Word(batchId, "batchId");
+  if (normalized === zeroWord) throw new Error("batchId must not be zero");
+  return with0x(normalized);
+}
+
+export function encodeEvmPrivacyDeposit(message, options = {}) {
+  const request = evmPrivacyDepositRequest(message);
+  return encodeFunctionData(
+    options.signature || evmPrivacyDepositSignature,
+    [evmPrivacyDepositTuple],
+    [request]
+  );
+}
+
+export function encodeEvmPrivacyTransfer(message, options = {}) {
+  const request = evmPrivacyTransferRequest(message);
+  return encodeFunctionData(
+    options.signature || evmPrivacyTransferSignature,
+    [evmPrivacyTransferTuple],
+    [request]
+  );
+}
+
+export function encodeEvmPrivacyWithdraw(message, options = {}) {
+  const request = evmPrivacyWithdrawRequest(message, options);
   return encodeFunctionData(
     options.signature || evmPrivacyWithdrawSignature,
     [evmPrivacyWithdrawTuple],
     [request]
+  );
+}
+
+export function encodeEvmPrivacyTransferWithAuthorization(message, authorization, options = {}) {
+  return encodeFunctionData(
+    options.signature || evmPrivacyTransferWithAuthorizationSignature,
+    [evmPrivacyTransferTuple, evmPrivacyAuthorizationTuple],
+    [evmPrivacyTransferRequest(message), evmPrivacyAuthorization(authorization)]
+  );
+}
+
+export function encodeEvmPrivacyWithdrawWithAuthorization(message, authorization, options = {}) {
+  return encodeFunctionData(
+    options.signature || evmPrivacyWithdrawWithAuthorizationSignature,
+    [evmPrivacyWithdrawTuple, evmPrivacyAuthorizationTuple],
+    [evmPrivacyWithdrawRequest(message, options), evmPrivacyAuthorization(authorization)]
+  );
+}
+
+export function encodeEvmPrivacyBatchTransfer(batchId, requests, options = {}) {
+  if (!Array.isArray(requests) || requests.length < 1 || requests.length > 20) {
+    throw new Error("batch transfer requests must contain 1..20 items");
+  }
+  return encodeFunctionData(
+    options.signature || evmPrivacyBatchTransferSignature,
+    [
+      { name: "batchId", type: "bytes32" },
+      { name: "requests", type: "tuple[]", components: evmPrivacyTransferTuple.components }
+    ],
+    [evmPrivacyBatchId(batchId), requests.map(evmPrivacyTransferRequest)]
+  );
+}
+
+export function encodeEvmPrivacyBatchTransferWithAuthorization(batchId, items, options = {}) {
+  if (!Array.isArray(items) || items.length < 1 || items.length > 20) {
+    throw new Error("authorized batch transfer items must contain 1..20 items");
+  }
+  return encodeFunctionData(
+    options.signature || evmPrivacyBatchTransferWithAuthorizationSignature,
+    [
+      { name: "batchId", type: "bytes32" },
+      { name: "items", type: "tuple[]", components: evmPrivacyAuthorizedTransferItemTuple.components }
+    ],
+    [evmPrivacyBatchId(batchId), items.map((item, index) => ({
+      request: evmPrivacyTransferRequest(item?.request ?? item?.message ?? item),
+      authorization: evmPrivacyAuthorization(item?.authorization ?? item?.auth ?? item?.privacyAuthorization)
+    }))]
+  );
+}
+
+export function encodeEvmPrivacySingleProofBatchTransfer(message, options = {}) {
+  return encodeFunctionData(
+    options.signature || evmPrivacySingleProofBatchTransferSignature,
+    [evmPrivacySingleProofBatchTuple],
+    [evmPrivacySingleProofBatchRequest(message)]
+  );
+}
+
+export function encodeEvmPrivacySingleProofBatchTransferWithAuthorization(message, authorization, options = {}) {
+  return encodeFunctionData(
+    options.signature || evmPrivacySingleProofBatchTransferWithAuthorizationSignature,
+    [evmPrivacySingleProofBatchTuple, evmPrivacyAuthorizationTuple],
+    [evmPrivacySingleProofBatchRequest(message), evmPrivacyAuthorization(authorization)]
   );
 }
 
@@ -1025,6 +1282,607 @@ export function defaultEncodeEvmTransfer(message, options = {}) {
 
 export function defaultEncodeEvmWithdraw(message, options = {}) {
   return encodeEvmPrivacyWithdraw(message, options);
+}
+
+function keccakHex(value, label = "EVM bytes") {
+  const clean = strip0x(bytesLikeToHex(value, label));
+  return `0x${keccak256.create().update(bytesFromHex(clean, label)).hex()}`;
+}
+
+function receiptHex(value, label) {
+  return with0x(bytesLikeToHex(value, label));
+}
+
+function receiptAddressTopic(address) {
+  return `0x${strip0x(normalizeEvmAddress(address)).padStart(64, "0")}`;
+}
+
+function receiptBytes32Topic(value, label) {
+  return `0x${bytes32Word(value, label)}`;
+}
+
+function requestHashForTransferRequest(request) {
+  return keccakHex(encodeAbiParameters([evmPrivacyTransferTuple], [request]), "transfer request encoding");
+}
+
+function requestHashForSingleProofBatchRequest(request) {
+  return keccakHex(
+    `${functionSelector(evmPrivacySingleProofBatchTransferSignature)}${encodeAbiParameters([evmPrivacySingleProofBatchTuple], [request])}`,
+    "single-proof batch request encoding"
+  );
+}
+
+const evmPrivacyAuthorizationTypedDataTypes = Object.freeze({
+  EIP712Domain: Object.freeze([
+    Object.freeze({ name: "name", type: "string" }),
+    Object.freeze({ name: "version", type: "string" }),
+    Object.freeze({ name: "chainId", type: "uint256" }),
+    Object.freeze({ name: "verifyingContract", type: "address" })
+  ]),
+  PrivacyActionAuthorization: Object.freeze([
+    Object.freeze({ name: "authorizationEnvelopeSelector", type: "bytes4" }),
+    Object.freeze({ name: "authorizationActionSelector", type: "bytes4" }),
+    Object.freeze({ name: "effectiveSender", type: "address" }),
+    Object.freeze({ name: "executor", type: "address" }),
+    Object.freeze({ name: "nonce", type: "uint256" }),
+    Object.freeze({ name: "deadline", type: "uint64" }),
+    Object.freeze({ name: "cosmosChainIdHash", type: "bytes32" }),
+    Object.freeze({ name: "requestHash", type: "bytes32" }),
+    Object.freeze({ name: "batchId", type: "bytes32" }),
+    Object.freeze({ name: "batchItemIndex", type: "uint64" }),
+    Object.freeze({ name: "authorizationKind", type: "uint8" })
+  ])
+});
+
+function normalizeEvmPrivacyAuthorizationDomain(domain) {
+  if (!domain || typeof domain !== "object" || Array.isArray(domain)) {
+    throw new Error("EVM privacy authorization domain is required");
+  }
+  const name = String(domain.name ?? "").trim();
+  const version = String(domain.version ?? "1").trim();
+  if (!name) throw new Error("EVM privacy authorization domain name is required");
+  if (!version) throw new Error("EVM privacy authorization domain version is required");
+  return Object.freeze({ name, version });
+}
+
+function normalizeEvmAuthorizationKindSet(kinds) {
+  if (kinds == null) return null;
+  if (!Array.isArray(kinds)) {
+    throw new Error("supportedAuthorizationKinds must be an array of uint8 values");
+  }
+  const normalized = kinds.map((kind, index) => requiredUint(
+    kind,
+    `supportedAuthorizationKinds[${index}]`,
+    8
+  ));
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error("supportedAuthorizationKinds must not contain duplicates");
+  }
+  return new Set(normalized);
+}
+
+function normalizeEvmAuthorizationProfile(profile) {
+  if (profile == null) return null;
+  if (typeof profile !== "object" || Array.isArray(profile)) {
+    throw new Error("EVM authorization profile must be an object");
+  }
+  if (profile.validate != null && typeof profile.validate !== "function") {
+    throw new Error("EVM authorization profile validate must be a function");
+  }
+  if (profile.buildTypedData != null && typeof profile.buildTypedData !== "function") {
+    throw new Error("EVM authorization profile buildTypedData must be a function");
+  }
+  if (typeof profile.validate !== "function" && typeof profile.buildTypedData !== "function") {
+    throw new Error("EVM authorization profile must provide validate or buildTypedData");
+  }
+  return profile;
+}
+
+function validateEvmPrivacyAuthorization(authorization, profile, options = {}) {
+  const normalized = evmPrivacyAuthorization(authorization, options);
+  profile?.validate?.(normalized);
+  return normalized;
+}
+
+/**
+ * Creates a policy for an EVM privacy authorization envelope.  The target
+ * chain chooses its accepted authorization kinds and EIP-712 domain; neither
+ * is imposed by the transport itself.
+ */
+export function createEvmAuthorizationProfile({
+  supportedAuthorizationKinds,
+  typedDataDomain,
+  validate
+} = {}) {
+  const supportedKinds = normalizeEvmAuthorizationKindSet(supportedAuthorizationKinds);
+  const domain = typedDataDomain == null
+    ? null
+    : normalizeEvmPrivacyAuthorizationDomain(typedDataDomain);
+  if (validate != null && typeof validate !== "function") {
+    throw new Error("authorization profile validate must be a function");
+  }
+  const applyPolicy = authorization => {
+    if (supportedKinds && !supportedKinds.has(authorization.authorizationKind)) {
+      throw new Error(`unsupported EVM privacy authorization kind ${authorization.authorizationKind}`);
+    }
+    if (validate) validate(authorization);
+    return authorization;
+  };
+  return Object.freeze({
+    validate(authorization) {
+      applyPolicy(authorization);
+    },
+    ...(domain ? {
+      buildTypedData(input = {}) {
+        const authorization = applyPolicy(
+          evmPrivacyAuthorization(input.authorization, { requireSignature: false })
+        );
+        return buildEvmPrivacyAuthorizationTypedData({
+          ...input,
+          authorization,
+          domain
+        });
+      }
+    } : {})
+  });
+}
+
+/** Build a canonical Clairveil EVM PrivacyActionAuthorization EIP-712 payload. */
+export function buildEvmPrivacyAuthorizationTypedData({
+  action,
+  request,
+  authorization,
+  cosmosChainId,
+  evmChainId,
+  contractAddress = evmPrivacyPrecompileAddress,
+  batchId = `0x${zeroWord}`,
+  batchItemIndex = 0,
+  domain
+} = {}) {
+  const normalizedAuthorization = evmPrivacyAuthorization(authorization, { requireSignature: false });
+  const normalizedDomain = normalizeEvmPrivacyAuthorizationDomain(domain);
+  const canonicalAction = String(action || "").trim();
+  const actionConfig = {
+    transfer: {
+      envelope: evmPrivacyTransferWithAuthorizationSignature,
+      action: evmPrivacyTransferSignature,
+      request: () => evmPrivacyTransferRequest(request),
+      requestHash: requestHashForTransferRequest,
+      batch: false
+    },
+    withdraw: {
+      envelope: evmPrivacyWithdrawWithAuthorizationSignature,
+      action: evmPrivacyWithdrawSignature,
+      request: () => evmPrivacyWithdrawRequest(request, { chainId: cosmosChainId }),
+      requestHash: value => keccakHex(encodeAbiParameters([evmPrivacyWithdrawTuple], [value]), "withdraw request encoding"),
+      batch: false
+    },
+    batchTransfer: {
+      envelope: evmPrivacyBatchTransferWithAuthorizationSignature,
+      action: evmPrivacyTransferSignature,
+      request: () => evmPrivacyTransferRequest(request),
+      requestHash: requestHashForTransferRequest,
+      batch: true
+    },
+    singleProofBatchTransfer: {
+      envelope: evmPrivacySingleProofBatchTransferWithAuthorizationSignature,
+      action: evmPrivacySingleProofBatchTransferSignature,
+      request: () => evmPrivacySingleProofBatchRequest(request),
+      requestHash: requestHashForSingleProofBatchRequest,
+      batch: false
+    }
+  }[canonicalAction];
+  if (!actionConfig) {
+    throw new Error("privacy authorization action must be transfer, withdraw, batchTransfer, or singleProofBatchTransfer");
+  }
+  const normalizedCosmosChainId = String(cosmosChainId || "").trim();
+  if (!normalizedCosmosChainId) throw new Error("cosmosChainId is required for privacy authorization");
+  const normalizedEvmChainId = requiredUint(evmChainId, "evmChainId");
+  const verifyingContract = normalizeEvmAddress(contractAddress, "privacy authorization verifying contract");
+  const normalizedBatchId = actionConfig.batch ? evmPrivacyBatchId(batchId) : `0x${zeroWord}`;
+  const normalizedBatchItemIndex = actionConfig.batch
+    ? requiredUint64(batchItemIndex, "batchItemIndex")
+    : 0n;
+  const normalizedRequest = actionConfig.request();
+  const requestHash = actionConfig.requestHash(normalizedRequest);
+  return Object.freeze({
+    types: evmPrivacyAuthorizationTypedDataTypes,
+    primaryType: "PrivacyActionAuthorization",
+    domain: Object.freeze({
+      name: normalizedDomain.name,
+      version: normalizedDomain.version,
+      chainId: normalizedEvmChainId.toString(),
+      verifyingContract
+    }),
+    message: Object.freeze({
+      authorizationEnvelopeSelector: `0x${functionSelector(actionConfig.envelope)}`,
+      authorizationActionSelector: `0x${functionSelector(actionConfig.action)}`,
+      effectiveSender: normalizedAuthorization.effectiveSender,
+      executor: normalizedAuthorization.executor,
+      nonce: normalizedAuthorization.nonce.toString(),
+      deadline: normalizedAuthorization.deadline.toString(),
+      cosmosChainIdHash: `0x${keccak256(normalizedCosmosChainId)}`,
+      requestHash,
+      batchId: normalizedBatchId,
+      batchItemIndex: normalizedBatchItemIndex.toString(),
+      authorizationKind: normalizedAuthorization.authorizationKind.toString()
+    })
+  });
+}
+
+function receiptExpectationForDeposit(message, nativeDenom) {
+  const request = evmPrivacyDepositRequest(message);
+  const amount = parseCoin(message?.amount, nativeDenom).raw;
+  return {
+    event: "PrivacyDeposit",
+    effectiveSender: "operator",
+    amount,
+    noteCommitment: receiptHex(request.noteCommitment, "note commitment")
+  };
+}
+
+function receiptExpectationForTransfer(message, authorization = null) {
+  const request = evmPrivacyTransferRequest(message);
+  return {
+    event: "PrivacyTransfer",
+    effectiveSender: authorization
+      ? normalizeEvmAddress(evmPrivacyAuthorization(authorization).effectiveSender)
+      : "operator",
+    root: receiptHex(request.root, "transfer root")
+  };
+}
+
+function receiptExpectationForWithdraw(message, options, authorization = null) {
+  const request = evmPrivacyWithdrawRequest(message, options);
+  return {
+    event: "PrivacyWithdraw",
+    effectiveSender: authorization
+      ? normalizeEvmAddress(evmPrivacyAuthorization(authorization).effectiveSender)
+      : "operator",
+    recipient: request.recipient,
+    amount: request.amount
+  };
+}
+
+function receiptExpectationForBatch(batchId, requests, items = null) {
+  const normalizedBatchId = evmPrivacyBatchId(batchId);
+  const entries = (items || requests).map((item, index) => {
+    const request = evmPrivacyTransferRequest(items ? (item?.request ?? item?.message ?? item) : item);
+    const authorization = items
+      ? evmPrivacyAuthorization(item?.authorization ?? item?.auth ?? item?.privacyAuthorization)
+      : null;
+    return {
+      itemIndex: BigInt(index),
+      effectiveSender: authorization ? authorization.effectiveSender : "operator",
+      requestHash: requestHashForTransferRequest(request),
+      root: receiptHex(request.root, `batch request ${index} root`)
+    };
+  });
+  return { event: "PrivacyBatchTransferItem", batchId: normalizedBatchId, entries };
+}
+
+function receiptExpectationForSingleProofBatch(message, authorization = null) {
+  const request = evmPrivacySingleProofBatchRequest(message);
+  return {
+    event: "PrivacySingleProofBatchTransfer",
+    effectiveSender: authorization
+      ? normalizeEvmAddress(evmPrivacyAuthorization(authorization).effectiveSender)
+      : "operator",
+    requestHash: requestHashForSingleProofBatchRequest(request),
+    root: receiptHex(request.root, "single-proof batch root"),
+    inputCount: BigInt(request.nullifiers.length),
+    outputCount: BigInt(request.outputs.length)
+  };
+}
+
+function receiptExpectationForCanonicalTransaction(transaction, buildCanonicalData, buildExpectation) {
+  const data = strip0x(transaction?.data).toLowerCase();
+  let canonicalData;
+  try {
+    canonicalData = typeof buildCanonicalData === "function"
+      ? buildCanonicalData()
+      : buildCanonicalData;
+  } catch {
+    // A public custom adapter can intentionally support a legacy or otherwise
+    // non-canonical request shape. It remains usable as a transaction adapter,
+    // but it cannot receive the SDK's strong event-evidence guarantee.
+    return null;
+  }
+  const expected = strip0x(canonicalData).toLowerCase();
+  // Receipt events for transfers bind only part of the request. Attach a
+  // strict expectation only when the adapter returned the exact canonical
+  // EVM calldata that the SDK validated, never merely a matching selector.
+  return data && expected && data === expected ? buildExpectation() : null;
+}
+
+function receiptData(value, label) {
+  const clean = strip0x(value);
+  if (!/^(?:[0-9a-fA-F]{2})*$/.test(clean)) {
+    throw new Error(`${label} must be even-length hex`);
+  }
+  return clean.toLowerCase();
+}
+
+function receiptWord(data, index, label) {
+  const start = index * 64;
+  const word = data.slice(start, start + 64);
+  if (word.length !== 64) throw new Error(`${label} is truncated`);
+  return word;
+}
+
+function receiptUint(data, index, label) {
+  return BigInt(`0x${receiptWord(data, index, label)}`);
+}
+
+function receiptDynamicBytes(data, index, label) {
+  const offset = receiptUint(data, index, `${label} offset`);
+  if (offset > BigInt(Number.MAX_SAFE_INTEGER) || offset % 32n !== 0n) {
+    throw new Error(`${label} has an invalid offset`);
+  }
+  const offsetIndex = Number(offset / 32n);
+  const length = receiptUint(data, offsetIndex, `${label} length`);
+  if (length > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`${label} is too large`);
+  const start = (offsetIndex + 1) * 64;
+  const end = start + Number(length) * 2;
+  const payload = data.slice(start, end);
+  if (payload.length !== Number(length) * 2) throw new Error(`${label} is truncated`);
+  return `0x${payload}`;
+}
+
+function receiptString(data, index, label) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytesFromHex(strip0x(receiptDynamicBytes(data, index, label)), label));
+  } catch {
+    throw new Error(`${label} is not valid UTF-8`);
+  }
+}
+
+function receiptSucceeded(status) {
+  try {
+    return BigInt(status) === 1n;
+  } catch {
+    return false;
+  }
+}
+
+function receiptLogTopics(log, label) {
+  if (!Array.isArray(log?.topics)) throw new Error(`${label}.topics is required`);
+  return log.topics.map((topic, index) => receiptBytes32Topic(topic, `${label}.topics[${index}]`));
+}
+
+function expectedPrivacyLogs(receipt, contractAddress, eventName) {
+  if (!receiptSucceeded(receipt?.status)) {
+    throw new Error("privacy receipt does not have an explicit successful status");
+  }
+  if (!Array.isArray(receipt?.logs)) throw new Error("privacy receipt logs are required");
+  const signature = {
+    PrivacyDeposit: "PrivacyDeposit(address,address,string,bytes)",
+    PrivacyTransfer: "PrivacyTransfer(address,address,bytes)",
+    PrivacyWithdraw: "PrivacyWithdraw(address,address,address,string)",
+    PrivacyBatchTransferItem: "PrivacyBatchTransferItem(address,address,bytes32,uint64,bytes32,bytes)",
+    PrivacySingleProofBatchTransfer: "PrivacySingleProofBatchTransfer(address,address,bytes32,bytes,uint8,uint8)"
+  }[eventName];
+  if (!signature) throw new Error(`unsupported privacy receipt event ${eventName}`);
+  const topic = `0x${keccak256(signature)}`;
+  const target = normalizeEvmAddress(contractAddress, "privacy contract address");
+  return receipt.logs.filter((log, index) => {
+    if (normalizeEvmAddress(log?.address, `receipt.logs[${index}].address`) !== target) return false;
+    const topics = receiptLogTopics(log, `receipt.logs[${index}]`);
+    return topics[0] === topic;
+  });
+}
+
+function assertReceiptSenderTopics(log, expectation, operator, label) {
+  const topics = receiptLogTopics(log, label);
+  const effectiveSender = expectation.effectiveSender === "operator"
+    ? operator
+    : normalizeEvmAddress(expectation.effectiveSender, `${label} effective sender`);
+  if (topics[1] !== receiptAddressTopic(effectiveSender) || topics[2] !== receiptAddressTopic(operator)) {
+    throw new Error(`${label} effectiveSender/operator does not match the prepared privacy call`);
+  }
+  return topics;
+}
+
+function normalizedEvmTransactionHash(value, label) {
+  const clean = String(value ?? "").trim().replace(/^0x/i, "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(clean)) {
+    throw new Error(`${label} must be a 32-byte EVM transaction hash`);
+  }
+  return `0x${clean}`;
+}
+
+/**
+ * Bind an RPC transaction to the exact SDK-prepared privacy request and the
+ * configured EVM network. This deliberately verifies only fields that remain
+ * stable across wallet fee/nonce filling: hash, sender, target, calldata,
+ * value, and chain ID.
+ */
+export function verifyEvmTransactionIdentity({
+  transaction,
+  rpcTransaction,
+  txHash,
+  sender,
+  expectedChainId,
+  actualChainId
+} = {}) {
+  if (!rpcTransaction || typeof rpcTransaction !== "object" || Array.isArray(rpcTransaction)) {
+    throw new Error("EVM transaction identity verification requires eth_getTransactionByHash output");
+  }
+  const metadata = evmTransactionMetadata(transaction);
+  if (!metadata.operation || !metadata.receiptExpectation ||
+      !metadata.expectedTo || !metadata.expectedData || !metadata.expectedValue) {
+    throw new Error("EVM transaction identity verification requires an SDK-prepared privacy transaction");
+  }
+
+  const preparedTo = normalizeEvmAddress(transaction?.to, "prepared privacy transaction target");
+  const preparedData = String(transaction?.data ?? "").trim().toLowerCase();
+  const preparedValue = normalizedEvmQuantity(
+    transaction?.value ?? "0x0",
+    "prepared privacy transaction value"
+  );
+  if (preparedTo !== metadata.expectedTo ||
+      preparedData !== metadata.expectedData ||
+      preparedValue !== metadata.expectedValue) {
+    throw new Error("prepared privacy transaction binding was modified before confirmation");
+  }
+
+  const requestedHash = normalizedEvmTransactionHash(txHash, "requested transaction hash");
+  const rpcHash = normalizedEvmTransactionHash(
+    rpcTransaction.hash ?? rpcTransaction.transactionHash,
+    "RPC transaction hash"
+  );
+  if (rpcHash !== requestedHash) {
+    throw new Error("RPC transaction hash does not match the requested transaction");
+  }
+
+  const expectedSender = normalizeEvmAddress(sender, "privacy transaction sender");
+  const rpcSender = normalizeEvmAddress(rpcTransaction.from, "RPC transaction sender");
+  if (rpcSender !== expectedSender) {
+    throw new Error("RPC transaction sender does not match the submitted privacy transaction sender");
+  }
+  if (transaction?.from != null &&
+      normalizeEvmAddress(transaction.from, "prepared privacy transaction sender") !== expectedSender) {
+    throw new Error("prepared privacy transaction sender does not match the submitted sender");
+  }
+
+  const rpcTo = normalizeEvmAddress(rpcTransaction.to, "RPC transaction target");
+  if (rpcTo !== preparedTo) {
+    throw new Error("RPC transaction target does not match the prepared privacy transaction");
+  }
+  const rpcInput = rpcTransaction.input;
+  const rpcData = rpcTransaction.data;
+  if (rpcInput != null && rpcData != null &&
+      String(rpcInput).trim().toLowerCase() !== String(rpcData).trim().toLowerCase()) {
+    throw new Error("RPC transaction input/data aliases conflict");
+  }
+  const actualData = String(rpcInput ?? rpcData ?? "").trim().toLowerCase();
+  if (!actualData || actualData !== preparedData) {
+    throw new Error("RPC transaction calldata does not match the prepared privacy transaction");
+  }
+  if (rpcTransaction.value == null) {
+    throw new Error("RPC transaction value is required for privacy transaction verification");
+  }
+  const actualValue = normalizedEvmQuantity(rpcTransaction.value, "RPC transaction value");
+  if (actualValue !== preparedValue) {
+    throw new Error("RPC transaction value does not match the prepared privacy transaction");
+  }
+
+  const configuredChainId = expectedChainId == null || String(expectedChainId).trim() === ""
+    ? ""
+    : normalizedEvmQuantity(expectedChainId, "expected EVM chain ID");
+  const preparedChainId = transaction?.chainId == null || String(transaction.chainId).trim() === ""
+    ? ""
+    : normalizedEvmQuantity(transaction.chainId, "prepared EVM chain ID");
+  const expectedNetwork = configuredChainId || preparedChainId;
+  if (!expectedNetwork) {
+    throw new Error("expected EVM chain ID is required for transaction identity verification");
+  }
+  if (configuredChainId && preparedChainId && configuredChainId !== preparedChainId) {
+    throw new Error("prepared EVM transaction chain ID does not match the configured network");
+  }
+  const rpcNetwork = normalizedEvmQuantity(actualChainId, "EVM RPC chain ID");
+  if (!rpcNetwork || rpcNetwork !== expectedNetwork) {
+    throw new Error("EVM RPC chain ID does not match the prepared privacy transaction");
+  }
+  if (rpcTransaction.chainId != null && String(rpcTransaction.chainId).trim() !== "" &&
+      normalizedEvmQuantity(rpcTransaction.chainId, "RPC transaction chain ID") !== expectedNetwork) {
+    throw new Error("RPC transaction chain ID does not match the prepared privacy transaction");
+  }
+
+  return Object.freeze({
+    verified: true,
+    operation: metadata.operation,
+    txHash: requestedHash,
+    sender: expectedSender,
+    to: preparedTo,
+    data: preparedData,
+    value: preparedValue,
+    chainId: expectedNetwork,
+    txBytesHash: evmTransactionBindingHash(transaction)
+  });
+}
+
+/**
+ * Verify an EVM privacy contract's action-specific event after a successful receipt.
+ * Receipt status alone is intentionally insufficient because a proxy/caught
+ * revert or unrelated call can otherwise look successful to the wallet.
+ */
+export function verifyEvmPrivacyReceipt({ transaction, receipt, sender, contractAddress } = {}) {
+  const expectation = evmTransactionMetadata(transaction).receiptExpectation;
+  if (!expectation || typeof expectation !== "object") {
+    throw new Error("privacy receipt verification requires an SDK-prepared transaction");
+  }
+  const operator = normalizeEvmAddress(sender, "privacy transaction sender");
+  const logs = expectedPrivacyLogs(
+    receipt,
+    contractAddress ?? transaction?.to,
+    expectation.event
+  );
+  if (expectation.event !== "PrivacyBatchTransferItem" && logs.length !== 1) {
+    throw new Error(`${expectation.event} receipt event count must be exactly one`);
+  }
+
+  if (expectation.event === "PrivacyDeposit") {
+    const log = logs[0];
+    assertReceiptSenderTopics(log, expectation, operator, "PrivacyDeposit");
+    const data = receiptData(log.data, "PrivacyDeposit data");
+    if (receiptString(data, 0, "PrivacyDeposit amount") !== expectation.amount ||
+        receiptDynamicBytes(data, 1, "PrivacyDeposit note commitment") !== expectation.noteCommitment) {
+      throw new Error("PrivacyDeposit amount or note commitment does not match the prepared privacy call");
+    }
+  } else if (expectation.event === "PrivacyTransfer") {
+    const log = logs[0];
+    assertReceiptSenderTopics(log, expectation, operator, "PrivacyTransfer");
+    if (receiptDynamicBytes(receiptData(log.data, "PrivacyTransfer data"), 0, "PrivacyTransfer root") !== expectation.root) {
+      throw new Error("PrivacyTransfer root does not match the prepared privacy call");
+    }
+  } else if (expectation.event === "PrivacyWithdraw") {
+    const log = logs[0];
+    const topics = assertReceiptSenderTopics(log, expectation, operator, "PrivacyWithdraw");
+    if (topics[3] !== receiptAddressTopic(expectation.recipient) ||
+        receiptString(receiptData(log.data, "PrivacyWithdraw data"), 0, "PrivacyWithdraw amount") !== expectation.amount) {
+      throw new Error("PrivacyWithdraw recipient or amount does not match the prepared privacy call");
+    }
+  } else if (expectation.event === "PrivacyBatchTransferItem") {
+    if (logs.length !== expectation.entries.length) {
+      throw new Error(`PrivacyBatchTransferItem receipt emitted ${logs.length} items; expected ${expectation.entries.length}`);
+    }
+    const seen = new Set();
+    for (const [index, log] of logs.entries()) {
+      const data = receiptData(log.data, `PrivacyBatchTransferItem[${index}] data`);
+      const itemIndex = receiptUint(data, 0, `PrivacyBatchTransferItem[${index}] item index`);
+      if (itemIndex >= BigInt(expectation.entries.length) || seen.has(itemIndex.toString())) {
+        throw new Error("PrivacyBatchTransferItem has an invalid or duplicate item index");
+      }
+      seen.add(itemIndex.toString());
+      const expected = expectation.entries[Number(itemIndex)];
+      const topics = assertReceiptSenderTopics(log, expected, operator, `PrivacyBatchTransferItem[${index}]`);
+      const batchIDMatches = topics[3] === receiptBytes32Topic(expectation.batchId, "batchId");
+      const observedRequestHash = `0x${receiptWord(data, 1, `PrivacyBatchTransferItem[${index}] request hash`)}`;
+      const requestHashMatches = observedRequestHash === expected.requestHash;
+      const rootMatches = receiptDynamicBytes(data, 2, `PrivacyBatchTransferItem[${index}] root`) === expected.root;
+      if (!batchIDMatches || !requestHashMatches || !rootMatches) {
+        const mismatches = [
+          !batchIDMatches && "batchId",
+          !requestHashMatches && "requestHash",
+          !rootMatches && "root"
+        ].filter(Boolean).join(", ");
+        throw new Error(`PrivacyBatchTransferItem ${itemIndex} does not match the prepared privacy call: ${mismatches}`);
+      }
+    }
+  } else if (expectation.event === "PrivacySingleProofBatchTransfer") {
+    const log = logs[0];
+    const topics = assertReceiptSenderTopics(log, expectation, operator, "PrivacySingleProofBatchTransfer");
+    const data = receiptData(log.data, "PrivacySingleProofBatchTransfer data");
+    if (topics[3] !== receiptBytes32Topic(expectation.requestHash, "single-proof batch request hash") ||
+        receiptDynamicBytes(data, 0, "PrivacySingleProofBatchTransfer root") !== expectation.root ||
+        receiptUint(data, 1, "PrivacySingleProofBatchTransfer input count") !== expectation.inputCount ||
+        receiptUint(data, 2, "PrivacySingleProofBatchTransfer output count") !== expectation.outputCount) {
+      throw new Error("PrivacySingleProofBatchTransfer does not match the prepared privacy call");
+    }
+  }
+
+  return Object.freeze({ verified: true, event: expectation.event, operation: evmTransactionMetadata(transaction).operation });
 }
 
 export function createEip1193WalletAdapter({ provider, account } = {}) {
@@ -1059,6 +1917,17 @@ export function createEip1193WalletAdapter({ provider, account } = {}) {
       }
       return signature;
     },
+    async signTypedData(typedData) {
+      const address = await this.getAddress();
+      const signature = await provider.request({
+        method: "eth_signTypedData_v4",
+        params: [address, JSON.stringify(typedData)]
+      });
+      if (typeof signature !== "string" || !/^0x[0-9a-fA-F]+$/.test(signature)) {
+        throw new Error("EVM wallet eth_signTypedData_v4 must return a 0x-prefixed hex signature");
+      }
+      return signature;
+    },
     async sendTransaction(transaction) {
       const externalTransaction = externalEvmTransaction(transaction);
       const from = externalTransaction.from
@@ -1089,16 +1958,30 @@ export function createEvmContractAdapter({
   encodeDeposit = defaultEncodeEvmDeposit,
   encodeTransfer = defaultEncodeEvmTransfer,
   encodeWithdraw = defaultEncodeEvmWithdraw,
+  encodeTransferWithAuthorization = encodeEvmPrivacyTransferWithAuthorization,
+  encodeWithdrawWithAuthorization = encodeEvmPrivacyWithdrawWithAuthorization,
+  encodeBatchTransfer = encodeEvmPrivacyBatchTransfer,
+  encodeBatchTransferWithAuthorization = encodeEvmPrivacyBatchTransferWithAuthorization,
+  encodeSingleProofBatchTransfer = encodeEvmPrivacySingleProofBatchTransfer,
+  encodeSingleProofBatchTransferWithAuthorization = encodeEvmPrivacySingleProofBatchTransferWithAuthorization,
   accountPrefix,
   chainId,
   depositMode = defaultEvmDepositMode,
-  nativeDenom = "uclair"
+  nativeDenom = "uclair",
+  authorizationProfile = null
 } = {}) {
   const to = normalizeEvmAddress(contractAddress, "contractAddress");
   const resolvedDepositMode = normalizeEvmDepositMode(depositMode);
   const resolvedNativeDenom = normalizeEvmNativeDenom(nativeDenom);
+  const resolvedAuthorizationProfile = normalizeEvmAuthorizationProfile(authorizationProfile);
+  const validateAuthorization = (authorization, options = {}) => validateEvmPrivacyAuthorization(
+    authorization,
+    resolvedAuthorizationProfile,
+    options
+  );
   return {
     contractAddress: to,
+    ...(resolvedAuthorizationProfile ? { authorizationProfile: resolvedAuthorizationProfile } : {}),
     abi: resolvedDepositMode === evmDepositModePayableExactValue
       ? evmPrivacyPrecompilePayableDepositAbi
       : evmPrivacyPrecompileAbi,
@@ -1139,6 +2022,76 @@ export function createEvmContractAdapter({
         data: encodeWithdraw(message, { accountPrefix, chainId, ...options }),
         value
       };
+    },
+    buildTransferWithAuthorizationTransaction(message, authorization, options = {}) {
+      const value = zeroTransactionValue(options, "transferWithAuthorization");
+      return {
+        to,
+        data: encodeTransferWithAuthorization(
+          message,
+          validateAuthorization(authorization),
+          { accountPrefix, chainId, ...options }
+        ),
+        value
+      };
+    },
+    buildWithdrawWithAuthorizationTransaction(message, authorization, options = {}) {
+      const value = zeroTransactionValue(options, "withdrawWithAuthorization");
+      return {
+        to,
+        data: encodeWithdrawWithAuthorization(
+          message,
+          validateAuthorization(authorization),
+          { accountPrefix, chainId, ...options }
+        ),
+        value
+      };
+    },
+    buildBatchTransferTransaction(batchId, requests, options = {}) {
+      const value = zeroTransactionValue(options, "batchTransfer");
+      return { to, data: encodeBatchTransfer(batchId, requests, { accountPrefix, chainId, ...options }), value };
+    },
+    buildBatchTransferWithAuthorizationTransaction(batchId, items, options = {}) {
+      const value = zeroTransactionValue(options, "batchTransferWithAuthorization");
+      if (!Array.isArray(items)) throw new Error("authorized batch items must be an array");
+      const normalizedItems = items.map((item, index) => ({
+        ...item,
+        authorization: validateAuthorization(
+          item?.authorization ?? item?.auth ?? item?.privacyAuthorization,
+          { requireSignature: true, index }
+        )
+      }));
+      return {
+        to,
+        data: encodeBatchTransferWithAuthorization(batchId, normalizedItems, { accountPrefix, chainId, ...options }),
+        value
+      };
+    },
+    buildSingleProofBatchTransferTransaction(message, options = {}) {
+      const value = zeroTransactionValue(options, "singleProofBatchTransfer");
+      return { to, data: encodeSingleProofBatchTransfer(message, { accountPrefix, chainId, ...options }), value };
+    },
+    buildSingleProofBatchTransferWithAuthorizationTransaction(message, authorization, options = {}) {
+      const value = zeroTransactionValue(options, "singleProofBatchTransferWithAuthorization");
+      return {
+        to,
+        data: encodeSingleProofBatchTransferWithAuthorization(
+          message,
+          validateAuthorization(authorization),
+          { accountPrefix, chainId, ...options }
+        ),
+        value
+      };
+    },
+    buildAuthorizationTypedData(input = {}) {
+      if (!resolvedAuthorizationProfile?.buildTypedData) {
+        throw new Error("configured EVM authorization profile does not provide buildTypedData()");
+      }
+      return resolvedAuthorizationProfile.buildTypedData({
+        ...input,
+        authorization: validateAuthorization(input.authorization, { requireSignature: false }),
+        contractAddress: input.contractAddress ?? to
+      });
     }
   };
 }
@@ -1150,9 +2103,16 @@ export function createEvmPrivacyPrecompileAdapter(options = {}) {
     chainId: options.chainId,
     depositMode: options.depositMode,
     nativeDenom: options.nativeDenom,
+    authorizationProfile: options.authorizationProfile,
     encodeDeposit: options.encodeDeposit ?? encodeEvmPrivacyDeposit,
     encodeTransfer: options.encodeTransfer ?? encodeEvmPrivacyTransfer,
-    encodeWithdraw: options.encodeWithdraw ?? encodeEvmPrivacyWithdraw
+    encodeWithdraw: options.encodeWithdraw ?? encodeEvmPrivacyWithdraw,
+    encodeTransferWithAuthorization: options.encodeTransferWithAuthorization ?? encodeEvmPrivacyTransferWithAuthorization,
+    encodeWithdrawWithAuthorization: options.encodeWithdrawWithAuthorization ?? encodeEvmPrivacyWithdrawWithAuthorization,
+    encodeBatchTransfer: options.encodeBatchTransfer ?? encodeEvmPrivacyBatchTransfer,
+    encodeBatchTransferWithAuthorization: options.encodeBatchTransferWithAuthorization ?? encodeEvmPrivacyBatchTransferWithAuthorization,
+    encodeSingleProofBatchTransfer: options.encodeSingleProofBatchTransfer ?? encodeEvmPrivacySingleProofBatchTransfer,
+    encodeSingleProofBatchTransferWithAuthorization: options.encodeSingleProofBatchTransferWithAuthorization ?? encodeEvmPrivacySingleProofBatchTransferWithAuthorization
   });
 }
 
@@ -1179,7 +2139,8 @@ export class ClairveilEvmClient {
     defaultDenom = "uclair",
     depositMode = defaultEvmDepositMode,
     nativeDenom = defaultDenom,
-    contractAdapter
+    contractAdapter,
+    authorizationProfile = null
   } = {}) {
     this.provider = provider;
     this.chainId = chainId;
@@ -1192,12 +2153,36 @@ export class ClairveilEvmClient {
     this.defaultDenom = String(defaultDenom || "uclair");
     this.depositMode = normalizeEvmDepositMode(depositMode);
     this.nativeDenom = normalizeEvmNativeDenom(nativeDenom, this.defaultDenom);
+    const adapterAuthorizationProfile = contractAdapter?.authorizationProfile ?? null;
+    if (authorizationProfile != null && adapterAuthorizationProfile != null &&
+        authorizationProfile !== adapterAuthorizationProfile) {
+      throw new Error("authorizationProfile conflicts with contractAdapter.authorizationProfile");
+    }
+    this.authorizationProfile = normalizeEvmAuthorizationProfile(
+      authorizationProfile ?? adapterAuthorizationProfile
+    );
     this.contract = contractAdapter || createEvmPrivacyPrecompileAdapter({
       contractAddress,
       accountPrefix: this.accountPrefix,
       chainId,
       depositMode: this.depositMode,
-      nativeDenom: this.nativeDenom
+      nativeDenom: this.nativeDenom,
+      authorizationProfile: this.authorizationProfile
+    });
+  }
+
+  validateAuthorization(authorization, options = {}) {
+    return validateEvmPrivacyAuthorization(authorization, this.authorizationProfile, options);
+  }
+
+  buildAuthorizationTypedData(input = {}) {
+    if (!this.authorizationProfile?.buildTypedData) {
+      throw new Error("configured EVM authorization profile does not provide buildTypedData()");
+    }
+    return this.authorizationProfile.buildTypedData({
+      ...input,
+      authorization: this.validateAuthorization(input.authorization, { requireSignature: false }),
+      contractAddress: input.contractAddress ?? this.contract.contractAddress
     });
   }
 
@@ -1243,7 +2228,12 @@ export class ClairveilEvmClient {
             depositMode: this.depositMode,
             nativeDenom: this.nativeDenom,
             expectedData,
-            expectedValue
+            expectedValue,
+            receiptExpectation: receiptExpectationForCanonicalTransaction(
+              transaction,
+              () => encodeEvmPrivacyDeposit(input.message),
+              () => receiptExpectationForDeposit(input.message, this.nativeDenom)
+            )
           }
         ))
       };
@@ -1291,11 +2281,16 @@ export class ClairveilEvmClient {
       transaction: markedEvmTransaction(transaction, privacyTransactionBindingMetadata(
         transaction,
         "deposit",
-        {
-          depositMode: this.depositMode,
-          nativeDenom: this.nativeDenom,
-          expectedData,
-          expectedValue
+          {
+            depositMode: this.depositMode,
+            nativeDenom: this.nativeDenom,
+            expectedData,
+            expectedValue,
+            receiptExpectation: receiptExpectationForCanonicalTransaction(
+              transaction,
+              () => encodeEvmPrivacyDeposit(message),
+              () => receiptExpectationForDeposit(message, this.nativeDenom)
+            )
         }
       ))
     };
@@ -1321,7 +2316,13 @@ export class ClairveilEvmClient {
       ...built,
       transaction: markedEvmTransaction(
         transaction,
-        privacyTransactionBindingMetadata(transaction, "transfer")
+        privacyTransactionBindingMetadata(transaction, "transfer", {
+          receiptExpectation: receiptExpectationForCanonicalTransaction(
+            transaction,
+            () => encodeEvmPrivacyTransfer(built.message),
+            () => receiptExpectationForTransfer(built.message)
+          )
+        })
       )
     };
   }
@@ -1430,7 +2431,178 @@ export class ClairveilEvmClient {
       message,
       transaction: markedEvmTransaction(
         transaction,
-        privacyTransactionBindingMetadata(transaction, "withdraw")
+        privacyTransactionBindingMetadata(transaction, "withdraw", {
+          receiptExpectation: receiptExpectationForCanonicalTransaction(
+            transaction,
+            () => encodeEvmPrivacyWithdraw(message, { accountPrefix, chainId: this.chainId }),
+            () => receiptExpectationForWithdraw(message, { accountPrefix, chainId: this.chainId })
+          )
+        })
+      )
+    };
+  }
+
+  buildTransferWithAuthorizationTransaction({ message, authorization, transactionOptions } = {}) {
+    if (!message) throw new Error("transfer message is required");
+    if (typeof this.contract.buildTransferWithAuthorizationTransaction !== "function") {
+      throw new Error("configured EVM contract adapter does not support transferWithAuthorization");
+    }
+    const normalizedAuthorization = this.validateAuthorization(authorization);
+    const transaction = this.contract.buildTransferWithAuthorizationTransaction(
+      message,
+      normalizedAuthorization,
+      transactionOptions
+    );
+    return {
+      status: "ready",
+      message,
+      authorization: normalizedAuthorization,
+      transaction: markedEvmTransaction(
+        transaction,
+        privacyTransactionBindingMetadata(transaction, "transferWithAuthorization", {
+          receiptExpectation: receiptExpectationForCanonicalTransaction(
+            transaction,
+            () => encodeEvmPrivacyTransferWithAuthorization(message, normalizedAuthorization),
+            () => receiptExpectationForTransfer(message, normalizedAuthorization)
+          )
+        })
+      )
+    };
+  }
+
+  buildWithdrawWithAuthorizationTransaction({ message, authorization, transactionOptions } = {}) {
+    if (!message) throw new Error("withdraw message is required");
+    if (typeof this.contract.buildWithdrawWithAuthorizationTransaction !== "function") {
+      throw new Error("configured EVM contract adapter does not support withdrawWithAuthorization");
+    }
+    const normalizedAuthorization = this.validateAuthorization(authorization);
+    const transaction = this.contract.buildWithdrawWithAuthorizationTransaction(
+      message,
+      normalizedAuthorization,
+      transactionOptions
+    );
+    return {
+      status: "ready",
+      message,
+      authorization: normalizedAuthorization,
+      transaction: markedEvmTransaction(
+        transaction,
+        privacyTransactionBindingMetadata(transaction, "withdrawWithAuthorization", {
+          receiptExpectation: receiptExpectationForCanonicalTransaction(
+            transaction,
+            () => encodeEvmPrivacyWithdrawWithAuthorization(
+              message,
+              normalizedAuthorization,
+              { accountPrefix: this.accountPrefix, chainId: this.chainId }
+            ),
+            () => receiptExpectationForWithdraw(message, { accountPrefix: this.accountPrefix, chainId: this.chainId }, normalizedAuthorization)
+          )
+        })
+      )
+    };
+  }
+
+  buildBatchTransferTransaction({ batchId, requests, transactionOptions } = {}) {
+    if (typeof this.contract.buildBatchTransferTransaction !== "function") {
+      throw new Error("configured EVM contract adapter does not support batchTransfer");
+    }
+    const transaction = this.contract.buildBatchTransferTransaction(batchId, requests, transactionOptions);
+    return {
+      status: "ready",
+      batchId,
+      requests,
+      transaction: markedEvmTransaction(
+        transaction,
+        privacyTransactionBindingMetadata(transaction, "batchTransfer", {
+          receiptExpectation: receiptExpectationForCanonicalTransaction(
+            transaction,
+            () => encodeEvmPrivacyBatchTransfer(batchId, requests),
+            () => receiptExpectationForBatch(batchId, requests)
+          )
+        })
+      )
+    };
+  }
+
+  buildBatchTransferWithAuthorizationTransaction({ batchId, items, transactionOptions } = {}) {
+    if (typeof this.contract.buildBatchTransferWithAuthorizationTransaction !== "function") {
+      throw new Error("configured EVM contract adapter does not support batchTransferWithAuthorization");
+    }
+    if (!Array.isArray(items)) throw new Error("authorized batch items must be an array");
+    const normalizedItems = items.map(item => ({
+      ...item,
+      authorization: this.validateAuthorization(
+        item?.authorization ?? item?.auth ?? item?.privacyAuthorization
+      )
+    }));
+    const transaction = this.contract.buildBatchTransferWithAuthorizationTransaction(
+      batchId,
+      normalizedItems,
+      transactionOptions
+    );
+    return {
+      status: "ready",
+      batchId,
+      items: normalizedItems,
+      transaction: markedEvmTransaction(
+        transaction,
+        privacyTransactionBindingMetadata(transaction, "batchTransferWithAuthorization", {
+          receiptExpectation: receiptExpectationForCanonicalTransaction(
+            transaction,
+            () => encodeEvmPrivacyBatchTransferWithAuthorization(batchId, normalizedItems),
+            () => receiptExpectationForBatch(batchId, null, normalizedItems)
+          )
+        })
+      )
+    };
+  }
+
+  buildSingleProofBatchTransferTransaction({ message, transactionOptions } = {}) {
+    if (!message) throw new Error("single-proof batch transfer message is required");
+    if (typeof this.contract.buildSingleProofBatchTransferTransaction !== "function") {
+      throw new Error("configured EVM contract adapter does not support singleProofBatchTransfer");
+    }
+    const transaction = this.contract.buildSingleProofBatchTransferTransaction(message, transactionOptions);
+    return {
+      status: "ready",
+      message,
+      transaction: markedEvmTransaction(
+        transaction,
+        privacyTransactionBindingMetadata(transaction, "singleProofBatchTransfer", {
+          receiptExpectation: receiptExpectationForCanonicalTransaction(
+            transaction,
+            () => encodeEvmPrivacySingleProofBatchTransfer(message),
+            () => receiptExpectationForSingleProofBatch(message)
+          )
+        })
+      )
+    };
+  }
+
+  buildSingleProofBatchTransferWithAuthorizationTransaction({ message, authorization, transactionOptions } = {}) {
+    if (!message) throw new Error("single-proof batch transfer message is required");
+    if (typeof this.contract.buildSingleProofBatchTransferWithAuthorizationTransaction !== "function") {
+      throw new Error("configured EVM contract adapter does not support singleProofBatchTransferWithAuthorization");
+    }
+    const normalizedAuthorization = this.validateAuthorization(authorization);
+    const transaction = this.contract.buildSingleProofBatchTransferWithAuthorizationTransaction(
+      message,
+      normalizedAuthorization,
+      transactionOptions
+    );
+    return {
+      status: "ready",
+      message,
+      authorization: normalizedAuthorization,
+      transaction: markedEvmTransaction(
+        transaction,
+        privacyTransactionBindingMetadata(transaction, "singleProofBatchTransferWithAuthorization", {
+          receiptExpectation: receiptExpectationForCanonicalTransaction(
+            transaction,
+            () => encodeEvmPrivacySingleProofBatchTransferWithAuthorization(message, normalizedAuthorization),
+            () => receiptExpectationForSingleProofBatch(message, normalizedAuthorization)
+          )
+        })
       )
     };
   }
@@ -1480,6 +2652,22 @@ export class ClairveilEvmClient {
     }
     await markBroadcastReservationSubmitted(reservationContext, normalizedTxHash);
     return normalizedTxHash;
+  }
+
+  verifyPrivacyReceipt({ transaction, receipt, sender } = {}) {
+    return verifyEvmPrivacyReceipt({
+      transaction,
+      receipt,
+      sender,
+      contractAddress: this.contract.contractAddress
+    });
+  }
+
+  verifyTransactionIdentity(input = {}) {
+    return verifyEvmTransactionIdentity({
+      ...input,
+      expectedChainId: input.expectedChainId ?? this.evmChainId
+    });
   }
 
   privacyAccount(material) {

@@ -30,7 +30,7 @@ SDK 메서드가 실제 chain REST/RPC, prover HTTP, Cosmos Msg, EVM precompile�
 | --- | --- | --- |
 | 브라우저 / Wallet | 사용자의 privacy root signature로부터 privacy material을 유도하고, 노트를 스캔하며, 준비된 transaction을 서명한다. | 일반 DApp 서버에 privacy root signature, root seed, spend/view/disclosure private material, 복호화한 note를 전달하면 안 된다. |
 | ClairveilJS | 클라이언트에서 note scan, planner, Merkle path/nullifier 검증, transfer·withdraw payload 구성, prover adapter 호출, Cosmos sign doc 또는 EVM transaction 구성을 수행한다. ZK proof를 자체 생성하지는 않는다. Note 영속화는 주입된 Note Store에 맡기며, SDK의 `LocalStorageNoteStore`는 명시적 opt-in 시 복호화 note를 평문 저장한다. | private material을 임의의 서버로 자동 전송하지 않는다. Production에서는 plaintext `LocalStorageNoteStore`를 사용하지 않고 앱·지갑의 암호화 Note Store를 주입한다. |
-| Prover 서비스 | ClairveilJS가 보낸 준비된 prover payload로 transfer, withdraw 또는 batch ZK proof를 생성해 응답한다. Batch는 Cosmos `MsgBatchTransfer` 전용이며 Deposit은 별도의 exact `depositProofUrl` 또는 주입한 provider를 사용한다. | 신뢰되지 않은 prover에 private payload/proof를 넘기면 안 된다. 원격 prover를 쓸지, local/WASM prover를 쓸지는 제품의 신뢰 모델이 결정한다. Automatic cross-endpoint failover는 기본 비활성화다. |
+| Prover 서비스 | ClairveilJS가 보낸 준비된 prover payload로 transfer, withdraw 또는 batch ZK proof를 생성해 응답한다. 같은 batch proof는 Cosmos `MsgBatchTransfer` 또는 EVM `singleProofBatchTransfer` 실행으로 매핑되며 Deposit은 별도의 exact `depositProofUrl` 또는 주입한 provider를 사용한다. | 신뢰되지 않은 prover에 private payload/proof를 넘기면 안 된다. 원격 prover를 쓸지, local/WASM prover를 쓸지는 제품의 신뢰 모델이 결정한다. Automatic cross-endpoint failover는 기본 비활성화다. |
 | Client State Stores | Note store는 scan 결과·cursor·nullifier 상태를, Reservation store는 inventory lock·lease·broadcast evidence를 보존한다. Production browser의 Reservation store는 암호화된 IndexedDB와 Web Locks를 사용한다. | 로컬 저장소이며 서버 저장소가 아니다. private material에서 유도한 암호화 키를 ciphertext와 함께 저장하면 안 된다. |
 | DApp Proxy | 기본 아키텍처에서는 필수가 아니다. 필요한 경우 chain REST/RPC, prover HTTP 또는 broadcast endpoint를 프록시한다. | 일반 production 경로에서 사용자 privacy material이나 복호화 note의 보관 주체가 되면 안 된다. |
 | Product Relayer | relay withdraw payload를 검증하고 relayer 자신의 Cosmos/EVM 계정으로 제출한다. 제품별 인증·수수료·정책은 SDK 공통 계약이 아니다. | 클라이언트가 준 candidate transaction을 검증 없이 제출하면 안 된다. |
@@ -157,16 +157,16 @@ Relayer는 클라이언트가 건넨 transaction을 그대로 신뢰해서는 �
 
 Experimental one-proof batch transfer는 일반 `/v1/prover/transfer`가 아니라 `/v1/proofs/batch-transfer`를 사용한다. 하나의 operation에서 1~16개 input과 1~32개 output을 원자적으로 처리하므로 모든 input reservation을 같은 lifecycle로 관리해야 한다.
 
-현재 이 흐름은 **Cosmos `MsgBatchTransfer` 전용**이다. EVM profile의 `prepareTransferBatch(...)`는 거부되며 ClairveilJS는 `IPrivacy.batchTransfer` ABI나 EVM batch fallback을 제공하지 않는다. EVM의 일반 `IPrivacy.transfer`는 별개의 native transfer 경로다.
+같은 One-Proof payload/proof는 profile에 따라 Cosmos `MsgBatchTransfer` 또는 EVM `singleProofBatchTransfer`로 실행된다. EVM executor rail은 선택적 EIP-712 authorization을 사용할 수 있으며, 단일 proof batch와 여러 독립 transfer transaction을 서로 대체하지 않는다. EVM의 일반 `IPrivacy.transfer`는 별개의 native transfer 경로다.
 
-실행 가능한 batch에는 `reservationManager`, `onPreparedPayload`, `onPreparedProof` checkpoint가 필요하다. Checkpoint된 payload와 proof는 private artifact이므로 암호화해 저장하고, 로컬 파일은 mode `0600`을 사용한다. 재시작 복구에서는 저장된 정확한 payload, 원래 operation ID, reservation batch와 proof checkpoint를 사용해야 하며, proof-stage 결과만으로 바로 broadcast하지 않는다. `finalizePreparedBatchTransfer(...)`로 sign doc과 operation evidence를 재구성·검증한 뒤 제출한다.
+실행 가능한 batch에는 `reservationManager`, `onPreparedPayload`, `onPreparedProof` checkpoint가 필요하다. Checkpoint된 payload와 proof는 private artifact이므로 암호화해 저장하고, 로컬 파일은 mode `0600`을 사용한다. 재시작 복구에서는 저장된 정확한 payload, 원래 operation ID, reservation batch와 proof checkpoint를 사용해야 하며, proof-stage 결과만으로 바로 broadcast하지 않는다. `finalizePreparedBatchTransfer(...)`로 Cosmos sign doc 또는 canonical EVM transaction과 operation evidence를 재구성·검증한 뒤 제출한다. 이 finalizer는 모든 nullifier를 다시 조회하고, SDK checkpoint quarantine에서 복구할 때는 일치하는 payload hash, 원래 claim token, broadcast/relay handoff 부재를 함께 검사한다.
 
 ## Cosmos와 EVM의 온체인 경로
 
 | 구분 | 조회 | 제출 |
 | --- | --- | --- |
 | Cosmos | REST query로 note scan, Merkle path, nullifier, protocol config를 조회한다. | ClairveilJS가 `MsgDeposit`, `MsgTransfer`, `MsgBatchTransfer` 또는 `MsgWithdraw`를 포함한 sign doc을 만들고, 지갑이나 relayer가 서명한 transaction을 RPC로 broadcast한다. |
-| EVM | Clairveil REST로 privacy 상태를 조회하고 read-only `evmRpc`로 chain ID와 transaction receipt 등을 조회한다. | ClairveilJS가 `IPrivacy.deposit`, `IPrivacy.transfer`, `IPrivacy.withdraw` calldata를 만들고 EIP-1193 wallet 또는 relayer가 제출한다. One-Proof batch는 지원하지 않는다. |
+| EVM | Clairveil REST로 privacy 상태를 조회하고 read-only `evmRpc`로 chain ID와 transaction receipt 등을 조회한다. | ClairveilJS가 `IPrivacy.deposit`, `IPrivacy.transfer`, `IPrivacy.singleProofBatchTransfer`, `IPrivacy.withdraw` calldata를 만들고 EIP-1193 wallet 또는 relayer가 제출한다. |
 
 EVM profile에서는 proof 또는 prepared transaction을 만들기 전에 연결 지갑의 chain ID와 read-only `evmRpc` chain ID가 profile의 `evmChainId`와 일치하는지 확인해야 한다.
 

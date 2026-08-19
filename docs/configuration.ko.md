@@ -53,7 +53,7 @@ await client.health();
 
 과거 호환을 위한 최상위 `chainId`, `rpc`, `rest`, `proverUrl`, `transport`, denom/prefix, Keplr/EVM 필드도 허용되지만, 존재한다면 선택된 active profile과 정확히 같아야 한다. 새 설정에서는 이 flattened 필드를 생략한다.
 
-`serverFeatures`는 UI 노출과 제품 정책을 위한 flag다. 예를 들어 `batchTransfer: true`만으로 One-Proof 기능이 자동 활성화되지는 않는다. 호출자는 정책을 확인한 뒤 client의 `enableExperimentalBatchTransfer`를 명시적으로 설정해야 하며, 이 기능은 현재 Cosmos 전용이다.
+`serverFeatures`는 UI 노출과 제품 정책을 위한 flag다. 예를 들어 `batchTransfer: true`만으로 One-Proof 기능이 자동 활성화되지는 않는다. 호출자는 정책을 확인한 뒤 Cosmos/EVM client의 `enableExperimentalBatchTransfer`를 명시적으로 설정해야 한다.
 
 ## 공통 Profile 필드
 
@@ -146,9 +146,10 @@ EVM profile은 Clairveil REST/RPC 필드와 별도로 다음 값을 요구한다
 | `evmChainId` | `0x`로 시작하는 EVM quantity 형식의 network ID |
 | `evmChainName` | 표시용 network 이름 |
 | `evmPrivacyPrecompileAddress` | target/downstream chain이 제공하는 20-byte `IPrivacy` precompile 주소 |
+| `evmAuthorizationProfile` | 선택적 JSON-safe chain policy. `typedDataDomain`과 target이 허용하는 `supportedAuthorizationKinds`를 정의 |
 | `evmGasLimit` | privacy transaction용 hex quantity |
 | `evmSendGasLimit` | native send용 hex quantity |
-| `evmDepositMode` | 기본 `nonpayable`, 또는 명시적인 `payable-exact-value` |
+| `evmDepositMode` | browser EVM profile에서는 canonical `payable-exact-value`가 필수 |
 | `evmNativeDenom` | payable deposit에서는 필수이며 `denom`과 정확히 같아야 함 |
 
 공통 `chainId`는 Clairveil payload domain이고 `evmChainId`는 EVM network ID이므로 서로 대체할 수 없다. Proof나 transaction을 준비하기 전에 SDK는 configured `evmRpc`와 연결된 signing wallet이 모두 `evmChainId`와 일치하는지 확인한다.
@@ -177,6 +178,10 @@ const evmProfile = {
   evmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b",
   evmDepositMode: "payable-exact-value",
   evmNativeDenom: "uclair",
+  evmAuthorizationProfile: {
+    typedDataDomain: { name: "Target EVM Privacy", version: "1" },
+    supportedAuthorizationKinds: [1, 2, 3]
+  },
   evmGasLimit: "0x989680",
   evmSendGasLimit: "0x5208"
 };
@@ -200,7 +205,7 @@ Profile 밖에서 조절하는 주요 `ClairveilBrowserClientOptions`는 다음�
 | `depositProofProvider` | 없음 | local/WASM DepositCircuit provider. 있으면 `depositProofUrl`보다 우선한다. |
 | `depositProofTimeoutMs` | 120,000ms | exact deposit proof HTTP timeout |
 | `depositProofResponseMaxBytes` | 1MiB | deposit proof 응답 상한 |
-| `enableExperimentalBatchTransfer` | `false` | Cosmos One-Proof batch 명시적 opt-in. EVM에서는 지원하지 않는다. |
+| `enableExperimentalBatchTransfer` | `false` | Cosmos/EVM One-Proof batch 명시적 opt-in. EVM에서는 canonical single-proof transaction으로 매핑한다. |
 
 일반 조회는 configured REST endpoint 사이에서 retry/failover할 수 있지만 nullifier와 Merkle witness는 privacy linkage가 크기 때문에 기본 endpoint에 고정된다. Availability를 높이기 위해 두 옵션을 켤 때는 provider 운영 주체가 정말 분리되어 있는지, 같은 사용자를 결합할 수 있는지 먼저 검토한다.
 

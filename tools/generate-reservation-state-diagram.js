@@ -144,6 +144,7 @@ const groups = [
         state: "ManualReview",
         tone: "uncertain",
         transitions: [
+          { to: "ProofReady", label: "검증된 checkpoint 복구", tone: "recovery" },
           { to: "ConfirmedSpent", label: "reconcile: chain spent evidence", tone: "confirmed" },
           { to: "Released", label: "operator 승인", tone: "neutral" },
           { to: "ReplanRequired", label: "operator 승인", tone: "recovery" },

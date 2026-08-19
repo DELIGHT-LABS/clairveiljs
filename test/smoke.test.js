@@ -170,6 +170,12 @@ function browserEvmProfile(overrides = {}) {
     evmChainId: "0x539",
     evmChainName: "Clairveil EVM Test",
     evmPrivacyPrecompileAddress,
+    evmDepositMode: "payable-exact-value",
+    evmNativeDenom: "udemo",
+    evmAuthorizationProfile: {
+      typedDataDomain: { name: "Test EVM Privacy", version: "1" },
+      supportedAuthorizationKinds: [1, 2, 3]
+    },
     evmGasLimit: "0x989680",
     evmSendGasLimit: "0x5208",
     ...overrides
@@ -421,7 +427,7 @@ test("core/cosmos/evm entrypoints load", () => {
   assert.equal(typeof createClairveilEvmClient, "function");
   assert.equal(typeof createNoteReservationManager, "function");
   assert.equal(typeof createRootNoteReservationManager, "function");
-  assert.equal(functionSelector("deposit((string,bytes,bytes,bytes))").length, 8);
+  assert.equal(functionSelector("deposit((bytes,bytes,bytes))").length, 8);
   assert.equal(evmPrivacyPrecompileAddress, "0x100000000000000000000000000000000000000b");
 });
 
@@ -2205,6 +2211,7 @@ test("Cosmos prepare methods forward top-level scan sequence cursors", async () 
     enableExperimentalBatchTransfer: true
   });
   const scans = [];
+  client.assertTransferProtocolConfig = async () => transferProtocolConfig();
   client.scanNotes = async input => {
     scans.push(input);
     throw new Error("scan captured");
@@ -2481,6 +2488,7 @@ test("browser-dapp EVM prepareTransfer enables full operation success evidence",
   });
 
   assert.equal(result.transaction.data, "0x1234");
+  assert.equal(result.txBytesHash, evmTransactionBindingHash(result.transaction));
   assert.equal(evmAuditTarget, transferProtocolConfig().audit_config.audit_master_pubkey_hex);
   assert.equal(evmSelfViewOptOut, undefined);
   assert.equal(evmChainNowUnix, 1_700_000_000);
@@ -2497,6 +2505,8 @@ test("browser-dapp EVM prepareTransfer enables full operation success evidence",
     assert.equal(reservation.expected_disclosure_digest, "audit-digest-evm-transfer");
     assert.equal(reservation.expected_recipient_hash, "recipient-hash");
     assert.equal(reservation.expected_amount_hash, "amount-hash");
+    assert.equal(reservation.tx_bytes_hash, result.txBytesHash);
+    assert.equal(reservation.metadata.execution_transport, "evm");
     assert.equal(reservation.metadata.operation_success_evidence_required, true);
   }
 
@@ -2621,6 +2631,7 @@ test("cosmos prepareTransfer returns its artifact with reconciliation warning af
   const reservations = (await store.load()).reservations;
   assert.equal(reservations.length > 0, true);
   assert.equal(reservations.every(reservation => reservation.status === reservationStatuses.ProofReady), true);
+  assert.equal(reservations.every(reservation => reservation.metadata.execution_transport === "cosmos"), true);
 });
 
 test("cosmos prepareTransfer validates disclosure capabilities before reserving or proving", async () => {
@@ -3061,6 +3072,7 @@ test("browser EVM prepareWithdraw works without a reservation manager and forwar
     evmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b"
   });
   client.privacyMaterial = heartbeatTestMaterial;
+  client.cosmos.assertProtocolPreflight = async () => ({});
   client.cosmos.scanNotes = async () => heartbeatTestScanResult();
   client.proverAdapter = () => null;
   let capturedChainNowUnix = null;
@@ -3731,6 +3743,73 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
     "payment"
   ]);
   assert.equal(result.payload.outputs.slice(3).every(output => output.kind === "padding"), true);
+  // The alternate execution builder must see the exact same proof-stage
+  // artifacts before the reservation transition, but bind an EVM transaction
+  // hash rather than a Cosmos sign-doc hash.
+  const proveCallsBeforeExecutionBuilder = proveBatchTransferCalls;
+  const executionStore = new MemoryReservationStore();
+  const executionReservationManager = createNoteReservationManager({
+    store: executionStore,
+    ownerKeyId: "chain:clair1execution",
+    indexKey: "index-key-v1"
+  });
+  const executionEvmClient = createClairveilEvmClient({
+    chainId: "clairveil-local-3",
+    evmChainId: "0x539",
+    accountPrefix: "clair",
+    defaultDenom: "uclair",
+    nativeDenom: "uclair"
+  });
+  let executionInput = null;
+  const executionResult = await client.prepareTransferBatch({
+    ...safetyInput,
+    reservationManager: executionReservationManager,
+    async onPreparedPayload() {},
+    async onPreparedProof() {},
+    async executionBuilder(input) {
+      executionInput = input;
+      const evmBuilt = executionEvmClient.buildSingleProofBatchTransferTransaction({
+        message: input.message
+      });
+      const transaction = markEvmTransactionReservationRequired({
+        chainId: "0x539",
+        gas: "0x989680",
+        ...evmBuilt.transaction
+      });
+      return {
+        executionTransport: "evm",
+        transaction,
+        txBytesHash: evmTransactionBindingHash(transaction)
+      };
+    }
+  });
+  assert.equal(executionResult.signDoc, undefined);
+  assert.equal(
+    executionResult.execution.txBytesHash,
+    evmTransactionBindingHash(executionResult.execution.transaction)
+  );
+  assert.equal(executionInput.message.outputs.length, 1);
+  assert.equal(executionInput.operationEvidence.expected_outputs.length, 1);
+  assert.equal(proveBatchTransferCalls, proveCallsBeforeExecutionBuilder + 1);
+  const executionReservations = await executionStore.listReservations({
+    ownerKeyId: "chain:clair1execution"
+  });
+  assert.equal(
+    executionReservations[0].tx_bytes_hash,
+    evmTransactionBindingHash(executionResult.execution.transaction)
+  );
+  assert.equal(executionReservations[0].metadata.execution_transport, "evm");
+  const submittedHash = await executionEvmClient.sendTransaction({
+    async getChainId() { return "0x539"; },
+    async sendTransaction(transaction) {
+      assert.equal(transaction.data, executionResult.execution.transaction.data);
+      return `0x${"aa".repeat(32)}`;
+    }
+  }, executionResult.execution.transaction, {
+    reservationManager: executionReservationManager,
+    reservation: executionResult.reservation
+  });
+  assert.equal(submittedHash, `0x${"aa".repeat(32)}`);
   const mismatchReservationManager = createNoteReservationManager({
     store: new MemoryReservationStore(),
     ownerKeyId: "chain:clair1sender-mismatch",
@@ -3760,7 +3839,7 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
     }),
     /expected recipient hash does not match its recipient/
   );
-  assert.equal(proveBatchTransferCalls, 1);
+  assert.equal(proveBatchTransferCalls, proveCallsBeforeExecutionBuilder + 1);
   const serializedReservedSignDoc = JSON.parse(JSON.stringify(
     result.signDoc,
     (_key, value) => typeof value === "bigint" ? value.toString() : value
@@ -3953,7 +4032,7 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
       pattern
     );
   }
-  assert.equal(proveBatchTransferCalls, 1);
+  assert.equal(proveBatchTransferCalls, proveCallsBeforeExecutionBuilder + 1);
 
   await assert.rejects(
     () => client.provePreparedBatchTransfer({
@@ -4146,6 +4225,61 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
     finalized.reservation.reservations[0].metadata.batch_transfer_operation_evidence.expected_outputs,
     finalized.operationEvidence.expected_outputs
   );
+
+  const checkpointRecoveryManager = createNoteReservationManager({
+    store: new MemoryReservationStore(),
+    ownerKeyId: "chain:clair1sender-checkpoint-recovery",
+    indexKey: "index-key-v1"
+  });
+  const checkpointRecoveryReservation = await checkpointRecoveryManager.reserveNotes({
+    notes: [inputNote],
+    operationId: result.operationEvidence.operation_id,
+    kind: "batch_transfer",
+    metadata: { batch_transfer_output_mode: "exact32" }
+  });
+  checkpointRecoveryReservation.reservations = await checkpointRecoveryManager.markProving(
+    checkpointRecoveryReservation.reservation_ids,
+    { leaseToken: checkpointRecoveryReservation.lease_token }
+  );
+  await checkpointRecoveryManager.markManualReview(
+    checkpointRecoveryReservation.reservation_ids,
+    {
+      leaseToken: checkpointRecoveryReservation.lease_token,
+      error: "batch_checkpointed_artifact_requires_recovery",
+      metadata: {
+        reconcile_reason: "batch_checkpointed_artifact_requires_recovery",
+        batch_payload_checkpoint_started: true,
+        batch_proof_checkpoint_started: true,
+        batch_transfer_payload_hash: checkpointedPayload.payload_hash
+      }
+    }
+  );
+  let recoveredExecutionInput = null;
+  const executionFinalized = await client.finalizePreparedBatchTransfer({
+    ...finalizationInput,
+    reservationManager: checkpointRecoveryManager,
+    reservation: checkpointRecoveryReservation,
+    executionBuilder(input) {
+      recoveredExecutionInput = input;
+      return {
+        executionTransport: "evm",
+        transaction: { to: "0x1111111111111111111111111111111111111111", data: "0x1234" },
+        txBytesHash: "evm-transaction-binding"
+      };
+    }
+  });
+  assert.equal(executionFinalized.signDoc, undefined);
+  assert.equal(executionFinalized.execution.txBytesHash, "evm-transaction-binding");
+  assert.equal(recoveredExecutionInput.payload.payload_hash, checkpointedPayload.payload_hash);
+  assert.equal(recoveredExecutionInput.proof.request_payload_hash, checkpointedPayload.payload_hash);
+  assert.equal(recoveredExecutionInput.operationEvidenceHash, executionFinalized.operationEvidenceHash);
+  const recoveredReservation = await checkpointRecoveryManager.getReservation(
+    checkpointRecoveryReservation.reservation_ids[0]
+  );
+  assert.equal(recoveredReservation.status, reservationStatuses.ProofReady);
+  assert.equal(recoveredReservation.tx_bytes_hash, "evm-transaction-binding");
+  assert.equal(recoveredReservation.metadata.execution_transport, "evm");
+  assert.equal(recoveredReservation.metadata.batch_checkpoint_recovered, true);
 });
 
 test("REST Merkle-path failures do not echo response bodies or commitment URLs", async () => {
@@ -8059,7 +8193,7 @@ test("EVM client builds and sends deposit transaction with mock provider", async
 
   assert.equal(prepared.material.amount, "3udemo");
   assert.equal(prepared.transaction.to, evmPrivacyPrecompileAddress);
-  assert.equal(prepared.transaction.data.slice(2, 10), functionSelector("deposit((string,bytes,bytes,bytes))"));
+  assert.equal(prepared.transaction.data.slice(2, 10), functionSelector("deposit((bytes,bytes,bytes))"));
   assert.equal(prepared.transaction.data, sameMaterial.transaction.data);
   assert.equal(prepared.transaction.data, sameMessage.transaction.data);
   assert.equal(sameMessage.material, undefined);
@@ -8536,6 +8670,217 @@ test("browser-dapp prepareRelayWithdraw returns an EVM transaction for EVM profi
   assert.equal(prepared.transaction.data.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,string,address,string,uint64))"));
 });
 
+test("browser-dapp EVM batch preparation binds the one-proof batch reservation to canonical calldata", async () => {
+  const client = createClairveilBrowserDappClient({
+    profile: browserEvmProfile(),
+    enableExperimentalBatchTransfer: true
+  });
+  client.privacyMaterial = () => ({
+    rootSeed: new Uint8Array(32),
+    address: "demo1example",
+    pubKeyHex: "02".padEnd(66, "0"),
+    shieldedAddress: "demos1example"
+  });
+  client.evmJsonRpc = async () => "0x539";
+  const message = {
+    proof: new Uint8Array(128).fill(1),
+    root: new Uint8Array(32).fill(2),
+    nullifiers: [new Uint8Array(32).fill(3)],
+    outputs: [{
+      commitment: new Uint8Array(32).fill(4),
+      ciphertext: new Uint8Array(430).fill(5),
+      viewTag: new Uint8Array(2).fill(6),
+      userPrivacyPolicy: 0,
+      userDisclosureMode: 0,
+      userDisclosureDigest: "0x",
+      userDisclosureTargetPubkey: "0x",
+      userDisclosurePayload: "0x",
+      fullDisclosureDigest: new Uint8Array(32).fill(7),
+      auditDisclosurePayload: new Uint8Array(472).fill(8),
+      selfViewDisclosurePayload: "0x"
+    }],
+    auditKeyId: "audit-key-1",
+    auditKeyEpoch: 1n,
+    auditDisclosureTargetPubkey: new Uint8Array(33).fill(9),
+    expiresAtUnix: 4_102_448_400n
+  };
+  let captured = null;
+  client.cosmos.prepareTransferBatch = async input => {
+    captured = input;
+    const execution = await input.executionBuilder({ message });
+    return {
+      status: "ready",
+      plan: { status: "batch_transfer_ready", canBuildTx: true },
+      execution,
+      reservation: {
+        reservation_ids: ["batch-reservation"],
+        lease_token: "batch-lease"
+      },
+      privacyAccount: { shielded_address: "demos1example" },
+      prepared: {
+        payments: [{ privacyPolicy: "all-private", disclosureMode: "none" }],
+        planAction: "batch_transfer"
+      }
+    };
+  };
+
+  const prepared = await client.prepareTransferBatch({
+    walletType: "evm",
+    address: "demo1example",
+    pubKeyHex: "02".padEnd(66, "0"),
+    signatureBase64: "AQID",
+    evmWallet: { getChainId: async () => "0x539" },
+    amounts: ["1udemo"],
+    recipient: "demos1recipient",
+    reservationManager: {},
+    onPreparedPayload() {},
+    onPreparedProof() {}
+  });
+
+  assert.equal(typeof captured.executionBuilder, "function");
+  assert.equal(prepared.signDoc, undefined);
+  assert.equal(prepared.transaction.chainId, "0x539");
+  assert.equal(prepared.transaction.to, evmPrivacyPrecompileAddress);
+  assert.equal(prepared.txBytesHash, evmTransactionBindingHash(prepared.transaction));
+  assert.equal(
+    prepared.transaction.data.slice(2, 10),
+    functionSelector("singleProofBatchTransfer((bytes,bytes,bytes[],(bytes,bytes,bytes,uint32,uint8,bytes,bytes,bytes,bytes,bytes,bytes)[],string,uint64,bytes,uint64))")
+  );
+  assert.equal(prepared.transaction.__clairveilEvmTransaction.reservationRequired, true);
+  assert.equal(
+    prepared.transaction.__clairveilEvmTransaction.expectedData,
+    prepared.transaction.data.toLowerCase()
+  );
+
+  let typedData = null;
+  const authorized = await client.prepareTransferBatch({
+    walletType: "evm",
+    address: "demo1example",
+    pubKeyHex: "02".padEnd(66, "0"),
+    signatureBase64: "AQID",
+    evmWallet: { getChainId: async () => "0x539" },
+    amounts: ["1udemo"],
+    recipient: "demos1recipient",
+    reservationManager: {},
+    onPreparedPayload() {},
+    onPreparedProof() {},
+    authorization: {
+      effectiveSender: "0x1111111111111111111111111111111111111111",
+      executor: "0x2222222222222222222222222222222222222222",
+      nonce: 7,
+      deadline: 4_102_448_500,
+      authorizationKind: 1
+    },
+    authorizationSigner: {
+      async signTypedData(value) {
+        typedData = value;
+        return `0x${"ab".repeat(65)}`;
+      }
+    }
+  });
+  assert.equal(typedData.primaryType, "PrivacyActionAuthorization");
+  assert.equal(typedData.message.authorizationActionSelector, `0x${functionSelector("singleProofBatchTransfer((bytes,bytes,bytes[],(bytes,bytes,bytes,uint32,uint8,bytes,bytes,bytes,bytes,bytes,bytes)[],string,uint64,bytes,uint64))")}`);
+  assert.equal(
+    authorized.transaction.data.slice(2, 10),
+    functionSelector("singleProofBatchTransferWithAuthorization((bytes,bytes,bytes[],(bytes,bytes,bytes,uint32,uint8,bytes,bytes,bytes,bytes,bytes,bytes)[],string,uint64,bytes,uint64),(address,address,uint256,uint64,uint8,bytes))")
+  );
+  assert.equal(authorized.authorization.signature, `0x${"ab".repeat(65)}`);
+  assert.equal(authorized.txBytesHash, evmTransactionBindingHash(authorized.transaction));
+
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      walletType: "evm",
+      address: "demo1example",
+      pubKeyHex: "02".padEnd(66, "0"),
+      signatureBase64: "AQID",
+      evmWallet: { getChainId: async () => "0x539" },
+      amounts: ["1udemo"],
+      recipient: "demos1recipient",
+      reservationManager: {},
+      onPreparedPayload() {},
+      onPreparedProof() {},
+      authorizationSigner: { async signTypedData() { return `0x${"ef".repeat(65)}`; } }
+    }),
+    /authorizationSigner requires authorization/
+  );
+  await assert.rejects(
+    () => client.prepareTransferBatch({
+      walletType: "evm",
+      address: "demo1example",
+      pubKeyHex: "02".padEnd(66, "0"),
+      signatureBase64: "AQID",
+      evmWallet: { getChainId: async () => "0x539" },
+      amounts: ["1udemo"],
+      recipient: "demos1recipient",
+      reservationManager: {},
+      onPreparedPayload() {},
+      onPreparedProof() {},
+      transactionOptions: { value: "0x0" },
+      transaction_options: { value: "0x0" }
+    }),
+    /transactionOptions aliases conflict/
+  );
+
+  let finalizedInput = null;
+  let finalizedTypedData = null;
+  client.cosmos.finalizePreparedBatchTransfer = async input => {
+    finalizedInput = input;
+    const execution = await input.executionBuilder({
+      payload: { payload_hash: "checkpointed-payload" },
+      proof: { request_payload_hash: "checkpointed-payload" },
+      message,
+      operationEvidence: { operation_id: "batch-operation" },
+      operationEvidenceHash: "operation-evidence-hash",
+      reservation: { reservation_ids: ["batch-reservation"] }
+    });
+    return {
+      payload: input.payload,
+      proof: input.proof,
+      message,
+      effects: {},
+      operationEvidence: { operation_id: "batch-operation" },
+      operationEvidenceHash: "operation-evidence-hash",
+      execution,
+      reservation: { reservation_ids: ["batch-reservation"] }
+    };
+  };
+  const finalized = await client.finalizePreparedBatchTransfer({
+    walletType: "evm",
+    address: "demo1example",
+    evmWallet: { getChainId: async () => "0x539" },
+    payload: { creator: "demo1example" },
+    proof: { request_payload_hash: "checkpointed-payload" },
+    amounts: ["1udemo"],
+    recipient: "demos1recipient",
+    operationId: "batch-operation",
+    reservationManager: {},
+    reservation: { reservation_ids: ["batch-reservation"] },
+    authorization: {
+      effectiveSender: "0x1111111111111111111111111111111111111111",
+      executor: "0x2222222222222222222222222222222222222222",
+      nonce: 8,
+      deadline: 4_102_448_500,
+      authorizationKind: 1
+    },
+    authorizationSigner: {
+      async signTypedData(value) {
+        finalizedTypedData = value;
+        return `0x${"cd".repeat(65)}`;
+      }
+    }
+  });
+  assert.equal(typeof finalizedInput.executionBuilder, "function");
+  assert.equal(finalized.signDoc, undefined);
+  assert.equal(finalized.transaction.chainId, "0x539");
+  assert.equal(finalized.txBytesHash, evmTransactionBindingHash(finalized.transaction));
+  assert.equal(
+    finalized.transaction.data.slice(2, 10),
+    functionSelector("singleProofBatchTransferWithAuthorization((bytes,bytes,bytes[],(bytes,bytes,bytes,uint32,uint8,bytes,bytes,bytes,bytes,bytes,bytes)[],string,uint64,bytes,uint64),(address,address,uint256,uint64,uint8,bytes))")
+  );
+  assert.equal(finalized.authorization.signature, `0x${"cd".repeat(65)}`);
+  assert.equal(finalizedTypedData.primaryType, "PrivacyActionAuthorization");
+});
+
 test("browser-dapp EVM relay withdraw build failure replans the durable ProofReady reservation", async () => {
   const client = createClairveilBrowserDappClient({
     profile: browserEvmProfile()
@@ -8676,7 +9021,7 @@ test("EVM privacy precompile encoders use tuple selectors", () => {
     expiresAtUnix: 1234
   }, { accountPrefix: "demo" });
 
-  assert.equal(deposit.slice(2, 10), functionSelector("deposit((string,bytes,bytes,bytes))"));
+  assert.equal(deposit.slice(2, 10), functionSelector("deposit((bytes,bytes,bytes))"));
   assert.equal(transfer.slice(2, 10), functionSelector("transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))"));
   assert.equal(withdraw.slice(2, 10), functionSelector("withdraw((bytes,bytes,bytes,string,address,string,uint64))"));
   assert.throws(

@@ -554,6 +554,8 @@ export interface PreparedTransfer extends ReservationReconciliationState {
   plan: TransferPlan;
   scan: ScanResult;
   signDoc?: SignDocBase64;
+  /** Present when executionBuilder produced a non-Cosmos execution artifact. */
+  execution?: PreparedTransferExecution;
   payload?: PreparedTransferPayload;
   proof?: PreparedTransferProof;
   message?: TransferMessage;
@@ -586,6 +588,8 @@ export interface PreparedTransferBatch extends ReservationReconciliationState {
   plan: TransferBatchPlan;
   scan: ScanResult;
   signDoc?: SignDocBase64;
+  /** Present when the caller supplied executionBuilder instead of a Cosmos sign-doc flow. */
+  execution?: PreparedBatchTransferExecution;
   payload?: PreparedBatchTransferPayload;
   proof?: PreparedBatchTransferProof;
   message?: MsgBatchTransferMessage;
@@ -624,6 +628,19 @@ export interface PreparedWithdrawNotReady extends PreparedWithdrawBase {
 }
 
 export type PreparedWithdraw = PreparedWithdrawReady | PreparedWithdrawNotReady;
+
+export interface PreparedWithdrawExecutionReady extends PreparedWithdrawBase {
+  status: "ready";
+  signDoc?: never;
+  execution: PreparedWithdrawExecutionArtifact;
+  proverPayload: PreparedWithdrawProverPayload;
+  proof: PreparedWithdrawProof;
+  payload: PreparedWithdrawPayload;
+  message: WithdrawMessage;
+  selectedNote: FoundNote;
+}
+
+export type PreparedWithdrawWithExecution = PreparedWithdrawExecutionReady | PreparedWithdrawNotReady;
 
 export interface PreparedRelayWithdraw extends ReservationReconciliationState {
   status: string;
@@ -892,6 +909,62 @@ export type PreparedBatchTransferProofCheckpoint = (
   }
 ) => Promise<void> | void;
 
+/**
+ * An execution artifact built from the one-proof batch after the proof and
+ * operation evidence are fixed, but before reservations transition to
+ * ProofReady. The binding hash is persisted with every reserved input.
+ */
+export type PreparedExecutionTransport = "evm" | "external";
+
+export type PreparedExecutionArtifact = {
+  txBytesHash: string;
+  tx_bytes_hash?: string;
+  /** Use evm for strict network transaction/receipt/event reconciliation. */
+  executionTransport: PreparedExecutionTransport;
+  execution_transport?: PreparedExecutionTransport;
+  transaction?: object;
+  authorization?: object;
+  authorizationTypedData?: object;
+};
+
+export type PreparedTransferExecution = PreparedExecutionArtifact & {
+  message?: TransferMessage;
+};
+
+export type PreparedWithdrawExecutionArtifact = PreparedExecutionArtifact & {
+  message?: WithdrawMessage;
+};
+
+export type PreparedBatchTransferExecution = PreparedExecutionArtifact;
+
+export type PreparedTransferExecutionBuilder = (input: {
+  payload: PreparedTransferPayload;
+  proof: PreparedTransferProof;
+  message: TransferMessage;
+  plan: TransferPlan;
+  isFinal: boolean;
+  reservation: ReservationBatch | null;
+}) => PreparedTransferExecution | Promise<PreparedTransferExecution>;
+
+export type PreparedWithdrawExecutionBuilder = (input: {
+  payload: PreparedWithdrawPayload;
+  proof: PreparedWithdrawProof;
+  proverPayload: PreparedWithdrawProverPayload;
+  selectedNote: FoundNote;
+  message: WithdrawMessage;
+  plan: WithdrawPlan;
+  reservation: ReservationBatch | null;
+}) => PreparedWithdrawExecutionArtifact | Promise<PreparedWithdrawExecutionArtifact>;
+
+export type PreparedBatchTransferExecutionBuilder = (input: {
+  payload: PreparedBatchTransferPayload;
+  proof: PreparedBatchTransferProof;
+  message: MsgBatchTransferMessage;
+  operationEvidence: BatchTransferOperationEvidence;
+  operationEvidenceHash: Hex;
+  reservation: ReservationBatch | null;
+}) => PreparedBatchTransferExecution | Promise<PreparedBatchTransferExecution>;
+
 type RequiredPreparedBatchTransferPayloadCheckpoint =
   | {
       onPreparedPayload: PreparedBatchTransferPayloadCheckpoint;
@@ -969,6 +1042,18 @@ export type PrepareTransferBatchInput = {
  * operation, current lease owner/token, and exact payload-nullifier lookup-key
  * set before any Proving -> ProofReady transition.
  */
+type FinalizePreparedBatchTransferExecutionInput =
+  | {
+      executionBuilder: PreparedBatchTransferExecutionBuilder;
+      pubKeyHex?: Hex;
+      gasLimit?: number | bigint;
+    }
+  | {
+      executionBuilder?: never;
+      pubKeyHex: Hex;
+      gasLimit: number | bigint;
+    };
+
 export type FinalizePreparedBatchTransferInput = {
   payload: PreparedBatchTransferPayload;
   proof: PreparedBatchTransferProof;
@@ -986,22 +1071,27 @@ export type FinalizePreparedBatchTransferInput = {
   denom?: string;
   chainNowUnix?: number;
   chain_now_unix?: number;
-} & PrepareTransferBatchPaymentShape &
+} & FinalizePreparedBatchTransferExecutionInput &
+  PrepareTransferBatchPaymentShape &
   BatchOperationEvidenceHashes &
   RequiredBatchTransferOperationIDBinding &
   RequiredReservationManagerBinding &
   RequiredReservationBatchBinding;
 
-export interface FinalizedPreparedBatchTransfer {
+interface FinalizedPreparedBatchTransferBase {
   payload: PreparedBatchTransferPayload;
   proof: PreparedBatchTransferProof & { proof_bytes: Uint8Array };
   message: MsgBatchTransferMessage;
   effects: { root_hex: Hex; nullifier_hexes: Hex[]; output_commitment_hexes: Hex[] };
   operationEvidence: BatchTransferOperationEvidence;
   operationEvidenceHash: Hex;
-  signDoc: SignDocBase64;
   reservation: ReservationBatch;
 }
+
+export type FinalizedPreparedBatchTransfer = FinalizedPreparedBatchTransferBase & (
+  | { signDoc: SignDocBase64; execution?: never }
+  | { signDoc?: never; execution: PreparedBatchTransferExecution }
+);
 
 export class ClairveilJS {
   constructor(options: ClairveilClientOptions);
@@ -1205,7 +1295,7 @@ export class ClairveilJS {
     reservationFinalizationRequired: true;
   }>;
   finalizePreparedBatchTransfer(input: FinalizePreparedBatchTransferInput): Promise<FinalizedPreparedBatchTransfer>;
-  prepareWithdraw(input: {
+  prepareWithdraw<TExecutionBuilder extends PreparedWithdrawExecutionBuilder | undefined = undefined>(input: {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
     amount: CoinString;

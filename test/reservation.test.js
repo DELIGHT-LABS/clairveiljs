@@ -3922,6 +3922,97 @@ test("explicit EVM success statuses mark the operation succeeded", async () => {
   }
 });
 
+test("EVM reservations require network, artifact, receipt, call, and privacy-event evidence", async () => {
+  const setup = async (nullifier, sequence) => {
+    const store = new MemoryReservationStore();
+    const manager = createNoteReservationManager({
+      store,
+      ownerKeyId: "chain:clair1owner",
+      indexKey: "index-key-v1"
+    });
+    const note = noteFixture({ nullifier, sequence });
+    const batch = await preparePlanReservation(manager, {
+      plan: { selectedNote: note },
+      kind: "payment"
+    });
+    await manager.markProofReady(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      txBytesHash: "EVM-ARTIFACT-BINDING",
+      executionTransport: "evm",
+      expectedOperationEvidenceHash: "EVM-OPERATION-EVIDENCE",
+      operationSuccessEvidenceRequired: true
+    });
+    return { store, manager, note, batch };
+  };
+  const networkTxHash = `0x${"ef".repeat(32)}`;
+
+  const incomplete = await setup("d1".repeat(32), 221);
+  const proofReady = await incomplete.store.getReservation(incomplete.batch.reservation_ids[0]);
+  assert.equal(proofReady.metadata.execution_transport, "evm");
+  await incomplete.manager.markBroadcastAttempting(incomplete.batch.reservation_ids, {
+    leaseToken: incomplete.batch.lease_token,
+    txBytesHash: "EVM-ARTIFACT-BINDING",
+    reason: "test_evm_submission"
+  });
+  await assert.rejects(
+    () => incomplete.manager.markSubmitted(incomplete.batch.reservation_ids, {
+      leaseToken: incomplete.batch.lease_token,
+      txBytesHash: "EVM-ARTIFACT-BINDING"
+    }),
+    /network tx hash for EVM reservations/
+  );
+  await incomplete.manager.markSubmitted(incomplete.batch.reservation_ids, {
+    leaseToken: incomplete.batch.lease_token,
+    txHash: networkTxHash,
+    txBytesHash: "EVM-ARTIFACT-BINDING"
+  });
+  await incomplete.manager.reconcileSpentNotes([{
+    ...incomplete.note,
+    isSpent: true,
+    operationSuccessEvidence: {
+      txResult: {
+        txHash: networkTxHash,
+        txBytesHash: "EVM-ARTIFACT-BINDING",
+        receipt: { transactionHash: networkTxHash, status: "0x1", logs: [] }
+      },
+      operationEvidenceHash: "EVM-OPERATION-EVIDENCE"
+    }
+  }]);
+  const incompleteRecord = await incomplete.store.getReservation(incomplete.batch.reservation_ids[0]);
+  assert.equal(incompleteRecord.metadata.operation_status, operationStatuses.ConflictSpent);
+  assert.ok(incompleteRecord.metadata.operation_success_evidence_errors.includes(
+    "EVM transaction identity verification missing"
+  ));
+  assert.ok(incompleteRecord.metadata.operation_success_evidence_errors.includes(
+    "EVM privacy receipt verification missing"
+  ));
+
+  const complete = await setup("d2".repeat(32), 222);
+  await markSubmittedAfterAttempt(complete.manager, complete.batch, {
+    leaseToken: complete.batch.lease_token,
+    txHash: networkTxHash,
+    txBytesHash: "EVM-ARTIFACT-BINDING"
+  });
+  await complete.manager.reconcileSpentNotes([{
+    ...complete.note,
+    isSpent: true,
+    operationSuccessEvidence: {
+      txResult: {
+        txHash: networkTxHash,
+        txBytesHash: "EVM-ARTIFACT-BINDING",
+        receipt: { transactionHash: networkTxHash, status: "0x1", logs: [] },
+        transactionVerification: { verified: true },
+        privacyReceipt: { verified: true }
+      },
+      operationEvidenceHash: "EVM-OPERATION-EVIDENCE"
+    }
+  }]);
+  const completeRecord = await complete.store.getReservation(complete.batch.reservation_ids[0]);
+  assert.equal(completeRecord.status, reservationStatuses.ConfirmedSpent);
+  assert.equal(completeRecord.metadata.operation_status, operationStatuses.Succeeded);
+  assert.deepEqual(completeRecord.metadata.operation_success_evidence_errors, []);
+});
+
 test("top-level failed EVM receipt overrides a nested successful tx result", async () => {
   const store = new MemoryReservationStore();
   const manager = createNoteReservationManager({
@@ -4404,6 +4495,74 @@ test("inactive transitions require reconciled discard or operator evidence", asy
   );
   assert.equal(resolvedReview[0].metadata.operator_id, "ops@example.test");
   assert.equal(resolvedReview[0].metadata.operator_approval_reference, "case-205");
+});
+
+test("checkpoint recovery atomically restores an unbroadcast ManualReview batch to ProofReady", async () => {
+  const store = new MemoryReservationStore();
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1checkpoint-recovery",
+    indexKey: "index-key-v1"
+  });
+  const batch = await preparePlanReservation(manager, {
+    plan: { selectedNote: noteFixture({ nullifier: "c6".repeat(32), sequence: 206 }) },
+    kind: "batch_transfer"
+  });
+  const reason = "batch_checkpointed_artifact_requires_recovery";
+  await manager.markManualReview(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    error: reason,
+    metadata: {
+      reconcile_reason: reason,
+      batch_payload_checkpoint_started: true,
+      batch_proof_checkpoint_started: true,
+      batch_transfer_payload_hash: "payload-hash"
+    }
+  });
+
+  await assert.rejects(
+    () => manager.transitionBatch(
+      batch.reservation_ids,
+      reservationStatuses.ManualReview,
+      reservationStatuses.ProofReady,
+      { payloadHash: "payload-hash" }
+    ),
+    /managed checkpoint recovery/
+  );
+  await assert.rejects(
+    () => manager.recoverCheckpointedProofReady(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      payloadHash: "different-payload-hash",
+      txBytesHash: "transaction-binding"
+    }),
+    /requires explicit unspent-nullifier evidence/
+  );
+  await assert.rejects(
+    () => manager.recoverCheckpointedProofReady(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      payloadHash: "different-payload-hash",
+      txBytesHash: "transaction-binding",
+      nullifierUnspentConfirmed: true
+    }),
+    /payload hash does not match/
+  );
+
+  const recovered = await manager.recoverCheckpointedProofReady(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    payloadHash: "payload-hash",
+    txBytesHash: "transaction-binding",
+    expectedOperationEvidenceHash: "operation-evidence",
+    operationSuccessEvidenceRequired: true,
+    nullifierUnspentConfirmed: true
+  });
+  assert.equal(recovered[0].status, reservationStatuses.ProofReady);
+  assert.equal(recovered[0].payload_hash, "payload-hash");
+  assert.equal(recovered[0].tx_bytes_hash, "transaction-binding");
+  assert.equal(recovered[0].metadata.batch_checkpoint_recovered, true);
+  assert.equal(recovered[0].metadata.nullifier_unspent_confirmed, true);
+  assert.equal(recovered[0].metadata.no_broadcast_attempt, true);
+  assert.equal(recovered[0].lease_token, batch.lease_token);
+  assert.ok(Date.parse(recovered[0].lease_until) > Date.now());
 });
 
 test("spent-note reconciliation applies multi-note updates in one atomic batch", async () => {

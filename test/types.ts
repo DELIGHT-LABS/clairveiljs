@@ -23,9 +23,13 @@ import {
   type PrepareEvmTransferInput,
   type PrepareDefaultEvmProfileTransferInput,
   type PrepareCosmosTransferBatchInput,
+  type PrepareEvmTransferBatchInput,
   type PrepareExplicitCosmosTransferBatchInput,
   type PreparedCosmosTransfer,
   type PreparedCosmosTransferBatch,
+  type PreparedEvmTransferBatch,
+  type FinalizedCosmosPreparedBatchTransfer,
+  type FinalizedEvmPreparedBatchTransfer,
   type PreparedEvmTransfer,
   type PreparedTransfer,
   type PrepareWithdrawInput,
@@ -586,6 +590,8 @@ const evmDirectDappClient = new ClairveilBrowserDappClient({
     evmChainId: "0x540",
     evmChainName: "Demo EVM Direct",
     evmPrivacyPrecompileAddress: "0x0000000000000000000000000000000000000900",
+    evmDepositMode: "payable-exact-value",
+    evmNativeDenom: "udemo",
     evmGasLimit: "0x989680",
     evmSendGasLimit: "0x5208"
   }
@@ -902,6 +908,10 @@ const evmDirectInlineDepositResult: Promise<PreparedEvmDeposit> = evmDirectDappC
   evmWallet: evmPreparationWallet,
   amount: "1udemo"
 });
+evmProfileDepositResult.then(result => {
+  const encryptedNoteHex: string = result.prepared.encryptedNoteHex;
+  void encryptedNoteHex;
+});
 evmProfileDappClient.prepareDeposit({
   ...walletIdentity,
   // @ts-expect-error An EVM profile cannot prepare a Cosmos deposit payload.
@@ -938,6 +948,25 @@ const evmDirectTransferResult: Promise<PreparedEvmTransfer> = evmDirectDappClien
   recipient: "demos1recipient",
   chainNowUnix: 4102444800
 });
+evmDirectTransferResult.then(result => {
+  const txBytesHash: string = result.txBytesHash;
+  void txBytesHash;
+});
+const evmWaitResult = evmProfileDappClient.waitForEvmTransaction(`0x${"ab".repeat(32)}`, {
+  privacyTransaction: {
+    to: "0x0000000000000000000000000000000000000900",
+    data: "0x1234",
+    value: "0x0",
+    chainId: "0x539"
+  },
+  sender: "0x1111111111111111111111111111111111111111"
+});
+evmWaitResult.then(result => {
+  const verified: boolean = result.evmTransactionVerified && result.evmPrivacyReceiptVerified;
+  void verified;
+});
+// @ts-expect-error EVM confirmation requires the original prepared request and sender.
+evmProfileDappClient.waitForEvmTransaction(`0x${"ab".repeat(32)}`);
 const transferResult: Promise<PreparedTransfer> = dappClient.prepareTransfer(transferInput);
 const transferBatchInput: PrepareCosmosTransferBatchInput = {
   ...walletIdentity,
@@ -1011,7 +1040,16 @@ const invalidExplicitCosmosBatchEvidence: PrepareExplicitCosmosTransferBatchInpu
 };
 // @ts-expect-error EVM profiles never permit Cosmos one-proof batch transfer.
 evmProfileDappClient.prepareTransferBatch(explicitCosmosTransferBatchInput);
-// @ts-expect-error EVM profiles do not have a default batch-transfer transport.
+const evmTransferBatchInput: PrepareEvmTransferBatchInput = {
+  ...walletIdentity,
+  ...batchSafetyBindings,
+  walletType: "evm",
+  evmWallet: evmPreparationWallet,
+  amounts: ["1udemo"],
+  recipient: "demos1recipient"
+};
+const evmTransferBatchResult: Promise<PreparedEvmTransferBatch> = evmProfileDappClient.prepareTransferBatch(evmTransferBatchInput);
+// @ts-expect-error EVM batch preparation requires the connected EVM wallet binding.
 evmProfileDappClient.prepareTransferBatch({
   ...walletIdentity,
   ...batchSafetyBindings,
@@ -1035,6 +1073,10 @@ const evmDirectWithdrawResult: Promise<PreparedEvmWithdraw> = evmDirectDappClien
   evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demo1recipient"
+});
+evmDirectWithdrawResult.then(result => {
+  const txBytesHash: string = result.txBytesHash;
+  void txBytesHash;
 });
 const withdrawResult: Promise<PreparedWithdraw> = dappClient.prepareWithdraw(withdrawInput);
 const cosmosWithdrawPayload: Promise<PreparedWithdrawPayload> = cosmosWithdrawResult.then(result => result.payload);
@@ -1153,7 +1195,7 @@ const finalizedCosmosBatch = cosmos.finalizePreparedBatchTransfer({
   reservation: {} as ReservationBatch,
   chainNowUnix: 4102444800
 });
-const finalizedDappBatch = dappClient.finalizePreparedBatchTransfer({
+const finalizedDappBatch: Promise<FinalizedCosmosPreparedBatchTransfer> = dappClient.finalizePreparedBatchTransfer({
   payload: checkpointedBatchPayload,
   proof: undefined as never,
   address: "demo1sender",
@@ -1167,18 +1209,27 @@ const finalizedDappBatch = dappClient.finalizePreparedBatchTransfer({
   reservation: {} as ReservationBatch,
   chainNowUnix: 4102444800
 });
-// @ts-expect-error EVM profiles never permit Cosmos staged batch finalization.
-evmProfileDappClient.finalizePreparedBatchTransfer({
+const finalizedEvmBatch: Promise<FinalizedEvmPreparedBatchTransfer> = evmProfileDappClient.finalizePreparedBatchTransfer({
   payload: checkpointedBatchPayload,
   proof: undefined as never,
   address: "demo1sender",
-  pubKeyHex: "02".repeat(33),
-  gasLimit: 25000000,
+  evmWallet: evmPreparationWallet,
   amounts: ["1udemo"],
   recipient: "demos1recipient",
   operationId: "batch-operation-1",
   reservationManager,
-  reservation: {} as ReservationBatch
+  reservation: {} as ReservationBatch,
+  transactionOptions: { value: "0x0" }
+});
+finalizedEvmBatch.then(result => {
+  const txBytesHash: string = result.txBytesHash;
+  void txBytesHash;
+});
+finalizedEvmBatch.then(result => {
+  const transaction = result.transaction;
+  const authorization = result.authorization;
+  void transaction;
+  void authorization;
 });
 const resumedCosmosBatch = cosmos.provePreparedBatchTransfer({
   payload: checkpointedBatchPayload,
@@ -1563,7 +1614,7 @@ const evm = createClairveilEvmClient({
 // @ts-expect-error Direct EVM deposit calldata requires the DepositCircuit proof.
 evm.buildDepositTransaction({ amount: "1udemo" });
 evm.buildDepositTransaction({ amount: "1udemo", proof: new Uint8Array([1]) });
-const selector: string = functionSelector("deposit((string,bytes,bytes,bytes))");
+const selector: string = functionSelector("deposit((bytes,bytes,bytes))");
 const evmPrecompileAddress: string = evmPrivacyPrecompileAddress;
 const bech32: string = evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo");
 const evmAddress: string = bech32AddressToEvm(bech32, "demo");

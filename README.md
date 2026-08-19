@@ -101,8 +101,12 @@ for the exact public-input order and Batch schema digest.
 Clairveil v0.3.1 adds `Keeper.DepositWithFunder` as a trusted in-process Go
 integration surface. It does not add a protobuf, gRPC, CLI, or client `funder`
 field. ClairveilJS therefore keeps the Cosmos message surface unchanged and
-supports the new flow only through a downstream chain's fixed payable privacy
-precompile.
+supports the new flow through a target chain's payable privacy precompile. Its
+deposit ABI is exactly `deposit((bytes,bytes,bytes))`: the amount is not a
+tuple field and the native minimal-unit `msg.value` is the only amount source.
+The SDK ships the canonical Clairveil EVM ABI surface, including direct and
+authorized transfer/withdraw, multi-proof batch, and Clairveil v0.3.1
+single-proof batch methods.
 
 ## Source Layout
 
@@ -135,9 +139,20 @@ const clairveil = createClairveilClient({
 });
 ```
 
-`prepareTransferBatch(...)` implements the frozen One-Proof `BatchTransfer` V1 contract published with Clairveil v0.3.1. It plans and atomically reserves 1–16 inputs, builds 1–32 ordered payment/change/padding outputs, calls one explicitly selected `proverAdapter.proveBatchTransfer(payload)` exactly once, and returns one Cosmos `MsgBatchTransfer`. It never expands the payments into multiple `MsgTransfer` proofs and does not perform automatic prover failover.
+`prepareTransferBatch(...)` implements the frozen One-Proof `BatchTransfer` V1 contract published with Clairveil v0.3.1. It plans and atomically reserves 1–16 inputs, builds 1–32 ordered payment/change/padding outputs, calls one explicitly selected `proverAdapter.proveBatchTransfer(payload)` exactly once, and never expands the payments into multiple `MsgTransfer` proofs or performs automatic prover failover. Cosmos profiles return one `MsgBatchTransfer` sign-doc; EVM profiles return the equivalent `singleProofBatchTransfer` transaction with the same proof, operation evidence, reservation transition, and transaction-binding hash.
 
-One-proof batch transfer is currently **Cosmos-only**. An EVM-profile `prepareTransferBatch(...)` call is rejected; ClairveilJS does not expose an `IPrivacy.batchTransfer` ABI or an EVM batch fallback. Do not confuse this flow with the ordinary EVM `IPrivacy.transfer` path.
+For an EVM profile, submit that transaction through
+`sendEvmTransaction({ wallet, transaction, reservationManager, reservation })`
+and confirm it with `waitForEvmTransaction(txHash, { privacyTransaction:
+transaction, sender })`. The expected `PrivacySingleProofBatchTransfer` event
+is bound to the exact prepared calldata; receipt status alone is not success
+evidence. To use an EVM executor rail, pass an `authorization` envelope. A
+pre-signed envelope is used directly, or pass `authorizationSigner` with
+`signTypedData(...)` and the browser flow signs the exact EIP-712
+`singleProofBatchTransfer` request before it advances any reservation to
+`ProofReady`. The lower-level EVM transport also exposes the canonical
+`batchTransfer`, `batchTransferWithAuthorization`, and both single-proof batch
+calldata builders for application-controlled execution.
 
 The ordinary `prepareTransfer(...)` API remains the supported native 2×2 `MsgTransfer` path; native 2×2 is not deprecated. Its two input witnesses are fetched together from one verified exact-root `commitment_paths_at_root` snapshot. Clairveil's older multi-message `transfer-batch` orchestration remains a separate protocol meaning and is not aliased to `prepareTransferBatch(...)`.
 
@@ -511,7 +526,12 @@ For a v0.3.1 payable deposit profile, also set
 profile's minimal `denom`. Both are fixed profile settings, not per-request
 funding inputs.
 
-`waitForEvmTransaction(...)` is the normal EVM confirmation API. For a
+`waitForEvmTransaction(txHash, { privacyTransaction, sender })` is the normal
+EVM confirmation API. The original SDK-prepared transaction and actual
+submitting EOA/executor are required. The method reads the receipt, full RPC
+transaction, and active chain ID, then succeeds only when receipt status,
+hash/from/to/input/value/network identity, and the action-specific privacy
+event all agree. For a
 read-only EVM JSON-RPC method that has no higher-level ClairveilJS wrapper,
 the browser client also exposes `evmJsonRpc<TResult>(method, params)`. It
 uses the configured `evmRpc` endpoint and the client's query timeout; it does
@@ -569,18 +589,20 @@ const noteStore = new LocalStorageNoteStore({
 
 ## EVM Privacy Precompile
 
-EVM Clairveil chains submit state-changing privacy actions through the EVM privacy precompile, not direct Cosmos SDK tx broadcast. ClairveilJS still prepares the privacy payload in the browser, then converts the prepared message into `IPrivacy.deposit`, `IPrivacy.transfer`, or `IPrivacy.withdraw` calldata.
+EVM Clairveil chains submit state-changing privacy actions through the EVM privacy precompile, not direct Cosmos SDK tx broadcast. ClairveilJS still prepares the privacy payload in the browser, then converts the prepared message into direct/authorized `IPrivacy.deposit`, `transfer`, `withdraw`, multi-proof batch, or Clairveil v0.3.1 single-proof batch calldata.
 
 Supported EVM scope: an EVM Clairveil chain must implement the canonical Clairveil
-v0.3.1-compatible `IPrivacy` precompile ABI and payload semantics. The default adapter encodes
-`deposit((string,bytes,bytes,bytes))`,
+v0.3.1-compatible `IPrivacy` precompile ABI and payload semantics. The default adapter encodes the payable
+`deposit((bytes,bytes,bytes))`,
 `transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))`,
-and `withdraw((bytes,bytes,bytes,string,address,string,uint64))`. A different
-function shape is outside the supported SDK scope and must not be selected by
-profile-only configuration.
+and `withdraw((bytes,bytes,bytes,string,address,string,uint64))` calls. A chain
+with a different call shape must provide `createEvmContractAdapter(...)`; a
+custom adapter owns its contract encoding and any non-canonical receipt proof.
 
 The EVM deposit tuple includes the same required `DepositCircuit` proof as
-`MsgDeposit`: `{ amount, noteCommitment, encryptedNote, proof }`. The transfer
+`MsgDeposit`: `{ noteCommitment, encryptedNote, proof }`. Its amount is bound
+only by the exact native minimal-unit `msg.value`; the SDK defaults to
+`payable-exact-value`. The transfer
 tuple carries encrypted output notes, 2-byte `viewTags` aligned with
 `newCommitments` and `cipherTexts`, user/audit disclosure, sender
 `selfViewDisclosureDigest`/`selfViewDisclosurePayload`, and absolute
@@ -604,7 +626,8 @@ const evmClairveil = createClairveilEvmClient({
   chainId: "evm-privacy-local-1",
   accountPrefix: "clair",
   shieldedPrefix: "clairs",
-  defaultDenom: "uclair"
+  defaultDenom: "uclair",
+  nativeDenom: "uclair"
 });
 
 const deposit = evmClairveil.buildDepositTransaction({
@@ -618,9 +641,51 @@ await evmClairveil.sendTransaction(wallet, deposit.transaction);
 console.log(defaultEvmPrivacyPrecompileAddress);
 ```
 
-The default deposit mode remains `nonpayable`. A downstream chain that moves
-EVM `msg.value` into a fixed precompile escrow and then calls Clairveil v0.3.1
-`Keeper.DepositWithFunder` must opt in explicitly:
+### EVM Authorization Profiles
+
+`authorizationKind` is an ABI-level `uint8`; ClairveilJS does not assign global
+meaning to its values. Configure a target-chain authorization profile when the
+application asks a wallet to sign an authorization. The profile owns the
+accepted kinds and EIP-712 domain.
+
+```js
+import {
+  createClairveilEvmClient,
+  createEvmAuthorizationProfile
+} from "clairveiljs/evm";
+
+const authorizationProfile = createEvmAuthorizationProfile({
+  supportedAuthorizationKinds: [1, 2, 3],
+  typedDataDomain: { name: "Target EVM Privacy", version: "1" }
+});
+
+const evmClairveil = createClairveilEvmClient({
+  chainId: "target-chain-1",
+  evmChainId: "0x539",
+  authorizationProfile
+});
+```
+
+Omit `supportedAuthorizationKinds` to permit every `uint8` value. The profile's
+public `buildTypedData(...)` method applies the same kind and custom validation
+policy as transaction construction. For a
+non-canonical EIP-712 payload, supply an `EvmAuthorizationProfile` with its own
+`buildTypedData(...)` callback to the EVM client or custom contract adapter. A
+pre-signed authorization can be submitted without a typed-data builder.
+
+An EVM browser profile requires `evmDepositMode: "payable-exact-value"` and
+an `evmNativeDenom` identical to the profile denom. After a successful receipt,
+verify the operation-specific `Privacy*` event as well as receipt status:
+
+For the browser client, use the same JSON-safe shape under
+`profile.evmAuthorizationProfile`:
+
+```js
+evmAuthorizationProfile: {
+  typedDataDomain: { name: "Target EVM Privacy", version: "1" },
+  supportedAuthorizationKinds: [1, 2, 3]
+}
+```
 
 ```js
 const evmClairveil = createClairveilEvmClient({
@@ -1077,7 +1142,7 @@ Reservations can also carry operation success evidence. Nullifier spent proves t
 
 Scan migrations must treat a note as spendable only when its latest nullifier check explicitly records `nullifierStatus: "unspent"`. Older cached `isSpent: false` entries, missing responses, malformed responses, and query failures are unverified and must stay out of the planner until revalidated.
 
-When later calling `reconcileSpentNotes(...)`, include matching tx/event evidence under `operationSuccessEvidence` or `successEvidence`. The current generic matcher is transport-agnostic: it treats a matching stored and actual `txHash` or `txBytesHash` as a transaction-identity match. Consequently, an EVM request-binding `txBytesHash` can contribute to `operation_status: "Succeeded"` when all other expected output/disclosure evidence also matches. The high-level EVM path stores a network `txHash`, but products that require an EVM receipt or RPC identity must enforce that additional rule in their caller-owned operation policy. `signDocHash` is only a supplemental mismatch guard and cannot establish chain execution by itself. A bare `txResult: { code: 0 }` also has no identity and cannot succeed. Nullifier spent alone is not enough. For a multi-input operation, include spent evidence for every linked input in the same reconcile call. Incomplete evidence records `ManualReview` across the linked operation, while an explicit identity or expected-output mismatch records `ConflictSpent` with `operation_success_evidence_errors`. Confirmed spent inputs remain quarantined in both cases, and a later complete evidence set atomically resolves every linked reservation to the same operation outcome. If you only use reservations as a note inventory lock, leave `operationSuccessEvidenceRequired` unset and keep operation success checks in your downstream operation database.
+When later calling `reconcileSpentNotes(...)`, include matching tx/event evidence under `operationSuccessEvidence` or `successEvidence`. For an EVM-tagged reservation, success requires both the persisted network `txHash` and prepared `txBytesHash` to match, an explicit successful receipt, `evmTransactionVerified: true`, `evmPrivacyReceiptVerified: true`, and all expected operation/output evidence. The structured result from `waitForEvmTransaction(...)` contains those EVM fields and can be supplied as `txResult`; a request-binding hash or receipt status alone cannot succeed. Untagged legacy/external reservations retain the generic identity matcher. `signDocHash` is only a supplemental mismatch guard and cannot establish chain execution by itself. A bare `txResult: { code: 0 }` also has no identity and cannot succeed. Nullifier spent alone is not enough. For a multi-input operation, include spent evidence for every linked input in the same reconcile call. Incomplete evidence records `ManualReview` across the linked operation, while an explicit identity or expected-output mismatch records `ConflictSpent` with `operation_success_evidence_errors`. Confirmed spent inputs remain quarantined in both cases, and a later complete evidence set atomically resolves every linked reservation to the same operation outcome. If you only use reservations as a note inventory lock, leave `operationSuccessEvidenceRequired` unset and keep operation success checks in your downstream operation database.
 
 Operation-level retry diagnostics are structured. `OPERATION_STATE_MIXED` exposes `error.details.reservations` as `{ reservation_id, status, operation_status? }` records. `OPERATION_EVIDENCE_CONFLICT` exposes `error.details.conflicts` with `reservation_id`, a normalized `field` such as `tx_hash`, `commitment`, `digest`, or `amount`, the exact `source_field`, `reason`, and available `expected`/`actual` values. Initial reconciliation conflicts are still persisted before control returns: the same records are stored in `metadata.operation_success_evidence_conflicts`, and Reference Payroll also returns them as `reconciliation.error_code` and `reconciliation.error_details` when manual review is required.
 

@@ -32,6 +32,7 @@ export declare const operationStatuses: Readonly<{
 
 export type ReservationStatus = typeof reservationStatuses[keyof typeof reservationStatuses];
 export type OperationStatus = typeof operationStatuses[keyof typeof operationStatuses];
+export type ReservationExecutionTransport = "cosmos" | "evm" | "external";
 export type ReservationMetadataValue =
   | string
   | number
@@ -415,6 +416,16 @@ export interface ReservationOperationSuccessEvidenceMetadata {
   tx_result?: object;
   transactionResult?: object;
   transaction_result?: object;
+  /** Set by strict EVM confirmation after RPC transaction identity verification. */
+  evmTransactionVerified?: boolean;
+  evm_transaction_verified?: boolean;
+  transactionVerified?: boolean;
+  transaction_verified?: boolean;
+  /** Set by strict EVM confirmation after action-specific Privacy* event verification. */
+  evmPrivacyReceiptVerified?: boolean;
+  evm_privacy_receipt_verified?: boolean;
+  privacyReceiptVerified?: boolean;
+  privacy_receipt_verified?: boolean;
   expectedOutputCommitment?: string;
   expected_output_commitment?: string;
   outputCommitment?: string;
@@ -457,8 +468,16 @@ export type ReservationProofReadyMetadata = ReservationLeaseMetadata & Reservati
   sign_doc_hash?: string;
   txBytesHash?: string;
   tx_bytes_hash?: string;
+  /** Write-once execution semantics used by operation reconciliation. */
+  executionTransport?: ReservationExecutionTransport;
+  execution_transport?: ReservationExecutionTransport;
   metadata?: ReservationMetadata;
 };
+
+export type ReservationCheckpointRecoveryMetadata = ReservationProofReadyMetadata & (
+  | { nullifierUnspentConfirmed: true; nullifier_unspent_confirmed?: true }
+  | { nullifier_unspent_confirmed: true; nullifierUnspentConfirmed?: true }
+);
 
 export type ReservationProofReadyBatchEntry = {
   /** If both aliases are supplied, they must contain the same IDs in the same order. */
@@ -606,6 +625,8 @@ export declare class NoteReservationManager {
   renewLease(reservationIDs?: readonly string[], metadata?: ReservationLeaseMetadata): Promise<NoteReservationRecord[]>;
   heartbeatLease(reservationIDs?: readonly string[], metadata?: ReservationLeaseMetadata): Promise<NoteReservationRecord[]>;
   markProving(reservationIDs?: readonly string[], metadata?: ReservationProvingMetadata): Promise<NoteReservationRecord[]>;
+  /** Restores an exact, unbroadcast checkpoint-quarantined batch after callers explicitly confirm every nullifier is unspent. */
+  recoverCheckpointedProofReady(reservationIDs: readonly string[], metadata: ReservationCheckpointRecoveryMetadata): Promise<NoteReservationRecord[]>;
   markProofReady(reservationIDs?: readonly string[], metadata?: ReservationProofReadyMetadata): Promise<NoteReservationRecord[]>;
   markProofReadyBatch(entries?: readonly ReservationProofReadyBatchEntry[]): Promise<NoteReservationRecord[]>;
   markBroadcastAttempting(reservationIDs: readonly string[], metadata: ReservationLeaseMetadata & ReservationBroadcastAttemptFields & { reason?: string; metadata?: ReservationMetadata }): Promise<NoteReservationRecord[]>;

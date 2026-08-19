@@ -62,7 +62,9 @@ test("nonpayable operations reject value and payable deposit bindings survive se
   const nonpayable = createEvmContractAdapter({
     encodeDeposit: () => "0x01",
     encodeTransfer: () => "0x02",
-    encodeWithdraw: () => "0x03"
+    encodeWithdraw: () => "0x03",
+    depositMode: "nonpayable",
+    nativeDenom: "udemo"
   });
   assert.throws(
     () => nonpayable.buildDepositTransaction(depositMessage(), { value: "0x1" }),
