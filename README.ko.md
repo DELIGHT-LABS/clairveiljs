@@ -10,6 +10,12 @@ API 매핑: [docs/api-mapping.ko.md](./docs/api-mapping.ko.md)
 
 Note reservation 상태 전이: [docs/reservation-state-machine.ko.md](./docs/reservation-state-machine.ko.md)
 
+저장소·영속성 구현: [docs/storage-and-persistence.ko.md](./docs/storage-and-persistence.ko.md)
+
+배포·클라이언트 설정: [docs/configuration.ko.md](./docs/configuration.ko.md)
+
+오류·복구: [docs/errors-and-recovery.ko.md](./docs/errors-and-recovery.ko.md)
+
 이 패키지는 Clairveil 전용 privacy primitive와 DApp 친화적인 API를 제공합니다.
 
 - Telescope로 생성한 `MsgDeposit`, `MsgTransfer`, `MsgBatchTransfer`, `MsgWithdraw`, privacy query protobuf binding
@@ -22,10 +28,10 @@ Note reservation 상태 전이: [docs/reservation-state-machine.ko.md](./docs/re
 - transfer disclosure MiMC digest 검증
 - privacy event, auditable transfer, reserve accounting, balance query
 - Keplr/custom signer용 wallet adapter
-- memory/localStorage 기반 note store
+- memory 및 명시적 plaintext opt-in이 필요한 demo/test용 localStorage note store
 - transfer/withdraw planner와 안정적인 `ClairveilError` 코드
 - prepared transfer/withdraw/relay withdraw payload builder
-- experimental feature gate가 적용된 v0.2 one-proof batch transfer 준비 (`MsgBatchTransfer`, 입력 1~16개, 출력 1~32개)
+- experimental feature gate가 적용된 One-Proof BatchTransfer V1 준비 (`MsgBatchTransfer`, 입력 1~16개, 출력 1~32개)
 - `/v1/prover/transfer`, `/v1/prover/withdraw`, `/v1/proofs/batch-transfer` HTTP prover adapter
 - Keplr `signDirect`용 sign doc 생성, signed tx 조립, broadcast
 - EIP-1193 wallet용 Clairveil-compatible `IPrivacy` EVM precompile calldata adapter
@@ -70,6 +76,41 @@ Public consumer는 내부 파일 경로를 직접 import하지 말고 package ex
 | --- | --- | --- | --- |
 | `0.3.1` | `v0.3.1` (`1a6ce6a`) | 기존 `MsgDeposit`/query 계약 유지 | opt-in `payable-exact-value` |
 
+`clairveiljs@0.3.1`은 immutable Clairveil `v0.3.1` release(commit
+`1a6ce6a0a0e10b765c025072b44c2364e9711b48`)의 protocol·wire·artifact 기준을
+지원합니다. Release 검증은 복사된 protobuf 4개, 내장 `v0.3.1` conformance
+fixture와 JSON Schema의 고정 SHA-256 manifest를 확인하고 해당 계약을 required
+mode로 실행합니다. 이후 미출시 protocol 변경까지 자동으로 지원한다는 의미는
+아닙니다.
+
+Client reservation 구현에는 한 가지 명시적인 SDK 확장이 있습니다.
+`allowedReservationTransitions`는 v0.3.1 fixture의 일반 전이와 일치하지만,
+`releaseReservedOrProving(...)`은 유효한 lease token이 있는 `Proving` reservation을
+`Released`로 직접 바꿀 수 있습니다. 이 store 전용 atomic rollback은 ClairveilJS의
+현재 구현이며, `Proving → Released`를 거부하는 v0.3.1의 일반 전이 규칙과 동일한
+동작은 아닙니다. 세부 범위는 [상태 전이 문서](./docs/reservation-state-machine.ko.md)를
+따릅니다.
+
+Clairveil `v0.3.1`의 공개 상태는 `PUBLICATION_READY_EXPERIMENTAL`이며
+`PRODUCTION_RELEASE_READY`가 아닙니다. Formal trusted setup, 외부
+security/circuit audit, signed production artifact와 downstream chain/product
+검증은 별도 production gate입니다. 이 README에서 말하는 production 저장소·배포
+권고는 그 gate를 닫았다는 뜻이 아닙니다.
+
+`v0.3.1` release handoff에는 그 시점의 external ClairveilJS가 legacy였다고
+기록되어 있습니다. 현재 패키지는 그 handoff 이후 frozen `privacy-note-v1` /
+`privacy-fixed-v1` 계약을 port한 downstream 구현이며, 위 exact source와
+fixture로 이를 검증합니다. Legacy decode나 compatibility fallback을 추가해
+handoff 이전 형식을 다시 허용하지 않습니다.
+
+고정 protocol 기준은 다음과 같다.
+
+- Active circuit set은 `privacy-note-v1`이며 required order는 `deposit`, `spend`, `joinsplit`, `batch-joinsplit-16x32-v1`입니다.
+- Canonical encoding은 `privacy-fixed-v1`이며 note plaintext 350 bytes, disclosure plaintext 392 bytes, typed envelope header 20 bytes입니다. Raw ciphertext, legacy JSON, wrong kind, non-zero reserved byte와 trailing byte는 거부합니다.
+- Transfer는 prepared payload `v5`와 proof/request/response `v2`, withdraw는 prover/final payload와 proof/request/response `v2`, relay handoff/schema는 `v2`를 사용합니다.
+- `AssetRegistryV1`이 denom/asset-ID mapping의 authoritative source이며 audit disclosure는 필수입니다. Transfer의 view tag는 정확히 두 개이고 각각 2 bytes이며, tag mismatch에서도 기본 scan은 full decrypt를 시도합니다.
+- Exact public-input 순서와 Batch schema digest는 [API 매핑 문서](./docs/api-mapping.ko.md#clairveil-v031-고정-계약)를 따릅니다.
+
 Clairveil v0.3.1의 `Keeper.DepositWithFunder`는 trusted in-process Go
 integration API이며 protobuf, gRPC, CLI 또는 client `funder` field가
 아닙니다. 따라서 ClairveilJS의 Cosmos message surface는 바꾸지 않고,
@@ -85,7 +126,7 @@ chain에서만 활성화합니다.
 
 두 예제는 wallet privacy material derivation, deposit 준비, note scan, transfer 준비, broadcast 흐름을 SDK surface로 수행합니다. Keplr/Cosmos 예제는 Cosmos `MsgDeposit`에 `DepositCircuit` proof가 포함되기 때문에 `depositProofProvider`가 필요합니다.
 
-## Experimental v0.2 One-Proof Batch Transfer
+## Experimental One-Proof BatchTransfer V1
 
 이 API는 experimental이며 기본값이 비활성화되어 있습니다. Downstream 애플리케이션이 required Go fixture conformance와 5-shape localnet matrix를 독립적으로 통과한 뒤에만 활성화하세요.
 
@@ -98,7 +139,7 @@ const clairveil = createClairveilClient({
 });
 ```
 
-`prepareTransferBatch(...)`는 Clairveil v0.2 `BatchTransfer` 계약을 구현합니다. 입력 1~16개를 계획하고 원자적으로 예약하며, 순서가 고정된 payment/change/padding 출력 1~32개를 만들고, 명시적으로 선택한 `proverAdapter.proveBatchTransfer(payload)`를 정확히 한 번 호출해 Cosmos `MsgBatchTransfer` 한 건을 반환합니다. Payment를 여러 `MsgTransfer` proof로 확장하지 않고 prover 자동 failover도 하지 않습니다.
+`prepareTransferBatch(...)`는 Clairveil v0.3.1에서 공개한 frozen One-Proof `BatchTransfer` V1 계약을 구현합니다. 입력 1~16개를 계획하고 원자적으로 예약하며, 순서가 고정된 payment/change/padding 출력 1~32개를 만들고, 명시적으로 선택한 `proverAdapter.proveBatchTransfer(payload)`를 정확히 한 번 호출해 Cosmos `MsgBatchTransfer` 한 건을 반환합니다. Payment를 여러 `MsgTransfer` proof로 확장하지 않고 prover 자동 failover도 하지 않습니다.
 
 현재 One-Proof Batch Transfer는 **Cosmos 전용**입니다. EVM profile의 `prepareTransferBatch(...)`는 요청을 거부하며, ClairveilJS는 `IPrivacy.batchTransfer` ABI 또는 EVM batch fallback을 제공하지 않습니다. EVM의 일반 `IPrivacy.transfer` 경로와 혼동하면 안 됩니다.
 
@@ -557,12 +598,12 @@ SDK는 payload 준비 중 reservation을 `Reserved -> Proving -> ProofReady`로 
 
 - `signDirectAndBroadcast(...)`, `broadcastSignedTx(...)`, EVM `sendTransaction(...)`에는 `reservationManager`와 prepared `reservation`을 함께 넘기세요. 이 메서드들은 외부 RPC 호출 전에 `broadcast_in_flight`를 원자적으로 설정하고 `broadcast_attempt_count`를 증가시킨 뒤, 결과를 `Submitted`, `Unknown`, `ManualReview` 중 하나로 기록합니다. Terminal 저장이 실패하면 durable marker가 남아 reconcile 전 재제출을 막습니다. Withdraw/relay 제출은 실제 transaction과 일치하는 `relayPayload`와 최신 `chainNowUnix`, 또는 권장되는 `getChainNowUnix`도 넘겨야 합니다. EVM request에 `chainId`가 있으면 같은 network ID를 `expectedEvmChainId`로 넘기세요. Binding되지 않은 relay request는 다시 만들고 caller가 넣은 sender, gas, fee 필드를 검증 후 제거합니다. Reservation에 authoritative `txBytesHash`가 이미 있으면 binding에 포함된 지원 sender, gas, fee 필드는 보존될 수 있지만, 지원하지 않는 transaction key는 제출 전에 항상 제거합니다. SDK는 Cosmos body를 decode하거나 EVM calldata를 다시 만들어 payload가 없거나 일치하지 않으면 외부 제출 전에 거부합니다. Custom EVM encoding option을 사용했다면 같은 값을 `relayTransactionOptions`로 넘기세요.
 - Custom wallet/provider 연동은 외부 broadcast 경계를 넘기 직전에 `markBroadcastAttempting(ids, { leaseToken, txHash?, txBytesHash?, signDocHash? })`을 호출해 이미 알 수 있는 transaction identity를 영속화한 뒤 아래 결과별 메서드를 사용해야 합니다.
-- 실제 transaction이 제출된 뒤에만 `markSubmitted(ids, { leaseToken, txHash | txBytesHash })`를 호출하세요. `signDocHash`만으로는 `Submitted` 근거가 되지 않습니다.
+- 실제 transaction이 제출된 뒤에만 `markSubmitted(ids, { leaseToken, txHash | txBytesHash })`를 호출하세요. 현재 저수준 manager는 transport를 구분하지 않고 두 값 중 하나만 있으면 제출 metadata로 받습니다. 따라서 EVM의 `txBytesHash`도 형식상 허용되지만 이는 canonical request binding일 뿐 network 제출 증명이 아닙니다. 고수준 EVM send helper는 wallet이 반환한 network `txHash`를 기록합니다. `signDocHash`만으로는 `Submitted` 근거가 되지 않습니다.
 - Transaction이 네트워크에 도달했을 수 있을 때만 `markUnknown(ids, { leaseToken, txHash | txBytesHash, signDocHash?, error })`를 호출하세요. `signDocHash`는 보조 증거일 뿐 단독으로 broadcast 경계를 증명하지 못합니다.
 - Wallet 또는 relayer 대기 중에는 `ProofReady` lease를 계속 갱신하세요. `markSubmitted(...)`와 `markUnknown(...)`은 현재의 만료되지 않은 lease token을 요구하며, lease가 만료되면 stale ownership을 전진시키지 말고 reconcile 또는 replan 흐름으로 처리해야 합니다.
 - Relay payload를 복사하거나 업로드하기 직전에 `recordRelayHandoff(ids, { leaseToken, payloadHash: prepared.payload.payload_hash })`를 호출하고 영속화가 끝날 때까지 기다리세요. 이 호출이 실패하면 payload를 외부에 노출하지 마세요. 성공한 뒤에는 local proof-discard/release 경로를 쓰지 말고 외부 제출 가능한 payload로 reconcile해야 합니다.
 - Wallet rejection 또는 broadcast 전 local proof discard가 발생하면 현재 유효한 lease로 `markReplanRequired(...)`를 호출하세요. 만료된 `ProofReady` lease는 `ManualReview`로 보내야 합니다. 새로고침된 페이지는 이전 proof artifact의 폐기를 증명할 수 없으므로 note를 다시 spendable하게 만들면 안 됩니다.
-- Local batch를 직접 폐기할 때 `Reserved`는 바로 release할 수 있고, `Proving`은 현재 batch lease token을 넣어 `releaseReservedOrProving(ids, { leaseToken })`를 호출해야 합니다. `rollbackPlanReservation(...)`은 두 경우를 처리합니다.
+- Local batch를 직접 폐기할 때 `Reserved`는 바로 release할 수 있고, `Proving`은 현재 batch lease token을 넣어 `releaseReservedOrProving(ids, { leaseToken })`를 호출해야 합니다. `rollbackPlanReservation(...)`은 두 경우를 처리합니다. 이 `Proving → Released` 경로는 v0.3.1 fixture의 일반 전이가 아니라 ClairveilJS store가 별도로 제공하는 현재 SDK 동작입니다.
 - Rollback 시점에 lease가 이미 만료됐다면 note를 release하지 않습니다. 원래 prepare/prover error를 보존하고 note가 조용히 재사용되지 않도록 best-effort로 reservation을 `ManualReview`로 이동합니다.
 - `ManualReview`는 chain/payload 이력을 운영자가 검토한 뒤에만 해결하세요. `resolveManualReview(ids, { target: "Released" | "ReplanRequired" | "Failed", operatorId, approvalReference, reason })`는 승인 metadata를 기록하고 승인된 결과 상태로 note를 이동합니다.
 - Relay payload를 복사했거나 relayer에게 넘긴 뒤에는 TTL 만료나 local cancel 버튼만으로 reservation을 release하지 마세요. Relayer가 expiry 전까지 proof를 제출할 수 있으므로 nullifier 상태, submitted tx evidence, manual review로 reconcile해야 합니다.
@@ -591,7 +632,7 @@ const firstPath = await pathProvider.lookupMerklePath(selectedNotes[0].commitmen
 
 SDK는 1–16개의 서로 다른 commitment, 요청한 root/height 일치, 각 depth-32 path의 root 재구성을 모두 검증한 뒤 provider를 반환합니다. 원격 path query는 query provider에게 input note 간 linkage를 노출할 수 있으므로, privacy policy에 맞는 endpoint와 네트워크 경로를 사용하세요.
 
-나중에 `reconcileSpentNotes(...)`를 호출할 때 tx/event evidence를 `operationSuccessEvidence` 또는 `successEvidence`에 넣으면 SDK가 expected evidence와 비교합니다. `operation_status: "Succeeded"`가 되려면 저장된 submitted `txHash` 또는 `txBytesHash`와 실제 tx identity가 일치해야 합니다. `signDocHash`는 보조 mismatch guard일 뿐 단독으로 chain 실행을 증명하지 못하며, `txResult: { code: 0 }`만 있는 경우도 identity가 없어 성공이 될 수 없습니다. Nullifier spent만으로는 충분하지 않습니다. 여러 input을 쓰는 operation은 같은 reconcile 호출에 연결된 모든 input의 spent evidence를 넣어야 합니다. 불완전한 evidence는 연결된 operation 전체를 `ManualReview`로 기록하고, tx identity나 expected output이 명시적으로 상충하면 `ConflictSpent`와 `operation_success_evidence_errors`를 기록합니다. 두 경우 모두 spent input은 `ConfirmedSpent`로 격리되며, 나중에 완전한 evidence가 들어오면 연결된 모든 reservation의 operation outcome을 원자적으로 통일합니다. Reservation을 note inventory lock으로만 쓴다면 `operationSuccessEvidenceRequired`를 켜지 말고, downstream operation DB에서 별도로 성공 판정을 하세요.
+나중에 `reconcileSpentNotes(...)`를 호출할 때 tx/event evidence를 `operationSuccessEvidence` 또는 `successEvidence`에 넣으면 SDK가 expected evidence와 비교합니다. 현재 generic matcher는 transport를 구분하지 않고 저장된 submitted `txHash` 또는 `txBytesHash` 중 하나와 실제 evidence의 같은 필드가 일치하면 transaction identity match로 계산합니다. 따라서 EVM request binding인 `txBytesHash`만으로도 다른 expected output/disclosure evidence가 모두 맞으면 `operation_status: "Succeeded"`가 될 수 있습니다. 고수준 EVM 흐름은 network `txHash`를 저장하지만, EVM receipt 또는 RPC identity를 반드시 요구하는 제품은 caller-side operation 정책에서도 이를 별도로 강제해야 합니다. `signDocHash`는 보조 mismatch guard일 뿐 단독으로 chain 실행을 증명하지 못하며, `txResult: { code: 0 }`만 있는 경우도 identity가 없어 성공이 될 수 없습니다. Nullifier spent만으로는 충분하지 않습니다. 여러 input을 쓰는 operation은 같은 reconcile 호출에 연결된 모든 input의 spent evidence를 넣어야 합니다. 불완전한 evidence는 연결된 operation 전체를 `ManualReview`로 기록하고, tx identity나 expected output이 명시적으로 상충하면 `ConflictSpent`와 `operation_success_evidence_errors`를 기록합니다. 두 경우 모두 spent input은 `ConfirmedSpent`로 격리되며, 나중에 완전한 evidence가 들어오면 연결된 모든 reservation의 operation outcome을 원자적으로 통일합니다. Reservation을 note inventory lock으로만 쓴다면 `operationSuccessEvidenceRequired`를 켜지 말고, downstream operation DB에서 별도로 성공 판정을 하세요.
 
 Operation 단위 재시도 진단은 구조화되어 있습니다. `OPERATION_STATE_MIXED`는 `error.details.reservations`에 `{ reservation_id, status, operation_status? }`를 제공합니다. `OPERATION_EVIDENCE_CONFLICT`는 `error.details.conflicts`에 `reservation_id`, `tx_hash`·`commitment`·`digest`·`amount` 같은 표준 `field`, 정확한 `source_field`, `reason`, 가능한 경우 `expected`/`actual` 값을 제공합니다. 최초 reconcile에서 발견한 충돌은 반환 전에 먼저 안전하게 저장되며 같은 정보가 `metadata.operation_success_evidence_conflicts`에 남습니다. Reference Payroll에서 manual review가 필요한 경우에는 `reconciliation.error_code`와 `reconciliation.error_details`로도 반환됩니다.
 
@@ -626,6 +667,11 @@ npm run test:conformance:required
 유지합니다. 검증 자체는 self-contained이며 고정 release/commit metadata와
 protobuf 4개, fixture 12개, JSON Schema 1개의 SHA-256 digest를 확인합니다.
 `CLAIRVEIL_SOURCE_DIR`나 별도 source checkout을 사용하지 않습니다.
+
+Reservation conformance test는 fixture의 allowed/rejected 전이를
+`canTransitionReservation(...)` 일반 전이 표에 대해 재생합니다. Store 전용
+`releaseReservedOrProving(...)`의 `Proving → Released` 확장까지 fixture와 같다고
+검증하는 것은 아닙니다.
 
 `prepublishOnly`는 `verify:release:integration`을 실행합니다. Package 검사,
 required conformance fixture, 필수 5-shape localnet one-proof matrix,

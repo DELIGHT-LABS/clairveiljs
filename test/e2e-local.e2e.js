@@ -470,7 +470,7 @@ function selectedOneProofBatchShapes(config) {
   ].map(shape => oneProofBatchShape(shape, config));
 }
 
-test("one-proof local E2E shape profiles retain the v0.2 disclosure contract", () => {
+test("one-proof local E2E shape profiles retain the Clairveil v0.3.1 disclosure contract", () => {
   const config = {
     denom: "uclair",
     oneProofBatchDepositAmount: "10uclair",

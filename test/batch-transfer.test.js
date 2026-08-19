@@ -205,7 +205,7 @@ function validatedBatchScanOutput(message, payload, index) {
   return validatedBatchScanPage(message, payload).outputs[index];
 }
 
-test("one-proof batch prover uses the Clairveil main route and binds the response hash", async () => {
+test("one-proof batch prover uses the Clairveil v0.3.1 route and binds the response hash", async () => {
   const payload = await batchPayload();
   const proof = new Uint8Array(164).fill(7);
   let call;

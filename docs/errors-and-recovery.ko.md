@@ -61,7 +61,7 @@ try {
 | `EXACT_NOTE_REQUIRED` | withdraw에 정확히 일치하는 단일 note가 필요 | shielded self-transfer로 exact note를 만든 뒤 재계획 |
 | `PROVER_UNAVAILABLE` | prover URL 없음, retryable HTTP/network failure | endpoint 상태를 확인. reservation이 안전한 pre-broadcast 상태인지 확인한 뒤 동일 checkpoint에서 재시도 |
 | `PROVER_TIMEOUT` | prover 요청 또는 async job timeout/abort | 응답이 늦게 완료될 수 있는 adapter인지 확인하고 checkpoint/job ID로 조회. 새 proof를 무조건 중복 요청하지 않음 |
-| `PROVER_CANCELLED` | client의 prover 대기 또는 async job poll 취소 | client wait가 끝났다는 뜻일 뿐 in-process solver 종료를 보장하지 않는다. Job/checkpoint와 reservation을 유지하고 server-side 취소 및 proof 미사용이 별도 확인된 뒤에만 rollback/replan |
+| `PROVER_CANCELLED` | client의 prover 대기 또는 async job poll 취소 | client wait가 끝났다는 뜻일 뿐 in-process solver 종료를 보장하지 않는다. 일반 prepare helper는 유효한 `Proving` lease를 `Released`로 rollback할 수 있으므로 현재 durable 상태를 다시 읽고, job/checkpoint는 별도 operation store에서 추적한다. `Released`만 보고 server-side 취소나 proof 미사용을 추론하지 않는다. |
 | `PROVER_REJECTED` | non-retryable prover 응답 또는 proof job 실패 | payload/circuit/config 불일치 조사. 같은 입력의 blind retry 금지 |
 | `OPERATION_STATE_MIXED` | 같은 operation의 linked reservation 상태가 서로 다름 | `details.reservations`를 확인하고 operation 전체를 격리·reconcile |
 | `OPERATION_EVIDENCE_CONFLICT` | tx/output/disclosure evidence가 persisted expectation과 충돌 | `details.conflicts`를 보존하고 `ManualReview` 또는 `ConflictSpent` 처리 |
@@ -85,7 +85,7 @@ try {
 | Prover 호출 전 payload/config 검증 실패 | 없음 | 입력, circuit, audit/disclosure/asset config를 수정. 기존 reservation은 helper가 기록한 상태에 따라 release/replan |
 | Prover timeout/unavailable/rejected/cancelled | 일반적으로 broadcast 전이지만 proof job과 in-process solver는 남을 수 있음 | adapter job/checkpoint와 현재 reservation을 확인. 같은 witness를 다른 endpoint로 보내거나 proof를 중복 생성하지 말고 reconcile 후 retry/replan |
 | Wallet이 명시적으로 서명·제출을 거절 | 명시적 provider 거절이 broadcast 전임을 보장할 때 없음 | SDK helper가 proof 폐기 evidence와 `ReplanRequired`를 기록했는지 확인. 단순 catch만으로 note를 release하지 않음 |
-| RPC broadcast가 시작됐거나 결과가 불명 | 있음 | `Unknown`으로 유지하고 tx hash/bytes hash, nullifier, chain tx lookup으로 reconcile. 새 transaction 재제출 금지 |
+| RPC broadcast가 시작됐거나 결과가 불명 | 있음 | `Unknown`으로 유지하고 network `txHash`, artifact binding, nullifier와 chain evidence로 reconcile. Cosmos exact signed `txBytesHash`는 network identity로 연결할 수 있지만 EVM request binding hash는 RPC 조회 키가 아님. 새 transaction 재제출 금지 |
 | Tx/receipt가 명시적으로 실패 | 있음 | 입력 nullifier가 미사용이고 기록된 tx가 실패 또는 부재했음을 모두 확인한 뒤 `Failed` 또는 `ReplanRequired` |
 | Nullifier spent 확인 | 확정 | reservation은 `ConfirmedSpent`. Payment/operation 성공은 별도 output evidence로 판정 |
 | Evidence 부족·충돌 또는 lease/bookkeeping 오류 | 불명 | `ManualReview`로 격리하고 operator/chain evidence 확인 |
@@ -106,22 +106,22 @@ supervised process isolation으로 제공해야 한다.
 
 - `retryable=true`, HTTP 429, timeout과 queue saturation은 다른 prover endpoint로 failover할 권한이 아니다.
 - 기본 정책은 명시적으로 선택한 endpoint 한 곳과 automatic failover 비활성화다.
-- Same-endpoint retry도 원래 payload/checkpoint와 reservation을 재사용하고 duplicate proof job 여부를 먼저 확인한다.
+- Same-endpoint retry를 제품 adapter에서 구현한다면 원래 payload/checkpoint와 duplicate proof job 여부를 먼저 확인한다. 일반 prepare helper가 이미 실패를 반환한 뒤에는 해당 reservation이 `Released`됐을 수 있으므로 자동으로 같은 reservation이 유지됐다고 가정하지 않는다.
 - 추가 endpoint로 같은 private witness를 보내려면 privacy boundary 확대를 사용자 또는 제품 정책이 명시적으로 승인해야 한다.
-- Solver 또는 job 종료가 불명확하면 reservation은 `Proving`, `ProofReady` 또는 `ManualReview`의 evidence guard 아래 유지한다.
+- 현재 일반 transfer/withdraw prepare helper는 준비 중 오류를 catch하면 `rollbackPlanReservation(...)`을 호출한다. lease가 유효한 `Proving` reservation은 `releaseReservedOrProving(...)`을 통해 `Released`가 되고, lease가 이미 만료된 경우에만 best-effort `ManualReview`로 이동한다. 이 release는 solver/job 종료 evidence가 아니므로 async job ID와 checkpoint가 필요한 제품은 별도 operation store에서 추적해야 한다.
 
 ## Broadcast 경계와 `Unknown`
 
 Reservation-aware broadcast helper는 외부 호출 직전에 `broadcast_in_flight`와 attempt evidence를 기록한다. 이후 결과를 다음처럼 처리한다.
 
-- 실제 제출 identity가 있으면 `Submitted`
+- 고수준 broadcast helper가 제출 결과 identity를 받으면 `Submitted`
 - transaction이 도달했을 수 있으나 결과가 불명확하면 `Unknown`
 - 명시적인 pre-broadcast wallet rejection이며 proof 폐기를 안전하게 기록할 수 있으면 `ReplanRequired`
 - provider 응답이나 bookkeeping 상태를 안전하게 판정할 수 없으면 `ManualReview`
 
 오류 객체에 `reservationReconciliationRequired: true`와 `reservationBookkeepingError`가 붙어 있으면 transaction은 broadcast됐거나 broadcast 결과를 처리하는 과정에서 durable 상태 기록이 실패한 것이다. 원래 오류와 transaction identity를 보존하고 즉시 reconcile한다.
 
-`signDocHash`는 prepared/signed artifact의 binding을 보조하지만 network 제출 evidence가 아니다. `txHash`나 `txBytesHash` 없이 `signDocHash`만으로 `Submitted`를 만들 수 없다.
+`signDocHash`는 prepared/signed artifact의 binding을 보조하며 단독으로 `Submitted`를 만들 수 없다. 현재 저수준 `markSubmitted(...)`은 transport를 구분하지 않고 `txHash` 또는 `txBytesHash` 중 하나를 받으므로 EVM canonical request binding만으로도 형식상 `Submitted`를 만들 수 있다. 반면 고수준 EVM send helper는 wallet/provider가 반환한 network `txHash`를 기록한다. EVM의 `txBytesHash`는 receipt 조회 키가 아니므로, 저수준 manager를 직접 사용하는 caller는 state 이름만으로 network 제출이 증명됐다고 해석하지 않는다.
 
 ## `Failed`와 `ReplanRequired`의 이중 Evidence
 
@@ -154,7 +154,7 @@ await reservationManager.transitionBatch(
 
 `ConfirmedSpent`는 input note의 nullifier가 온체인에서 소비됐다는 뜻이다. 다음 항목을 검증하기 전에는 payment, payroll item 또는 transfer가 의도대로 성공했다고 보고하지 않는다.
 
-- 저장된 `txHash` 또는 `txBytesHash`와 실제 transaction identity
+- 저장된 `txHash` 또는 `txBytesHash`와 reconcile evidence의 같은 identity. 현재 generic matcher는 transport를 구분하지 않으므로 EVM network `txHash`/receipt 의무는 caller가 별도 강제
 - expected output commitment
 - recipient, amount, denom 또는 그 binding hash
 - disclosure digest와 policy evidence

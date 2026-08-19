@@ -4,7 +4,7 @@ ClairveilJS is a JavaScript SDK for using Clairveil privacy features in browser 
 
 Korean documentation: [README.ko.md](./README.ko.md)
 
-Korean design documents: [System architecture](./docs/architecture.ko.md), [API mapping](./docs/api-mapping.ko.md), [Note reservation lifecycle](./docs/reservation-state-machine.ko.md)
+Korean design and operations documents: [System architecture](./docs/architecture.ko.md), [API mapping](./docs/api-mapping.ko.md), [Note reservation lifecycle](./docs/reservation-state-machine.ko.md), [Storage and persistence](./docs/storage-and-persistence.ko.md), [Configuration](./docs/configuration.ko.md), [Errors and recovery](./docs/errors-and-recovery.ko.md)
 
 It uses CosmJS as the transport/signing foundation and provides Clairveil-specific privacy primitives and DApp-friendly APIs:
 
@@ -24,11 +24,11 @@ It uses CosmJS as the transport/signing foundation and provides Clairveil-specif
 - balance queries
 - wallet adapters for Keplr or custom signers
 - CosmJS OfflineSigner adapter when a separate privacy-root signer is supplied
-- note store adapters for memory/localStorage-backed scans
+- note-store adapters for memory-backed scans and explicitly opted-in plaintext localStorage demos/tests
 - planner results for transfer and withdraw UX states
-- stable `ClairveilError` codes for planner/prover/wallet failures
+- stable `ClairveilError` codes for planner, prover, and operation-evidence failures
 - prepared transfer payload building
-- experimental, feature-gated v0.2 one-proof batch transfer preparation (`MsgBatchTransfer`, 1–16 inputs, 1–32 outputs)
+- experimental, feature-gated One-Proof BatchTransfer V1 preparation (`MsgBatchTransfer`, 1–16 inputs, 1–32 outputs)
 - prepared withdraw and relay withdraw prover/final payload building
 - HTTP prover adapter for `/v1/prover/transfer`, `/v1/prover/withdraw`, and `/v1/proofs/batch-transfer`
 - async job prover adapter for remote queue/poll prover deployments
@@ -66,6 +66,45 @@ For EVM chains, ClairveilJS calls the chain-provided privacy precompile. The DAp
 | --- | --- | --- | --- |
 | `0.3.1` | `v0.3.1` (`1a6ce6a`) | unchanged `MsgDeposit`/query contracts | opt-in `payable-exact-value` |
 
+`clairveiljs@0.3.1` supports the protocol, wire, and artifact baseline of the
+immutable Clairveil `v0.3.1` release, commit
+`1a6ce6a0a0e10b765c025072b44c2364e9711b48`. Release verification checks the
+pinned SHA-256 manifest for all four copied protobuf files, the bundled
+`v0.3.1` conformance fixtures, and the JSON Schema, then runs those contracts in
+required mode. This does not imply support for later, unreleased protocol
+changes.
+
+The client reservation implementation has one explicit SDK extension.
+`allowedReservationTransitions` matches the generic v0.3.1 fixture table, but
+`releaseReservedOrProving(...)` can move a `Proving` reservation directly to
+`Released` when the current lease token is valid. This store-specific atomic
+rollback is the current ClairveilJS behavior; it is not the same as the v0.3.1
+generic transition rule, which rejects `Proving -> Released`. See the
+[reservation state document](./docs/reservation-state-machine.ko.md) for the
+exact scope.
+
+Clairveil `v0.3.1` is `PUBLICATION_READY_EXPERIMENTAL`, not
+`PRODUCTION_RELEASE_READY`. Formal trusted setup, an external security/circuit
+audit, signed production artifacts, and downstream chain/product validation
+remain separate production gates. Production-hardening guidance in this README
+does not close those gates.
+
+The Clairveil v0.3.1 release handoff records that the external ClairveilJS package
+was legacy at the time of that handoff. This package is the downstream port of the
+frozen `privacy-note-v1` / `privacy-fixed-v1` contract completed after that
+snapshot and verified against the exact source and fixtures above. It does not
+restore legacy decoding or compatibility fallbacks.
+
+The pinned protocol baseline is:
+
+- active circuit set `privacy-note-v1`, in required order `deposit`, `spend`, `joinsplit`, `batch-joinsplit-16x32-v1`;
+- canonical `privacy-fixed-v1` encoding: 350-byte note plaintext, 392-byte disclosure plaintext, and a 20-byte typed-envelope header; raw ciphertext, legacy JSON, wrong kinds, non-zero reserved bytes, and trailing bytes are rejected;
+- transfer prepared payload `v5` with proof/request/response `v2`, withdraw prover/final payload and proof/request/response `v2`, and relay handoff/schema `v2`;
+- authoritative `AssetRegistryV1` denom/asset-ID mapping, mandatory audit disclosure, and exactly two 2-byte transfer view tags; the safe scan default still attempts full decryption on a tag mismatch.
+
+See the [API mapping](./docs/api-mapping.ko.md#clairveil-v031-고정-계약)
+for the exact public-input order and Batch schema digest.
+
 Clairveil v0.3.1 adds `Keeper.DepositWithFunder` as a trusted in-process Go
 integration surface. It does not add a protobuf, gRPC, CLI, or client `funder`
 field. ClairveilJS therefore keeps the Cosmos message surface unchanged and
@@ -90,7 +129,7 @@ Public consumers should import through the package export map (`clairveiljs`, `c
 
 Minimal SDK usage examples live in [`examples/`](https://github.com/DELIGHT-LABS/clairveiljs/tree/main/examples). Start with [`examples/minimal-keplr-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-keplr-flow.js) for Keplr/Cosmos and [`examples/minimal-metamask-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-metamask-flow.js) for MetaMask/EVM. Both examples derive wallet privacy material, prepare a deposit, scan notes, prepare a transfer, and broadcast through the SDK surface. The Keplr/Cosmos example requires a `depositProofProvider` because Cosmos `MsgDeposit` includes a `DepositCircuit` proof.
 
-## Experimental v0.2 One-Proof Batch Transfer
+## Experimental One-Proof BatchTransfer V1
 
 This surface is experimental and disabled by default. Enable it only after the downstream application has independently passed the required Go-fixture conformance suite and the five-shape localnet matrix:
 
@@ -103,7 +142,7 @@ const clairveil = createClairveilClient({
 });
 ```
 
-`prepareTransferBatch(...)` implements the Clairveil v0.2 `BatchTransfer` contract. It plans and atomically reserves 1–16 inputs, builds 1–32 ordered payment/change/padding outputs, calls one explicitly selected `proverAdapter.proveBatchTransfer(payload)` exactly once, and returns one Cosmos `MsgBatchTransfer`. It never expands the payments into multiple `MsgTransfer` proofs and does not perform automatic prover failover.
+`prepareTransferBatch(...)` implements the frozen One-Proof `BatchTransfer` V1 contract published with Clairveil v0.3.1. It plans and atomically reserves 1–16 inputs, builds 1–32 ordered payment/change/padding outputs, calls one explicitly selected `proverAdapter.proveBatchTransfer(payload)` exactly once, and returns one Cosmos `MsgBatchTransfer`. It never expands the payments into multiple `MsgTransfer` proofs and does not perform automatic prover failover.
 
 One-proof batch transfer is currently **Cosmos-only**. An EVM-profile `prepareTransferBatch(...)` call is rejected; ClairveilJS does not expose an `IPrivacy.batchTransfer` ABI or an EVM batch fallback. Do not confuse this flow with the ordinary EVM `IPrivacy.transfer` path.
 
@@ -203,6 +242,11 @@ npm run test:conformance:required
 compatibility. It is self-contained: it validates the pinned release and commit
 metadata plus SHA-256 digests for four protobufs, twelve fixtures, and one JSON
 Schema. It does not read `CLAIRVEIL_SOURCE_DIR` or require a source checkout.
+
+The reservation conformance test replays the fixture's allowed and rejected
+transitions through the generic `canTransitionReservation(...)` table. It does
+not assert that the store-specific `releaseReservedOrProving(...)`
+`Proving -> Released` extension is identical to the fixture.
 
 `prepublishOnly` runs `verify:release:integration`: package checks, required
 conformance fixtures, the required five-shape localnet one-proof matrix, and
@@ -953,12 +997,12 @@ The SDK moves reservations through `Reserved -> Proving -> ProofReady` while it 
 
 - Pass both `reservationManager` and the prepared `reservation` to `signDirectAndBroadcast(...)`, `broadcastSignedTx(...)`, or EVM `sendTransaction(...)`. These methods atomically set `broadcast_in_flight` and increment `broadcast_attempt_count` before the external RPC call, then record `Submitted`, `Unknown`, or `ManualReview`. A failed terminal write leaves the durable marker in place and blocks resubmission until reconciliation. Withdraw/relay submissions must also pass the matching `relayPayload` plus a fresh `chainNowUnix`, or preferably `getChainNowUnix`. When an EVM request contains `chainId`, also pass that network ID as `expectedEvmChainId`. Unbound relay requests are rebuilt and caller-supplied sender, gas, and fee fields are stripped after validation. If a reservation already carries an authoritative `txBytesHash`, supported sender, gas, and fee fields covered by that binding may be preserved; unsupported transaction keys are always stripped before submission. The SDK decodes the Cosmos body or rebuilds the EVM calldata and rejects a missing or mismatched payload before external submission. If custom EVM transaction encoding options were used, pass the same options as `relayTransactionOptions`.
 - Custom wallet/provider integrations must call `markBroadcastAttempting(ids, { leaseToken, txHash?, txBytesHash?, signDocHash? })` immediately before crossing the external broadcast boundary, persisting any transaction identity already available before using the outcome-specific methods below.
-- Call `markSubmitted(ids, { leaseToken, txHash | txBytesHash })` only after a transaction was actually submitted. A `signDocHash` alone is not enough for `Submitted`.
+- Call `markSubmitted(ids, { leaseToken, txHash | txBytesHash })` only after a transaction was actually submitted. The current low-level manager is transport-agnostic and accepts either value as submission metadata. An EVM `txBytesHash` is therefore accepted structurally even though it is only a canonical request binding, not proof of network submission. The high-level EVM send helper records the network `txHash` returned by the wallet. A `signDocHash` alone is not enough for `Submitted`.
 - Call `markUnknown(ids, { leaseToken, txHash | txBytesHash, signDocHash?, error })` only when the transaction may have reached the network. A `signDocHash` is supplemental evidence and cannot establish that boundary by itself.
 - Keep the `ProofReady` lease alive while a wallet or relayer is waiting. `markSubmitted(...)` and `markUnknown(...)` require the current, unexpired lease token; if the lease expires, reconcile or replan instead of advancing stale ownership.
 - Immediately before copying or uploading a relay payload, call `recordRelayHandoff(ids, { leaseToken, payloadHash: prepared.payload.payload_hash })` and wait for it to persist. If that call fails, do not expose the payload. Once it succeeds, do not use local proof-discard/release paths; reconcile the externally deliverable payload instead.
 - For wallet rejection or local proof discard before broadcast, use `markReplanRequired(...)` with the current live lease instead of leaving `ProofReady` active. An expired `ProofReady` lease must move to `ManualReview`; a refreshed page cannot prove that an older proof artifact was destroyed and must not make the note spendable again.
-- If you directly discard a local batch, `Reserved` can be released directly; `Proving` requires its current batch lease token via `releaseReservedOrProving(ids, { leaseToken })`. `rollbackPlanReservation(...)` handles both cases for you.
+- If you directly discard a local batch, `Reserved` can be released directly; `Proving` requires its current batch lease token via `releaseReservedOrProving(ids, { leaseToken })`. `rollbackPlanReservation(...)` handles both cases for you. This `Proving -> Released` path is a current ClairveilJS store behavior outside the generic v0.3.1 fixture transition table.
 - If a rollback sees that the lease already expired, it does not release the note. It moves the reservation to `ManualReview` best-effort so the original prepare/prover error is preserved and the note is not silently reused.
 - Resolve `ManualReview` only after an operator has reviewed the chain and payload history. `resolveManualReview(ids, { target: "Released" | "ReplanRequired" | "Failed", operatorId, approvalReference, reason })` records the approval metadata and moves the linked note into the approved outcome.
 - After a relay payload is copied or handed to a relayer, do not release the reservation by TTL or a local cancel button. The relayer may still submit the proof until expiry, so reconcile by checking nullifier status, submitted tx evidence, or manual review.
@@ -969,7 +1013,7 @@ Reservations can also carry operation success evidence. Nullifier spent proves t
 
 Scan migrations must treat a note as spendable only when its latest nullifier check explicitly records `nullifierStatus: "unspent"`. Older cached `isSpent: false` entries, missing responses, malformed responses, and query failures are unverified and must stay out of the planner until revalidated.
 
-When later calling `reconcileSpentNotes(...)`, include matching tx/event evidence under `operationSuccessEvidence` or `successEvidence`. `operation_status: "Succeeded"` requires an actual tx identity matching the stored submitted `txHash` or `txBytesHash`; `signDocHash` is only a supplemental mismatch guard and cannot establish chain execution by itself. A bare `txResult: { code: 0 }` also has no identity and cannot succeed. Nullifier spent alone is not enough. For a multi-input operation, include spent evidence for every linked input in the same reconcile call. Incomplete evidence records `ManualReview` across the linked operation, while an explicit identity or expected-output mismatch records `ConflictSpent` with `operation_success_evidence_errors`. Confirmed spent inputs remain quarantined in both cases, and a later complete evidence set atomically resolves every linked reservation to the same operation outcome. If you only use reservations as a note inventory lock, leave `operationSuccessEvidenceRequired` unset and keep operation success checks in your downstream operation database.
+When later calling `reconcileSpentNotes(...)`, include matching tx/event evidence under `operationSuccessEvidence` or `successEvidence`. The current generic matcher is transport-agnostic: it treats a matching stored and actual `txHash` or `txBytesHash` as a transaction-identity match. Consequently, an EVM request-binding `txBytesHash` can contribute to `operation_status: "Succeeded"` when all other expected output/disclosure evidence also matches. The high-level EVM path stores a network `txHash`, but products that require an EVM receipt or RPC identity must enforce that additional rule in their caller-owned operation policy. `signDocHash` is only a supplemental mismatch guard and cannot establish chain execution by itself. A bare `txResult: { code: 0 }` also has no identity and cannot succeed. Nullifier spent alone is not enough. For a multi-input operation, include spent evidence for every linked input in the same reconcile call. Incomplete evidence records `ManualReview` across the linked operation, while an explicit identity or expected-output mismatch records `ConflictSpent` with `operation_success_evidence_errors`. Confirmed spent inputs remain quarantined in both cases, and a later complete evidence set atomically resolves every linked reservation to the same operation outcome. If you only use reservations as a note inventory lock, leave `operationSuccessEvidenceRequired` unset and keep operation success checks in your downstream operation database.
 
 Operation-level retry diagnostics are structured. `OPERATION_STATE_MIXED` exposes `error.details.reservations` as `{ reservation_id, status, operation_status? }` records. `OPERATION_EVIDENCE_CONFLICT` exposes `error.details.conflicts` with `reservation_id`, a normalized `field` such as `tx_hash`, `commitment`, `digest`, or `amount`, the exact `source_field`, `reason`, and available `expected`/`actual` values. Initial reconciliation conflicts are still persisted before control returns: the same records are stored in `metadata.operation_success_evidence_conflicts`, and Reference Payroll also returns them as `reconciliation.error_code` and `reconciliation.error_details` when manual review is required.
 

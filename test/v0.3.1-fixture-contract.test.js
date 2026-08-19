@@ -22,7 +22,7 @@ import { fixtureTestOptions, readFixture } from "./helpers.js";
 
 const padField = value => fieldHexV1(value);
 
-test("v0.2 NoteV1 fixture is derived by the public note primitives", fixtureTestOptions, () => {
+test("Clairveil v0.3.1 NoteV1 fixture is derived by the public note primitives", fixtureTestOptions, () => {
   const contract = readFixture("privacy_note_v1_contract.json");
   const vector = contract.vector;
   const spend = derivePubKeyFromScalar(BigInt(vector.spend_scalar));
@@ -54,7 +54,7 @@ test("v0.2 NoteV1 fixture is derived by the public note primitives", fixtureTest
   });
 });
 
-test("v0.2 batch JoinSplit fixture is bound to aggregate roots and effect evidence", fixtureTestOptions, () => {
+test("Clairveil v0.3.1 batch JoinSplit fixture is bound to aggregate roots and effect evidence", fixtureTestOptions, () => {
   const contract = readFixture("privacy_batch_joinsplit_v1_contract.json");
   const vector = contract.vector;
   const disclosure = contract.user_disclosure;
@@ -93,7 +93,7 @@ test("v0.2 batch JoinSplit fixture is bound to aggregate roots and effect eviden
   }), effect.id_hex);
 });
 
-test("v0.2 disclosure-blinding fixture retains exact rejection codes", fixtureTestOptions, () => {
+test("Clairveil v0.3.1 disclosure-blinding fixture retains exact rejection codes", fixtureTestOptions, () => {
   const contract = readFixture("privacy_disclosure_blinding_v1_contract.json");
   assert.equal(contract.schema_version, "v1");
   for (const vector of contract.vectors) {

@@ -1,7 +1,8 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const OUTPUT = fileURLToPath(new URL("../docs/assets/clairveil-privacy-architecture.svg", import.meta.url));
+const CHECK = process.argv.includes("--check");
 
 const W = 2400;
 const H = 1500;
@@ -184,9 +185,14 @@ rect(1840, 250, 510, 875, { fill: "#FFFDF8", stroke: "#DDA33F", strokeWidth: 2, 
 text(2095, 294, "Chain & Query Endpoints", { size: 27, weight: 800, fill: C.amber });
 
 // Remote prover, outside the trust boundary.
-rect(485, 130, 520, 100, { fill: C.greenFill, stroke: C.green, strokeWidth: 2, radius: 18, shadow: true });
-proverIcon(535, 180);
-header(755, 171, "원격 Prover 서비스 (선택)", "ZK proof 생성 전용 · 외부 신뢰 경계", C.green);
+rect(485, 125, 520, 105, { fill: C.greenFill, stroke: C.green, strokeWidth: 2, radius: 18, shadow: true });
+proverIcon(535, 177);
+header(755, 157, "원격 Prover 서비스 (선택)", "ZK proof 생성 · 외부 신뢰 경계", C.green);
+text(755, 213, "transfer/withdraw · batch(Cosmos only): proverUrl · deposit: 별도 provider", {
+  size: 11.5,
+  weight: 700,
+  fill: C.green
+});
 
 // User application.
 rect(90, 405, 280, 340, { fill: C.purpleFill, stroke: C.purple, strokeWidth: 2, radius: 22, shadow: true });
@@ -237,12 +243,20 @@ bullet(1162, 690, "계정·키 관리", C.purple, { size: 16 });
 // Local client state stores.
 rect(450, 820, 590, 230, { fill: "#F7FBFF", stroke: "#6FA1F5", strokeWidth: 1.8, radius: 22, shadow: true });
 databaseIcon(500, 880);
-header(745, 870, "Client State Stores", "브라우저 로컬 · private-at-rest", C.blue);
-bullet(490, 930, "Note inventory · scan cursor · nullifier 상태", C.blue, { size: 14 });
-bullet(490, 966, "Reservation · lease · broadcast evidence", C.blue, { size: 14 });
-bullet(785, 930, "Reservation: encrypted IndexedDB + Web Locks", C.blue, { size: 14 });
-bullet(785, 966, "다중 탭 CAS · fail-closed 재사용 방지", C.blue, { size: 14 });
-text(745, 1018, "저장 키와 private material을 ciphertext와 함께 보관하지 않음", {
+header(745, 870, "Client State Stores", "브라우저 로컬 · 저장소별 보안 계약", C.blue);
+rect(480, 915, 255, 103, { fill: C.panel, stroke: "#B8CDF4", strokeWidth: 1.2, radius: 12 });
+text(607, 942, "Note Store · scan inventory", { size: 14, weight: 800, fill: C.blueDark });
+text(495, 969, "Production: encrypted wallet DB", { size: 11.5, weight: 600, anchor: "start" });
+text(495, 991, "LocalStorageNoteStore: plaintext", { size: 11.5, weight: 600, anchor: "start" });
+text(495, 1009, "demo/test only", { size: 11.5, weight: 700, fill: C.red, anchor: "start" });
+
+rect(755, 915, 255, 103, { fill: C.panel, stroke: "#B8CDF4", strokeWidth: 1.2, radius: 12 });
+text(882, 942, "Reservation Store · leases", { size: 14, weight: 800, fill: C.blueDark });
+text(770, 969, "encrypted IndexedDB + Web Locks", { size: 11.5, weight: 600, anchor: "start" });
+text(770, 991, "multi-tab CAS · fail-closed", { size: 11.5, weight: 600, anchor: "start" });
+text(770, 1009, "note 재사용 방지", { size: 11.5, weight: 700, anchor: "start" });
+
+text(745, 1040, "Production 저장 키와 private material은 ciphertext와 분리", {
   size: 13,
   weight: 700,
   fill: C.blueDark
@@ -253,7 +267,7 @@ rect(1500, 690, 300, 205, { fill: C.orangeFill, stroke: C.orange, strokeWidth: 2
 serverIcon(1535, 734);
 header(1665, 738, "DApp 서버 (선택)", "API proxy / gateway", C.orange);
 bullet(1532, 795, "prover·query endpoint proxy", C.orange, { size: 13.5 });
-bullet(1532, 826, "비민감 운영 데이터만 저장", C.orange, { size: 13.5 });
+bullet(1532, 826, "prover payload 로그·캐시 금지", C.orange, { size: 13.5, weight: 700 });
 bullet(1532, 857, "privacy material·복호화 note 저장 금지", C.orange, { size: 13, weight: 700 });
 text(1650, 884, "서명·권한 주체 아님", { size: 12.5, weight: 700, fill: C.muted });
 
@@ -267,14 +281,19 @@ text(1650, 1098, "재시도·수수료 정책: product-defined", { size: 12.5, w
 // Chain execution endpoint.
 rect(1880, 325, 430, 315, { fill: C.amberFill, stroke: "#D9901C", strokeWidth: 1.8, radius: 20, shadow: true });
 shieldIcon(1940, 415);
-header(2120, 376, "온체인 실행 엔드포인트", "Clairveil Cosmos 모듈 / EVM Precompile", C.amber);
+header(2120, 376, "온체인 실행 엔드포인트", "Cosmos module · downstream EVM", C.amber);
 bullet(1918, 500, "transaction 제출·proof 검증", C.amber, { size: 15 });
 bullet(1918, 540, "상태 기록 및 이벤트 발생", C.amber, { size: 15 });
 bullet(1918, 580, "nullifier 사용 반영", C.amber, { size: 15 });
-text(2095, 618, "최종 ZK proof 유효성은 온체인 규칙이 검증", {
-  size: 13,
+text(2095, 608, "EVM precompile 제공: target/downstream chain", {
+  size: 12,
   weight: 700,
   fill: C.amber
+});
+text(2095, 628, "One-Proof batch: Cosmos MsgBatchTransfer only", {
+  size: 11.5,
+  weight: 800,
+  fill: C.red
 });
 
 // Query endpoint.
@@ -287,6 +306,13 @@ bullet(1918, 985, "Merkle path · circuit/audit/asset config", C.amber, { size: 
 text(2095, 1032, "공개 체인 데이터 기반 조회", { size: 13, weight: 700, fill: C.muted });
 
 // Primary flow.
+// When proverUrl targets the DApp proxy, the privacy-sensitive prover payload
+// crosses that server before reaching the remote prover. Draw this before the
+// primary line so the user-signed transaction path remains visually dominant
+// at their single crossing.
+path("M 1650 690 C 1650 470 1450 285 1005 190", C.orange, { width: 3, dash: "9 8" });
+tag(1240, 264, 250, "proxied private prover payload", C.orange);
+
 line(370, 550, 450, 550, C.blue, { width: 4.5 });
 line(1040, 550, 1120, 550, C.blue, { width: 4.5 });
 line(1420, 550, 1880, 550, C.blue, { width: 4.5 });
@@ -300,11 +326,11 @@ line(665, 320, 665, 230, C.green, { width: 3, dash: "8 7" });
 line(805, 230, 805, 320, C.green, { width: 3, dash: "8 7" });
 tag(678, 242, 114, ["증명 요청", "proof 응답"], C.green, { lines: true });
 line(745, 760, 745, 820, C.blue, { width: 3, startArrow: true });
-tag(772, 773, 134, "암호화 read/write", C.blue);
+tag(772, 773, 134, "store read/write", C.blue);
 
 // Read-only direct query route.
-path("M 1040 682 H 1828 V 950 H 1880", C.gray, { width: 2.8, dash: "8 8" });
-tag(1245, 648, 185, "읽기 전용 직접 조회", C.gray);
+path("M 1040 350 H 1080 V 215 H 2370 V 905 H 2310", C.gray, { width: 2.8, dash: "8 8" });
+tag(1140, 174, 185, "읽기 전용 직접 조회", C.gray);
 
 // Optional DApp proxy route.
 path("M 1040 720 C 1200 720 1330 792 1500 792", C.orange, { width: 3, dash: "9 8" });
@@ -357,5 +383,14 @@ text(2190, 1342, "신뢰 경계", { size: 14, weight: 800, anchor: "start" });
 text(2190, 1372, "클라이언트 로컬", { size: 12.5, weight: 600, anchor: "start", fill: C.muted });
 
 add("</svg>");
-await writeFile(OUTPUT, out.join(""), "utf8");
-console.log(OUTPUT);
+const generated = out.join("");
+if (CHECK) {
+  const committed = await readFile(OUTPUT, "utf8");
+  if (committed !== generated) {
+    throw new Error("architecture SVG is stale; run npm run docs:diagram:architecture and commit the result");
+  }
+  console.log(`up to date: ${OUTPUT}`);
+} else {
+  await writeFile(OUTPUT, generated, "utf8");
+  console.log(OUTPUT);
+}

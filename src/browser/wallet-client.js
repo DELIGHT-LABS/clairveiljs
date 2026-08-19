@@ -374,8 +374,7 @@ function assertProfileKeplrCompatibility(profile) {
 }
 
 /**
- * Fail-closed validator for a browser DApp chain profile. This mirrors the
- * deployment profile contract in clairveil-web-client-config.schema.json,
+ * Fail-closed runtime validator for the BrowserWalletProfile contract,
  * including the transport-specific wallet and endpoint requirements.
  */
 export function validateBrowserWalletProfile(profile) {
@@ -462,10 +461,10 @@ export function validateBrowserWalletProfile(profile) {
 }
 
 /**
- * Validate and resolve the complete browser deployment configuration described
- * by clairveil-web-client-config.schema.json. The browser client deliberately
- * receives only the resulting active profile, so this helper keeps profile
- * selection and every deprecated flattened compatibility field fail-closed.
+ * Validate and resolve the complete ClairveilWebClientConfig contract. The
+ * browser client deliberately receives only the resulting active profile, so
+ * this helper keeps profile selection and every deprecated flattened
+ * compatibility field fail-closed.
  */
 export function validateClairveilWebClientConfig(config) {
   if (!config || typeof config !== "object" || Array.isArray(config)) {

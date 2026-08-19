@@ -8,6 +8,8 @@
 
 - 시스템 배치와 신뢰 경계: [시스템 아키텍처](./architecture.ko.md)
 - note 중복 사용 방지와 제출 후 복구: [Note Reservation 상태 전이](./reservation-state-machine.ko.md)
+- endpoint와 client option: [배포·클라이언트 설정](./configuration.ko.md)
+- 오류 형태와 재시도 판단: [오류·복구](./errors-and-recovery.ko.md)
 
 ## 계약 분류
 
@@ -19,6 +21,43 @@
 | Product-defined API | 인증·수수료·queue·URL을 제품이 정의한다. ClairveilJS 공통 서버 계약이 아니다. | relay withdraw handoff, DApp proxy route |
 
 `/v1/prover/transfer`, `/v1/prover/withdraw`, `/v1/proofs/batch-transfer`는 `clairveil.d`의 chain REST endpoint가 아니다. 기본 HTTP prover adapter를 선택한 **브라우저의 ClairveilJS**가 `proverUrl`에 직접 요청한다. `proverUrl`이 DApp proxy를 가리킬 때만 요청이 그 서버를 경유한다.
+
+## Clairveil v0.3.1 고정 계약
+
+이 문서와 SDK의 지원 기준은 immutable Clairveil `v0.3.1` release commit
+`1a6ce6a0a0e10b765c025072b44c2364e9711b48`이다. 아래 값은
+배포 profile이 바꿀 수 있는 설정이 아니라 conformance fixture와 consensus
+identity가 고정한 protocol 계약이다.
+
+| 계약 | 고정 값 |
+| --- | --- |
+| Active circuit set | `privacy-note-v1`, BN254, required order `deposit` → `spend` → `joinsplit` → `batch-joinsplit-16x32-v1` |
+| Public-input schema SHA-256 | `deposit`: `c3231fb5ae62539d2e4baeb78aa4be8a4c44e3cd8fa325ba60f13b7f563d5a1e`; `spend`: `d0a033aa2f7b6e098873307a815545ee3e83d974026c0e52bf39a038e08f4872`; `joinsplit`: `4946e23db34529c6fce0a95ce69f6df08563a305ddcc70c7b6b786471e03aa82`; batch: `5606327d69dcb06c00811f2135291d39a2ea1cedf554f114f7eb4a178098d333` |
+| Canonical binary encoding | `privacy-fixed-v1`; `NotePlaintextV1` 350 bytes, `DisclosurePlaintextV1` 392 bytes, typed envelope header 20 bytes |
+| Transfer | prepared payload `v5`; proof/request/response `v2` |
+| Withdraw | prover/final payload와 proof/request/response 모두 `v2`; output note field 없음 |
+| Relay withdraw | handoff/schema `v2`; relayer `creator`와 owner-bound recipient를 분리 |
+| One-Proof batch | payload `batch-transfer-payload-v1`, proof `batch-transfer-proof-v1`, request/response `v1`; Cosmos `MsgBatchTransfer` 전용 |
+
+Public input은 이름을 정렬하거나 rename하지 않고 아래 순서를 그대로 사용한다.
+
+- Deposit 3개: `Commitment`, `Amount`, `AssetID`.
+- Native transfer / JoinSplit 13개: `MerkleRoot`, `ChainDomainHi`, `ChainDomainLo`, `ExpiresAtUnix`, `Nullifier0`, `Nullifier1`, `Commitment0`, `Commitment1`, `UserPrivacyPolicy`, `UserDisclosureDigest`, `FullDisclosureDigest`, `PayloadDigestHi`, `PayloadDigestLo`.
+- Withdraw / Spend 9개: `MerkleRoot`, `ChainDomainHi`, `ChainDomainLo`, `ExpiresAtUnix`, `Nullifier`, `Amount`, `RecipientDigestHi`, `RecipientDigestLo`, `AssetID`.
+- BatchJoinSplit16x32 12개: `MerkleRoot`, `ChainDomainHi`, `ChainDomainLo`, `ExpiresAtUnix`, `InputCount`, `OutputCount`, `NullifierRoot`, `CommitmentRoot`, `UserDisclosureRoot`, `FullDisclosureRoot`, `PayloadDigestHi`, `PayloadDigestLo`.
+
+`AssetRegistryV1`만 denom/asset-ID의 authoritative source로 사용하고 missing,
+collision 또는 양방향 mapping 불일치에서는 fail-closed한다. Audit disclosure는
+필수이고 sender self-view는 기본 포함·명시적 opt-out이다. Native transfer는
+정확히 두 개의 2-byte view tag를 사용하며 tag는 untrusted hint이므로 기본
+scan은 mismatch에서도 full decrypt를 시도한다. Transfer/withdraw의 `creator`는
+replaceable하지만 output, disclosure, recipient, chain과 expiry는 owner
+intent/proof에 binding된다.
+
+Raw ciphertext, legacy JSON plaintext, wrong envelope kind, non-zero reserved
+byte, trailing byte와 cross-kind decode는 compatibility fallback 없이 거부한다.
+Clairveil `v0.3.1`의 상태는 `PUBLICATION_READY_EXPERIMENTAL`이며, 이 계약을
+구현했다는 사실만으로 production release gate가 닫히지는 않는다.
 
 ## End-to-End 작업 매핑
 
@@ -68,7 +107,9 @@
 | `fetchAssetByDenom(...)`, `queryAssetByDenom(...)` | GET | `/clairveil/privacy/v1/assets/by_denom/{canonical_denom=**}` | canonical denom → asset ID. SDK는 canonical denom을 URL encode해 치환 |
 | `fetchAssetByID(...)`, `queryAssetByID(...)` | GET | `/clairveil/privacy/v1/assets/by_id/{asset_id_hex}` | asset ID → canonical denom |
 
-`scanWalletNotes(...)`는 event filter를 명시하지 않은 기본 wallet scan에서 typed `privacy_scan`을 사용한다. Typed endpoint가 명시적으로 없음을 뜻하는 응답일 때만 `scan_events`로 fallback하며, malformed typed response는 fallback하지 않고 실패한다. One-Proof Batch Transfer는 typed scan만 허용한다.
+`scanWalletNotes(...)`는 event filter를 명시하지 않은 기본 wallet scan에서 typed `privacy_scan`을 사용한다. Typed endpoint가 명시적으로 없음을 뜻하는 응답일 때만 `scan_events`로 fallback하며, malformed typed response는 fallback하지 않고 실패한다. One-Proof Batch Transfer는 typed scan만 허용한다. Wallet은 wire의 `(height, global_sequence, output_index)` 전체 cursor를 사용하고, 해당 cursor까지의 모든 output과 nullifier 상태가 durable하게 반영된 뒤 같은 transaction에서 cursor를 commit해야 한다.
+
+`commitment_paths_at_root`는 요청한 root/height와 정확히 같은 snapshot의 path만 사용한다. Current-root path는 persisted incremental node를 읽으므로 online historical-rebuild budget을 소비하지 않는다. Non-current historical public query는 complete root/count/height metadata를 요구하며 최대 1,024 leaves, keeper process당 동시 rebuild 2개로 제한된다. 한계를 넘으면 `ResourceExhausted`가 반환되며 current root 또는 trusted local historical-path index를 사용해야 한다. 별도 offline recovery/export 상한은 `MaxMerkleRebuildLeaves = 1,048,576`이다. Remote historical root/path 요청은 provider에게 wallet의 시점과 관심 state를 노출한다.
 
 Nullifier와 Merkle path 요청은 spend 대상의 linkage를 query provider에 노출할 수 있다. 기본값에서는 각각 `nullifierFailover: false`, `merklePathFailover: false`로 최초 configured REST endpoint에 고정하며, 여러 endpoint에 노출해도 된다는 제품 결정이 있을 때만 failover를 켠다.
 
@@ -116,12 +157,13 @@ DApp proxy도 마찬가지로 제품 계약이다. 단순 CORS proxy라도 priva
 | 관찰한 값 | 말할 수 있는 것 | 아직 말할 수 없는 것 |
 | --- | --- | --- |
 | prepared sign doc / EVM transaction | proof와 transaction artifact가 준비됨 | network 제출 또는 성공 |
-| `txHash` / `txBytesHash` | 특정 transaction identity가 존재함 | chain 성공과 원하는 output 생성 |
+| network `txHash` 또는 Cosmos exact signed `txBytesHash` | chain에서 조회 가능한 transaction identity가 존재함 | chain 성공과 원하는 output 생성 |
+| EVM `txBytesHash` | prepared EVM transaction request와 reservation의 로컬 binding | network 제출, RPC tx identity 또는 chain 성공. `eth_sendTransaction`이 반환한 `txHash`가 별도로 필요 |
 | successful tx result / receipt | 해당 transaction 실행 성공 | 기대한 payment/output과의 일치 |
 | input nullifier spent | 입력 note가 소비됨 | payment 또는 payroll item 성공 |
-| tx identity + expected output/disclosure evidence 일치 | operation 성공 판정 가능 | 없음. 단, linked input 전체를 함께 검증해야 함 |
+| manager에 저장된 `txHash` 또는 `txBytesHash`와 expected output/disclosure evidence 일치 | 현재 generic matcher에서 operation 성공 판정 가능 | EVM에서 bytes hash만 맞은 경우 network 제출·receipt 확인. linked input 전체도 함께 검증해야 함 |
 
-Reservation API를 사용하는 흐름은 외부 broadcast 직전에 `markBroadcastAttempting(...)`, 실제 제출 후 `markSubmitted(...)` 또는 불확실한 경우 `markUnknown(...)`에 해당하는 durable evidence를 남겨야 한다. SDK broadcast helper는 이 lifecycle을 대신 관리할 수 있다.
+Reservation API를 사용하는 흐름은 외부 broadcast 직전에 `markBroadcastAttempting(...)`, 실제 제출 후 `markSubmitted(...)` 또는 불확실한 경우 `markUnknown(...)`에 해당하는 durable evidence를 남겨야 한다. 현재 저수준 manager는 transport를 구분하지 않고 `txHash`와 `txBytesHash` 중 하나를 제출 identity metadata로 허용하며, `reconcileSpentNotes(...)`도 같은 종류의 저장값과 입력값이 일치하면 identity match로 계산한다. 따라서 EVM request binding만으로도 manager 상태와 operation 성공 조건을 충족할 수 있다. 고수준 EVM send helper는 wallet이 반환한 network `txHash`를 기록하지만, receipt나 RPC transaction identity를 필수로 삼는 제품은 caller-side 정책으로 추가 검증해야 한다. SDK broadcast helper는 이 lifecycle을 대신 관리할 수 있다.
 
 ## 관련 package entrypoint
 

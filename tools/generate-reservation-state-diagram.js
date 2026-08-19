@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 const OUTPUT = fileURLToPath(new URL("../docs/assets/note-reservation-lifecycle.svg", import.meta.url));
 const RESERVATION_SOURCE = new URL("../src/privacy/reservation.js", import.meta.url);
+const CHECK = process.argv.includes("--check");
 
 const W = 2400;
 const H = 1560;
@@ -74,7 +75,7 @@ const groups = [
           { to: "ManualReview", label: "lease / 증명 예외", tone: "uncertain" },
           {
             to: "Released",
-            label: "유효한 lease token으로 atomic release",
+            label: "SDK store atomic release",
             tone: "neutral",
             special: true
           }
@@ -108,7 +109,11 @@ const groups = [
         tone: "confirmed",
         transitions: [
           { to: "Unknown", label: "network 결과 불명", tone: "uncertain" },
-          { to: "Failed", label: "제출 실패 확인", tone: "failure" },
+          {
+            to: "Failed",
+            label: "nullifier 미사용 + tx 실패/부재 확인",
+            tone: "failure"
+          },
           {
             to: "ReplanRequired",
             label: "nullifier 미사용 + tx 실패/부재 확인",
@@ -122,7 +127,11 @@ const groups = [
         tone: "uncertain",
         transitions: [
           { to: "ConfirmedSpent", label: "on-chain spent evidence 확인", tone: "confirmed" },
-          { to: "Failed", label: "제출 실패 확인", tone: "failure" },
+          {
+            to: "Failed",
+            label: "nullifier 미사용 + tx 실패/부재 확인",
+            tone: "failure"
+          },
           {
             to: "ReplanRequired",
             label: "nullifier 미사용 + tx 실패/부재 확인",
@@ -380,7 +389,7 @@ const labels = [
   ["plan에서", "note 선택"],
   "batch lease 획득",
   ["proof 생성 및", "checkpoint 완료"],
-  ["transaction", "제출 확인"],
+  ["제출 identity", "metadata 기록"],
   ["on-chain spent", "evidence 확인"]
 ];
 add(`<circle cx="88" cy="${primaryY}" r="16" fill="#111827"/>`);
@@ -439,17 +448,26 @@ text(1610, 1457, "ConfirmedSpent = 입력 note 소비 확인", {
   fill: colors.red,
   anchor: "start"
 });
-text(1610, 1486, "payment/operation 성공은 operation_status와 transaction/output evidence로 별도 검증", {
+text(1610, 1486, "operation 성공 matcher는 txHash/txBytesHash와 output evidence를 비교 · transport 구분 없음", {
   size: 13,
   fill: colors.muted,
   anchor: "start"
 });
-text(1610, 1510, "SPECIAL = generic transition이 아닌 lease-token 검증 atomic release", {
-  size: 13,
+text(1610, 1510, "SPECIAL = v0.3.1 generic table 외부의 ClairveilJS store atomic release", {
+  size: 12.5,
   fill: colors.muted,
   anchor: "start"
 });
 
 add("</svg>");
-await writeFile(OUTPUT, svg.join(""), "utf8");
-console.log(OUTPUT);
+const generated = svg.join("");
+if (CHECK) {
+  const committed = await readFile(OUTPUT, "utf8");
+  if (committed !== generated) {
+    throw new Error("reservation lifecycle SVG is stale; run npm run docs:diagram:reservation and commit the result");
+  }
+  console.log(`up to date: ${OUTPUT}`);
+} else {
+  await writeFile(OUTPUT, generated, "utf8");
+  console.log(OUTPUT);
+}

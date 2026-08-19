@@ -106,7 +106,7 @@ function validPayload() {
   return payload;
 }
 
-test("transfer v5 prepared payload hash matches the Clairveil main line contract", () => {
+test("transfer v5 prepared payload hash matches the Clairveil v0.3.1 contract", () => {
   const payload = {
     version: "v5", creator: "clair1creator", chain_id: "clairveil-test-1", expires_at_unix: 4102448400,
     root_hex: field(1n), asset_id_hex: field(2n), user_privacy_policy: 0, user_disclosure_mode: 0,
@@ -190,7 +190,7 @@ test("transfer v5 proof and message builders reject expired payloads by default"
   assert.equal(validatePreparedTransferV5Proof(payload, proof, { nowUnix: 0 }), true);
 });
 
-test("standard transfer builder emits the Clairveil 0.2 V5 fixed-envelope contract", async () => {
+test("standard transfer builder emits the Clairveil v0.3.1 V5 fixed-envelope contract", async () => {
   const rootSeed = new Uint8Array(32).fill(7);
   const senderSpend = deriveSpendKeys(rootSeed).pubKey;
   const senderView = deriveViewKeys(rootSeed).pubKey;

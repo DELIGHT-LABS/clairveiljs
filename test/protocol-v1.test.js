@@ -50,7 +50,7 @@ function fieldBytes(value) {
   return output;
 }
 
-test("privacy-fixed-v1 note primitives match the Clairveil main golden vector", () => {
+test("privacy-fixed-v1 note primitives match the Clairveil v0.3.1 golden vector", () => {
   const spend = derivePubKeyFromScalar(17n);
   const view = derivePubKeyFromScalar(19n);
   const note = {
@@ -236,7 +236,7 @@ test("privacy-fixed-v1 disclosure plaintext and transfer blinded digests are can
   assert.throws(() => decryptDisclosureV1(encrypted, 29n, encryptedEnvelopeKindV1.userDisclosure), /kind mismatch/);
 });
 
-test("batch 16x32 vector, disclosure, and intent public inputs match Clairveil main", () => {
+test("batch 16x32 vector, disclosure, and intent public inputs match Clairveil v0.3.1", () => {
   const nullifiers = Array(16).fill(0n); nullifiers[0] = 1n;
   const commitments = Array(32).fill(0n); commitments[0] = 2n;
   const fullDigests = Array(32).fill(0n); fullDigests[0] = 3n;
