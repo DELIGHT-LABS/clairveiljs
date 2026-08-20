@@ -4,7 +4,7 @@ ClairveilJS is a JavaScript SDK for using Clairveil privacy features in browser 
 
 Korean documentation: [README.ko.md](./README.ko.md)
 
-Korean design and operations documents: [System architecture](./docs/architecture.ko.md), [API mapping](./docs/api-mapping.ko.md), [Note reservation lifecycle](./docs/reservation-state-machine.ko.md), [Storage and persistence](./docs/storage-and-persistence.ko.md), [Configuration](./docs/configuration.ko.md), [Errors and recovery](./docs/errors-and-recovery.ko.md)
+Design and operations documents: [System architecture](./docs/architecture.md), [API mapping](./docs/api-mapping.md), [Note reservation lifecycle](./docs/reservation-state-machine.md), [Storage and persistence](./docs/storage-and-persistence.md), [Configuration](./docs/configuration.md), [Errors and recovery](./docs/errors-and-recovery.md)
 
 It uses CosmJS as the transport/signing foundation and provides Clairveil-specific privacy primitives and DApp-friendly APIs:
 
@@ -80,7 +80,7 @@ The client reservation implementation has one explicit SDK extension.
 `Released` when the current lease token is valid. This store-specific atomic
 rollback is the current ClairveilJS behavior; it is not the same as the v0.3.1
 generic transition rule, which rejects `Proving -> Released`. See the
-[reservation state document](./docs/reservation-state-machine.ko.md) for the
+[reservation state document](./docs/reservation-state-machine.md) for the
 exact scope.
 
 Clairveil `v0.3.1` is `PUBLICATION_READY_EXPERIMENTAL`, not
@@ -102,7 +102,7 @@ The pinned protocol baseline is:
 - transfer prepared payload `v5` with proof/request/response `v2`, withdraw prover/final payload and proof/request/response `v2`, and relay handoff/schema `v2`;
 - authoritative `AssetRegistryV1` denom/asset-ID mapping, mandatory audit disclosure, and exactly two 2-byte transfer view tags; the safe scan default still attempts full decryption on a tag mismatch.
 
-See the [API mapping](./docs/api-mapping.ko.md#clairveil-v031-고정-계약)
+See the [API mapping](./docs/api-mapping.md#clairveil-v031-fixed-contract)
 for the exact public-input order and Batch schema digest.
 
 Clairveil v0.3.1 adds `Keeper.DepositWithFunder` as a trusted in-process Go
