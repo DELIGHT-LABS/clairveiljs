@@ -514,7 +514,36 @@ export async function buildTransferMessage({ proverAdapter, ...input } = {}) {
   if (!proverAdapter?.proveTransfer) {
     throw new Error("proverAdapter.proveTransfer is required");
   }
-  const payload = await buildPreparedTransferPayload(input);
+  const hasChainNowCamel = input.chainNowUnix !== undefined && input.chainNowUnix !== null;
+  const hasChainNowSnake = input.chain_now_unix !== undefined && input.chain_now_unix !== null;
+  const chainNowCamel = hasChainNowCamel ? input.chainNowUnix : undefined;
+  const chainNowSnake = hasChainNowSnake ? input.chain_now_unix : undefined;
+  if ((hasChainNowCamel && (!Number.isSafeInteger(chainNowCamel) || chainNowCamel < 0)) ||
+      (hasChainNowSnake && (!Number.isSafeInteger(chainNowSnake) || chainNowSnake < 0)) ||
+      (!hasChainNowCamel && !hasChainNowSnake)) {
+    throw new Error("transfer chainNowUnix is required from authoritative chain time");
+  }
+  if (hasChainNowCamel && hasChainNowSnake && chainNowCamel !== chainNowSnake) {
+    throw new Error("chainNowUnix aliases conflict");
+  }
+  const hasExpiryCamel = input.expiresAtUnix !== undefined && input.expiresAtUnix !== null;
+  const hasExpirySnake = input.expires_at_unix !== undefined && input.expires_at_unix !== null;
+  const expiryCamel = hasExpiryCamel ? input.expiresAtUnix : undefined;
+  const expirySnake = hasExpirySnake ? input.expires_at_unix : undefined;
+  if ((hasExpiryCamel && (!Number.isSafeInteger(expiryCamel) || expiryCamel < 0)) ||
+      (hasExpirySnake && (!Number.isSafeInteger(expirySnake) || expirySnake < 0))) {
+    throw new Error("transfer expiresAtUnix must be a non-negative safe integer");
+  }
+  if (hasExpiryCamel && hasExpirySnake && expiryCamel !== expirySnake) {
+    throw new Error("expiresAtUnix aliases conflict");
+  }
+  const chainNowUnix = hasChainNowCamel ? chainNowCamel : chainNowSnake;
+  const expiresAtUnix = hasExpiryCamel ? expiryCamel : expirySnake;
+  const payload = await buildPreparedTransferPayload({
+    ...input,
+    chainNowUnix,
+    ...(expiresAtUnix === undefined ? {} : { expiresAtUnix })
+  });
   await assertProverNullifiersUnspent(
     payload.inputs.map(inputNote => inputNote.nullifier_hex),
     input.checkNullifiers,
@@ -522,12 +551,12 @@ export async function buildTransferMessage({ proverAdapter, ...input } = {}) {
   const response = await proverAdapter.proveTransfer({
     version: "v2",
     payload
-  }, { signal: input.signal });
+  }, { signal: input.signal, nowUnix: chainNowUnix });
   const proof = response?.proof || response;
   return {
     payload,
     proof,
-    message: buildTransferMsgFromPayloadAndProof(payload, proof)
+    message: buildTransferMsgFromPayloadAndProof(payload, proof, { nowUnix: chainNowUnix })
   };
 }
 

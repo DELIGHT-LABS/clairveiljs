@@ -256,18 +256,25 @@ export interface EvmDepositTransactionResult {
 }
 
 interface EvmTransferTransactionFields extends PreparedTransferPayloadInput {
-  payload?: PreparedTransferPayload;
-  proof?: PreparedTransferProof;
+  expires_at_unix?: number;
   transactionOptions?: EvmPrivacyTransactionOptions;
 }
 
+type EvmAuthoritativeTransferTime =
+  | { chainNowUnix: number; chain_now_unix?: number }
+  | { chain_now_unix: number; chainNowUnix?: number };
+
+type EvmExistingTransferArtifacts =
+  | { payload?: never; proof?: never }
+  | { payload: PreparedTransferPayload; proof: PreparedTransferProof };
+
 export type EvmTransferTransactionInput =
-  | (EvmTransferTransactionFields & {
+  | (EvmTransferTransactionFields & EvmAuthoritativeTransferTime & EvmExistingTransferArtifacts & {
       message: TransferMessage;
       proverAdapter?: ProverAdapter;
       checkNullifiers?: NullifierStatusReader;
     })
-  | (EvmTransferTransactionFields & {
+  | (EvmTransferTransactionFields & EvmAuthoritativeTransferTime & {
       message?: undefined;
       proverAdapter: ProverAdapter;
       checkNullifiers: NullifierStatusReader;

@@ -68,7 +68,9 @@ function normalizeDepositProofURL(urlValue) {
 }
 
 function proverRequestURL(baseURL, path) {
-  const url = new URL(path, baseURL);
+  const url = new URL(baseURL);
+  const prefix = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
+  url.pathname = `${prefix}${String(path || "").replace(/^\/+/, "")}`;
   url.search = "";
   url.hash = "";
   return url;
@@ -461,7 +463,7 @@ function normalizeProofResponseShape(response, kind, expectedResponseVersion, ex
   };
 }
 
-function unwrapTransferProof(request, response) {
+function unwrapTransferProof(request, response, { nowUnix } = {}) {
   const normalized = normalizeProofResponseShape(
     response,
     "transfer",
@@ -469,7 +471,7 @@ function unwrapTransferProof(request, response) {
     preparedTransferV5ProofVersion
   );
   const proof = normalized.proof;
-  validatePreparedTransferV5Proof(request.payload, proof);
+  validatePreparedTransferV5Proof(request.payload, proof, { nowUnix });
   return {
     version: normalized.version,
     proof
@@ -527,7 +529,7 @@ export function createHttpProverAdapter({
   const normalizedBaseURL = normalizeBaseURL(baseURL);
 
   return {
-    async proveTransfer(request, { signal } = {}) {
+    async proveTransfer(request, { signal, nowUnix } = {}) {
       const normalizedRequest = {
         version: request?.version || transferProofRequestVersion,
         payload: request?.payload || request
@@ -549,7 +551,7 @@ export function createHttpProverAdapter({
           fetchImpl,
           signal
         });
-        return unwrapTransferProof(normalizedRequest, response);
+        return unwrapTransferProof(normalizedRequest, response, { nowUnix });
       } catch (error) {
         throw wrapProverError(error);
       }
@@ -725,7 +727,7 @@ export function createAsyncJobProverAdapter({
     throw new Error("getJob(jobId) is required");
   }
 
-  async function waitForProof({ request, submit, unwrap, signal }) {
+  async function waitForProof({ request, submit, unwrap, unwrapOptions, signal }) {
     try {
       if (signal?.aborted) throw proverCancelledError();
       const submitted = await abortable(submit(request, { signal }), signal);
@@ -741,7 +743,7 @@ export function createAsyncJobProverAdapter({
         const status = normalizeJobResult(job);
         if (status === "completed") {
           const response = job.response ?? job.result ?? job;
-          return unwrap(request, response);
+          return unwrap(request, response, unwrapOptions);
         }
         if (status === "failed") {
           throw wrapProverError(new Error(`prover job ${jobId} failed`));
@@ -758,7 +760,7 @@ export function createAsyncJobProverAdapter({
   const adapter = {};
 
   if (typeof submitTransferJob === "function") {
-    adapter.proveTransfer = async (request, { signal } = {}) => {
+    adapter.proveTransfer = async (request, { signal, nowUnix } = {}) => {
       const normalizedRequest = {
         version: request?.version || transferProofRequestVersion,
         payload: request?.payload || request
@@ -773,6 +775,7 @@ export function createAsyncJobProverAdapter({
         request: normalizedRequest,
         submit: submitTransferJob,
         unwrap: unwrapTransferProof,
+        unwrapOptions: { nowUnix },
         signal
       });
     };
@@ -825,14 +828,14 @@ export function createAsyncJobProverAdapter({
 
 export function createStaticProverAdapter({ transferProofHex = "", withdrawProofHex = "" } = {}) {
   return {
-    async proveTransfer(request) {
+    async proveTransfer(request, { nowUnix } = {}) {
       const payload = request?.payload || request;
       const proof = {
         version: preparedTransferV5ProofVersion,
         payload_hash: payload.payload_hash,
         proof_hex: transferProofHex
       };
-      validatePreparedTransferV5Proof(payload, proof);
+      validatePreparedTransferV5Proof(payload, proof, { nowUnix });
       return { version: transferProofResponseVersion, proof };
     },
 

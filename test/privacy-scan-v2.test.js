@@ -20,6 +20,8 @@ import {
   createPrivacyScanValidationStateV2,
   processPrivacyScanOutputV2,
   processPrivacyScanPageV2,
+  restorePrivacyScanValidationStateV2,
+  serializePrivacyScanValidationStateV2,
   validatePrivacyScanPageV2
 } from "clairveiljs/scan";
 import { createClairveilClient } from "clairveiljs/cosmos";
@@ -56,31 +58,52 @@ function baseSummary(eventType, outputCount, overrides = {}) {
   };
 }
 
-function validDepositPage() {
-  const note = noteForScan();
+function validDepositEvent({ index = 0, height = 10, globalSequence = 4, txByte = 7, leafIndex = index } = {}) {
+  const note = noteForScan(index);
   const commitment = canonicalFieldBytes(computeNoteCommitmentV1(note));
   const encryptedNote = encryptDepositNoteV1(note, new Uint8Array(32).fill(5));
-  const summary = baseSummary("deposit", 1);
+  const summary = baseSummary("deposit", 1, {
+    height,
+    globalSequence,
+    txHash: new Uint8Array(32).fill(txByte)
+  });
   return {
-    scanSchemaVersion,
-    summaries: [summary],
-    outputs: [{
+    summary,
+    output: {
       height: summary.height,
       globalSequence: summary.globalSequence,
       outputIndex: 0,
       commitment,
       encryptedNote,
       leafIndexFound: true,
-      leafIndex: 0,
+      leafIndex,
       txHash: summary.txHash,
       eventType: summary.eventType,
       circuitSetId: summary.circuitSetId,
       payloadVersion: summary.payloadVersion,
       scanSchemaVersion
-    }],
-    nextCursor: { height: summary.height, globalSequence: summary.globalSequence, outputIndex: 0 },
-    hasMore: false
+    }
   };
+}
+
+function typedScanResponse(base, overrides = {}) {
+  const response = { ...base, ...overrides };
+  return {
+    scanSchemaVersion: response.scanSchemaVersion ?? scanSchemaVersion,
+    summaries: response.summaries,
+    outputs: response.outputs,
+    nextCursor: response.nextCursor,
+    hasMore: response.hasMore ?? false
+  };
+}
+
+function validDepositPage() {
+  const { summary, output } = validDepositEvent();
+  return typedScanResponse({
+    summaries: [summary],
+    outputs: [output],
+    nextCursor: { height: summary.height, globalSequence: summary.globalSequence, outputIndex: 0 }
+  });
 }
 
 function validBatchOutput(index, auditTarget, selfViewEnabled, note = noteForScan(index + 1)) {
@@ -121,16 +144,16 @@ function validBatchOutput(index, auditTarget, selfViewEnabled, note = noteForSca
   };
 }
 
-function validBatchPage({ selfViewEnabled = true, notes = null } = {}) {
+function validBatchPage({ selfViewEnabled = true, notes = null, outputCount = 2 } = {}) {
   const auditTarget = derivePubKeyFromScalar(97n);
-  const summary = baseSummary("batch_transfer", 2, {
+  const summary = baseSummary("batch_transfer", outputCount, {
     nullifiers: [canonicalFieldBytes(53n)],
     effectId: canonicalFieldBytes(59n),
     auditKeyId: "audit-key-1",
     auditKeyEpoch: 1,
     auditTargetPubkey: packPoint(auditTarget)
   });
-  const outputs = [0, 1].map(index => ({
+  const outputs = Array.from({ length: outputCount }, (_, index) => ({
     height: summary.height,
     globalSequence: summary.globalSequence,
     outputIndex: index,
@@ -145,13 +168,42 @@ function validBatchPage({ selfViewEnabled = true, notes = null } = {}) {
     auditTargetPubkey: summary.auditTargetPubkey,
     ...validBatchOutput(index, auditTarget, selfViewEnabled, notes?.[index])
   }));
-  return {
-    scanSchemaVersion,
+  return typedScanResponse({
     summaries: [summary],
     outputs,
-    nextCursor: { height: summary.height, globalSequence: summary.globalSequence, outputIndex: 1 },
-    hasMore: false
-  };
+    nextCursor: {
+      height: summary.height,
+      globalSequence: summary.globalSequence,
+      outputIndex: outputCount - 1
+    }
+  });
+}
+
+function partialBatchPage(batch, outputIndex = 0) {
+  const output = batch.outputs[outputIndex];
+  return typedScanResponse(batch, {
+    outputs: [output],
+    nextCursor: {
+      height: output.height,
+      globalSequence: output.globalSequence,
+      outputIndex: output.outputIndex
+    },
+    hasMore: true
+  });
+}
+
+function pendingBatchFixture(batchOptions) {
+  const batch = validBatchPage(batchOptions);
+  const firstPage = partialBatchPage(batch);
+  const state = createPrivacyScanValidationStateV2();
+  validatePrivacyScanPageV2(firstPage, { validationState: state });
+  return { batch, firstPage, state };
+}
+
+function roundTripValidationState(state) {
+  return restorePrivacyScanValidationStateV2(
+    JSON.parse(JSON.stringify(serializePrivacyScanValidationStateV2(state)))
+  );
 }
 
 test("typed privacy scan rejects event-specific audit and disclosure sentinel violations", () => {
@@ -235,13 +287,16 @@ test("typed privacy scan rejects mixed batch self-view records and terminal outp
   };
   assert.throws(() => validatePrivacyScanPageV2(mixedSelfView), /self-view disclosure must be all-or-none/);
 
-  const prefix = {
-    ...batch,
-    outputs: [batch.outputs[0]],
-    nextCursor: { height: 10, globalSequence: 4, outputIndex: 0 }
-  };
+  const prefix = { ...partialBatchPage(batch), hasMore: false };
   assert.throws(() => validatePrivacyScanPageV2(prefix), /completed page ends with an incomplete output event/);
-  assert.doesNotThrow(() => validatePrivacyScanPageV2({ ...prefix, hasMore: true }));
+  assert.throws(
+    () => validatePrivacyScanPageV2({ ...prefix, hasMore: true }),
+    /partial page requires validation state/
+  );
+  assert.doesNotThrow(() => validatePrivacyScanPageV2(
+    { ...prefix, hasMore: true },
+    { validationState: createPrivacyScanValidationStateV2() }
+  ));
   assert.throws(
     () => validatePrivacyScanPageV2({
       ...batch,
@@ -249,6 +304,20 @@ test("typed privacy scan rejects mixed batch self-view records and terminal outp
       nextCursor: { height: 0, globalSequence: 0, outputIndex: 0 }
     }),
     /completed page omits an output from a summarized event/
+  );
+});
+
+test("typed privacy scan rejects a partial page that skips an earlier output-bearing summary", () => {
+  const first = validDepositEvent();
+  const second = validDepositEvent({ index: 1, height: 11, globalSequence: 5, txByte: 8, leafIndex: 1 });
+  assert.throws(
+    () => validatePrivacyScanPageV2(typedScanResponse({
+      summaries: [first.summary, second.summary],
+      outputs: [second.output],
+      nextCursor: { height: second.summary.height, globalSequence: second.summary.globalSequence, outputIndex: 0 },
+      hasMore: true
+    })),
+    /partial page omits an output from a summarized event/
   );
 });
 
@@ -265,21 +334,16 @@ test("typed privacy scan accepts SHA-256 batch effect IDs outside the BN254 fiel
 
 test("typed privacy scan validation state binds batch self-view disclosure across cursor pages", () => {
   const batch = validBatchPage();
-  const firstPage = {
-    ...batch,
-    outputs: [batch.outputs[0]],
-    nextCursor: { height: 10, globalSequence: 4, outputIndex: 0 },
-    hasMore: true
-  };
-  const finalPage = {
-    ...batch,
+  const firstPage = partialBatchPage(batch);
+  const finalPage = typedScanResponse(batch, {
     outputs: [batch.outputs[1]],
     hasMore: false
-  };
+  });
   const state = createPrivacyScanValidationStateV2();
   const finalRequest = { after: firstPage.nextCursor, validationState: state };
   assert.doesNotThrow(() => validatePrivacyScanPageV2(firstPage, { validationState: state }));
   assert.equal(state.batch_self_view_by_event.get("10/4"), true);
+  assert.equal(state.pending_summary_by_event.get("10/4").output_count, 2);
   assert.throws(
     () => validatePrivacyScanPageV2({
       ...finalPage,
@@ -289,20 +353,115 @@ test("typed privacy scan validation state binds batch self-view disclosure acros
   );
   assert.doesNotThrow(() => validatePrivacyScanPageV2(finalPage, finalRequest));
   assert.equal(state.batch_self_view_by_event.size, 0);
+  assert.equal(state.pending_summary_by_event.size, 0);
+});
+
+test("typed privacy scan rejects a resumed summary that shrinks its original output count", () => {
+  const { batch, firstPage, state } = pendingBatchFixture();
+
+  assert.throws(
+    () => validatePrivacyScanPageV2({
+      ...batch,
+      summaries: [{ ...batch.summaries[0], outputCount: 1 }],
+      outputs: [],
+      nextCursor: firstPage.nextCursor,
+      hasMore: false
+    }, { after: firstPage.nextCursor, validationState: state }),
+    /does not match its pending summary identity/
+  );
+  assert.equal(state.pending_summary_by_event.get("10/4").output_count, 2);
+});
+
+test("typed privacy scan preserves pending summary identity across serialization and restart", () => {
+  const { batch, firstPage, state } = pendingBatchFixture();
+  const restored = roundTripValidationState(state);
+
+  assert.throws(
+    () => validatePrivacyScanPageV2({
+      ...batch,
+      summaries: [{ ...batch.summaries[0], txHash: new Uint8Array(32).fill(8) }],
+      outputs: [],
+      nextCursor: firstPage.nextCursor,
+      hasMore: false
+    }, { after: firstPage.nextCursor, validationState: restored }),
+    /does not match its pending summary identity/
+  );
+  assert.equal(restored.pending_summary_by_event.get("10/4").tx_hash, "07".repeat(32));
+  assert.doesNotThrow(() => validatePrivacyScanPageV2({
+    ...batch,
+    outputs: [batch.outputs[1]],
+    hasMore: false
+  }, { after: firstPage.nextCursor, validationState: restored }));
+  assert.equal(restored.pending_summary_by_event.size, 0);
+});
+
+test("typed privacy scan rejects a resumed cursor that skips a pending output after restart", () => {
+  const { batch, state } = pendingBatchFixture({ outputCount: 3 });
+  const restored = roundTripValidationState(state);
+
+  assert.throws(
+    () => validatePrivacyScanPageV2({
+      ...batch,
+      outputs: [batch.outputs[2]],
+      hasMore: false
+    }, {
+      after: { height: 10, globalSequence: 4, outputIndex: 1 },
+      validationState: restored
+    }),
+    /pending summary does not match the request cursor/
+  );
+  assert.equal(restored.pending_summary_by_event.get("10/4").last_output_index, 0);
+});
+
+test("typed privacy scan rejects a snapshot with its pending-summary field removed", () => {
+  const { state } = pendingBatchFixture();
+  const snapshot = structuredClone(serializePrivacyScanValidationStateV2(state));
+  delete snapshot.pending_summary_by_event;
+
+  assert.throws(
+    () => restorePrivacyScanValidationStateV2(snapshot),
+    /validation state snapshot is invalid/
+  );
+});
+
+test("typed privacy scan rejects inconsistent pending-summary and batch self-view state", () => {
+  const { state } = pendingBatchFixture();
+  const snapshot = structuredClone(serializePrivacyScanValidationStateV2(state));
+
+  state.batch_self_view_by_event.clear();
+  assert.throws(
+    () => serializePrivacyScanValidationStateV2(state),
+    /missing batch self-view state/
+  );
+  state.batch_self_view_by_event.set("10/4", true);
+  state.pending_summary_by_event.clear();
+  assert.throws(
+    () => serializePrivacyScanValidationStateV2(state),
+    /does not match a pending batch summary/
+  );
+
+  assert.throws(
+    () => restorePrivacyScanValidationStateV2({
+      ...snapshot,
+      batch_self_view_by_event: []
+    }),
+    /missing batch self-view state/
+  );
+  assert.throws(
+    () => restorePrivacyScanValidationStateV2({
+      ...snapshot,
+      pending_summary_by_event: []
+    }),
+    /does not match a pending batch summary/
+  );
 });
 
 test("Cosmos pagination retains batch self-view validation state", async () => {
   const batch = validBatchPage();
-  const pages = [{
-    ...batch,
-    outputs: [batch.outputs[0]],
-    nextCursor: { height: 10, globalSequence: 4, outputIndex: 0 },
-    hasMore: true
-  }, {
-    ...batch,
+  const pages = [partialBatchPage(batch), typedScanResponse(batch, {
     outputs: [{ ...batch.outputs[1], selfViewDisclosurePayload: new Uint8Array() }],
     hasMore: false
-  }];
+  })];
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
@@ -342,17 +501,11 @@ test("Cosmos queryPrivacyScan returns only validator-issued typed pages", async 
 
 test("durable privacy scan cursors retain partial batch validation across a restart", async () => {
   const batch = validBatchPage();
-  const firstPage = {
-    ...batch,
-    outputs: [batch.outputs[0]],
-    nextCursor: { height: 10, globalSequence: 4, outputIndex: 0 },
-    hasMore: true
-  };
-  const finalPage = {
-    ...batch,
+  const firstPage = partialBatchPage(batch);
+  const finalPage = typedScanResponse(batch, {
     outputs: [{ ...batch.outputs[1], selfViewDisclosurePayload: new Uint8Array() }],
     hasMore: false
-  };
+  });
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
@@ -362,7 +515,22 @@ test("durable privacy scan cursors retain partial batch validation across a rest
   const first = await client.scanNotes({ rootSeed: new Uint8Array(32).fill(9), maxPages: 1 });
   assert.deepEqual(first.scanCursor.validation_state, {
     version: "privacy-scan-validation-v2",
-    batch_self_view_by_event: [{ event_key: "10/4", self_view_enabled: true }]
+    batch_self_view_by_event: [{ event_key: "10/4", self_view_enabled: true }],
+    pending_summary_by_event: [{
+      event_key: "10/4",
+      tx_hash: "07".repeat(32),
+      event_type: "batch_transfer",
+      last_output_index: 0,
+      nullifiers: ["00".repeat(31) + "35"],
+      output_count: 2,
+      circuit_set_id: "privacy-note-v1",
+      payload_version: "privacy-fixed-v1",
+      scan_schema_version: "privacy-scan-v2",
+      audit_key_id: "audit-key-1",
+      audit_key_epoch: "1",
+      audit_target_pubkey: Buffer.from(batch.summaries[0].auditTargetPubkey).toString("hex"),
+      effect_id: "00".repeat(31) + "3b"
+    }]
   });
   assert.deepEqual(first.nextScanOptions.validationStateSnapshot, first.scanCursor.validation_state);
 

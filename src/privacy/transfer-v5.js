@@ -120,9 +120,12 @@ function randomNonZeroField(excluded = new Set()) {
 }
 
 function canonicalExpiryFromInput(expiresAtUnix, chainNowUnix) {
-  const now = chainNowUnix == null ? Math.floor(Date.now() / 1000) : Number(chainNowUnix);
+  if (chainNowUnix == null) {
+    throw new Error("transfer chainNowUnix is required from authoritative chain time");
+  }
+  const now = chainNowUnix;
   if (!Number.isSafeInteger(now) || now < 0) throw new Error("transfer chainNowUnix must be a non-negative safe integer");
-  const expiry = expiresAtUnix == null ? now + 1800 : Number(expiresAtUnix);
+  const expiry = expiresAtUnix == null ? now + 1800 : expiresAtUnix;
   if (!Number.isSafeInteger(expiry) || expiry <= now) throw new Error("transfer expires_at_unix must be a future safe integer");
   return expiry;
 }
@@ -978,10 +981,14 @@ export function validatePreparedTransferV5Proof(payload, proof, { nowUnix } = {}
   return true;
 }
 
-export function buildTransferV5MsgFromPayloadAndProof(payload, proof, { nowUnix } = {}) {
+export function buildTransferV5MsgFromPayloadAndProof(payload, proof, { nowUnix, creator } = {}) {
   validatePreparedTransferV5Proof(payload, proof, { nowUnix });
+  const messageCreator = String(creator ?? payload.creator ?? "").trim();
+  if (!messageCreator) throw new Error("transfer message creator is required");
   return {
-    creator: payload.creator,
+    // Creator is deliberately outside the canonical proof effect. A relayer
+    // may replace it without rebuilding the payload or proof.
+    creator: messageCreator,
     proof: bytesFromHex(proof.proof_hex, "transfer v5 proof"),
     root: bytesFromHex(payload.root_hex, "transfer v5 root"),
     nullifiers: payload.inputs.map((input, index) => bytesFromHex(input.nullifier_hex, `transfer v5 nullifier ${index}`)),

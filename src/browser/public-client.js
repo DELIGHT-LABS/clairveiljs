@@ -122,7 +122,7 @@ async function fetchJson(url, { timeoutMs = defaultFetchTimeoutMs, method = "GET
     return response.json();
   } catch (error) {
     if (error?.name === "AbortError") {
-      const timeoutError = new Error(`fetch request timed out after ${resolvedTimeoutMs}ms: ${url}`);
+      const timeoutError = new Error(`fetch request timed out after ${resolvedTimeoutMs}ms`);
       timeoutError.code = "FETCH_TIMEOUT";
       throw timeoutError;
     }

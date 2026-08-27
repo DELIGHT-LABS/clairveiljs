@@ -37,10 +37,27 @@ export const privacyScanEventTypeV2: Readonly<{
 }>;
 export const privacyScanValidationStateVersionV2: "privacy-scan-validation-v2";
 
+export interface PrivacyScanPendingSummaryIdentityV2 {
+  tx_hash: string;
+  event_type: "deposit" | "shielded_transfer" | "batch_transfer" | "withdraw";
+  /** Exact output cursor validated on the previous partial page. */
+  last_output_index: number;
+  nullifiers: readonly string[];
+  output_count: number;
+  circuit_set_id: "privacy-note-v1";
+  payload_version: "privacy-fixed-v1";
+  scan_schema_version: "privacy-scan-v2";
+  audit_key_id: string;
+  audit_key_epoch: string;
+  audit_target_pubkey: string;
+  effect_id: string;
+}
+
 /** Mutable state supplied to validatePrivacyScanPageV2 across cursor pages. */
 export interface PrivacyScanValidationStateV2 {
   version: "privacy-scan-validation-v2";
   batch_self_view_by_event: Map<string, boolean>;
+  pending_summary_by_event: Map<string, Readonly<PrivacyScanPendingSummaryIdentityV2>>;
 }
 
 /** JSON-safe cursor payload for restoring typed-page validation after restart. */
@@ -49,6 +66,9 @@ export interface PrivacyScanValidationStateSnapshotV2 {
   batch_self_view_by_event: readonly Readonly<{
     event_key: string;
     self_view_enabled: boolean;
+  }>[];
+  pending_summary_by_event: readonly Readonly<PrivacyScanPendingSummaryIdentityV2 & {
+    event_key: string;
   }>[];
 }
 

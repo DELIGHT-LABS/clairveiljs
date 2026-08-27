@@ -114,7 +114,10 @@ test("nonpayable operations reject value and payable deposit bindings survive se
   const transferClient = createClairveilEvmClient({
     contractAdapter: nonpayable
   });
-  const transfer = await transferClient.buildTransferTransaction({ message: {} });
+  const transfer = await transferClient.buildTransferTransaction({
+    message: { expiresAtUnix: 2_000n },
+    chainNowUnix: 1_000
+  });
   await transferClient.sendTransaction(wallet, JSON.parse(JSON.stringify(transfer.transaction)));
   await assert.rejects(
     () => transferClient.sendTransaction(wallet, { ...transfer.transaction, value: "0x5" }),

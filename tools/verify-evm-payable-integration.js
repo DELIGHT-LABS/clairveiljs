@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 export const payableEvmEvidenceSchema = "clairveil-payable-evm-e2e-v1";
 export const verifiedClairveilRelease = "v0.3.1";
-export const verifiedClairveilCommit = "1a6ce6a0a0e10b765c025072b44c2364e9711b48";
+export const verifiedClairveilCommit = "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b";
 export const verifiedSdkVersion = "0.3.1";
 
 const stateFields = [

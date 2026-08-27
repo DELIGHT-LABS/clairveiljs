@@ -51,9 +51,16 @@ import {
   type ValidatedPrivacyScanPageV2
 } from "clairveiljs/scan";
 import type { PreparedBatchTransferPayload } from "clairveiljs/batch-transfer";
-import { runClairveilConformanceFixtures } from "clairveiljs/conformance";
+import {
+  noteReservationContractVersionV3,
+  validateNoteReservationContractV3,
+  runClairveilConformanceFixtures,
+  type NoteReservationContractV3
+} from "clairveiljs/conformance";
 import {
   createClairveilClient,
+  createClairveilRegistry,
+  MsgWithdraw,
   type BatchTransferOperationEvidence,
   type PreparedTransfer as CosmosPreparedTransfer,
   type BatchOperationEvidenceHashes,
@@ -103,7 +110,8 @@ import {
   MemoryReservationStore,
   reservationHeartbeatIntervalMs,
   type InitialNoteReservationRecord,
-  type ReservationBatch
+  type ReservationBatch,
+  type ReservationRelayTransactionEvidence
 } from "clairveiljs/reservation";
 import {
   bech32AddressToEvm,
@@ -122,6 +130,19 @@ import {
 } from "clairveiljs/prover";
 
 const rootSeed = new Uint8Array(32);
+const decodedCosmosWithdraw = MsgWithdraw.decode(new Uint8Array());
+const decodedCosmosWithdrawRecipient: string = decodedCosmosWithdraw.recipient;
+const clairveilRegistry = createClairveilRegistry();
+const encodedCosmosWithdraw: Uint8Array = clairveilRegistry.encode({
+  typeUrl: MsgWithdraw.typeUrl,
+  value: MsgWithdraw.fromPartial({ recipient: decodedCosmosWithdrawRecipient })
+});
+void encodedCosmosWithdraw;
+// @ts-expect-error Registry codecs need fromPartial or create for value construction.
+createClairveilRegistry([["/example.Incomplete", {
+  encode: () => ({ finish: () => new Uint8Array() }),
+  decode: () => ({})
+}]]);
 // @ts-expect-error V5 preparation requires the fixed-circuit input contract.
 buildPreparedTransferV5Payload({});
 const batchOnlyAsyncProver = createAsyncJobProverAdapter({
@@ -183,6 +204,12 @@ const preparedPayrollOperation: Promise<PreparedOneProofPayrollOperation> = prep
 });
 async function provePayrollOperationTypes(): Promise<void> {
   const prepared = await preparedPayrollOperation;
+  const payrollSignDoc = {
+    bodyBytes: "AA==",
+    authInfoBytes: "AA==",
+    chainId: "demo-1",
+    accountNumber: "0"
+  };
   const operationEvidence: OneProofPayrollOperationEvidence = buildOneProofPayrollOperationEvidence(prepared);
   const operationEvidenceHash: string = oneProofPayrollOperationEvidenceHash(operationEvidence);
   const proven: ProvenOneProofPayrollOperation = await provePreparedOneProofPayrollOperation(prepared, {
@@ -197,11 +224,12 @@ async function provePayrollOperationTypes(): Promise<void> {
   });
   await createOneProofPayrollBatchSignDoc(proven, {
     cosmosClient: {
-      createBatchTransferSignDoc: async input => input
+      createBatchTransferSignDoc: async () => payrollSignDoc
     },
     signer: "demo1example",
     pubKeyHex: "02".padEnd(66, "0"),
-    gasLimit: 1
+    gasLimit: 1,
+    feeAmount: [{ denom: "udemo", amount: "10" }]
   });
   await reconcileOneProofPayrollOperationEvidence({
     prepared,
@@ -214,7 +242,7 @@ async function provePayrollOperationTypes(): Promise<void> {
     prepared,
     execution: proven,
     reservationBatch,
-    signDoc: { messageCreator: "clair1creator" },
+    signDoc: payrollSignDoc,
     signedTxBytes: new Uint8Array([1, 2, 3])
   });
   const restoredArtifact: OneProofPayrollArtifact = parseOneProofPayrollArtifact(serializeOneProofPayrollArtifact(artifact));
@@ -225,24 +253,39 @@ async function provePayrollOperationTypes(): Promise<void> {
   });
   const retryAction: "reconcile-succeeded" | "manual-review" | "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction" = retryInspection.next_action;
   void retryAction;
+  if (retryInspection.next_action === "retransmit-signed-transaction") {
+    await retransmitOneProofPayrollArtifact(restoredArtifact, {
+      reservationManager,
+      nowUnix: 1_700_000_000,
+      retryDecision: retryInspection.retry_decision,
+      broadcastSignedTx: async (bytes, context) => ({ bytes, hash: context.tx_bytes_hash })
+    });
+  }
+  // @ts-expect-error Exact payroll retransmit requires an inspect-issued retry decision.
   await retransmitOneProofPayrollArtifact(restoredArtifact, {
+    reservationManager,
     nowUnix: 1_700_000_000,
-    broadcastSignedTx: async (bytes, context) => ({ bytes, hash: context.tx_bytes_hash })
+    broadcastSignedTx: async () => ({})
   });
   await markOneProofPayrollReservationBroadcastAttempting(reservationManager, reservationBatch, proven, {
-    txBytesHash: "ab".repeat(32),
+    artifact,
     reason: "cosmos_broadcast_tx_sync"
   });
-  // @ts-expect-error A broadcast attempt needs a transaction or tx-bytes identity.
   await markOneProofPayrollReservationBroadcastAttempting(reservationManager, reservationBatch, proven, {
-    signDocHash: "sign-doc-only"
+    // @ts-expect-error A Cosmos payroll marker derives identity from a verified signed artifact.
+    txHash: "ab".repeat(32),
+    txBytesHash: "ab".repeat(32),
+    signDocHash: "cd".repeat(32)
   });
   await markOneProofPayrollReservationSubmitted(reservationManager, reservationBatch, proven, {
-    txHash: "TX-HASH"
+    txHash: "cd".repeat(32),
+    txBytesHash: "cd".repeat(32),
+    signDocHash: "ef".repeat(32)
   });
-  // @ts-expect-error Submission must retain a durable transaction or tx-bytes identity.
+  // @ts-expect-error Cosmos payroll submission requires all three exact identity fields.
   await markOneProofPayrollReservationSubmitted(reservationManager, reservationBatch, proven, {
-    signDocHash: "sign-doc-only"
+    txHash: "cd".repeat(32),
+    txBytesHash: "cd".repeat(32)
   });
   void operationEvidenceHash;
   void exact32PayrollPlan;
@@ -576,12 +619,9 @@ createNoteReservationManager({
   indexKey: rootSeed
 });
 const reservationStoreForReplacementType = new MemoryReservationStore();
-async function reservationReplacementTypeExample() {
-  const reservation = await reservationManager.getReservation("reservation-id");
-  return reservationStoreForReplacementType.unsafeReplaceReservation(reservation);
-}
-void reservationReplacementTypeExample;
-// @ts-expect-error unsafeReplaceReservation requires a complete stored record rather than merging a patch.
+// @ts-expect-error Raw lifecycle replacement is not a public production API.
+reservationStoreForReplacementType.unsafeReplaceState({ version: 1, reservations: [] });
+// @ts-expect-error Per-record replacement cannot bypass manager/CAS invariants.
 reservationStoreForReplacementType.unsafeReplaceReservation({ reservation_id: "reservation-id" });
 const rootReservationManager = createRootNoteReservationManager({
   store: new MemoryReservationStore(),
@@ -653,7 +693,35 @@ const attemptingReservations = reservationManager.markBroadcastAttempting([], {
 const rejectedReservations = reservationManager.markBroadcastRejected([], {
   leaseToken: "lease",
   providerCode: 4001,
+  rpcInvoked: false,
+  walletRejectedBeforeBroadcast: true,
   error: "User rejected the request"
+});
+const failedBroadcastReservations = reservationManager.markBroadcastFailed([], {
+  txHashChecked: "ab".repeat(32),
+  checkedHeight: 10,
+  nullifierUnspentConfirmed: true,
+  txAbsentOrFailedConfirmed: true
+});
+const failedBroadcastReservationsSnake = reservationManager.markBroadcastFailed([], {
+  tx_hash_checked: "ab".repeat(32),
+  checked_height: 10,
+  nullifier_unspent_confirmed: true,
+  tx_absent_or_failed_confirmed: true
+});
+const relayTransactionEvidence: ReservationRelayTransactionEvidence = {
+  operationId: "relay-operation",
+  payloadHash: "ab".repeat(32),
+  txHash: "CD".repeat(32),
+  checkedHeight: 10,
+  transactionIncludedConfirmed: true,
+  payloadHashMatched: true
+};
+const relaySubmittedReservations = reservationManager.recordRelayTransactionEvidence(relayTransactionEvidence);
+reservationManager.recordRelayTransactionEvidence({
+  ...relayTransactionEvidence,
+  // @ts-expect-error inclusion evidence must be the literal true value.
+  transactionIncludedConfirmed: false
 });
 const submittedReservations = reservationManager.markSubmitted([], {
   leaseToken: "lease",
@@ -690,6 +758,16 @@ const replanReservations = reservationManager.markReplanRequired([], {
   txHashChecked: "aa".repeat(32),
   error: "receipt failed"
 });
+const expiredProofReadyRecovery = reservationManager.recoverExpiredProofReadyBroadcastFailure({
+  operationId: "operation-after-restart",
+  txHashChecked: "aa".repeat(32),
+  txBytesHash: "ab".repeat(32),
+  signDocHash: "ac".repeat(32),
+  checkedHeight: 124,
+  executionFailedConfirmed: true,
+  inputNullifiers: ["bb".repeat(32)],
+  checkNullifiers: async nullifiers => new Map(nullifiers.map(value => [value, false]))
+});
 const manualReviewResolution = reservationManager.resolveManualReview([], {
   target: "ReplanRequired",
   operatorId: "ops@example.test",
@@ -698,16 +776,20 @@ const manualReviewResolution = reservationManager.resolveManualReview([], {
 const depositInput: PrepareDepositInput = {
   ...walletIdentity,
   amount: "1udemo",
-  proofHex: "ab"
+  proofHex: "ab",
+  gasLimit: 2500000,
+  feeAmount: [{ denom: "udemo", amount: "1250" }]
 };
 const transferInput: PrepareCosmosTransferInput = {
   ...walletIdentity,
   amount: "1udemo",
   recipient: "demos1recipient",
+  chainNowUnix: 4102444800,
   privacyPolicy: "all-private",
   disclosureMode: "none",
   expectedRecipientHash: "recipient-hash",
   expectedAmountHash: "amount-hash",
+  feeAmount: [{ denom: "udemo", amount: "200000" }],
   scan: {
     afterHeight: 0,
     limit: 200,
@@ -715,6 +797,13 @@ const transferInput: PrepareCosmosTransferInput = {
   },
   reservationManager
 };
+// @ts-expect-error Executable transfer preparation requires authoritative chain time.
+const missingTransferChainTime: PrepareCosmosTransferInput = {
+  ...walletIdentity,
+  amount: "1udemo",
+  recipient: "demos1recipient"
+};
+void missingTransferChainTime;
 // @ts-expect-error Cosmos transfer evidence requires both recipient and amount hashes.
 const invalidCosmosTransferEvidence: PrepareCosmosTransferInput = {
   ...walletIdentity,
@@ -741,6 +830,7 @@ const withdrawInput: PrepareCosmosWithdrawInput = {
   ...walletIdentity,
   amount: "1udemo",
   recipient: "demo1recipient",
+  fee_amount: [{ denom: "udemo", amount: "125000" }],
   scan: {
     afterHeight: 0,
     limit: 200,
@@ -770,9 +860,15 @@ const scanInput: ScanWalletNotesInput = {
   maxPages: 3,
   afterHeight: 12,
   page: 2,
-  eventTypes: ["deposit", "shielded_transfer"],
+  eventTypes: [],
   includeFoundNotes: true
 };
+const filteredWalletScanInput: ScanWalletNotesInput = {
+  ...walletIdentity,
+  // @ts-expect-error high-level wallet scans never filter the typed projection.
+  eventTypes: ["deposit"]
+};
+void filteredWalletScanInput;
 // @ts-expect-error walletType rejects misspellings.
 const invalidWalletType: PrepareDepositInput = { ...walletIdentity, walletType: "evmm", amount: "1udemo" };
 // @ts-expect-error Cosmos deposit requires proof/proofHex/depositProofProvider.
@@ -825,19 +921,22 @@ const cosmosTransferResult: Promise<PreparedCosmosTransfer> = dappClient.prepare
 const cosmosInlineTransferResult: Promise<PreparedCosmosTransfer> = dappClient.prepareTransfer({
   ...walletIdentity,
   amount: "1udemo",
-  recipient: "demos1recipient"
+  recipient: "demos1recipient",
+  chainNowUnix: 4102444800
 });
 const evmProfileTransferResult: Promise<PreparedEvmTransfer> = evmProfileDappClient.prepareTransfer({
   ...walletIdentity,
   evmWallet: evmPreparationWallet,
   amount: "1udemo",
-  recipient: "demos1recipient"
+  recipient: "demos1recipient",
+  chainNowUnix: 4102444800
 });
 const evmDirectTransferResult: Promise<PreparedEvmTransfer> = evmDirectDappClient.prepareTransfer({
   ...walletIdentity,
   evmWallet: evmPreparationWallet,
   amount: "1udemo",
-  recipient: "demos1recipient"
+  recipient: "demos1recipient",
+  chainNowUnix: 4102444800
 });
 const transferResult: Promise<PreparedTransfer> = dappClient.prepareTransfer(transferInput);
 const transferBatchInput: PrepareCosmosTransferBatchInput = {
@@ -996,6 +1095,10 @@ const batchPlanReady: boolean = batchPlan.canBuildTx;
 const conformanceResult = runClairveilConformanceFixtures({
   fixtureNames: ["privacy_wallet_golden_vectors.json"]
 });
+declare const reservationContractInput: unknown;
+const reservationContract: NoteReservationContractV3 =
+  validateNoteReservationContractV3(reservationContractInput);
+const reservationContractVersion: 3 = noteReservationContractVersionV3;
 const cosmosReserveResult: Promise<ReserveResponse> = cosmos.fetchReserve("udemo");
 const cosmosTxRawCheckpoint = cosmos.signDirect({
   wallet: {
@@ -1013,6 +1116,7 @@ const cosmosTxRawCheckpoint = cosmos.signDirect({
 cosmosTxRawCheckpoint.then(checkpoint => {
   const exactTxRawBytes: Uint8Array = checkpoint.txRawBytes;
   const exactTxRawHash: string = checkpoint.txBytesHash;
+  const exactCosmosTxHash: string = checkpoint.txHash;
   cosmos.broadcastTxRawBytes(exactTxRawBytes);
   void exactTxRawHash;
 });
@@ -1029,6 +1133,7 @@ const cosmosPreparedTransferBatch = cosmos.prepareTransferBatch({
   afterSequence: 11,
   expectedRecipientHash: "recipient-hash",
   expectedAmountHashes: ["amount-hash-0", "amount-hash-1"],
+  fee_amount: [{ denom: "udemo", amount: "250000" }],
   reservationManager,
   onPreparedPayload() {},
   onPreparedProof() {}
@@ -1039,7 +1144,8 @@ const finalizedCosmosBatch = cosmos.finalizePreparedBatchTransfer({
   proof: undefined as never,
   signer: "demo1sender",
   pubKeyHex: "02".repeat(33),
-  gasLimit: 25000000,
+  gas_limit: 25000000n,
+  fee_amount: [{ denom: "udemo", amount: "250000" }],
   amounts: ["1udemo"],
   recipient: "demos1recipient",
   operationId: "batch-operation-1",
@@ -1053,6 +1159,7 @@ const finalizedDappBatch = dappClient.finalizePreparedBatchTransfer({
   address: "demo1sender",
   pubKeyHex: "02".repeat(33),
   gasLimit: 25000000,
+  feeAmount: [{ denom: "udemo", amount: "250000" }],
   amounts: ["1udemo"],
   recipient: "demos1recipient",
   operationId: "batch-operation-1",
@@ -1097,6 +1204,9 @@ cosmos.prepareTransfer({
   amount: "1udemo",
   recipient: "demos1recipient",
   proverAdapter: undefined as never,
+  chainNowUnix: 4102444800,
+  gas_limit: 8000000,
+  feeAmount: [{ denom: "udemo", amount: "200000" }],
   after_height: 20,
   after_sequence: 21
 });
@@ -1105,6 +1215,8 @@ cosmos.prepareWithdraw({
   amount: "1udemo",
   recipient: "demo1recipient",
   proverAdapter: undefined as never,
+  gas_limit: 5000000,
+  fee_amount: [{ denom: "udemo", amount: "125000" }],
   afterHeight: 30,
   afterSequence: 31
 });
@@ -1251,11 +1363,31 @@ planTransferBatchNotes({ notes: [legacyFoundNote], amounts: ["1udemo"] });
 createClairveilEvmClient().sendTransaction(null, nativeSendTx, { reservationManager });
 const reservationBoundCosmosBroadcast = cosmos.broadcastSignedTx(
   { bodyBytes: "" as never, authInfoBytes: "" as never, signature: "" as never },
-  { reservationManager, reservation: {} as ReservationBatch }
+  {
+    reservationManager,
+    reservation: {} as ReservationBatch,
+    beforeBroadcast(identity) {
+      const signedTxHash: string = identity.txHash;
+      const exactTxRawHash: string = identity.txBytesHash;
+      const boundSignDocHash: string = identity.signDocHash;
+      void signedTxHash;
+      void exactTxRawHash;
+      void boundSignDocHash;
+    }
+  }
 );
 const reservationBatchBoundCosmosBroadcast = cosmos.broadcastSignedTx(
   { bodyBytes: "" as never, authInfoBytes: "" as never, signature: "" as never },
   { reservationManager, reservationBatch: {} as ReservationBatch }
+);
+cosmos.broadcastSignedTx(
+  { bodyBytes: "" as never, authInfoBytes: "" as never, signature: "" as never },
+  {
+    reservationManager,
+    reservation: {} as ReservationBatch,
+    // @ts-expect-error the final pre-broadcast fence must be synchronous.
+    beforeBroadcast: async () => {}
+  }
 );
 const reservationSnakeBatchBoundCosmosBroadcast = cosmos.broadcastSignedTx(
   { bodyBytes: "" as never, authInfoBytes: "" as never, signature: "" as never },
@@ -1263,6 +1395,11 @@ const reservationSnakeBatchBoundCosmosBroadcast = cosmos.broadcastSignedTx(
 );
 cosmos.broadcastSignedTx(
   { bodyBytes: "" as never, authInfoBytes: "" as never, signature: "" as never },
+  { relayPayload: relayBroadcastPayload, getChainNowUnix: async () => 4102444800 }
+);
+cosmos.broadcastSignedTx(
+  { bodyBytes: "" as never, authInfoBytes: "" as never, signature: "" as never },
+  // @ts-expect-error relay Cosmos broadcasts require a fresh provider, not a captured timestamp.
   { relayPayload: relayBroadcastPayload, chainNowUnix: 4102444800 }
 );
 cosmos.buildRelayWithdrawMessageFromPayload({
@@ -1460,10 +1597,14 @@ const evmExistingWithdrawMessage = {
   chainId: "demo-1",
   expiresAtUnix: 4102448400n
 };
-const evmTransferTransactionResult = evm.buildTransferTransaction({ message: evmExistingTransferMessage });
+const evmTransferTransactionResult = evm.buildTransferTransaction({
+  message: evmExistingTransferMessage,
+  chainNowUnix: 4102444800
+});
 const evmWithdrawTransactionResult = evm.buildWithdrawTransaction({ message: evmExistingWithdrawMessage });
 evm.buildTransferTransaction({
   inputs: [],
+  chainNowUnix: 4102444800,
   proverAdapter: undefined as never,
   checkNullifiers: async () => new Map()
 });
@@ -1559,6 +1700,8 @@ void {
   cosmosFetchJsonResult,
   auditDisclosureResult,
   conformanceResult,
+  reservationContract,
+  reservationContractVersion,
   cosmosReserveResult,
   publicReserveResult,
   endpointSetOnlyCosmos,

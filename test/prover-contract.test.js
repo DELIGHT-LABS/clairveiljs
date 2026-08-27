@@ -31,6 +31,39 @@ test("static prover adapter validates and returns a transfer v5 proof", fixtureT
   assert.deepEqual(response.proof, examples.transfer.response.proof);
 });
 
+test("transfer prover adapters validate proofs against authoritative chain time", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const expiry = examples.transfer.request.payload.expires_at_unix;
+  const adapters = [
+    createStaticProverAdapter({
+      transferProofHex: examples.transfer.response.proof.proof_hex
+    }),
+    createHttpProverAdapter({
+      baseURL: "http://127.0.0.1",
+      fetchImpl: async () => jsonResponse(examples.transfer.response)
+    }),
+    createAsyncJobProverAdapter({
+      submitTransferJob: async () => ({ job_id: "authoritative-time" }),
+      getJob: async () => ({
+        status: "completed",
+        response: examples.transfer.response
+      }),
+      intervalMs: 0
+    })
+  ];
+
+  for (const adapter of adapters) {
+    const response = await adapter.proveTransfer(examples.transfer.request, {
+      nowUnix: expiry - 1
+    });
+    assert.deepEqual(response.proof, examples.transfer.response.proof);
+    await assert.rejects(
+      () => adapter.proveTransfer(examples.transfer.request, { nowUnix: expiry }),
+      /transfer v5 payload expired/
+    );
+  }
+});
+
 test("HTTP prover adapter follows the Go route and version contract", fixtureTestOptions, async () => {
   const contract = readFixture("privacy_prover_http_api_contract.json");
   const examples = readFixture("privacy_prover_example_bundle.json");
@@ -47,10 +80,10 @@ test("HTTP prover adapter follows the Go route and version contract", fixtureTes
         authorization: init.headers.get("Authorization"),
         body
       });
-      if (url.pathname === contract.transfer_route.path) {
+      if (url.pathname === `/base${contract.transfer_route.path}`) {
         return jsonResponse(examples.transfer.response);
       }
-      if (url.pathname === contract.withdraw_route.path) {
+      if (url.pathname === `/base${contract.withdraw_route.path}`) {
         return jsonResponse(examples.withdraw.response);
       }
       return jsonResponse({ version: "v1", code: "not_found" }, 404);
@@ -60,17 +93,39 @@ test("HTTP prover adapter follows the Go route and version contract", fixtureTes
   const transfer = await adapter.proveTransfer(examples.transfer.request);
   const withdraw = await adapter.proveWithdraw(examples.withdraw.request);
 
-  assert.equal(calls[0].url, `https://prover.example${contract.transfer_route.path}`);
+  assert.equal(calls[0].url, `https://prover.example/base${contract.transfer_route.path}`);
   assert.equal(calls[0].method, contract.transfer_route.method);
   assert.equal(calls[0].contentType, contract.content_type);
   assert.equal(calls[0].authorization, "Bearer test-token");
   assert.equal(calls[0].body.version, contract.transfer_route.request_version);
   assert.equal(transfer.version, contract.transfer_route.response_version);
 
-  assert.equal(calls[1].url, `https://prover.example${contract.withdraw_route.path}`);
+  assert.equal(calls[1].url, `https://prover.example/base${contract.withdraw_route.path}`);
   assert.equal(calls[1].method, contract.withdraw_route.method);
   assert.equal(calls[1].body.version, contract.withdraw_route.request_version);
   assert.equal(withdraw.version, contract.withdraw_route.response_version);
+});
+
+test("HTTP prover adapter preserves a base URL path prefix with or without a trailing slash", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  for (const baseURL of ["https://prover.example/tenant-a", "https://prover.example/tenant-a/"]) {
+    const paths = [];
+    const adapter = createHttpProverAdapter({
+      baseURL,
+      fetchImpl: async url => {
+        paths.push(url.pathname);
+        return url.pathname.endsWith("/transfer")
+          ? jsonResponse(examples.transfer.response)
+          : jsonResponse(examples.withdraw.response);
+      }
+    });
+    await adapter.proveTransfer(examples.transfer.request);
+    await adapter.proveWithdraw(examples.withdraw.request);
+    assert.deepEqual(paths, [
+      "/tenant-a/v1/prover/transfer",
+      "/tenant-a/v1/prover/withdraw"
+    ]);
+  }
 });
 
 test("HTTP prover adapter rejects proof payload hash mismatch", fixtureTestOptions, async () => {

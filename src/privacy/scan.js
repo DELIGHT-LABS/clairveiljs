@@ -612,7 +612,8 @@ function scanRequest(input = {}) {
 export function createPrivacyScanValidationStateV2() {
   return {
     version: privacyScanValidationStateVersionV2,
-    batch_self_view_by_event: new Map()
+    batch_self_view_by_event: new Map(),
+    pending_summary_by_event: new Map()
   };
 }
 
@@ -626,19 +627,120 @@ function scanValidationEventKey(value) {
   return value;
 }
 
+const pendingSummaryIdentityKeys = Object.freeze([
+  "audit_key_epoch",
+  "audit_key_id",
+  "audit_target_pubkey",
+  "circuit_set_id",
+  "effect_id",
+  "event_type",
+  "last_output_index",
+  "nullifiers",
+  "output_count",
+  "payload_version",
+  "scan_schema_version",
+  "tx_hash"
+]);
+
+function pendingSummaryIdentity(summary, lastOutputIndex) {
+  return Object.freeze({
+    tx_hash: hexFromBytes(summary.tx_hash),
+    event_type: summary.event_type,
+    last_output_index: scanUint32(
+      lastOutputIndex,
+      "privacy scan pending summary last output index"
+    ),
+    nullifiers: Object.freeze(summary.nullifiers.map(hexFromBytes)),
+    output_count: summary.output_count,
+    circuit_set_id: summary.circuit_set_id,
+    payload_version: summary.payload_version,
+    scan_schema_version: summary.scan_schema_version,
+    audit_key_id: summary.audit_key_id,
+    audit_key_epoch: scanUint64(summary.audit_key_epoch, "privacy scan pending summary audit key epoch").toString(),
+    audit_target_pubkey: hexFromBytes(summary.audit_target_pubkey),
+    effect_id: hexFromBytes(summary.effect_id)
+  });
+}
+
+function scanSnapshotHex(value, label) {
+  if (typeof value !== "string" || (value && (!/^[0-9a-f]+$/.test(value) || value.length % 2 !== 0))) {
+    throw new Error(`${label} is invalid`);
+  }
+  return value ? bytesFromHex(value, label) : new Uint8Array();
+}
+
+function scanPendingSummaryIdentity(input, eventKey) {
+  if (!input || typeof input !== "object" || Array.isArray(input) ||
+      !sameScanValue(Object.keys(input).sort(), pendingSummaryIdentityKeys)) {
+    throw new Error("privacy scan validation state pending summary is invalid");
+  }
+  const [height, globalSequence] = scanValidationEventKey(eventKey).split("/");
+  const summary = scanSummary({
+    height,
+    globalSequence,
+    txHash: scanSnapshotHex(input.tx_hash, "privacy scan pending summary tx hash"),
+    eventType: input.event_type,
+    nullifiers: Array.isArray(input.nullifiers)
+      ? input.nullifiers.map((value, index) => scanSnapshotHex(value, `privacy scan pending summary nullifier ${index}`))
+      : input.nullifiers,
+    outputCount: input.output_count,
+    circuitSetId: input.circuit_set_id,
+    payloadVersion: input.payload_version,
+    scanSchemaVersion: input.scan_schema_version,
+    auditKeyId: input.audit_key_id,
+    auditKeyEpoch: input.audit_key_epoch,
+    auditTargetPubkey: scanSnapshotHex(input.audit_target_pubkey, "privacy scan pending summary audit target"),
+    effectId: scanSnapshotHex(input.effect_id, "privacy scan pending summary effect ID")
+  }, 0);
+  const lastOutputIndex = scanUint32(
+    input.last_output_index,
+    "privacy scan pending summary last output index"
+  );
+  if (lastOutputIndex >= summary.output_count - 1) {
+    throw new Error("privacy scan validation state pending summary is invalid");
+  }
+  const identity = pendingSummaryIdentity(summary, lastOutputIndex);
+  if (!sameScanValue(input, identity)) {
+    throw new Error("privacy scan validation state pending summary is invalid");
+  }
+  return identity;
+}
+
+function validatePrivacyScanValidationStateMaps(batchSelfViewByEvent, pendingSummaryByEvent) {
+  for (const [key, summary] of pendingSummaryByEvent) {
+    if (summary.event_type === privacyScanEventTypeV2.batchTransfer && !batchSelfViewByEvent.has(key)) {
+      throw new Error("privacy scan validation state is missing batch self-view state for a pending summary");
+    }
+  }
+  for (const key of batchSelfViewByEvent.keys()) {
+    const summary = pendingSummaryByEvent.get(key);
+    if (!summary || summary.event_type !== privacyScanEventTypeV2.batchTransfer) {
+      throw new Error("privacy scan validation state batch self-view state does not match a pending batch summary");
+    }
+  }
+}
+
 function scanValidationState(input = {}) {
   const camel = input.validationState;
   const snake = input.validation_state;
   if (camel != null && snake != null && camel !== snake) throw new Error("privacy scan validation state aliases do not match");
   const state = camel ?? snake ?? null;
   if (state == null) return null;
-  if (!state || typeof state !== "object" || state.version !== privacyScanValidationStateVersionV2 || !(state.batch_self_view_by_event instanceof Map)) {
+  if (!state || typeof state !== "object" || state.version !== privacyScanValidationStateVersionV2 ||
+      !(state.batch_self_view_by_event instanceof Map) || !(state.pending_summary_by_event instanceof Map)) {
     throw new Error("privacy scan validation state is invalid");
   }
   for (const [key, enabled] of state.batch_self_view_by_event) {
     scanValidationEventKey(key);
     if (typeof enabled !== "boolean") throw new Error("privacy scan validation state is invalid");
   }
+  for (const [key, summary] of state.pending_summary_by_event) {
+    scanPendingSummaryIdentity(summary, key);
+  }
+  validatePrivacyScanValidationStateMaps(
+    state.batch_self_view_by_event,
+    state.pending_summary_by_event
+  );
   return state;
 }
 
@@ -648,15 +750,21 @@ export function serializePrivacyScanValidationStateV2(input) {
   const entries = [...state.batch_self_view_by_event]
     .map(([event_key, self_view_enabled]) => Object.freeze({ event_key, self_view_enabled }))
     .sort((left, right) => left.event_key.localeCompare(right.event_key));
+  const pendingSummaries = [...state.pending_summary_by_event]
+    .map(([event_key, summary]) => Object.freeze({ event_key, ...summary }))
+    .sort((left, right) => left.event_key.localeCompare(right.event_key));
   return Object.freeze({
     version: privacyScanValidationStateVersionV2,
-    batch_self_view_by_event: Object.freeze(entries)
+    batch_self_view_by_event: Object.freeze(entries),
+    pending_summary_by_event: Object.freeze(pendingSummaries)
   });
 }
 
 /** Restore serialized page-validation state supplied by a durable scan cursor. */
 export function restorePrivacyScanValidationStateV2(input) {
-  if (!input || typeof input !== "object" || Array.isArray(input) || input.version !== privacyScanValidationStateVersionV2 || !Array.isArray(input.batch_self_view_by_event)) {
+  if (!input || typeof input !== "object" || Array.isArray(input) || input.version !== privacyScanValidationStateVersionV2 ||
+      !Array.isArray(input.batch_self_view_by_event) ||
+      !Array.isArray(input.pending_summary_by_event)) {
     throw new Error("privacy scan validation state snapshot is invalid");
   }
   const entries = input.batch_self_view_by_event;
@@ -671,7 +779,18 @@ export function restorePrivacyScanValidationStateV2(input) {
     }
     state.batch_self_view_by_event.set(eventKey, entry.self_view_enabled);
   }
-  return state;
+  for (const entry of input.pending_summary_by_event) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || !("event_key" in entry)) {
+      throw new Error("privacy scan validation state snapshot is invalid");
+    }
+    const { event_key: eventKeyValue, ...summaryValue } = entry;
+    const eventKey = scanValidationEventKey(eventKeyValue);
+    if (state.pending_summary_by_event.has(eventKey)) {
+      throw new Error("privacy scan validation state snapshot is invalid");
+    }
+    state.pending_summary_by_event.set(eventKey, scanPendingSummaryIdentity(summaryValue, eventKey));
+  }
+  return scanValidationState({ validationState: state });
 }
 
 function validateBatchSelfViewDisclosurePage(outputs, summaries, state) {
@@ -701,8 +820,61 @@ function commitBatchSelfViewValidationState(state, next) {
   for (const [key, enabled] of next) state.batch_self_view_by_event.set(key, enabled);
 }
 
+function validatePendingPrivacyScanSummaries(request, page, state) {
+  const pendingByEvent = new Map(state?.pending_summary_by_event);
+  const lastOutput = page.outputs.at(-1);
+  const partialSummary = page.has_more && lastOutput && compareScanCursor(page.next_cursor, {
+    height: lastOutput.height,
+    global_sequence: lastOutput.global_sequence,
+    output_index: lastOutput.output_index
+  }) === 0
+    ? page.summaries.find(value => scanEventKey(value) === scanEventKey(lastOutput))
+    : null;
+  if (!state) {
+    if (partialSummary && lastOutput.output_index < partialSummary.output_count - 1) {
+      throw new Error("privacy scan partial page requires validation state");
+    }
+    return pendingByEvent;
+  }
+  const requestEventKey = scanEventKey(request.after);
+  for (const [key, expected] of pendingByEvent) {
+    if (key !== requestEventKey || request.after.output_index !== expected.last_output_index) {
+      throw new Error("privacy scan pending summary does not match the request cursor");
+    }
+    const summary = page.summaries.find(value => scanEventKey(value) === key);
+    if (!summary || !sameScanValue(
+      expected,
+      pendingSummaryIdentity(summary, expected.last_output_index)
+    )) {
+      throw new Error("privacy scan resumed page does not match its pending summary identity");
+    }
+  }
+  for (const output of page.outputs) {
+    const key = scanEventKey(output);
+    const expected = pendingByEvent.get(key);
+    if (expected && output.output_index === expected.output_count - 1) {
+      pendingByEvent.delete(key);
+    }
+  }
+  if (partialSummary) {
+    const key = scanEventKey(lastOutput);
+    if (lastOutput.output_index < partialSummary.output_count - 1) {
+      pendingByEvent.set(
+        key,
+        pendingSummaryIdentity(partialSummary, lastOutput.output_index)
+      );
+    }
+  }
+  return pendingByEvent;
+}
+
+function commitPendingPrivacyScanSummaryState(state, next) {
+  if (!state) return;
+  state.pending_summary_by_event.clear();
+  for (const [key, summary] of next) state.pending_summary_by_event.set(key, summary);
+}
+
 function validateCompletedPrivacyScanPage(request, page) {
-  if (page.has_more) return;
   const outputsByEvent = new Map();
   for (const output of page.outputs) {
     const key = scanEventKey(output);
@@ -710,6 +882,15 @@ function validateCompletedPrivacyScanPage(request, page) {
     outputsByEvent.get(key).add(output.output_index);
   }
   const afterEvent = eventCursor(request.after);
+  const lastOutput = page.outputs.at(-1);
+  const partialEventKey = page.has_more && lastOutput &&
+    compareScanCursor(page.next_cursor, {
+      height: lastOutput.height,
+      global_sequence: lastOutput.global_sequence,
+      output_index: lastOutput.output_index
+    }) === 0
+      ? scanEventKey(lastOutput)
+      : "";
   for (const summary of page.summaries) {
     const summaryCursor = eventCursor(summary);
     const comparison = compareScanCursor(summaryCursor, afterEvent);
@@ -719,10 +900,17 @@ function validateCompletedPrivacyScanPage(request, page) {
       if (request.after.output_index >= summary.output_count - 1) continue;
       firstRequiredIndex = request.after.output_index + 1;
     }
+    // A has_more page may end with a prefix of exactly one output-bearing
+    // event. Output ordering below proves that prefix begins immediately after
+    // the request cursor (or at index zero). Every earlier summarized event
+    // must still be complete before the cursor can advance past it.
+    if (partialEventKey === scanEventKey(summary)) continue;
     const returned = outputsByEvent.get(scanEventKey(summary)) ?? new Set();
     for (let outputIndex = firstRequiredIndex; outputIndex < summary.output_count; outputIndex += 1) {
       if (!returned.has(outputIndex)) {
-        throw new Error("privacy scan completed page omits an output from a summarized event");
+        throw new Error(page.has_more
+          ? "privacy scan partial page omits an output from a summarized event"
+          : "privacy scan completed page omits an output from a summarized event");
       }
     }
   }
@@ -835,10 +1023,13 @@ export function validatePrivacyScanPageV2(response, request = {}) {
   };
   Object.defineProperty(page, validatedPrivacyScanPageBrandV2, { value: true });
   Object.freeze(page);
+  const nextPendingSummaryState = validatePendingPrivacyScanSummaries(normalizedRequest, page, validationState);
   validatePrivacyScanNextCursor(normalizedRequest, page, summariesByEvent);
   validateCompletedPrivacyScanPage(normalizedRequest, page);
   if (hasMore && compareScanCursor(nextCursor, normalizedRequest.after) <= 0) throw new Error("privacy scan has_more page did not advance the cursor");
+  validatePrivacyScanValidationStateMaps(nextBatchSelfViewState, nextPendingSummaryState);
   commitBatchSelfViewValidationState(validationState, nextBatchSelfViewState);
+  commitPendingPrivacyScanSummaryState(validationState, nextPendingSummaryState);
   return page;
 }
 

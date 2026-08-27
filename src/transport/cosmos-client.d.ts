@@ -109,23 +109,70 @@ export const msgBatchTransferTypeUrl: "/clairveil.privacy.v1.MsgBatchTransfer";
 export const msgTransferTypeUrl: "/clairveil.privacy.v1.MsgTransfer";
 export const msgWithdrawTypeUrl: "/clairveil.privacy.v1.MsgWithdraw";
 
-export interface MsgCodec<T = object> {
-  typeUrl: string;
-  encode(message: Partial<T>, writer?: object): object;
-  decode(input?: Uint8Array): T;
-  fromPartial(object: Partial<T>): T;
+export const MsgDeposit: typeof import("../generated/clairveil/privacy/v1/tx.js").MsgDeposit;
+export const MsgBatchTransfer: typeof import("../generated/clairveil/privacy/v1/tx.js").MsgBatchTransfer;
+export const MsgTransfer: typeof import("../generated/clairveil/privacy/v1/tx.js").MsgTransfer;
+export const MsgWithdraw: typeof import("../generated/clairveil/privacy/v1/tx.js").MsgWithdraw;
+
+/**
+ * Structural protobuf codec accepted by the Clairveil Cosmos registry.
+ * Kept local so consumers do not inherit CosmJS' optional code-generator types.
+ */
+export interface ClairveilRegistryCodecBase {
+  readonly typeUrl?: string;
+  readonly encode: (...args: any[]) => { finish(): Uint8Array };
+  readonly decode: (...args: any[]) => any;
 }
 
-export const MsgDeposit: MsgCodec;
-export const MsgBatchTransfer: MsgCodec;
-export const MsgTransfer: MsgCodec;
-export const MsgWithdraw: MsgCodec;
+export type ClairveilRegistryGeneratedType = ClairveilRegistryCodecBase & (
+  | {
+      readonly fromPartial: (...args: any[]) => any;
+      readonly create?: (...args: any[]) => any;
+    }
+  | {
+      readonly create: (...args: any[]) => any;
+      readonly fromPartial?: (...args: any[]) => any;
+    }
+);
+
+export interface ClairveilRegistryEncodeObject<T = unknown> {
+  readonly typeUrl: string;
+  readonly value: T;
+}
+
+export interface ClairveilRegistryDecodeObject {
+  readonly typeUrl: string;
+  readonly value: Uint8Array;
+}
+
+/** Public, dependency-safe structural surface of CosmJS Registry. */
+export interface ClairveilRegistry {
+  register(typeUrl: string, type: ClairveilRegistryGeneratedType): void;
+  lookupType(typeUrl: string): ClairveilRegistryGeneratedType | undefined;
+  encode<T>(encodeObject: ClairveilRegistryEncodeObject<T>): Uint8Array;
+  encodeAsAny<T>(encodeObject: ClairveilRegistryEncodeObject<T>): ClairveilRegistryDecodeObject;
+  encodeTxBody(txBodyFields: {
+    readonly messages: readonly ClairveilRegistryEncodeObject[];
+    readonly memo?: string;
+    readonly timeoutHeight?: bigint;
+    readonly extensionOptions?: readonly ClairveilRegistryDecodeObject[];
+    readonly nonCriticalExtensionOptions?: readonly ClairveilRegistryDecodeObject[];
+  }): Uint8Array;
+  decode(decodeObject: ClairveilRegistryDecodeObject): unknown;
+  decodeTxBody(txBody: Uint8Array): unknown;
+}
 
 export interface SignDocBase64 {
   bodyBytes: Base64;
   authInfoBytes: Base64;
   chainId: string;
   accountNumber: string;
+}
+
+/** Canonical minimal-denom Cosmos fee coin embedded in AuthInfo. */
+export interface CosmosFeeCoin {
+  denom: string;
+  amount: string;
 }
 
 export interface SignedTxBase64 {
@@ -138,6 +185,8 @@ export interface SignedTxBase64 {
 export interface SignedTxRawCheckpoint {
   signedTx: SignedTxBase64;
   txRawBytes: Uint8Array;
+  /** Uppercase Cosmos transaction hash (SHA-256 of txRawBytes). */
+  txHash: Hex;
   txBytesHash: Hex;
   signDocHash: Hex;
 }
@@ -169,6 +218,7 @@ export interface TxSearchResult {
 
 export interface BroadcastSignedTxResult {
   ok: boolean;
+  txHash: Hex;
   txBytesHash: Hex;
   broadcast: {
     txhash: Hex | string;
@@ -204,18 +254,6 @@ export type ReservationBroadcastBinding =
 
 type RelayBroadcastChainTime =
   | {
-      chainNowUnix: number;
-      chain_now_unix?: number;
-      getChainNowUnix?: never;
-      get_chain_now_unix?: never;
-    }
-  | {
-      chainNowUnix?: number;
-      chain_now_unix: number;
-      getChainNowUnix?: never;
-      get_chain_now_unix?: never;
-    }
-  | {
       chainNowUnix?: never;
       chain_now_unix?: never;
       getChainNowUnix: () => number | Promise<number>;
@@ -245,8 +283,9 @@ export type RelayBroadcastValidation =
       relay_payload?: never;
       chainNowUnix?: never;
       chain_now_unix?: never;
-      getChainNowUnix?: never;
-      get_chain_now_unix?: never;
+      /** Required at broadcast time when the exact signed body contains an expiring privacy message. */
+      getChainNowUnix?: () => number | Promise<number>;
+      get_chain_now_unix?: () => number | Promise<number>;
       expectedChainId?: never;
       expected_chain_id?: never;
       expectedRecipient?: never;
@@ -258,6 +297,16 @@ export type RelayBroadcastValidation =
 export type ReservationBroadcastOptions = ReservationBroadcastBinding & RelayBroadcastValidation & {
   attempts?: number;
   intervalMs?: number;
+  /**
+   * Synchronous final fence invoked after all asynchronous validation and the
+   * durable broadcast-attempt write, immediately before Cosmos RPC submission.
+   * Throw to block submission. Returning a Promise is rejected and never awaited.
+   */
+  beforeBroadcast?: (identity: Readonly<{
+    txHash: Hex;
+    txBytesHash: Hex;
+    signDocHash: Hex;
+  }>) => undefined;
 };
 
 export interface ReserveResponse {
@@ -271,6 +320,10 @@ export interface ReserveResponse {
 
 export type Uint64CursorInput = number | bigint | string;
 export type Uint64CursorValue = number | string;
+
+export type AuthoritativeTransferPreparationTime =
+  | { chainNowUnix: number; chain_now_unix?: number }
+  | { chain_now_unix: number; chainNowUnix?: number };
 
 export interface PrivacyEventsQuery {
   afterHeight?: Uint64CursorInput;
@@ -298,7 +351,31 @@ export interface PrivacyScanOptions extends PrivacyEventsQuery {
   validation_state_snapshot?: PrivacyScanValidationStateSnapshotV2;
   scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
   scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+  /** Fail closed instead of falling back when privacy-scan-v2 is unavailable. */
+  strictPrivacyScan?: boolean;
+  strict_privacy_scan?: boolean;
 }
+
+/**
+ * Scan options accepted by wallet balance and spend-selection APIs. These
+ * surfaces always consume the complete typed projection and fail closed.
+ */
+export type TypedWalletScanOptions = Omit<
+  PrivacyScanOptions,
+  | "eventTypes"
+  | "event_types"
+  | "scanSource"
+  | "scan_source"
+  | "strictPrivacyScan"
+  | "strict_privacy_scan"
+> & {
+  eventTypes?: readonly [];
+  event_types?: readonly [];
+  scanSource?: "privacy_scan";
+  scan_source?: "privacy_scan";
+  strictPrivacyScan?: true;
+  strict_privacy_scan?: true;
+};
 
 export interface PrivacyScanCursorInput {
   height?: Uint64CursorInput;
@@ -395,7 +472,7 @@ export interface PrivacyScanResumeOptions {
   completed: boolean;
 }
 
-export interface WalletScanInput extends PrivacyScanOptions {
+export interface WalletScanInput extends TypedWalletScanOptions {
   rootSeed: Uint8Array;
   includeFoundNotes?: boolean;
 }
@@ -467,6 +544,8 @@ export interface PreparedTransferSummary {
   finalAmount: CoinString;
   finalRecipient: ShieldedAddress;
   selectedInputTotal: string;
+  expiresAtUnix: number;
+  chainNowUnix: number;
   reservation?: ReservationBatch | null;
 }
 
@@ -588,6 +667,10 @@ export type PrepareDepositInput = {
   amount: CoinString;
   memo?: string;
   gasLimit?: number;
+  gas_limit?: number;
+  /** Exact profile/caller-selected fee coins embedded in the sign doc. */
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
   denom?: string;
   assetDenom?: string;
 } & DepositProofInput;
@@ -609,7 +692,9 @@ export type ConfirmDepositInput = {
   intervalMs?: number;
 };
 
-export function createClairveilRegistry(extraTypes?: Array<[string, object]>): object;
+export function createClairveilRegistry(
+  extraTypes?: ReadonlyArray<readonly [string, ClairveilRegistryGeneratedType]>
+): ClairveilRegistry;
 export function normalizeRpcEndpoint(rpc: string): string;
 export function normalizeRestEndpoint(rest: string): string;
 export function buildRootSigningMessage(address: ClairAddress, pubKeyHex: Hex): string;
@@ -835,6 +920,10 @@ export type PrepareTransferBatchInput = {
   outputMode?: "compact" | "exact32" | "exact-32";
   output_mode?: "compact" | "exact32" | "exact-32";
   gasLimit?: number;
+  gas_limit?: number;
+  /** Exact profile/caller-selected fee coins, snapshotted before scan/proving. */
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
   expiresAtUnix?: number;
   expires_at_unix?: number;
   chainNowUnix?: number;
@@ -861,12 +950,10 @@ export type PrepareTransferBatchInput = {
   limit?: number;
   maxPages?: number;
   max_pages?: number;
-  eventTypes?: string[];
-  event_types?: string[];
-  scan?: PrivacyScanOptions;
-  scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
-  scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
-} & PrivacyScanOptions &
+  scan?: TypedWalletScanOptions;
+  scanSource?: "privacy_scan";
+  scan_source?: "privacy_scan";
+} & TypedWalletScanOptions &
   PrepareTransferBatchPaymentShape &
   BatchOperationEvidenceHashes &
   RequiredReservationManagerBinding &
@@ -877,14 +964,21 @@ export type PrepareTransferBatchInput = {
  * Restores the non-proving half of a checkpointed one-proof batch transfer.
  * Supply the exact original payment rows so the SDK can bind the recovered
  * payload/proof to per-item operation evidence before it makes the
- * reservation broadcastable.
+ * reservation broadcastable. The manager must support authoritative
+ * getReservations/lookupKeyForNote reads; the finalizer verifies the stored
+ * operation, current lease owner/token, and exact payload-nullifier lookup-key
+ * set before any Proving -> ProofReady transition.
  */
 export type FinalizePreparedBatchTransferInput = {
   payload: PreparedBatchTransferPayload;
   proof: PreparedBatchTransferProof;
   signer: ClairAddress | string;
   pubKeyHex: Hex;
-  gasLimit: number | bigint;
+  gasLimit?: number | bigint;
+  gas_limit?: number | bigint;
+  /** Exact profile/caller-selected fee coins embedded in the recovered ProofReady sign doc. */
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
   memo?: string;
   userPrivacyPolicy?: string | number;
   userDisclosureMode?: string | number;
@@ -1009,7 +1103,7 @@ export class ClairveilJS {
     denom?: string;
     shieldedPrefix?: string;
   }): DepositMaterial;
-  scanWalletNotes(input: PrivacyScanOptions & {
+  scanWalletNotes(input: TypedWalletScanOptions & {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
     limit?: number;
@@ -1028,9 +1122,9 @@ export class ClairveilJS {
     denom?: string;
     limit?: number;
     maxPages?: number;
-    scan?: PrivacyScanOptions;
-    scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
-    scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+    scan?: TypedWalletScanOptions;
+    scanSource?: "privacy_scan";
+    scan_source?: "privacy_scan";
   }): Promise<{ plan: TransferPlan; scan: ScanResult }>;
   planWalletWithdraw(input: {
     wallet?: WalletAdapterLike;
@@ -1039,9 +1133,9 @@ export class ClairveilJS {
     denom?: string;
     limit?: number;
     maxPages?: number;
-    scan?: PrivacyScanOptions;
-    scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
-    scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+    scan?: TypedWalletScanOptions;
+    scanSource?: "privacy_scan";
+    scan_source?: "privacy_scan";
   }): Promise<{ plan: WithdrawPlan; scan: ScanResult }>;
   buildDepositMessage(input: BuildDepositMessageInput): object;
   prepareDeposit(input: PrepareDepositInput): Promise<PreparedDeposit>;
@@ -1055,11 +1149,23 @@ export class ClairveilJS {
     signal?: AbortSignal;
     allowPlanStep?: boolean;
     gasLimit?: number;
+    gas_limit?: number;
     userPrivacyPolicy?: string | number;
     userDisclosureMode?: string | number;
     userDisclosureTargetPubKeyHex?: Hex;
+    /** Sender self-view is enabled by default; set true only for an explicit opt-out. */
+    disableSelfViewDisclosure?: boolean;
+    disable_self_view_disclosure?: boolean;
+    selfViewDisclosureTargetPubKeyHex?: Hex;
+    self_view_disclosure_target_pubkey?: Hex;
     /** Optional safety assertion; if set, it must equal the active chain audit master key. */
     auditDisclosureTargetPubKeyHex?: Hex;
+    /** Optional explicit expiry; defaults to authoritative chain time + 1800 seconds. */
+    expiresAtUnix?: number;
+    expires_at_unix?: number;
+    /** Authoritative chain time is required before an executable transfer proof is prepared. */
+    chainNowUnix?: number;
+    chain_now_unix?: number;
     denom?: string;
     afterHeight?: Uint64CursorInput;
     after_height?: Uint64CursorInput;
@@ -1069,14 +1175,15 @@ export class ClairveilJS {
     limit?: number;
     maxPages?: number;
     max_pages?: number;
-    eventTypes?: string[];
-    event_types?: string[];
-    scan?: PrivacyScanOptions;
-    scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
-    scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+    scan?: TypedWalletScanOptions;
+    scanSource?: "privacy_scan";
+    scan_source?: "privacy_scan";
+    /** Exact profile/caller-selected fee coins, snapshotted before proof preparation. */
+    feeAmount?: readonly CosmosFeeCoin[];
+    fee_amount?: readonly CosmosFeeCoin[];
     reservationManager?: NoteReservationManager | null;
     reservation_manager?: NoteReservationManager | null;
-  } & PrivacyScanOptions & DirectOperationEvidenceHashes): Promise<PreparedTransfer>;
+  } & TypedWalletScanOptions & DirectOperationEvidenceHashes & AuthoritativeTransferPreparationTime): Promise<PreparedTransfer>;
   prepareTransferBatch(input: PrepareTransferBatchInput): Promise<PreparedTransferBatch>;
   provePreparedBatchTransfer(input: {
     payload: PreparedBatchTransferPayload;
@@ -1106,6 +1213,7 @@ export class ClairveilJS {
     proverAdapter: ProverAdapter;
     signal?: AbortSignal;
     gasLimit?: number;
+    gas_limit?: number;
     denom?: string;
     assetDenom?: string;
     afterHeight?: Uint64CursorInput;
@@ -1116,17 +1224,18 @@ export class ClairveilJS {
     limit?: number;
     maxPages?: number;
     max_pages?: number;
-    eventTypes?: string[];
-    event_types?: string[];
-    scan?: PrivacyScanOptions;
-    scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
-    scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+    scan?: TypedWalletScanOptions;
+    scanSource?: "privacy_scan";
+    scan_source?: "privacy_scan";
     expiresAtUnix?: number;
     chainNowUnix?: number;
     chain_now_unix?: number;
+    /** Exact profile/caller-selected fee coins, snapshotted before proof preparation. */
+    feeAmount?: readonly CosmosFeeCoin[];
+    fee_amount?: readonly CosmosFeeCoin[];
     reservationManager?: NoteReservationManager | null;
     reservation_manager?: NoteReservationManager | null;
-  } & PrivacyScanOptions): Promise<PreparedWithdraw>;
+  } & TypedWalletScanOptions): Promise<PreparedWithdraw>;
   prepareRelayWithdraw(input: {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
@@ -1144,22 +1253,23 @@ export class ClairveilJS {
     limit?: number;
     maxPages?: number;
     max_pages?: number;
-    eventTypes?: string[];
-    event_types?: string[];
-    scan?: PrivacyScanOptions;
-    scanSource?: "privacy_scan" | "scan_events" | "privacy_events" | string;
-    scan_source?: "privacy_scan" | "scan_events" | "privacy_events" | string;
+    scan?: TypedWalletScanOptions;
+    scanSource?: "privacy_scan";
+    scan_source?: "privacy_scan";
     expiresAtUnix?: number;
     reservationManager?: NoteReservationManager | null;
     reservation_manager?: NoteReservationManager | null;
-  } & PrivacyScanOptions & RelayChainTimeInput): Promise<PreparedRelayWithdraw>;
+  } & TypedWalletScanOptions & RelayChainTimeInput): Promise<PreparedRelayWithdraw>;
   createDepositSignDoc(input: Parameters<ClairveilJS["prepareDeposit"]>[0]): Promise<PreparedDeposit>;
   createTransferSignDoc(input: Parameters<ClairveilJS["prepareTransfer"]>[0]): Promise<PreparedTransfer & { status: "ready"; signDoc: SignDocBase64 }>;
   createTransferBatchSignDoc(input: Parameters<ClairveilJS["prepareTransferBatch"]>[0]): Promise<PreparedTransferBatch & { status: "ready"; signDoc: SignDocBase64 }>;
   createBatchTransferSignDoc(input: {
     signer: ClairAddress;
     pubKeyHex: Hex;
-    gasLimit: number | bigint;
+    gasLimit?: number | bigint;
+    gas_limit?: number | bigint;
+    feeAmount?: readonly CosmosFeeCoin[];
+    fee_amount?: readonly CosmosFeeCoin[];
     message: MsgBatchTransferMessage;
     memo?: string;
     expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"];
@@ -1168,8 +1278,9 @@ export class ClairveilJS {
   }): Promise<SignDocBase64>;
   createWithdrawSignDoc(input: Parameters<ClairveilJS["prepareWithdraw"]>[0]): Promise<PreparedWithdrawReady>;
   createRelayWithdrawPayload(input: Parameters<ClairveilJS["prepareRelayWithdraw"]>[0]): Promise<PreparedRelayWithdraw & { status: "ready"; payload: PreparedWithdrawPayload }>;
-  buildPreparedTransferPayload(input: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;
-  buildTransferMessage(input: PreparedTransferPayloadInput & {
+  buildPreparedTransferPayload(input: PreparedTransferPayloadInput & { chainNowUnix: number }): Promise<PreparedTransferPayload>;
+  buildTransferMessage(input: PreparedTransferPayloadInput & AuthoritativeTransferPreparationTime & {
+    expires_at_unix?: number;
     proverAdapter: ProverAdapter;
     checkNullifiers?: import("../privacy/payload.js").NullifierStatusReader;
     signal?: AbortSignal;
@@ -1199,10 +1310,13 @@ export class ClairveilJS {
     pubKeyHex?: Hex;
     pub_key_hex?: Hex;
     gasLimit?: number;
-    feeAmount?: Array<object>;
+    feeAmount?: readonly CosmosFeeCoin[];
     memo?: string;
   } & CosmosRelayWithdrawRelayOptions): Promise<PreparedRelayWithdrawSignDoc>;
   decodeUserDisclosure(input: {
+    /** Validator-issued shielded-transfer recipient output; avoids raw event lookup. */
+    output?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
+    scanOutput?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
     txHash?: Hex;
     tx_hash?: Hex;
     address?: ClairAddress;
@@ -1218,6 +1332,9 @@ export class ClairveilJS {
     asset_denom?: string;
   } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
   decodeSelfViewDisclosure(input: {
+    /** Validator-issued shielded-transfer recipient output; avoids raw event lookup. */
+    output?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
+    scanOutput?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
     txHash?: Hex;
     tx_hash?: Hex;
     address?: ClairAddress;
@@ -1237,6 +1354,9 @@ export class ClairveilJS {
     asset_denom?: string;
   } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
   decodeAuditDisclosure(input: {
+    /** Validator-issued shielded-transfer recipient output; avoids raw event lookup. */
+    output?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
+    scanOutput?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
     txHash?: Hex;
     tx_hash?: Hex;
     disclosurePrivKeyHex?: Hex;
@@ -1312,7 +1432,7 @@ export class ClairveilJS {
     messages: Array<{ typeUrl: string; value: object }>;
     memo?: string;
     gasLimit?: number;
-    feeAmount?: Array<object>;
+    feeAmount?: readonly CosmosFeeCoin[];
   }): Promise<SignDocBase64>;
   buildTxRawBytes(signedTx: SignedTxBase64): Uint8Array;
   /** Broadcast exact pre-encoded TxRaw bytes without re-encoding them. */
@@ -1320,6 +1440,11 @@ export class ClairveilJS {
   broadcastSignedTx(signedTx: SignedTxBase64, waitOptions?: ReservationBroadcastOptions): Promise<BroadcastSignedTxResult>;
   /** Sign without broadcasting so callers can durably checkpoint exact TxRaw bytes first. */
   signDirect(input: ReservationBroadcastOptions & { wallet: WalletAdapterLike; signDoc: SignDocBase64; waitOptions?: { attempts?: number; intervalMs?: number } }): Promise<SignedTxRawCheckpoint>;
+  /**
+   * Reservation-aware signing keeps the operation lease alive from before the
+   * wallet prompt through the durable broadcast outcome write. A bound
+   * reservation manager must therefore provide renewLease.
+   */
   signDirectAndBroadcast(input: ReservationBroadcastOptions & { wallet: WalletAdapterLike; signDoc: SignDocBase64; waitOptions?: { attempts?: number; intervalMs?: number } }): Promise<BroadcastSignedTxResult>;
 }
 

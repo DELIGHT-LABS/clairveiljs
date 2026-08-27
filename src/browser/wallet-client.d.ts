@@ -2,11 +2,13 @@ import type { Base64, ClairAddress, Hex, PrivacyMaterial, ShieldedAddress } from
 import type {
   DerivedPrivacyAccount,
   ClairveilJS,
+  CosmosFeeCoin,
   PrivacyAccountSummary,
   PrivacyEventsQuery,
   PrivacyEventsCursor,
   PrivacyScanOptions,
   PrivacyScanResumeOptions,
+  TypedWalletScanOptions,
   QueryRetryOptions,
   ReservationReconciliationState,
   ReserveResponse,
@@ -363,6 +365,11 @@ export type PrepareDepositBaseInput = Omit<BrowserWalletIdentityInput, "walletTy
 export type PrepareCosmosDepositInput = PrepareDepositBaseInput & PrepareDepositProofInput & {
   walletType?: "cosmos";
   wallet_type?: "cosmos";
+  gasLimit?: number;
+  gas_limit?: number;
+  /** Exact profile/caller-selected fee coins embedded in the sign doc. */
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
 };
 
 export type PrepareEvmDepositInput = PrepareDepositBaseInput & EvmNetworkWalletBinding & (
@@ -444,6 +451,10 @@ export type DirectOperationEvidenceHashes =
       expected_amount_hash?: string;
     };
 
+type AuthoritativeBrowserTransferPreparationTime =
+  | { chainNowUnix: number; chain_now_unix?: number }
+  | { chain_now_unix: number; chainNowUnix?: number };
+
 export type PrepareTransferInput = BrowserWalletIdentityInput & DirectOperationEvidenceHashes & {
   amount: CoinString;
   recipient: ShieldedAddress;
@@ -455,13 +466,19 @@ export type PrepareTransferInput = BrowserWalletIdentityInput & DirectOperationE
   limit?: number;
   maxPages?: number;
   max_pages?: number;
-  scan?: PrivacyScanOptions;
+  scan?: TypedWalletScanOptions;
   privacyPolicy?: TransferPrivacyPolicy;
   privacy_policy?: TransferPrivacyPolicy;
   disclosureMode?: TransferUserDisclosureMode;
   disclosure_mode?: TransferUserDisclosureMode;
   disclosurePubKeyHex?: Hex;
   disclosure_pubkey_hex?: Hex;
+  /** Optional explicit expiry; defaults to authoritative chain time + 1800 seconds. */
+  expiresAtUnix?: number;
+  expires_at_unix?: number;
+  /** Authoritative chain time is required before an executable transfer proof is prepared. */
+  chainNowUnix?: number;
+  chain_now_unix?: number;
   /** Sender self-view is enabled by default; set true only for an explicit opt-out. */
   disableSelfViewDisclosure?: boolean;
   disable_self_view_disclosure?: boolean;
@@ -469,7 +486,13 @@ export type PrepareTransferInput = BrowserWalletIdentityInput & DirectOperationE
   self_view_disclosure_target_pubkey?: Hex;
   reservationManager?: NoteReservationManager | null;
   reservation_manager?: NoteReservationManager | null;
-};
+  /** Cosmos only: exact gas limit embedded in the ProofReady sign doc. */
+  gasLimit?: number;
+  gas_limit?: number;
+  /** Cosmos only: exact minimal-denom fee coins embedded in the ProofReady sign doc. */
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
+} & AuthoritativeBrowserTransferPreparationTime;
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
@@ -502,6 +525,8 @@ export interface PreparedTransferSummary {
   amount?: CoinString;
   recipient?: ShieldedAddress;
   selectedInputTotal?: string;
+  expiresAtUnix: number;
+  chainNowUnix: number;
   payload?: PreparedTransferPayload;
   proof?: PreparedTransferProof;
   message?: TransferMessage;
@@ -568,9 +593,12 @@ export type PrepareTransferBatchInput = BrowserWalletIdentityInput &
   limit?: number;
   maxPages?: number;
   max_pages?: number;
-  scan?: PrivacyScanOptions;
+  scan?: TypedWalletScanOptions;
   gasLimit?: number;
   gas_limit?: number;
+  /** Exact profile/caller-selected fee coins, snapshotted before scan/proving. */
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
   expiresAtUnix?: number;
   expires_at_unix?: number;
   chainNowUnix?: number;
@@ -674,13 +702,19 @@ export interface PrepareWithdrawInput extends BrowserWalletIdentityInput {
   limit?: number;
   maxPages?: number;
   max_pages?: number;
-  scan?: PrivacyScanOptions;
+  scan?: TypedWalletScanOptions;
   expiresAtUnix?: number;
   expires_at_unix?: number;
   chainNowUnix?: number;
   chain_now_unix?: number;
   reservationManager?: NoteReservationManager | null;
   reservation_manager?: NoteReservationManager | null;
+  /** Cosmos only: exact gas limit embedded in the ProofReady sign doc. */
+  gasLimit?: number;
+  gas_limit?: number;
+  /** Cosmos only: exact minimal-denom fee coins embedded in the ProofReady sign doc. */
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
 }
 
 export type PrepareWithdrawBaseInput = Omit<PrepareWithdrawInput, "walletType" | "wallet_type">;
@@ -816,8 +850,8 @@ export type CreateRelayWithdrawSignDocInput = {
   pub_key_hex?: Hex;
   gasLimit?: number;
   gas_limit?: number;
-  feeAmount?: Array<object>;
-  fee_amount?: Array<object>;
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
   memo?: string;
   expectedChainId?: string;
   expected_chain_id?: string;
@@ -834,7 +868,7 @@ export interface PreparedRelayWithdrawSignDoc {
   relayer: ClairAddress | string;
 }
 
-export interface ScanWalletNotesInput extends BrowserWalletIdentityInput, PrivacyScanOptions {
+export interface ScanWalletNotesInput extends BrowserWalletIdentityInput, TypedWalletScanOptions {
   includeFoundNotes?: boolean;
   noteStore?: MemoryNoteStore;
   note_store?: MemoryNoteStore;
@@ -847,6 +881,9 @@ export type ScanWalletNotesResult = ScanResult & {
 };
 
 export interface DecodeUserDisclosureInput extends Partial<BrowserWalletIdentityInput>, PrivacyScanOptions {
+  /** Validator-issued shielded-transfer recipient output; avoids raw event lookup. */
+  output?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
+  scanOutput?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
   txHash?: Hex;
   tx_hash?: Hex;
   assetDenom?: string;
@@ -863,6 +900,9 @@ export interface DecodeSelfViewDisclosureInput extends DecodeUserDisclosureInput
 }
 
 export interface DecodeAuditDisclosureInput extends PrivacyScanOptions {
+  /** Validator-issued shielded-transfer recipient output; avoids raw event lookup. */
+  output?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
+  scanOutput?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
   txHash?: Hex;
   tx_hash?: Hex;
   assetDenom?: string;
@@ -1021,7 +1061,16 @@ export class ClairveilBrowserClient<
   evmNativeSendTransaction(input: { to: string; amount: CoinString }): BrowserEvmNativeSendTransaction;
   /** Submit an EVM transaction while preserving prepared reservation lifecycle state. */
   sendEvmTransaction(input: BrowserEvmTransactionBroadcastInput): Promise<Hex | string>;
-  buildBankSendSignDoc(input: { from: ClairAddress; pubKeyHex: Hex; to: ClairAddress; amount: CoinString }): Promise<SignDocBase64>;
+  buildBankSendSignDoc(input: {
+    from: ClairAddress;
+    pubKeyHex: Hex;
+    to: ClairAddress;
+    amount: CoinString;
+    gasLimit?: number;
+    gas_limit?: number;
+    feeAmount?: readonly CosmosFeeCoin[];
+    fee_amount?: readonly CosmosFeeCoin[];
+  }): Promise<SignDocBase64>;
   broadcastTxRawBytes(txRawBytes: Uint8Array, waitOptions?: ReservationBroadcastOptions): Promise<BroadcastSignedTxResult>;
   broadcastSignedTx(input: SignedTxBase64, waitOptions?: ReservationBroadcastOptions): Promise<BroadcastSignedTxResult>;
   signDirect(input: ReservationBroadcastOptions & {

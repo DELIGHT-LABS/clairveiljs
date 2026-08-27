@@ -18,6 +18,8 @@ export interface BatchTransferProverAdapter {
 export interface ProverRequestOptions {
   /** Cancels waiting for the prover request/job. In-process proving may continue remotely. */
   signal?: AbortSignal;
+  /** Authoritative chain time used to validate an expiry-bound transfer proof. */
+  nowUnix?: number;
 }
 
 /** Input passed to a local/WASM or pinned remote DepositCircuit proof provider. */

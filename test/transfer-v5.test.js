@@ -134,8 +134,39 @@ test("transfer v5 rejects stale or tampered prepared effects before MsgTransfer 
   const message = buildTransferV5MsgFromPayloadAndProof(payload, proof, { nowUnix: 1_700_000_000 });
   assert.equal(message.expiresAtUnix, 4102448400n);
   assert.equal(message.viewTags.length, 2);
+  const replacementCreator = buildTransferV5MsgFromPayloadAndProof(payload, proof, {
+    nowUnix: 1_700_000_000,
+    creator: "clair1replacement"
+  });
+  assert.equal(replacementCreator.creator, "clair1replacement");
+  assert.deepEqual(
+    { ...replacementCreator, creator: message.creator },
+    message,
+    "creator replacement must not change the proof-bound transfer effect"
+  );
   assert.throws(() => validatePreparedTransferV5PayloadAt(payload, payload.expires_at_unix));
   assert.throws(() => validatePreparedTransferV5PayloadMetadata({ ...payload, creator: "clair1altered" }));
+});
+
+test("transfer v5 creator replacement remains replay-safe across chain domains", () => {
+  const payload = validPayload();
+  const proof = {
+    version: "v2",
+    payload_hash: payload.payload_hash,
+    proof_hex: `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}`
+  };
+  const replay = structuredClone(payload);
+  replay.chain_id = "clairveil-other-chain";
+  replay.payload_hash = computePreparedTransferV5PayloadHash(replay);
+
+  assert.notEqual(replay.payload_hash, payload.payload_hash);
+  assert.throws(
+    () => buildTransferV5MsgFromPayloadAndProof(replay, proof, {
+      nowUnix: 1_700_000_000,
+      creator: "clair1replacement"
+    }),
+    /proof payload hash mismatch/
+  );
 });
 
 test("transfer v5 metadata rejects identity disclosure targets before message construction", () => {
@@ -213,6 +244,13 @@ test("standard transfer builder emits the Clairveil v0.3.1 V5 fixed-envelope con
     height: 1,
     sequence: index
   }));
+  await assert.rejects(
+    () => buildPreparedTransferPayload({
+      creator: "clair1creator",
+      chainId: "clairveil-test-1"
+    }),
+    /chainNowUnix is required from authoritative chain time/
+  );
   const payload = await buildPreparedTransferPayload({
     creator: "clair1creator",
     chainId: "clairveil-test-1",

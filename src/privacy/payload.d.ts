@@ -134,9 +134,9 @@ export function selectTransferInputs(notes: FoundNote[], denom: string, targetAm
 export function selectBatchTransferInputs(notes: FoundNote[], denom: string, targetAmount: string | number | bigint): TransferInputSelection;
 export function validatePreparedTransferPayloadMetadata(payload: PreparedTransferPayload): true;
 export function computePreparedTransferPayloadHash(payload: PreparedTransferPayload): Hex;
-export function buildPreparedTransferPayload(input: PreparedTransferPayloadInput): Promise<PreparedTransferPayload>;
+export function buildPreparedTransferPayload(input: PreparedTransferPayloadInput & { chainNowUnix: number }): Promise<PreparedTransferPayload>;
 export function validatePreparedTransferProof(payload: PreparedTransferPayload, proof: PreparedTransferProof, options?: { nowUnix?: number }): true;
-export function buildTransferMsgFromPayloadAndProof(payload: PreparedTransferPayload, proof: PreparedTransferProof, options?: { nowUnix?: number }): TransferMessage;
+export function buildTransferMsgFromPayloadAndProof(payload: PreparedTransferPayload, proof: PreparedTransferProof, options?: { nowUnix?: number; creator?: string }): TransferMessage;
 export type NullifierUsage =
   | boolean
   | { used: boolean; Used?: never }
@@ -149,7 +149,10 @@ export type NullifierStatusResult =
   | Record<string, NullifierUsage>
   | { statuses: readonly NullifierStatusEntry[] };
 export type NullifierStatusReader = (nullifiers: readonly Hex[]) => NullifierStatusResult | Promise<NullifierStatusResult>;
-export function buildTransferMessage(input: PreparedTransferPayloadInput & { proverAdapter: ProverAdapter; checkNullifiers: NullifierStatusReader; signal?: AbortSignal }): Promise<TransferMessageBuildResult>;
+export type AuthoritativeTransferChainTimeInput =
+  | { chainNowUnix: number; chain_now_unix?: number }
+  | { chain_now_unix: number; chainNowUnix?: number };
+export function buildTransferMessage(input: PreparedTransferPayloadInput & AuthoritativeTransferChainTimeInput & { expires_at_unix?: number; proverAdapter: ProverAdapter; checkNullifiers: NullifierStatusReader; signal?: AbortSignal }): Promise<TransferMessageBuildResult>;
 export function computePreparedWithdrawProverPayloadHash(payload: PreparedWithdrawProverPayload): Hex;
 export interface PreparedWithdrawProverPayloadInput {
   notes?: FoundNote[];

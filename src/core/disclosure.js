@@ -36,6 +36,7 @@ export const transferPrivacyPolicyDiscloseTo = 2;
 export const transferPrivacyPolicyDiscloseFrom = 4;
 
 const supportedPolicies = new Set([0, 1, 2, 3, 4, 5, 6, 7]);
+const shieldedTransferScanEventType = "shielded_transfer";
 const batchTransferScanEventType = "batch_transfer";
 const batchUserDisclosureModes = Object.freeze({
   none: "USER_DISCLOSURE_MODE_NONE",
@@ -301,10 +302,95 @@ function typedScanUserDisclosureMode(output) {
 }
 
 function typedScanTxHash(output, txHash) {
-  if (txHash != null && String(txHash).trim()) return String(txHash).trim();
   const value = typedScanAliasedValue(output, "txHash", "tx_hash", "privacy scan batch transaction hash");
-  if (value == null) return "";
-  return hexFromBytes(typedScanBytes(value, "privacy scan batch transaction hash"));
+  const embedded = value == null
+    ? ""
+    : hexFromBytes(typedScanBytes(value, "privacy scan batch transaction hash"));
+  const requested = String(txHash ?? "").trim().replace(/^0x/i, "");
+  if (requested && embedded && requested.toLowerCase() !== embedded.toLowerCase()) {
+    throw new Error("transaction hash does not match the validated PrivacyScanOutputV2 record");
+  }
+  return requested || embedded;
+}
+
+function transferDisclosureEventFromScanOutput(output) {
+  if (!isValidatedPrivacyScanOutputV2(output)) {
+    throw new Error("transfer disclosure output must come from validatePrivacyScanPageV2");
+  }
+  const eventType = String(typedScanAliasedValue(
+    output,
+    "eventType",
+    "event_type",
+    "privacy scan transfer event type"
+  ) || "").trim();
+  if (eventType !== shieldedTransferScanEventType) {
+    throw new Error("selected PrivacyScanOutputV2 is not a shielded transfer output");
+  }
+  const outputIndex = typedScanOutputIndex(output);
+  if (outputIndex !== 0) {
+    throw new Error("selected PrivacyScanOutputV2 is not the shielded transfer recipient output");
+  }
+  const bytesAttribute = (camel, snake, label) => {
+    const bytes = typedScanOptionalBytes(output, camel, snake, label);
+    return bytes.length ? hexFromBytes(bytes) : "";
+  };
+  const fullDigest = bytesAttribute(
+    "fullDisclosureDigest",
+    "full_disclosure_digest",
+    "privacy scan transfer full disclosure digest"
+  );
+  return {
+    event_type: shieldedTransferScanEventType,
+    tx_hash_hex: typedScanTxHash(output),
+    attributes: [
+      {
+        key: "user_disclosure_mode",
+        value: typedScanUserDisclosureMode(output)
+      },
+      {
+        key: "user_disclosure_target_pubkey",
+        value: bytesAttribute(
+          "userDisclosureTargetPubkey",
+          "user_disclosure_target_pubkey",
+          "privacy scan transfer user disclosure target"
+        )
+      },
+      {
+        key: "user_disclosure_payload",
+        value: bytesAttribute(
+          "userDisclosurePayload",
+          "user_disclosure_payload",
+          "privacy scan transfer user disclosure payload"
+        )
+      },
+      {
+        key: "user_disclosure_digest",
+        value: bytesAttribute(
+          "userDisclosureDigest",
+          "user_disclosure_digest",
+          "privacy scan transfer user disclosure digest"
+        )
+      },
+      {
+        key: "audit_disclosure_payload",
+        value: bytesAttribute(
+          "auditDisclosurePayload",
+          "audit_disclosure_payload",
+          "privacy scan transfer audit disclosure payload"
+        )
+      },
+      { key: "audit_disclosure_digest", value: fullDigest },
+      {
+        key: "self_view_disclosure_payload",
+        value: bytesAttribute(
+          "selfViewDisclosurePayload",
+          "self_view_disclosure_payload",
+          "privacy scan transfer self-view disclosure payload"
+        )
+      },
+      { key: "self_view_disclosure_digest", value: fullDigest }
+    ]
+  };
 }
 
 /**
@@ -607,6 +693,40 @@ export function decodeBatchSelfViewDisclosureFromScanOutput(output, options = {}
     source: "self_view_encrypted",
     delivery: "self-view-encrypted"
   });
+}
+
+/** Decode a direct-transfer user disclosure from one fully validated typed scan output. */
+export function decodeUserDisclosureFromScanOutput(output, disclosureScalar, disclosurePubKeyHex, txHash, options = {}) {
+  const event = transferDisclosureEventFromScanOutput(output);
+  return decodeUserDisclosureFromEvent(
+    event,
+    disclosureScalar,
+    disclosurePubKeyHex,
+    typedScanTxHash(output, txHash),
+    options
+  );
+}
+
+/** Decode a direct-transfer self-view disclosure from one fully validated typed scan output. */
+export function decodeSelfViewDisclosureFromScanOutput(output, disclosureScalar, txHash, options = {}) {
+  const event = transferDisclosureEventFromScanOutput(output);
+  return decodeSelfViewDisclosureFromEvent(
+    event,
+    disclosureScalar,
+    typedScanTxHash(output, txHash),
+    options
+  );
+}
+
+/** Decode a direct-transfer audit disclosure from one fully validated typed scan output. */
+export function decodeAuditDisclosureFromScanOutput(output, disclosureScalar, txHash, options = {}) {
+  const event = transferDisclosureEventFromScanOutput(output);
+  return decodeAuditDisclosureFromEvent(
+    event,
+    disclosureScalar,
+    typedScanTxHash(output, txHash),
+    options
+  );
 }
 
 export function eventAttribute(event, key) {

@@ -18,6 +18,12 @@ import {
   normalizeEvmAddress
 } from "../transport/evm.js";
 import {
+  resolveCosmosFeeAmount as resolveBrowserCosmosFeeAmount,
+  resolveCosmosGasLimit as resolveBrowserCosmosGasLimit,
+  resolveDirectOperationEvidenceHashes,
+  transferProofReadyMetadata
+} from "../transport/cosmos-options.js";
+import {
   derivePrivacyMaterial,
   hexFromBytes
 } from "../core/crypto.js";
@@ -36,10 +42,17 @@ import {
 } from "../privacy/planner.js";
 import {
   preparePlanReservation,
-  reservationHeartbeatIntervalMs,
   rollbackPlanReservation,
   rollbackPlanReservationPreservingError
 } from "../privacy/reservation.js";
+import {
+  appendReservationCleanupErrors,
+  markReservationProofReady,
+  reservationAvailableNotes,
+  reservationBatchSummary,
+  reservationReconciliationFields,
+  withReservationHeartbeat
+} from "../privacy/reservation-workflow.js";
 import {
   createHttpDepositProofProvider,
   createHttpProverAdapter,
@@ -90,18 +103,6 @@ function assertReadOnlyEvmJsonRpcMethod(method) {
     throw new Error(`EVM JSON-RPC method ${normalizedMethod || "<empty>"} is not permitted for read-only queries`);
   }
   return normalizedMethod;
-}
-
-function appendReservationCleanupErrors(error, cleanupErrors = []) {
-  if (!cleanupErrors.length || !error || typeof error !== "object") return;
-  try {
-    const existing = Array.isArray(error.reservationCleanupErrors)
-      ? error.reservationCleanupErrors
-      : [];
-    error.reservationCleanupErrors = [...existing, ...cleanupErrors];
-  } catch {
-    // Cleanup annotations are best-effort and must never replace the original error.
-  }
 }
 
 function trimTrailingSlash(value) {
@@ -668,6 +669,13 @@ function canonicalBrowserAliasScalar(value) {
   return typeof value === "bigint" ? value.toString() : String(value).trim();
 }
 
+function canonicalBrowserTransferUnix(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("transfer time must be a non-negative safe integer");
+  }
+  return value;
+}
+
 function canonicalBrowserAliasHex(value) {
   return canonicalBrowserAliasScalar(value).replace(/^0x/i, "").toLowerCase();
 }
@@ -714,7 +722,9 @@ async function fetchJson(url, options = {}) {
     return data;
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw new Error(`fetch request timed out after ${resolvedTimeoutMs}ms: ${url}`);
+      const timeoutError = new Error(`fetch request timed out after ${resolvedTimeoutMs}ms`);
+      timeoutError.code = "FETCH_TIMEOUT";
+      throw timeoutError;
     }
     throw error;
   } finally {
@@ -810,7 +820,57 @@ function scanOptionsFromBody(body = {}) {
     eventLimit: scan.eventLimit ?? scan.event_limit ?? body.eventLimit ?? body.event_limit,
     maxEncodedBytes: scan.maxEncodedBytes ?? scan.max_encoded_bytes ?? body.maxEncodedBytes ?? body.max_encoded_bytes,
     validationStateSnapshot: scan.validationStateSnapshot ?? scan.validation_state_snapshot ?? body.validationStateSnapshot ?? body.validation_state_snapshot,
-    scanSource: scan.scanSource ?? scan.scan_source ?? body.scanSource ?? body.scan_source
+    scanSource: scan.scanSource ?? scan.scan_source ?? body.scanSource ?? body.scan_source,
+    strictPrivacyScan: scan.strictPrivacyScan
+      ?? scan.strict_privacy_scan
+      ?? body.strictPrivacyScan
+      ?? body.strict_privacy_scan
+  };
+}
+
+function typedWalletScanOptionsFromBody(body = {}) {
+  const scan = body.scan || {};
+  const eventTypeAliases = [
+    scan.eventTypes,
+    scan.event_types,
+    body.eventTypes,
+    body.event_types
+  ].filter(value => value !== undefined && value !== null);
+  for (const eventTypes of eventTypeAliases) {
+    if (!Array.isArray(eventTypes)) {
+      throw new Error("wallet and spend scan eventTypes must be an array");
+    }
+    if (eventTypes.length > 0) {
+      throw new Error("wallet and spend scans must not filter event types; typed privacy_scan summaries are required");
+    }
+  }
+
+  const sourceAliases = [
+    scan.scanSource,
+    scan.scan_source,
+    body.scanSource,
+    body.scan_source
+  ].filter(value => value !== undefined && value !== null);
+  for (const source of sourceAliases) {
+    if (String(source).trim().toLowerCase() !== "privacy_scan") {
+      throw new Error("wallet and spend scans only support the typed privacy_scan source");
+    }
+  }
+
+  const strictAliases = [
+    scan.strictPrivacyScan,
+    scan.strict_privacy_scan,
+    body.strictPrivacyScan,
+    body.strict_privacy_scan
+  ].filter(value => value !== undefined && value !== null);
+  if (strictAliases.some(value => value !== true)) {
+    throw new Error("wallet and spend scans require strictPrivacyScan=true");
+  }
+
+  return {
+    ...scanOptionsFromBody(body),
+    scanSource: "privacy_scan",
+    strictPrivacyScan: true
   };
 }
 
@@ -819,114 +879,6 @@ function relayChainNowUnixFromBody(body = {}) {
     ?? body.chain_now_unix
     ?? body.nowUnix
     ?? body.now_unix;
-}
-
-async function reservationAvailableNotes(reservationManager, notes) {
-  if (!reservationManager) return notes;
-  if (typeof reservationManager.filterAvailableNotes !== "function") {
-    throw new Error("reservationManager.filterAvailableNotes is required");
-  }
-  return reservationManager.filterAvailableNotes(notes);
-}
-
-function reservationBatchSummary(batch) {
-  if (!batch) return null;
-  return {
-    operation_id: batch.operation_id,
-    lease_owner: batch.lease_owner || batch.reservations?.[0]?.lease_owner || "",
-    lease_token: batch.lease_token || batch.reservations?.[0]?.lease_token || "",
-    lease_until: batch.lease_until || batch.reservations?.[0]?.lease_until || "",
-    reservation_ids: [...(batch.reservation_ids || [])],
-    reservations: [...(batch.reservations || [])]
-  };
-}
-
-function transferProofReadyMetadata(built, context = {}) {
-  const output = built?.payload?.outputs?.[0] || {};
-  const coin = context.amount ? parseCoin(context.amount, context.denom || "") : null;
-  const batchItemIndex = context.batchItemIndex ?? context.batch_item_index;
-  const batchItemIndexKnown = context.batchItemIndexKnown ?? context.batch_item_index_known;
-  const expectedOutputCommitment = built?.payload?.outputs?.[0]?.commitment_hex || "";
-  const expectedDisclosureDigest = built?.payload?.audit_disclosure_digest_hex || "";
-  const expectedRecipientHash = context.expectedRecipientHash ?? context.expected_recipient_hash ?? "";
-  const expectedAmount = output.amount || coin?.amount || "";
-  const expectedAmountHash = context.expectedAmountHash ?? context.expected_amount_hash ?? "";
-  const expectedDenom = context.expectedDenom ?? context.expected_denom ?? coin?.denom ?? context.denom ?? "";
-  const operationSuccessEvidenceRequired = Boolean(
-    expectedOutputCommitment &&
-    expectedDisclosureDigest &&
-    expectedRecipientHash &&
-    expectedAmount &&
-    expectedAmountHash &&
-    expectedDenom
-  );
-  return {
-    payloadHash: built?.payload?.payload_hash || "",
-    txBytesHash: context.txBytesHash ?? context.tx_bytes_hash ?? "",
-    expectedOutputCommitment,
-    expectedDisclosureDigest,
-    expectedRecipientHash,
-    expectedAmount,
-    expectedAmountHash,
-    expectedDenom,
-    batchItemIndex: batchItemIndex ?? 0,
-    batchItemIndexKnown: batchItemIndexKnown ?? (operationSuccessEvidenceRequired || (batchItemIndex !== undefined && batchItemIndex !== null)),
-    operationSuccessEvidenceRequired
-  };
-}
-
-function resolveDirectOperationEvidenceHashes({
-  expectedRecipientHash,
-  expected_recipient_hash,
-  expectedAmountHash,
-  expected_amount_hash
-} = {}) {
-  const recipientProvided = operationEvidenceAliasProvided(
-    expectedRecipientHash,
-    expected_recipient_hash
-  );
-  const amountProvided = operationEvidenceAliasProvided(
-    expectedAmountHash,
-    expected_amount_hash
-  );
-  const recipientHash = resolveOperationEvidenceAlias(
-    expectedRecipientHash,
-    expected_recipient_hash,
-    "expectedRecipientHash"
-  );
-  const amountHash = resolveOperationEvidenceAlias(
-    expectedAmountHash,
-    expected_amount_hash,
-    "expectedAmountHash"
-  );
-  if (recipientProvided !== amountProvided) {
-    throw new Error("expected recipient hash and expected amount hash must be provided together");
-  }
-  if (recipientProvided && !recipientHash.trim()) {
-    throw new Error("expectedRecipientHash must not be empty");
-  }
-  if (amountProvided && !amountHash.trim()) {
-    throw new Error("expectedAmountHash must not be empty");
-  }
-  return {
-    provided: recipientProvided,
-    expectedRecipientHash: recipientHash,
-    expectedAmountHash: amountHash
-  };
-}
-
-function operationEvidenceAliasProvided(camelValue, snakeValue) {
-  return (camelValue !== undefined && camelValue !== null) ||
-    (snakeValue !== undefined && snakeValue !== null);
-}
-
-function resolveOperationEvidenceAlias(camelValue, snakeValue, name) {
-  const camelProvided = camelValue !== undefined && camelValue !== null;
-  const snakeProvided = snakeValue !== undefined && snakeValue !== null;
-  if (camelProvided && snakeProvided && String(camelValue) !== String(snakeValue)) {
-    throw new Error(`${name} aliases conflict`);
-  }
-  return String(camelProvided ? camelValue : snakeProvided ? snakeValue : "");
 }
 
 function withdrawProofReadyMetadata(built, context = {}) {
@@ -942,20 +894,6 @@ function withdrawProofReadyMetadata(built, context = {}) {
     txBytesHash: context.txBytesHash ?? context.tx_bytes_hash ?? "",
     metadata: expiresAtUnix ? { payload_expires_at_unix: expiresAtUnix } : {}
   };
-}
-
-async function markReservationProofReady(reservationManager, batch, metadata) {
-  if (!reservationManager || !batch?.reservation_ids?.length) return [];
-  if (typeof reservationManager.markProofReady !== "function") {
-    throw new Error("reservationManager.markProofReady is required");
-  }
-  const reservations = await reservationManager.markProofReady(batch.reservation_ids, {
-    ...metadata,
-    leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || ""
-  });
-  batch.reservations = reservations;
-  batch.lease_until = reservations[0]?.lease_until || batch.lease_until;
-  return reservations;
 }
 
 async function markReservationReplanRequired(reservationManager, reservation, error, reason) {
@@ -980,92 +918,6 @@ async function replanProofReadyReservationPreservingError(reservationManager, re
   } catch (cleanupError) {
     appendReservationCleanupErrors(error, [cleanupError]);
   }
-}
-
-async function renewReservationLease(reservationManager, batch) {
-  if (!reservationManager || !batch?.reservation_ids?.length) return [];
-  if (typeof reservationManager.renewLease !== "function") return [];
-  const reservations = await reservationManager.renewLease(batch.reservation_ids, {
-    leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || ""
-  });
-  batch.reservations = reservations;
-  batch.lease_until = reservations[0]?.lease_until || batch.lease_until;
-  return reservations;
-}
-
-async function withReservationHeartbeat(reservationManager, batch, task) {
-  if (!reservationManager || !batch?.reservation_ids?.length || typeof reservationManager.renewLease !== "function") {
-    return task({
-      assertHeartbeatHealthy() {},
-      async heartbeatNow() {}
-    });
-  }
-  await renewReservationLease(reservationManager, batch);
-  const heartbeatIntervalMs = reservationHeartbeatIntervalMs({
-    leaseDurationMs: reservationManager.leaseDurationMs,
-    leaseUntil: batch.lease_until || batch.reservations?.[0]?.lease_until
-  });
-  let heartbeatError = null;
-  let inFlightHeartbeat = null;
-  const heartbeat = async () => {
-    if (heartbeatError) return;
-    try {
-      await renewReservationLease(reservationManager, batch);
-    } catch (error) {
-      heartbeatError = error;
-    }
-  };
-  const heartbeatNow = async () => {
-    if (!inFlightHeartbeat) {
-      inFlightHeartbeat = heartbeat().finally(() => {
-        inFlightHeartbeat = null;
-      });
-    }
-    await inFlightHeartbeat;
-    assertHeartbeatHealthy();
-  };
-  const assertHeartbeatHealthy = () => {
-    if (!heartbeatError) return;
-    const error = new Error("note reservation lease heartbeat failed during proof generation");
-    error.name = "ReservationHeartbeatError";
-    error.cause = heartbeatError;
-    throw error;
-  };
-  const timer = typeof globalThis.setInterval === "function"
-    ? globalThis.setInterval(() => { void heartbeatNow().catch(() => {}); }, heartbeatIntervalMs)
-    : null;
-  let taskCompleted = false;
-  let result;
-  try {
-    result = await task({ assertHeartbeatHealthy, heartbeatNow });
-    taskCompleted = true;
-  } finally {
-    if (timer && typeof globalThis.clearInterval === "function") {
-      globalThis.clearInterval(timer);
-    }
-    if (inFlightHeartbeat) await inFlightHeartbeat;
-  }
-  if (taskCompleted && heartbeatError) {
-    return {
-      ...result,
-      reservationReconciliationRequired: true,
-      reservationReconciliationWarning: {
-        code: "reservation_heartbeat_failed_after_proof_ready",
-        message: "The prepared artifact is durable, but reservation reconciliation is required before broadcast.",
-        cause: heartbeatError?.message || String(heartbeatError)
-      }
-    };
-  }
-  return result;
-}
-
-function reservationReconciliationFields(result = {}) {
-  return result.reservationReconciliationRequired === true
-    ? {
-        reservationReconciliationRequired: true,
-        reservationReconciliationWarning: result.reservationReconciliationWarning
-      }
-    : {};
 }
 
 function positiveCoinForDenom(amount, denom, label) {
@@ -1709,11 +1561,24 @@ export class ClairveilBrowserClient {
     return this.evm.sendTransaction(wallet, transaction, reservationOptions);
   }
 
-  async buildBankSendSignDoc({ from, pubKeyHex, to, amount }) {
+  async buildBankSendSignDoc({
+    from,
+    pubKeyHex,
+    to,
+    amount,
+    gasLimit,
+    gas_limit,
+    feeAmount,
+    fee_amount
+  }) {
     const coin = positiveCoinForDenom(amount, this.denom, "send");
+    const resolvedGasLimit = resolveBrowserCosmosGasLimit(gasLimit, gas_limit, 200000);
+    const resolvedFeeAmount = resolveBrowserCosmosFeeAmount(feeAmount, fee_amount);
     return this.cosmos.buildDirectSignDoc({
       signer: from,
       pubKeyHex,
+      gasLimit: resolvedGasLimit,
+      feeAmount: resolvedFeeAmount,
       messages: [
         {
           typeUrl: "/cosmos.bank.v1beta1.MsgSend",
@@ -1834,7 +1699,10 @@ export class ClairveilBrowserClient {
       material,
       depositMaterial,
       amount,
-      gasLimit: 2500000,
+      gasLimit: body.gasLimit,
+      gas_limit: body.gas_limit,
+      feeAmount: body.feeAmount,
+      fee_amount: body.fee_amount,
       proof: depositProof,
       proofHex: depositProofHex
     });
@@ -1856,6 +1724,20 @@ export class ClairveilBrowserClient {
   async prepareTransfer(body) {
     const walletType = this.walletTypeFromBody(body);
     if (walletType === "evm") await this.assertEvmPreparationNetwork(body);
+    const expiresAtUnix = browserAliasedInputValue(
+      body,
+      "expiresAtUnix",
+      "expires_at_unix",
+      "expiresAtUnix",
+      canonicalBrowserTransferUnix
+    );
+    const chainNowUnix = browserAliasedInputValue(
+      body,
+      "chainNowUnix",
+      "chain_now_unix",
+      "chainNowUnix",
+      canonicalBrowserTransferUnix
+    );
     const material = this.privacyMaterial(body, walletType);
     const amount = body.amount;
     const recipient = body.recipient;
@@ -1882,10 +1764,12 @@ export class ClairveilBrowserClient {
       expected_amount_hash: body.expected_amount_hash
     });
     const allowPlanStep = Boolean(body.allowPlanStep ?? body.allow_plan_step);
-    const scanOptions = scanOptionsFromBody(body);
+    const scanOptions = typedWalletScanOptionsFromBody(body);
     const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
 
     if (walletType !== "evm") {
+      const gasLimit = resolveBrowserCosmosGasLimit(body.gasLimit, body.gas_limit, 8000000);
+      const feeAmount = resolveBrowserCosmosFeeAmount(body.feeAmount, body.fee_amount);
       const prepared = await this.cosmos.prepareTransfer({
         proverAdapter: body.proverAdapter ?? body.prover_adapter ?? this.proverAdapter(),
         material,
@@ -1902,9 +1786,12 @@ export class ClairveilBrowserClient {
           expectedRecipientHash: operationEvidence.expectedRecipientHash,
           expectedAmountHash: operationEvidence.expectedAmountHash
         } : {}),
+        expiresAtUnix,
+        chainNowUnix,
         allowPlanStep,
         scan: scanOptions,
-        gasLimit: 8000000,
+        gasLimit,
+        feeAmount,
         reservationManager
       });
       if (prepared.status !== "ready") throw plannerError(prepared);
@@ -1983,10 +1870,18 @@ export class ClairveilBrowserClient {
           userDisclosureTargetPubKeyHex: isFinal ? userDisclosureTargetPubKeyHex : "",
           auditDisclosureTargetPubKeyHex: auditPubKeyHex,
           disableSelfViewDisclosure,
-          selfViewDisclosureTargetPubKeyHex
+          selfViewDisclosureTargetPubKeyHex,
+          expiresAtUnix,
+          chainNowUnix
         });
         assertHeartbeatHealthy();
-        const evmBuilt = await this.evm.buildTransferTransaction({ message: built.message });
+        const evmBuilt = await this.evm.buildTransferTransaction({
+          message: built.message,
+          payload: built.payload,
+          proof: built.proof,
+          expiresAtUnix: built.payload.expires_at_unix,
+          chainNowUnix
+        });
         let transaction = {
           chainId: this.evmChainId,
           gas: this.evmGasLimit,
@@ -2001,7 +1896,7 @@ export class ClairveilBrowserClient {
           expectedRecipientHash: isFinal ? operationEvidence.expectedRecipientHash : "",
           expectedAmountHash: isFinal ? operationEvidence.expectedAmountHash : "",
           txBytesHash
-        }));
+        }, "txBytesHash"));
         return { built, transaction };
       });
       const { built, transaction } = heartbeatResult;
@@ -2022,6 +1917,8 @@ export class ClairveilBrowserClient {
           privacyPolicy: userPrivacyPolicy,
           disclosureMode: userDisclosureMode,
           planStatus: plan.status,
+          expiresAtUnix: built.payload.expires_at_unix,
+          chainNowUnix,
           reservation: reservationBatchSummary(reservationBatch)
         },
         plan
@@ -2117,7 +2014,7 @@ export class ClairveilBrowserClient {
     const payments = body.payments;
     const amounts = body.amounts;
     const recipient = body.recipient;
-    const scanOptions = scanOptionsFromBody(body);
+    const scanOptions = typedWalletScanOptionsFromBody(body);
     const prepared = await this.cosmos.prepareTransferBatch({
       proverAdapter: suppliedProverAdapter ?? this.proverAdapter(),
       material,
@@ -2146,6 +2043,8 @@ export class ClairveilBrowserClient {
       expected_amount_hashes: body.expected_amount_hashes,
       scan: scanOptions,
       gasLimit,
+      feeAmount: body.feeAmount,
+      fee_amount: body.fee_amount,
       expiresAtUnix,
       chainNowUnix,
       rootHex,
@@ -2275,6 +2174,8 @@ export class ClairveilBrowserClient {
       signer: body.signer ?? body.address ?? body.payload?.creator,
       pubKeyHex,
       gasLimit,
+      feeAmount: body.feeAmount,
+      fee_amount: body.fee_amount,
       memo: body.memo,
       payments: body.payments,
       amounts: body.amounts,
@@ -2311,16 +2212,19 @@ export class ClairveilBrowserClient {
     const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
 
     if (walletType !== "evm") {
+      const gasLimit = resolveBrowserCosmosGasLimit(body.gasLimit, body.gas_limit, 5000000);
+      const feeAmount = resolveBrowserCosmosFeeAmount(body.feeAmount, body.fee_amount);
       const prepared = await this.cosmos.prepareWithdraw({
         proverAdapter: body.proverAdapter ?? body.prover_adapter ?? this.proverAdapter(),
         material,
         signal: body.signal,
         amount,
         recipient,
-        scan: scanOptionsFromBody(body),
+        scan: typedWalletScanOptionsFromBody(body),
         expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
         chainNowUnix: body.chainNowUnix ?? body.chain_now_unix,
-        gasLimit: 5000000,
+        gasLimit,
+        feeAmount,
         reservationManager
       });
       if (prepared.status !== "ready") throw plannerError(prepared);
@@ -2346,7 +2250,7 @@ export class ClairveilBrowserClient {
       };
     }
 
-    const scanOptions = scanOptionsFromBody(body);
+    const scanOptions = typedWalletScanOptionsFromBody(body);
     const scan = await this.cosmos.scanNotes({
       rootSeed: material.rootSeed,
       ...scanOptions,
@@ -2443,7 +2347,7 @@ export class ClairveilBrowserClient {
       signal: body.signal,
       amount,
       recipient,
-      scan: scanOptionsFromBody(body),
+      scan: typedWalletScanOptionsFromBody(body),
       expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
       chainNowUnix: relayChainNowUnixFromBody(body),
       reservationManager
@@ -2525,12 +2429,14 @@ export class ClairveilBrowserClient {
   }
 
   async createRelayWithdrawSignDoc(body = {}) {
+    const gasLimit = resolveBrowserCosmosGasLimit(body.gasLimit, body.gas_limit, 5000000);
+    const feeAmount = resolveBrowserCosmosFeeAmount(body.feeAmount, body.fee_amount);
     const result = await this.cosmos.createRelayWithdrawSignDoc({
       payload: body.payload,
       relayer: body.relayer ?? body.creator ?? body.address,
       pubKeyHex: body.pubKeyHex ?? body.pub_key_hex,
-      gasLimit: body.gasLimit ?? body.gas_limit,
-      feeAmount: body.feeAmount ?? body.fee_amount ?? [],
+      gasLimit,
+      feeAmount,
       memo: body.memo,
       chainNowUnix: relayChainNowUnixFromBody(body),
       expectedChainId: body.expectedChainId ?? body.expected_chain_id,
@@ -2569,6 +2475,8 @@ export class ClairveilBrowserClient {
       validation_state_snapshot,
       scanSource,
       scan_source,
+      strictPrivacyScan,
+      strict_privacy_scan,
       noteStore,
       note_store,
       includeFoundNotes = false
@@ -2596,6 +2504,8 @@ export class ClairveilBrowserClient {
       validation_state_snapshot,
       scanSource,
       scan_source,
+      strictPrivacyScan,
+      strict_privacy_scan,
       noteStore: noteStore ?? note_store,
       includeFoundNotes
     });
@@ -2610,7 +2520,10 @@ export class ClairveilBrowserClient {
   }
 
   async decodeUserDisclosure(body) {
-    const request = { txHash: body.txHash ?? body.tx_hash };
+    const request = {
+      txHash: body.txHash ?? body.tx_hash
+    };
+    addIfPresent(request, "output", body.output ?? body.scanOutput);
     addIfPresent(request, "afterHeight", body.afterHeight ?? body.after_height);
     addIfPresent(request, "afterSequence", body.afterSequence ?? body.after_sequence);
     addIfPresent(request, "page", body.page);
@@ -2630,7 +2543,10 @@ export class ClairveilBrowserClient {
   }
 
   async decodeSelfViewDisclosure(body) {
-    const request = { txHash: body.txHash ?? body.tx_hash };
+    const request = {
+      txHash: body.txHash ?? body.tx_hash
+    };
+    addIfPresent(request, "output", body.output ?? body.scanOutput);
     addIfPresent(request, "afterHeight", body.afterHeight ?? body.after_height);
     addIfPresent(request, "afterSequence", body.afterSequence ?? body.after_sequence);
     addIfPresent(request, "page", body.page);
@@ -2656,6 +2572,7 @@ export class ClairveilBrowserClient {
       txHash: body.txHash ?? body.tx_hash,
       disclosurePrivKeyHex: body.disclosurePrivKeyHex ?? body.disclosure_privkey_hex
     };
+    addIfPresent(request, "output", body.output ?? body.scanOutput);
     addIfPresent(request, "afterHeight", body.afterHeight ?? body.after_height);
     addIfPresent(request, "afterSequence", body.afterSequence ?? body.after_sequence);
     addIfPresent(request, "page", body.page);

@@ -7,6 +7,7 @@ import {
 import {
   buildPreparedTransferPayload,
   buildTransferMessage,
+  buildTransferMsgFromPayloadAndProof,
   buildPreparedWithdrawProverPayload,
   buildWithdrawMsgFromPayload,
   buildWithdrawMessage,
@@ -832,6 +833,84 @@ function requiredUint64(value, label) {
   return parsed;
 }
 
+function strictTransferUnix(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function aliasedEvmTransferUnix(input, camelName, snakeName, label, { required = false } = {}) {
+  const camelProvided = input?.[camelName] !== undefined && input?.[camelName] !== null;
+  const snakeProvided = input?.[snakeName] !== undefined && input?.[snakeName] !== null;
+  const camel = camelProvided ? strictTransferUnix(input[camelName], label) : undefined;
+  const snake = snakeProvided ? strictTransferUnix(input[snakeName], label) : undefined;
+  if (camelProvided && snakeProvided && camel !== snake) {
+    throw new Error(`${label} aliases conflict`);
+  }
+  if (required && !camelProvided && !snakeProvided) {
+    throw new Error(`${label} is required from authoritative chain time`);
+  }
+  return camelProvided ? camel : snake;
+}
+
+function transferMessageExpiry(message) {
+  const camelProvided = message?.expiresAtUnix !== undefined && message?.expiresAtUnix !== null;
+  const snakeProvided = message?.expires_at_unix !== undefined && message?.expires_at_unix !== null;
+  if (!camelProvided && !snakeProvided) {
+    throw new Error("transfer message expiresAtUnix is required");
+  }
+  const camel = camelProvided
+    ? requiredUint64(message.expiresAtUnix, "transfer message expiresAtUnix")
+    : undefined;
+  const snake = snakeProvided
+    ? requiredUint64(message.expires_at_unix, "transfer message expires_at_unix")
+    : undefined;
+  if (camelProvided && snakeProvided && camel !== snake) {
+    throw new Error("transfer message expiresAtUnix aliases conflict");
+  }
+  return camelProvided ? camel : snake;
+}
+
+function assertEvmTransferExecutionBinding(input, built) {
+  const chainNowUnix = aliasedEvmTransferUnix(
+    input,
+    "chainNowUnix",
+    "chain_now_unix",
+    "transfer chainNowUnix",
+    { required: true }
+  );
+  const requestedExpiry = aliasedEvmTransferUnix(
+    input,
+    "expiresAtUnix",
+    "expires_at_unix",
+    "transfer expiresAtUnix"
+  );
+  const messageExpiry = transferMessageExpiry(built.message);
+  if (requestedExpiry !== undefined && BigInt(requestedExpiry) !== messageExpiry) {
+    throw new Error("transfer message expiry does not match the requested expiresAtUnix");
+  }
+  if (BigInt(chainNowUnix) >= messageExpiry) {
+    throw new Error("transfer message expired before EVM transaction construction");
+  }
+
+  const hasPayload = built.payload !== undefined && built.payload !== null;
+  const hasProof = built.proof !== undefined && built.proof !== null;
+  if (hasPayload !== hasProof) {
+    throw new Error("EVM transfer payload and proof must be supplied together");
+  }
+  if (hasPayload) {
+    const expectedMessage = buildTransferMsgFromPayloadAndProof(
+      built.payload,
+      built.proof,
+      { nowUnix: chainNowUnix }
+    );
+    if (encodeEvmPrivacyTransfer(expectedMessage) !== encodeEvmPrivacyTransfer(built.message)) {
+      throw new Error("EVM transfer message does not match the supplied payload and proof");
+    }
+  }
+}
+
 function bytesArray(value, label, byteLength) {
   if (!Array.isArray(value)) {
     throw new Error(`${label} must be an array`);
@@ -1232,6 +1311,7 @@ export class ClairveilEvmClient {
         chainId: input.chainId ?? this.chainId,
         checkNullifiers: input.checkNullifiers
       });
+    assertEvmTransferExecutionBinding(input, built);
     const transaction = this.contract.buildTransferTransaction(
       built.message,
       input.transactionOptions

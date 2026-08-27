@@ -95,6 +95,10 @@ test("protocol preflight binds the consensus circuit identity and authoritative 
       mapping_version: "privacy-asset-registry-v1",
       asset: { canonical_denom: "uclair", asset_id: assetID }
     };
+    if (path === `/clairveil/privacy/v1/assets/by_id/${assetID}`) return {
+      mapping_version: "privacy-asset-registry-v1",
+      asset: { canonical_denom: "uclair", asset_id: assetID }
+    };
     if (path === "/clairveil/privacy/v1/audit_config") return {
       audit_master_pubkey_hex: packPointHex(derivePubKeyFromScalar(101n)),
       audit_key_id: "master",
@@ -114,6 +118,39 @@ test("protocol preflight binds the consensus circuit identity and authoritative 
   const transfer = await client.assertTransferProtocolConfig("uclair");
   assert.equal(transfer.audit_config.audit_key_id, "master");
   assert.deepEqual(transfer.disclosure_config.supported_user_modes, ["none"]);
+});
+
+test("protocol preflight fails closed when the AssetRegistry reverse mapping disagrees", async () => {
+  const response = circuitConfig();
+  const assetID = computeAssetIdV1("uclair").toString(16).padStart(64, "0");
+  const otherAssetID = computeAssetIdV1("uother").toString(16).padStart(64, "0");
+  const client = createClairveilClient({
+    rpc: "http://rpc.example",
+    rest: "http://rest.example",
+    chainId: "clairveil-test-1"
+  });
+  let reverseQueries = 0;
+  client.fetchJson = async path => {
+    if (path === "/clairveil/privacy/v1/circuit_config") return response;
+    if (path === "/clairveil/privacy/v1/assets/by_denom/uclair") return {
+      mapping_version: "privacy-asset-registry-v1",
+      asset: { canonical_denom: "uclair", asset_id: assetID }
+    };
+    if (path === `/clairveil/privacy/v1/assets/by_id/${assetID}`) {
+      reverseQueries += 1;
+      return {
+        mapping_version: "privacy-asset-registry-v1",
+        asset: { canonical_denom: "uother", asset_id: otherAssetID }
+      };
+    }
+    throw new Error(`unexpected path ${path}`);
+  };
+
+  await assert.rejects(
+    () => client.assertProtocolPreflight("uclair"),
+    /asset_id does not match the requested asset ID/
+  );
+  assert.equal(reverseQueries, 1);
 });
 
 test("low-level proof builders cannot bypass consensus protocol preflight", async () => {

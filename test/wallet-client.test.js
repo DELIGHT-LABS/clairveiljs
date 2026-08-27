@@ -317,6 +317,25 @@ test("browser transfer preparation rejects conflicting self-view aliases", async
     }),
     /selfViewDisclosureTargetPubKeyHex aliases conflict/
   );
+  await assert.rejects(
+    () => client.prepareTransfer({
+      amount: "1uclair",
+      recipient: "clairs1recipient",
+      chainNowUnix: 10,
+      chain_now_unix: 11
+    }),
+    /chainNowUnix aliases conflict/
+  );
+  await assert.rejects(
+    () => client.prepareTransfer({
+      amount: "1uclair",
+      recipient: "clairs1recipient",
+      expiresAtUnix: 20,
+      expires_at_unix: 21,
+      chainNowUnix: 10
+    }),
+    /expiresAtUnix aliases conflict/
+  );
 });
 
 test("browser batch preparation rejects conflicting snapshot and disclosure aliases", async () => {
@@ -365,6 +384,79 @@ test("browser batch preparation rejects conflicting snapshot and disclosure alia
     }),
     /pubKeyHex aliases conflict/
   );
+});
+
+test("browser batch preparation forwards profile fees to the Cosmos sign-doc path", async () => {
+  const client = browserClient({ enableExperimentalBatchTransfer: true });
+  client.privacyMaterial = () => ({ shieldedAddress: "clairs1sender" });
+  let received = null;
+  client.cosmos.prepareTransferBatch = async input => {
+    received = input;
+    return {
+      status: "ready",
+      signDoc: {},
+      reservation: null,
+      prepared: {
+        payments: [{ privacyPolicy: "all-private", disclosureMode: "none" }]
+      },
+      privacyAccount: { shielded_address: "clairs1sender" },
+      plan: {}
+    };
+  };
+  const fees = [{ denom: "uclair", amount: "41" }];
+  await client.prepareTransferBatch({
+    amounts: ["1uclair"],
+    recipient: "clairs1recipient",
+    proverAdapter: {},
+    reservationManager: {},
+    onPreparedPayload() {},
+    onPreparedProof() {},
+    gas_limit: 26000000,
+    fee_amount: fees
+  });
+
+  assert.equal(received.gasLimit, 26000000);
+  assert.equal(received.fee_amount, fees);
+});
+
+test("browser Cosmos transfer preserves caller gas and fee aliases at the SDK facade", async () => {
+  const client = browserClient();
+  client.privacyMaterial = () => ({ shieldedAddress: "clairs1sender" });
+  let received = null;
+  client.cosmos.prepareTransfer = async input => {
+    received = input;
+    return {
+      status: "ready",
+      signDoc: {},
+      reservation: null,
+      privacyAccount: { shielded_address: "clairs1sender" },
+      prepared: { planAction: "final_transfer" },
+      plan: { status: "final_transfer_ready" },
+      payload: {},
+      proof: {},
+      message: {}
+    };
+  };
+
+  await client.prepareTransfer({
+    amount: "1uclair",
+    recipient: "clairs1recipient",
+    proverAdapter: {},
+    chainNowUnix: 10,
+    gas_limit: 8123456,
+    fee_amount: [{ denom: "uclair", amount: "47" }]
+  });
+
+  assert.equal(received.gasLimit, 8123456);
+  assert.deepEqual(received.feeAmount, [{ denom: "uclair", amount: "47" }]);
+  assert.equal(received.fee_amount, undefined);
+  await assert.rejects(() => client.prepareTransfer({
+    amount: "1uclair",
+    recipient: "clairs1recipient",
+    chainNowUnix: 10,
+    gasLimit: 8,
+    gas_limit: 9
+  }), /gasLimit aliases conflict/);
 });
 
 test("browser client delegates signDirectAndBroadcast to the Cosmos client", async () => {
@@ -695,7 +787,10 @@ test("browser Cosmos transfer preserves the prepared effect for DApp confirmatio
   const payload = { payload_hash: "payload-hash" };
   const proof = { payload_hash: "payload-hash", proof_hex: "proof" };
   const message = { creator: "clair1sender" };
-  client.cosmos.prepareTransfer = async () => ({
+  let received;
+  client.cosmos.prepareTransfer = async input => {
+    received = input;
+    return ({
     status: "ready",
     signDoc: { chainId: "clairveil-local-3" },
     reservation: null,
@@ -711,15 +806,22 @@ test("browser Cosmos transfer preserves the prepared effect for DApp confirmatio
     plan: { status: "final_transfer_ready" },
     privacyAccount: { shielded_address: "clairs1sender" },
   });
+  };
 
   const prepared = await client.prepareTransfer({
     amount: "1uclair",
     recipient: "clairs1recipient",
+    chainNowUnix: 4102444800,
+    chain_now_unix: 4102444800,
+    expiresAtUnix: 4102448400,
+    expires_at_unix: 4102448400
   });
 
   assert.equal(prepared.prepared.payload, payload);
   assert.equal(prepared.prepared.proof, proof);
   assert.equal(prepared.prepared.message, message);
+  assert.equal(received.chainNowUnix, 4102444800);
+  assert.equal(received.expiresAtUnix, 4102448400);
 });
 
 test("browser disclosure wrappers forward an explicit asset denom", async () => {
@@ -815,6 +917,7 @@ test("browser staged batch finalizer forwards the original recovery context", as
     address: "clair1sender",
     pub_key_hex: "02".repeat(33),
     gas_limit: 123,
+    fee_amount: [{ denom: "uclair", amount: "43" }],
     amounts: ["1uclair"],
     recipient: "clairs1recipient",
     operation_id: "batch-operation-1",
@@ -828,6 +931,7 @@ test("browser staged batch finalizer forwards the original recovery context", as
   assert.equal(received.signer, "clair1sender");
   assert.equal(received.pubKeyHex, "02".repeat(33));
   assert.equal(received.gasLimit, 123);
+  assert.deepEqual(received.fee_amount, [{ denom: "uclair", amount: "43" }]);
   assert.equal(received.userPrivacyPolicy, "all-private");
   assert.equal(received.userDisclosureMode, "none");
   assert.equal(received.operation_id, "batch-operation-1");

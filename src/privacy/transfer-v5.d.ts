@@ -112,7 +112,7 @@ export type BuildPreparedTransferV5PayloadInput = {
   creator: ClairAddress | string;
   chainId: string;
   expiresAtUnix?: number;
-  chainNowUnix?: number;
+  chainNowUnix: number;
   /** V5 is a fixed 2-in/2-out circuit. */
   inputs: readonly [FoundNote, FoundNote];
   recipient: ShieldedAddress;
@@ -150,5 +150,5 @@ export function computePreparedTransferV5PayloadHash(payload: Partial<PreparedTr
 export function validatePreparedTransferV5PayloadMetadata(payload: PreparedTransferV5Payload): true;
 export function validatePreparedTransferV5PayloadAt(payload: PreparedTransferV5Payload, nowUnix?: number): true;
 export function validatePreparedTransferV5Proof(payload: PreparedTransferV5Payload, proof: PreparedTransferV5Proof, options?: { nowUnix?: number }): true;
-export function buildTransferV5MsgFromPayloadAndProof(payload: PreparedTransferV5Payload, proof: PreparedTransferV5Proof, options?: { nowUnix?: number }): MsgTransfer;
+export function buildTransferV5MsgFromPayloadAndProof(payload: PreparedTransferV5Payload, proof: PreparedTransferV5Proof, options?: { nowUnix?: number; creator?: string }): MsgTransfer;
 export function validateDisclosureBlindingSeparationV1(input?: DisclosureBlindingSeparationInputV1): true;

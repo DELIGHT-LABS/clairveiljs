@@ -1,6 +1,6 @@
 import { toBech32 } from "@cosmjs/encoding";
 import { Registry, encodePubkey, makeAuthInfoBytes, makeSignDoc } from "@cosmjs/proto-signing";
-import { defaultRegistryTypes, StargateClient } from "@cosmjs/stargate";
+import { BroadcastTxError, defaultRegistryTypes, StargateClient } from "@cosmjs/stargate";
 import { TxBody, TxRaw } from "cosmjs-types/cosmos/tx/v1beta1/tx";
 import {
   MsgBatchTransfer as GeneratedMsgBatchTransfer,
@@ -23,11 +23,14 @@ import {
 } from "../core/crypto.js";
 import {
   decodeAuditDisclosureFromEvent,
+  decodeAuditDisclosureFromScanOutput,
   decodeBatchAuditDisclosureFromScanOutput,
   decodeBatchSelfViewDisclosureFromScanOutput,
   decodeBatchUserDisclosureFromScanOutput,
   decodeSelfViewDisclosureFromEvent,
+  decodeSelfViewDisclosureFromScanOutput,
   decodeUserDisclosureFromEvent,
+  decodeUserDisclosureFromScanOutput,
   disclosureScalarFromHex
 } from "../core/disclosure.js";
 import {
@@ -84,12 +87,29 @@ import {
 import {
   hashAmount,
   hashRecipient,
+  hashTransparentRecipient,
   preparePlanReservation,
-  reservationHeartbeatIntervalMs,
   reservationStatuses,
   rollbackPlanReservation,
   rollbackPlanReservationPreservingError
 } from "../privacy/reservation.js";
+import {
+  appendReservationCleanupErrors,
+  markReservationProofReady,
+  reservationAvailableNotes,
+  reservationBatchSummary,
+  reservationReconciliationFields,
+  withReservationHeartbeat
+} from "../privacy/reservation-workflow.js";
+import {
+  aliasedValueProvided as operationEvidenceAliasProvided,
+  normalizeCosmosFeeCoins,
+  resolveAliasedString as resolveOperationEvidenceAlias,
+  resolveCosmosFeeAmount,
+  resolveCosmosGasLimit,
+  resolveDirectOperationEvidenceHashes,
+  transferProofReadyMetadata
+} from "./cosmos-options.js";
 import {
   createPrivacyScanValidationStateV2,
   parseNullifierUsage,
@@ -128,17 +148,6 @@ export * from "../privacy/network-config.js";
 export * from "../privacy/planner.js";
 export * from "../privacy/prover.js";
 
-function appendReservationCleanupErrors(error, cleanupErrors = []) {
-  if (!cleanupErrors.length || !error || typeof error !== "object") return;
-  try {
-    const existing = Array.isArray(error.reservationCleanupErrors)
-      ? error.reservationCleanupErrors
-      : [];
-    error.reservationCleanupErrors = [...existing, ...cleanupErrors];
-  } catch {
-    // Cleanup annotations are best-effort and must never replace the original error.
-  }
-}
 export * from "../privacy/reservation.js";
 export * from "../privacy/scan.js";
 export * from "../privacy/merkle-path.js";
@@ -238,6 +247,39 @@ function normalizedBatchNowUnix(value) {
     throw new Error("batch transfer chainNowUnix must be a non-negative safe integer");
   }
   return nowUnix;
+}
+
+function normalizedTransferUnix(value, label) {
+  const unix = value;
+  if (!Number.isSafeInteger(unix) || unix < 0) {
+    throw new Error(`transfer ${label} must be a non-negative safe integer`);
+  }
+  return unix;
+}
+
+function aliasedTransferUnix(camelValue, snakeValue, label) {
+  const hasCamel = camelValue !== undefined && camelValue !== null;
+  const hasSnake = snakeValue !== undefined && snakeValue !== null;
+  const camel = hasCamel ? normalizedTransferUnix(camelValue, label) : undefined;
+  const snake = hasSnake ? normalizedTransferUnix(snakeValue, label) : undefined;
+  if (hasCamel && hasSnake && camel !== snake) {
+    throw new Error(`${label} aliases conflict`);
+  }
+  return hasCamel ? camel : snake;
+}
+
+function requiredTransferPreparationTime(chainNowUnix, expiresAtUnix) {
+  if (chainNowUnix === undefined) {
+    throw new Error("transfer chainNowUnix is required from authoritative chain time");
+  }
+  const expiry = expiresAtUnix ?? chainNowUnix + 1800;
+  if (!Number.isSafeInteger(expiry)) {
+    throw new Error("transfer expiresAtUnix must be a non-negative safe integer");
+  }
+  if (expiry <= chainNowUnix) {
+    throw new Error("transfer expiresAtUnix must be later than chainNowUnix");
+  }
+  return { chainNowUnix, expiresAtUnix: expiry };
 }
 
 function normalizeBatchTransferOutputMode(value) {
@@ -835,24 +877,91 @@ function attachBroadcastEvidence(error, { txHash = "", txBytesHash = "" } = {}) 
     ? error
     : new Error(String(error || "broadcast failed"));
   try {
-    if (txHash && !original.txHash && !original.txhash) {
-      original.txHash = txHash;
-    }
-    if (txBytesHash && !original.txBytesHash && !original.tx_bytes_hash) {
-      original.txBytesHash = txBytesHash;
-    }
+    // These canonical fields identify the exact signed TxRaw bytes. Preserve
+    // transport-specific aliases for diagnostics, but never let an arbitrary
+    // remote decoration suppress or replace the deterministic recovery key.
+    if (txHash) original.txHash = txHash;
+    if (txBytesHash) original.txBytesHash = txBytesHash;
     return original;
   } catch {
     const wrapped = new Error(
       String(original?.message || error || "broadcast failed"),
       { cause: original }
     );
+    const originalPrototype = Object.getPrototypeOf(original);
+    if (originalPrototype && originalPrototype !== Object.prototype) {
+      Object.setPrototypeOf(wrapped, originalPrototype);
+    }
     if (typeof original?.name === "string" && original.name) {
       wrapped.name = original.name;
+    }
+    for (const field of ["code", "codespace", "log"]) {
+      if (original?.[field] !== undefined) wrapped[field] = original[field];
     }
     if (txHash) wrapped.txHash = txHash;
     if (txBytesHash) wrapped.txBytesHash = txBytesHash;
     return wrapped;
+  }
+}
+
+function attachBroadcastDisposition(error, fields = {}) {
+  const original = error && typeof error === "object"
+    ? error
+    : new Error(String(error || "broadcast failed"));
+  try {
+    Object.assign(original, fields);
+    return original;
+  } catch {
+    const wrapped = new Error(
+      String(original?.message || error || "broadcast failed"),
+      { cause: original }
+    );
+    const originalPrototype = Object.getPrototypeOf(original);
+    if (originalPrototype && originalPrototype !== Object.prototype) {
+      Object.setPrototypeOf(wrapped, originalPrototype);
+    }
+    if (typeof original?.name === "string" && original.name) wrapped.name = original.name;
+    for (const field of ["code", "codespace", "log", "txHash", "txBytesHash"]) {
+      if (original?.[field] !== undefined) wrapped[field] = original[field];
+    }
+    Object.assign(wrapped, fields);
+    return wrapped;
+  }
+}
+
+function isExplicitCheckTxRejection(error) {
+  if (error instanceof BroadcastTxError) return true;
+  return error?.name === "BroadcastTxError" &&
+    Number.isSafeInteger(error?.code) &&
+    Number(error.code) !== 0 &&
+    typeof error?.codespace === "string";
+}
+
+function normalizedCosmosTxHash(value) {
+  const normalized = String(value || "").trim().replace(/^0x/i, "");
+  return /^[0-9a-fA-F]{64}$/.test(normalized) ? normalized.toUpperCase() : "";
+}
+
+function runSynchronousBeforeBroadcast(options = {}, evidence = {}) {
+  const callback = options?.beforeBroadcast;
+  if (callback == null) return;
+  if (typeof callback !== "function") {
+    throw new TypeError("beforeBroadcast must be a function");
+  }
+  const result = callback(Object.freeze({
+    txHash: String(evidence.txHash || ""),
+    txBytesHash: String(evidence.txBytesHash || ""),
+    signDocHash: String(evidence.signDocHash || "")
+  }));
+  if (
+    result != null &&
+    (typeof result === "object" || typeof result === "function") &&
+    typeof result.then === "function"
+  ) {
+    // Observe a rejected async callback without ever awaiting it. The
+    // broadcast remains blocked and the durable attempt is reconciled below.
+    void Promise.resolve(result).catch(() => {});
+    throw new TypeError("beforeBroadcast must be synchronous and must not return a Promise");
   }
 }
 
@@ -895,9 +1004,15 @@ function cosmosSignDocMetadata(signDoc) {
 }
 
 function reservationRequiredCosmosMemo(memo = "") {
-  return [String(memo || "").trim(), cosmosReservationRequiredMemoMarker]
-    .filter(Boolean)
-    .join("\n");
+  const lines = String(memo || "")
+    .trim()
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+  if (!lines.includes(cosmosReservationRequiredMemoMarker)) {
+    lines.push(cosmosReservationRequiredMemoMarker);
+  }
+  return lines.join("\n");
 }
 
 function cosmosTxBodyRequiresReservation(signDoc) {
@@ -954,16 +1069,20 @@ function directBroadcastContext(input = {}) {
     reservationManager: reservationManager ?? reservation_manager ?? null,
     reservation: resolvedReservation,
     relayPayload: input.relayPayload ?? input.relay_payload,
-    getChainNowUnix: input.getChainNowUnix ?? input.get_chain_now_unix,
-    chainNowUnix: input.chainNowUnix ?? input.chain_now_unix,
+    getChainNowUnix: input.getChainNowUnix,
+    get_chain_now_unix: input.get_chain_now_unix,
+    chainNowUnix: input.chainNowUnix,
+    chain_now_unix: input.chain_now_unix,
     expectedChainId: input.expectedChainId ?? input.expected_chain_id,
     expectedRecipient: input.expectedRecipient ?? input.expected_recipient,
-    accountPrefix: input.accountPrefix ?? input.account_prefix
+    accountPrefix: input.accountPrefix ?? input.account_prefix,
+    beforeBroadcast: input.beforeBroadcast
   };
   return {
     wallet,
     signDoc,
     walletSignDoc,
+    reservation: resolvedReservation,
     reservationContext,
     signDocHash: cosmosSignDocBindingHash(signDoc),
     broadcastOptions
@@ -1005,7 +1124,9 @@ async function fetchJson(url, {
     return response.json();
   } catch (error) {
     if (error?.name === "AbortError") {
-      const timeoutError = new Error(`fetch request timed out after ${resolvedTimeoutMs}ms: ${url}`);
+      // Query URLs may contain nullifiers, commitments, or account material.
+      // Keep timeout diagnostics useful without copying the request target.
+      const timeoutError = new Error(`fetch request timed out after ${resolvedTimeoutMs}ms`);
       timeoutError.code = "FETCH_TIMEOUT";
       throw timeoutError;
     }
@@ -1370,8 +1491,23 @@ function resolveScanOptions({
   validationStateSnapshot,
   validation_state_snapshot,
   scanSource,
-  scan_source
+  scan_source,
+  strictPrivacyScan,
+  strict_privacy_scan
 } = {}) {
+  const resolvedEventTypes = scan?.eventTypes ?? scan?.event_types ?? eventTypes ?? event_types;
+  if (resolvedEventTypes != null) {
+    if (!Array.isArray(resolvedEventTypes)) {
+      throw new Error("wallet and spend scan eventTypes must be an array");
+    }
+    if (resolvedEventTypes.some(value => String(value || "").trim())) {
+      throw new Error("wallet and spend scans must not filter event types; typed privacy_scan summaries are required");
+    }
+  }
+  const resolvedScanSource = scan?.scanSource ?? scan?.scan_source ?? scanSource ?? scan_source;
+  if (resolvedScanSource != null && resolvedScanSource !== "privacy_scan") {
+    throw new Error("wallet and spend scans only support the typed privacy_scan source");
+  }
   return {
     after: scan?.after ?? after,
     afterHeight: scan?.afterHeight ?? scan?.after_height ?? afterHeight ?? after_height,
@@ -1379,12 +1515,15 @@ function resolveScanOptions({
     page: scan?.page ?? page,
     limit: scan?.limit ?? limit,
     maxPages: scan?.maxPages ?? scan?.max_pages ?? maxPages ?? max_pages,
-    eventTypes: scan?.eventTypes ?? scan?.event_types ?? eventTypes ?? event_types,
+    eventTypes: [],
     outputLimit: scan?.outputLimit ?? scan?.output_limit ?? outputLimit ?? output_limit,
     eventLimit: scan?.eventLimit ?? scan?.event_limit ?? eventLimit ?? event_limit,
     maxEncodedBytes: scan?.maxEncodedBytes ?? scan?.max_encoded_bytes ?? maxEncodedBytes ?? max_encoded_bytes,
     validationStateSnapshot: scan?.validationStateSnapshot ?? scan?.validation_state_snapshot ?? validationStateSnapshot ?? validation_state_snapshot,
-    scanSource: scan?.scanSource ?? scan?.scan_source ?? scanSource ?? scan_source
+    scanSource: "privacy_scan",
+    // High-level wallet and spend selection must never turn an unavailable or
+    // malformed typed endpoint into a cursor-bearing legacy scan.
+    strictPrivacyScan: true
   };
 }
 
@@ -1408,26 +1547,6 @@ function publicPrivacyAccount(material) {
     shielded_address: material.shieldedAddress,
     disclosure_pubkey_hex: material.disclosurePubKeyHex,
     root_signature_hash: material.rootSignatureHash
-  };
-}
-
-async function reservationAvailableNotes(reservationManager, notes) {
-  if (!reservationManager) return notes;
-  if (typeof reservationManager.filterAvailableNotes !== "function") {
-    throw new Error("reservationManager.filterAvailableNotes is required");
-  }
-  return reservationManager.filterAvailableNotes(notes);
-}
-
-function reservationBatchSummary(batch) {
-  if (!batch) return null;
-  return {
-    operation_id: batch.operation_id,
-    lease_owner: batch.lease_owner || batch.reservations?.[0]?.lease_owner || "",
-    lease_token: batch.lease_token || batch.reservations?.[0]?.lease_token || "",
-    lease_until: batch.lease_until || batch.reservations?.[0]?.lease_until || "",
-    reservation_ids: [...(batch.reservation_ids || [])],
-    reservations: [...(batch.reservations || [])]
   };
 }
 
@@ -1459,6 +1578,90 @@ function signedWithdrawMessage(signedTx) {
     throw new Error("withdraw broadcast must contain exactly one MsgWithdraw");
   }
   return GeneratedMsgWithdraw.decode(withdrawals[0].value);
+}
+
+function signedTransferMessage(signedTx) {
+  const body = TxBody.decode(fromBase64(signedTx?.bodyBytes, "bodyBytes"));
+  const transfers = body.messages.filter(message => message.typeUrl === msgTransferTypeUrl);
+  if (!transfers.length) return null;
+  if (body.messages.length !== 1 || transfers.length !== 1) {
+    throw new Error("transfer broadcast must contain exactly one MsgTransfer");
+  }
+  return GeneratedMsgTransfer.decode(transfers[0].value);
+}
+
+function signedBatchTransferMessage(signedTx) {
+  const body = TxBody.decode(fromBase64(signedTx?.bodyBytes, "bodyBytes"));
+  const transfers = body.messages.filter(message => message.typeUrl === msgBatchTransferTypeUrl);
+  if (!transfers.length) return null;
+  if (body.messages.length !== 1 || transfers.length !== 1) {
+    throw new Error("batch transfer broadcast must contain exactly one MsgBatchTransfer");
+  }
+  const message = GeneratedMsgBatchTransfer.decode(transfers[0].value);
+  if (!String(message.creator || "").trim()) {
+    throw new Error("signed MsgBatchTransfer creator is required");
+  }
+  if (message.proof.length !== batchTransferProofSize) {
+    throw new Error(`signed MsgBatchTransfer proof must be exactly ${batchTransferProofSize} bytes`);
+  }
+  if (GeneratedMsgBatchTransfer.encode(message).finish().length > maxBatchTransferMessageBytesV1) {
+    throw new Error(`signed MsgBatchTransfer exceeds the ${maxBatchTransferMessageBytesV1}-byte hard cap`);
+  }
+  const effects = validateBatchTransferEffectsV1(message);
+  return { message, effects };
+}
+
+function aliasedBroadcastChainTimeProvider(options = {}) {
+  const camel = options.getChainNowUnix;
+  const snake = options.get_chain_now_unix;
+  if (camel != null && snake != null && camel !== snake) {
+    throw new Error("getChainNowUnix aliases conflict");
+  }
+  const provider = camel ?? snake;
+  if (provider != null && typeof provider !== "function") {
+    throw new Error("getChainNowUnix must be a function");
+  }
+  return provider;
+}
+
+async function authoritativeBroadcastChainNowUnix(options = {}, label = "signed privacy transaction") {
+  if (options?.chainNowUnix != null || options?.chain_now_unix != null) {
+    throw new Error(`${label} broadcast does not accept chainNowUnix; use getChainNowUnix for a fresh authoritative expiry check`);
+  }
+  const chainTimeProvider = aliasedBroadcastChainTimeProvider(options);
+  if (!chainTimeProvider) {
+    throw new Error(`${label} broadcast requires getChainNowUnix for a fresh authoritative expiry check`);
+  }
+  let value;
+  try {
+    value = await chainTimeProvider();
+  } catch (error) {
+    throw new Error(`${label} authoritative chain time query failed`, { cause: error });
+  }
+  const chainNowUnix = value;
+  if (!Number.isSafeInteger(chainNowUnix) || chainNowUnix < 0) {
+    throw new Error(`${label} authoritative chain time must be a non-negative safe integer`);
+  }
+  return chainNowUnix;
+}
+
+function signedDirectPrivacyInputNullifiers(signedTx) {
+  const body = TxBody.decode(fromBase64(signedTx?.bodyBytes, "bodyBytes"));
+  const transfers = body.messages.filter(message => message.typeUrl === msgTransferTypeUrl);
+  const withdrawals = body.messages.filter(message => message.typeUrl === msgWithdrawTypeUrl);
+  if (!transfers.length && !withdrawals.length) return null;
+  if (body.messages.length !== 1 || transfers.length + withdrawals.length !== 1) {
+    throw new Error("reserved direct privacy broadcast must contain exactly one MsgTransfer or MsgWithdraw");
+  }
+  const nullifiers = transfers.length
+    ? GeneratedMsgTransfer.decode(transfers[0].value).nullifiers
+    : [GeneratedMsgWithdraw.decode(withdrawals[0].value).nullifier];
+  return nullifiers.map((nullifier, index) => {
+    if (!(nullifier instanceof Uint8Array) || nullifier.length !== 32) {
+      throw new Error(`reserved direct privacy input nullifier at index ${index} must be exactly 32 bytes`);
+    }
+    return hexFromBytes(nullifier);
+  });
 }
 
 function normalizedTxRawBytes(value) {
@@ -1526,13 +1729,75 @@ function batchTransferNullifierHexesFromReservationRecords(records) {
   return normalized[0];
 }
 
-async function recheckReservedBatchTransferNullifiers(context, checkNullifiers) {
-  if (!context) return;
-  const nullifiers = batchTransferNullifierHexesFromReservationRecords(
-    await authoritativeReservationRecords(context)
-  );
-  if (!nullifiers.length) return;
-  batchTransferNullifiersUnspent(await checkNullifiers(nullifiers), nullifiers);
+async function recheckReservedBatchTransferNullifiers(context, signedTx, checkNullifiers) {
+  const signed = signedBatchTransferMessage(signedTx);
+  if (!signed) return null;
+  if (!context) {
+    throw new Error("signed MsgBatchTransfer broadcast requires reservationManager and reservation");
+  }
+  if (typeof context.reservationManager.lookupKeyForNote !== "function") {
+    throw new Error("reservationManager.lookupKeyForNote is required for batch transfer broadcast validation");
+  }
+  const records = await authoritativeReservationRecords(context);
+  const persistedNullifiers = batchTransferNullifierHexesFromReservationRecords(records);
+  const signedNullifiers = signed.effects.nullifiers.map(hexFromBytes);
+  if (persistedNullifiers.length && (
+    signedNullifiers.length !== persistedNullifiers.length ||
+    signedNullifiers.some((nullifier, index) => nullifier !== persistedNullifiers[index])
+  )) {
+    throw new Error("batch transfer reservations do not match the signed transaction nullifiers");
+  }
+  const persistedLookupKeys = records.map(record => String(record?.nullifier_lookup_key || ""));
+  const signedLookupKeys = (await Promise.all(signedNullifiers.map(nullifier =>
+    context.reservationManager.lookupKeyForNote({ nullifier })
+  ))).map(value => String(value || ""));
+  if (
+    records.length !== signedNullifiers.length ||
+    persistedLookupKeys.some(value => !value) ||
+    signedLookupKeys.some(value => !value) ||
+    new Set(persistedLookupKeys).size !== persistedLookupKeys.length ||
+    new Set(signedLookupKeys).size !== signedLookupKeys.length ||
+    signedLookupKeys.some((value, index) => value !== persistedLookupKeys[index])
+  ) {
+    throw new Error("batch transfer reservations do not match the signed transaction inputs");
+  }
+  batchTransferNullifiersUnspent(await checkNullifiers(signedNullifiers), signedNullifiers);
+  return signed;
+}
+
+async function recheckReservedDirectPrivacyNullifiers(context, signedTx, checkNullifiers) {
+  const candidates = signedDirectPrivacyInputNullifiers(signedTx);
+  if (candidates == null) return;
+  if (context) {
+    if (typeof context.reservationManager.lookupKeyForNote !== "function") {
+      throw new Error("reservationManager.lookupKeyForNote is required for reserved direct privacy broadcast validation");
+    }
+    const records = await authoritativeReservationRecords(context);
+    const persistedLookupKeys = records.map(record => String(record?.nullifier_lookup_key || ""));
+    if (!persistedLookupKeys.length || persistedLookupKeys.some(key => !key) ||
+        new Set(persistedLookupKeys).size !== persistedLookupKeys.length) {
+      throw new Error("reserved direct privacy inputs have invalid persisted nullifier lookup keys");
+    }
+    const candidateLookupKeys = (await Promise.all(candidates.map(nullifier =>
+      context.reservationManager.lookupKeyForNote({ nullifier })
+    ))).map(key => String(key || ""));
+    const persistedLookupKeySet = new Set(persistedLookupKeys);
+    if (candidates.length !== persistedLookupKeys.length ||
+        candidateLookupKeys.some(key => !key || !persistedLookupKeySet.has(key)) ||
+        new Set(candidateLookupKeys).size !== candidateLookupKeys.length ||
+        new Set(candidates).size !== candidates.length) {
+      throw new Error("reserved direct privacy inputs do not match the signed transaction nullifiers");
+    }
+  }
+  const statuses = await checkNullifiers(candidates);
+  const statusFor = nullifier => statuses instanceof Map
+    ? statuses.get(nullifier) ?? statuses.get(`0x${nullifier}`)
+    : statuses?.[nullifier] ?? statuses?.[`0x${nullifier}`];
+  for (const [index, nullifier] of candidates.entries()) {
+    if (statusFor(nullifier) !== false) {
+      throw new Error(`reserved direct privacy input nullifier at index ${index} is spent, missing, or has an invalid status`);
+    }
+  }
 }
 
 function assertReservationPayloadMatches(records, payload) {
@@ -1581,38 +1846,57 @@ async function validateRelayBroadcastContext(options, {
   const payload = options?.relayPayload ?? options?.relay_payload ?? null;
   const reservationRecords = await authoritativeReservationRecords(reservationContext);
   assertReservationSignDocMatches(reservationRecords, signDocHash, { allowPayloadBinding: Boolean(payload) });
-  const chainTimeProvider = options?.getChainNowUnix ?? options?.get_chain_now_unix;
   const withdrawMessage = signedWithdrawMessage(signedTx);
+  if (options?.chainNowUnix != null || options?.chain_now_unix != null) {
+    throw new Error("Cosmos broadcast does not accept chainNowUnix; use getChainNowUnix at the final submission boundary");
+  }
   if (!payload) {
     if (withdrawMessage) {
       throw new Error("withdraw broadcast requires relayPayload and authoritative chain time");
     }
-    if (
-      options?.chainNowUnix != null ||
-      options?.chain_now_unix != null ||
-      chainTimeProvider != null
-    ) {
-      throw new Error("relayPayload is required when relay broadcast chain time is provided");
-    }
     return;
   }
-  if (chainTimeProvider != null && typeof chainTimeProvider !== "function") {
-    throw new Error("getChainNowUnix must be a function");
-  }
-  const chainNowUnix = chainTimeProvider
-    ? await chainTimeProvider()
-    : options.chainNowUnix ?? options.chain_now_unix;
-  validateRelayWithdrawPayload(payload, {
-    chainNowUnix,
-    expectedChainId: options.expectedChainId ?? options.expected_chain_id ?? expectedChainId,
-    expectedRecipient: options.expectedRecipient ?? options.expected_recipient,
-    accountPrefix: options.accountPrefix ?? options.account_prefix ?? accountPrefix
-  });
   assertReservationPayloadMatches(reservationRecords, payload);
   if (!withdrawMessage) {
     throw new Error("relayPayload does not match a Cosmos MsgWithdraw transaction");
   }
+  if (!aliasedBroadcastChainTimeProvider(options)) {
+    throw new Error("signed MsgWithdraw broadcast requires getChainNowUnix for a fresh authoritative expiry check");
+  }
   assertSignedWithdrawMatchesPayload(withdrawMessage, payload);
+}
+
+async function assertSignedPrivacyFreshAtBroadcast(signedTx, options = {}, {
+  expectedChainId,
+  accountPrefix
+} = {}) {
+  const transferMessage = signedTransferMessage(signedTx);
+  const withdrawMessage = signedWithdrawMessage(signedTx);
+  const batchTransfer = signedBatchTransferMessage(signedTx);
+  if (!transferMessage && !withdrawMessage && !batchTransfer) return;
+  const label = withdrawMessage
+    ? "signed MsgWithdraw"
+    : batchTransfer
+      ? "signed MsgBatchTransfer"
+      : "signed MsgTransfer";
+  const chainNowUnix = await authoritativeBroadcastChainNowUnix(options, label);
+  if (withdrawMessage) {
+    const payload = options?.relayPayload ?? options?.relay_payload ?? null;
+    validateRelayWithdrawPayload(payload, {
+      chainNowUnix,
+      expectedChainId: options.expectedChainId ?? options.expected_chain_id ?? expectedChainId,
+      expectedRecipient: options.expectedRecipient ?? options.expected_recipient,
+      accountPrefix: options.accountPrefix ?? options.account_prefix ?? accountPrefix
+    });
+    assertSignedWithdrawMatchesPayload(withdrawMessage, payload);
+    return;
+  }
+  const expiresAtUnix = transferMessage
+    ? BigInt(transferMessage.expiresAtUnix)
+    : batchTransfer.effects.expiresAtUnix;
+  if (BigInt(chainNowUnix) >= expiresAtUnix) {
+    throw new Error(`${label} expired at the final broadcast fence`);
+  }
 }
 
 function attachReservationBookkeepingError(error, bookkeepingError) {
@@ -1681,6 +1965,38 @@ async function markBroadcastReservationSubmitted(context, evidence = {}) {
   }
 }
 
+async function markBroadcastReservationRejected(context, error, {
+  kind,
+  providerCode = "",
+  providerCodespace = "",
+  providerLog = ""
+} = {}) {
+  if (!context) return;
+  try {
+    if (typeof context.reservationManager.markBroadcastRejected !== "function") {
+      throw new Error("reservationManager.markBroadcastRejected is required for definitive broadcast rejection");
+    }
+    const beforeRpc = kind === "before_rpc";
+    const checkTx = kind === "check_tx";
+    await context.reservationManager.markBroadcastRejected(context.reservationIDs, {
+      leaseToken: context.leaseToken,
+      error: beforeRpc ? "broadcast_aborted_before_rpc" : "check_tx_rejected",
+      providerCode,
+      providerCodespace,
+      providerLog,
+      rpcInvoked: checkTx,
+      checkTxRejected: checkTx,
+      broadcastAbortedBeforeRpc: beforeRpc,
+      walletRejectedBeforeBroadcast: false,
+      metadata: {
+        reconcile_reason: beforeRpc ? "broadcast_aborted_before_rpc" : "check_tx_rejected"
+      }
+    });
+  } catch (bookkeepingError) {
+    throw attachReservationBookkeepingError(error, bookkeepingError);
+  }
+}
+
 function isExplicitWalletRejection(error) {
   return String(error?.code ?? error?.data?.code ?? "") === "4001";
 }
@@ -1695,6 +2011,8 @@ async function markSigningReservationRejected(context, error) {
       leaseToken: context.leaseToken,
       error: "wallet_rejected_before_broadcast",
       providerCode: "4001",
+      rpcInvoked: false,
+      walletRejectedBeforeBroadcast: true,
       metadata: {
         wallet_rejected_before_broadcast: true,
         provider_rejection_code: "4001",
@@ -1704,94 +2022,6 @@ async function markSigningReservationRejected(context, error) {
   } catch (bookkeepingError) {
     throw attachReservationBookkeepingError(error, bookkeepingError);
   }
-}
-
-function transferProofReadyMetadata(built, context = {}) {
-  const output = built?.payload?.outputs?.[0] || {};
-  const coin = context.amount ? parseCoin(context.amount, context.denom || "") : null;
-  const batchItemIndex = context.batchItemIndex ?? context.batch_item_index;
-  const batchItemIndexKnown = context.batchItemIndexKnown ?? context.batch_item_index_known;
-  const expectedOutputCommitment = built?.payload?.outputs?.[0]?.commitment_hex || "";
-  const expectedDisclosureDigest = built?.payload?.audit_disclosure_digest_hex || "";
-  const expectedRecipientHash = context.expectedRecipientHash ?? context.expected_recipient_hash ?? "";
-  const expectedAmount = output.amount || coin?.amount || "";
-  const expectedAmountHash = context.expectedAmountHash ?? context.expected_amount_hash ?? "";
-  const expectedDenom = context.expectedDenom ?? context.expected_denom ?? coin?.denom ?? context.denom ?? "";
-  const operationSuccessEvidenceRequired = Boolean(
-    expectedOutputCommitment &&
-    expectedDisclosureDigest &&
-    expectedRecipientHash &&
-    expectedAmount &&
-    expectedAmountHash &&
-    expectedDenom
-  );
-  return {
-    payloadHash: built?.payload?.payload_hash || "",
-    signDocHash: context.signDocHash ?? context.sign_doc_hash ?? "",
-    expectedOutputCommitment,
-    expectedDisclosureDigest,
-    expectedRecipientHash,
-    expectedAmount,
-    expectedAmountHash,
-    expectedDenom,
-    batchItemIndex: batchItemIndex ?? 0,
-    batchItemIndexKnown: batchItemIndexKnown ?? (operationSuccessEvidenceRequired || (batchItemIndex !== undefined && batchItemIndex !== null)),
-    operationSuccessEvidenceRequired
-  };
-}
-
-function resolveDirectOperationEvidenceHashes({
-  expectedRecipientHash,
-  expected_recipient_hash,
-  expectedAmountHash,
-  expected_amount_hash
-} = {}) {
-  const recipientProvided = operationEvidenceAliasProvided(
-    expectedRecipientHash,
-    expected_recipient_hash
-  );
-  const amountProvided = operationEvidenceAliasProvided(
-    expectedAmountHash,
-    expected_amount_hash
-  );
-  const recipientHash = resolveOperationEvidenceAlias(
-    expectedRecipientHash,
-    expected_recipient_hash,
-    "expectedRecipientHash"
-  );
-  const amountHash = resolveOperationEvidenceAlias(
-    expectedAmountHash,
-    expected_amount_hash,
-    "expectedAmountHash"
-  );
-  if (recipientProvided !== amountProvided) {
-    throw new Error("expected recipient hash and expected amount hash must be provided together");
-  }
-  if (recipientProvided && !recipientHash.trim()) {
-    throw new Error("expectedRecipientHash must not be empty");
-  }
-  if (amountProvided && !amountHash.trim()) {
-    throw new Error("expectedAmountHash must not be empty");
-  }
-  return {
-    provided: recipientProvided,
-    expectedRecipientHash: recipientHash,
-    expectedAmountHash: amountHash
-  };
-}
-
-function operationEvidenceAliasProvided(camelValue, snakeValue) {
-  return (camelValue !== undefined && camelValue !== null) ||
-    (snakeValue !== undefined && snakeValue !== null);
-}
-
-function resolveOperationEvidenceAlias(camelValue, snakeValue, name) {
-  const camelProvided = camelValue !== undefined && camelValue !== null;
-  const snakeProvided = snakeValue !== undefined && snakeValue !== null;
-  if (camelProvided && snakeProvided && String(camelValue) !== String(snakeValue)) {
-    throw new Error(`${name} aliases conflict`);
-  }
-  return String(camelProvided ? camelValue : snakeProvided ? snakeValue : "");
 }
 
 function resolveDisclosureAssetDenom(assetDenom, asset_denom, defaultDenom) {
@@ -1889,34 +2119,109 @@ function resolveBatchOperationEvidence({
 }
 
 function withdrawProofReadyMetadata(built, context = {}) {
+  const payload = built?.payload || built?.proverPayload || {};
   const expiresAtUnix = String(
-    built?.payload?.expires_at_unix ||
-    built?.payload?.expiresAtUnix ||
-    built?.proverPayload?.expires_at_unix ||
-    built?.proverPayload?.expiresAtUnix ||
+    payload.expires_at_unix ||
+    payload.expiresAtUnix ||
     ""
   );
+  const bindOperationSuccess = context.bindOperationSuccess === true ||
+    context.bind_operation_success === true;
+  const coin = bindOperationSuccess && payload.amount
+    ? parseCoin(payload.amount, payload.asset_denom || payload.assetDenom || context.denom || "")
+    : null;
+  const amount = coin?.amount || "";
+  const denom = coin?.denom || "";
+  const recipient = bindOperationSuccess ? String(payload.recipient || "") : "";
+  if (bindOperationSuccess && (!amount || !denom || !recipient)) {
+    throw new Error("withdraw success binding requires recipient, amount, and denom");
+  }
   return {
-    payloadHash: built?.payload?.payload_hash || built?.proverPayload?.payload_hash || "",
+    payloadHash: payload.payload_hash || "",
     signDocHash: context.signDocHash ?? context.sign_doc_hash ?? "",
     expectedOutputCommitment: "",
     expectedDisclosureDigest: "",
+    expectedRecipientHash: bindOperationSuccess
+      ? hashTransparentRecipient(recipient, { accountPrefix: context.accountPrefix })
+      : "",
+    expectedAmount: amount,
+    expectedAmountHash: bindOperationSuccess ? hashAmount(denom, amount) : "",
+    expectedDenom: denom,
+    operationSuccessEvidenceRequired: bindOperationSuccess,
     metadata: expiresAtUnix ? { payload_expires_at_unix: expiresAtUnix } : {}
   };
 }
 
-async function markReservationProofReady(reservationManager, batch, metadata) {
-  if (!reservationManager || !batch?.reservation_ids?.length) return [];
-  if (typeof reservationManager.markProofReady !== "function") {
-    throw new Error("reservationManager.markProofReady is required");
+async function authoritativeBatchRecoveryReservation(
+  reservationManager,
+  batch,
+  { operationId, nullifierHexes } = {}
+) {
+  if (typeof reservationManager?.getReservations !== "function" ||
+      typeof reservationManager?.lookupKeyForNote !== "function") {
+    throw new Error("finalizePreparedBatchTransfer requires authoritative reservation-set lookup support");
   }
-  const reservations = await reservationManager.markProofReady(batch.reservation_ids, {
-    ...metadata,
-    leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || ""
-  });
-  batch.reservations = reservations;
-  batch.lease_until = reservations[0]?.lease_until || batch.lease_until;
-  return reservations;
+  const reservationIDs = [...(batch?.reservation_ids || [])].map(value => String(value || "").trim());
+  if (!reservationIDs.length || reservationIDs.some(id => !id) ||
+      new Set(reservationIDs).size !== reservationIDs.length) {
+    throw new Error("prepared batch transfer recovery requires unique reservation IDs");
+  }
+  const normalizedNullifiers = [...(nullifierHexes || [])].map(value => String(value || "").trim().toLowerCase());
+  if (reservationIDs.length !== normalizedNullifiers.length ||
+      new Set(normalizedNullifiers).size !== normalizedNullifiers.length) {
+    throw new Error("prepared batch transfer reservation set does not match its input nullifiers");
+  }
+  const leaseToken = String(batch?.lease_token || batch?.leaseToken || "").trim();
+  const leaseOwner = String(
+    batch?.lease_owner || batch?.leaseOwner || batch?.reservations?.[0]?.lease_owner || ""
+  ).trim();
+  if (!leaseToken || !leaseOwner) {
+    throw new Error("prepared batch transfer recovery requires the original lease owner and token");
+  }
+  if (String(reservationManager.leaseOwner || "") !== leaseOwner) {
+    throw new Error("prepared batch transfer reservation lease owner does not match the recovery manager");
+  }
+  const loaded = await reservationManager.getReservations(reservationIDs);
+  if (!Array.isArray(loaded)) {
+    throw new Error("prepared batch transfer recovery did not load the exact reservation set");
+  }
+  const byID = new Map(loaded.map(record => [String(record?.reservation_id || ""), record]));
+  if (loaded.length !== reservationIDs.length || byID.size !== reservationIDs.length ||
+      reservationIDs.some(id => !byID.has(id))) {
+    throw new Error("prepared batch transfer recovery did not load the exact reservation set");
+  }
+  const reservations = reservationIDs.map(id => byID.get(id));
+  const normalizedOperationID = String(operationId || "").trim();
+  if (reservations.some(record =>
+    String(record.operation_id || "") !== normalizedOperationID ||
+    String(record.kind || "") !== "batch_transfer"
+  )) {
+    throw new Error("prepared batch transfer reservations do not belong to the recovered operation");
+  }
+  if (reservations.some(record =>
+    String(record.status || "") !== reservationStatuses.Proving ||
+    String(record.lease_owner || "") !== leaseOwner ||
+    String(record.lease_token || "") !== leaseToken
+  )) {
+    throw new Error("prepared batch transfer reservations do not have the recovered Proving lease");
+  }
+  const expectedLookupKeys = await Promise.all(normalizedNullifiers.map(nullifier =>
+    reservationManager.lookupKeyForNote({ nullifier })
+  ));
+  const actualLookupKeys = reservations.map(record => String(record.nullifier_lookup_key || ""));
+  if (new Set(expectedLookupKeys).size !== expectedLookupKeys.length ||
+      new Set(actualLookupKeys).size !== actualLookupKeys.length ||
+      expectedLookupKeys.some(key => !actualLookupKeys.includes(key))) {
+    throw new Error("prepared batch transfer reservation inputs do not match the payload nullifiers");
+  }
+  return {
+    ...batch,
+    operation_id: normalizedOperationID,
+    lease_owner: leaseOwner,
+    lease_token: leaseToken,
+    reservation_ids: reservationIDs,
+    reservations
+  };
 }
 
 async function reservationIDsForNotes(reservationManager, batch, notes) {
@@ -2002,92 +2307,6 @@ async function replanProofReadyReservations(reservationManager, batch, error, re
       proof_discarded: true
     }
   });
-}
-
-async function renewReservationLease(reservationManager, batch) {
-  if (!reservationManager || !batch?.reservation_ids?.length) return [];
-  if (typeof reservationManager.renewLease !== "function") return [];
-  const reservations = await reservationManager.renewLease(batch.reservation_ids, {
-    leaseToken: batch.lease_token || batch.reservations?.[0]?.lease_token || ""
-  });
-  batch.reservations = reservations;
-  batch.lease_until = reservations[0]?.lease_until || batch.lease_until;
-  return reservations;
-}
-
-async function withReservationHeartbeat(reservationManager, batch, task) {
-  if (!reservationManager || !batch?.reservation_ids?.length || typeof reservationManager.renewLease !== "function") {
-    return task({
-      assertHeartbeatHealthy() {},
-      async heartbeatNow() {}
-    });
-  }
-  await renewReservationLease(reservationManager, batch);
-  const heartbeatIntervalMs = reservationHeartbeatIntervalMs({
-    leaseDurationMs: reservationManager.leaseDurationMs,
-    leaseUntil: batch.lease_until || batch.reservations?.[0]?.lease_until
-  });
-  let heartbeatError = null;
-  let inFlightHeartbeat = null;
-  const heartbeat = async () => {
-    if (heartbeatError) return;
-    try {
-      await renewReservationLease(reservationManager, batch);
-    } catch (error) {
-      heartbeatError = error;
-    }
-  };
-  const heartbeatNow = async () => {
-    if (!inFlightHeartbeat) {
-      inFlightHeartbeat = heartbeat().finally(() => {
-        inFlightHeartbeat = null;
-      });
-    }
-    await inFlightHeartbeat;
-    assertHeartbeatHealthy();
-  };
-  const assertHeartbeatHealthy = () => {
-    if (!heartbeatError) return;
-    const error = new Error("note reservation lease heartbeat failed during proof generation");
-    error.name = "ReservationHeartbeatError";
-    error.cause = heartbeatError;
-    throw error;
-  };
-  const timer = typeof globalThis.setInterval === "function"
-    ? globalThis.setInterval(() => { void heartbeatNow().catch(() => {}); }, heartbeatIntervalMs)
-    : null;
-  let taskCompleted = false;
-  let result;
-  try {
-    result = await task({ assertHeartbeatHealthy, heartbeatNow });
-    taskCompleted = true;
-  } finally {
-    if (timer && typeof globalThis.clearInterval === "function") {
-      globalThis.clearInterval(timer);
-    }
-    if (inFlightHeartbeat) await inFlightHeartbeat;
-  }
-  if (taskCompleted && heartbeatError) {
-    return {
-      ...result,
-      reservationReconciliationRequired: true,
-      reservationReconciliationWarning: {
-        code: "reservation_heartbeat_failed_after_proof_ready",
-        message: "The prepared artifact is durable, but reservation reconciliation is required before broadcast.",
-        cause: heartbeatError?.message || String(heartbeatError)
-      }
-    };
-  }
-  return result;
-}
-
-function reservationReconciliationFields(result = {}) {
-  return result.reservationReconciliationRequired === true
-    ? {
-        reservationReconciliationRequired: true,
-        reservationReconciliationWarning: result.reservationReconciliationWarning
-      }
-    : {};
 }
 
 export class ClairveilJS {
@@ -2411,6 +2630,11 @@ export class ClairveilJS {
       this.assertCircuitConfig(),
       this.resolveAsset(canonicalDenom)
     ]);
+    const reverseAsset = await this.resolveAssetByID(asset.asset_id_hex);
+    if (reverseAsset.canonical_denom !== asset.canonical_denom ||
+        reverseAsset.asset_id_hex !== asset.asset_id_hex) {
+      throw new Error("AssetRegistryV1 forward and reverse mappings do not agree");
+    }
     return Object.freeze({ circuit_config: circuitConfig, asset });
   }
 
@@ -2536,20 +2760,18 @@ export class ClairveilJS {
     event_types,
     includeFoundNotes = false,
     scanSource,
-    scan_source
+    scan_source,
+    strictPrivacyScan = false,
+    strict_privacy_scan
   } = {}) {
     const requestedEventTypes = event_types ?? eventTypes;
     const resolvedEventTypes = requestedEventTypes ?? ["deposit", "shielded_transfer"];
     const pageLimit = Math.max(1, Number(limit || 200));
     const pageBudget = Math.max(1, Number(maxPages || 1));
     // `privacy_scan` intentionally rejects event filters so its cursor proves
-    // progress across zero-output events. Preserve the prior filtered
-    // ScanEvents contract unless the caller explicitly selected a source.
-    const source = scan_source ?? scanSource ?? (
-      Array.isArray(requestedEventTypes) && requestedEventTypes.some(value => String(value || "").trim())
-        ? "scan_events"
-        : "privacy_scan"
-    );
+    // progress across zero-output events. Legacy sources remain available only
+    // when a low-level diagnostic caller selects one explicitly.
+    const source = scan_source ?? scanSource ?? "privacy_scan";
     if (source !== "privacy_scan" && resolvedEventTypes.some(value => String(value || "").trim() === "batch_transfer")) {
       throw new Error("batch_transfer outputs require the typed privacy-scan-v2 source");
     }
@@ -2609,10 +2831,10 @@ export class ClairveilJS {
           if (!hasMore) break;
         }
       } catch (error) {
-        const canFallback = error?.status === 404 || error?.status === 405 || error?.status === 501 || error?.code === "UNSUPPORTED_PRIVACY_SCAN_VERSION";
+        const canFallback = error?.status === 404 || error?.status === 405 || error?.status === 501;
         if (!canFallback) throw error;
-        if (this.enableExperimentalBatchTransfer) {
-          throw new Error("typed privacy-scan-v2 is required while one-proof batch transfer support is enabled", { cause: error });
+        if (Boolean(strict_privacy_scan ?? strictPrivacyScan) || this.enableExperimentalBatchTransfer) {
+          throw new Error("typed privacy-scan-v2 is required; legacy scan fallback is disabled", { cause: error });
         }
         // Only an absent typed endpoint may fall back. A malformed or failed
         // privacy-scan-v2 response is terminal because it may contain batch
@@ -2654,7 +2876,8 @@ export class ClairveilJS {
         latest_output_index: currentAfter.outputIndex,
         pages_scanned: pagesScanned,
         completed: !hasMore,
-        ...(validationState.batch_self_view_by_event.size
+        ...(validationState.batch_self_view_by_event.size ||
+          validationState.pending_summary_by_event?.size
           ? { validation_state: serializePrivacyScanValidationStateV2(validationState) }
           : {})
       };
@@ -3013,58 +3236,74 @@ export class ClairveilJS {
     validationStateSnapshot,
     validation_state_snapshot,
     scanSource,
-    scan_source
+    scan_source,
+    strictPrivacyScan = false,
+    strict_privacy_scan
   } = {}) {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
+    const requestedEventTypes = event_types ?? eventTypes;
+    if (requestedEventTypes != null) {
+      if (!Array.isArray(requestedEventTypes)) {
+        throw new Error("wallet scan eventTypes must be an array");
+      }
+      if (requestedEventTypes.some(value => String(value || "").trim())) {
+        throw new Error("wallet scans must not filter event types; typed privacy_scan summaries are required");
+      }
+    }
+    const requestedScanSource = scan_source ?? scanSource;
+    if (requestedScanSource != null && requestedScanSource !== "privacy_scan") {
+      throw new Error("wallet scans only support the typed privacy_scan source");
+    }
     let resolvedAfter = after;
     let resolvedAfterHeight = afterHeight ?? after_height;
     let resolvedAfterSequence = afterSequence ?? after_sequence;
     let resolvedPage = page;
-    let resolvedScanSource = scan_source ?? scanSource;
+    let resolvedScanSource = "privacy_scan";
     let resolvedValidationStateSnapshot = validationStateSnapshot ?? validation_state_snapshot;
     if (resolvedAfter == null && resolvedAfterHeight == null && noteStore) {
       const cached = await noteStore.load();
       const cachedCursor = cached.scanCursor || {};
       if (cachedCursor.source === "privacy_scan") {
         const next = nextPrivacyScanOptions(cachedCursor, { limit, maxPages });
-        const requestedSource = resolvedScanSource;
-        const sourceChanged = Boolean(requestedSource && requestedSource !== "privacy_scan");
-        if (sourceChanged) {
-          resolvedAfterHeight = decrementUint64Cursor(next.after?.height ?? 0, "scan source switch height");
-          resolvedAfterSequence = 0;
-          resolvedPage = 1;
-        } else {
-          resolvedAfter = next.after;
-          resolvedScanSource = "privacy_scan";
-          resolvedValidationStateSnapshot = resolvedValidationStateSnapshot ?? next.validationStateSnapshot;
-        }
+        resolvedAfter = next.after;
+        resolvedValidationStateSnapshot = resolvedValidationStateSnapshot ?? next.validationStateSnapshot;
       } else if (cachedCursor.source === "scan_events" || cachedCursor.source === "privacy_events") {
         const next = nextPrivacyScanOptions(cachedCursor, { limit, maxPages });
-        const requestedSource = resolvedScanSource;
-        const sourceChanged = Boolean(requestedSource && requestedSource !== cachedCursor.source);
-        if (sourceChanged) {
-          // ScanEvents resumes after an exact (height, sequence), while the legacy
-          // endpoint starts at after_height + 1. Rewind one height when translating
-          // either cursor so a source switch may duplicate events but cannot skip one.
-          resolvedAfterHeight = decrementUint64Cursor(next.afterHeight ?? 0, "scan source switch height");
-          resolvedAfterSequence = 0;
-          resolvedPage = 1;
-        } else {
-          resolvedAfterHeight = next.afterHeight;
-          resolvedAfterSequence = next.afterSequence ?? 0;
-          resolvedPage = resolvedPage ?? next.page;
-          resolvedScanSource = next.scanSource ?? cachedCursor.source;
-        }
+        // A legacy cursor cannot prove an output position. Migrate by rewinding
+        // one height and deduplicating typed outputs locally; never continue to
+        // persist a legacy wallet cursor.
+        resolvedAfter = {
+          height: decrementUint64Cursor(next.afterHeight ?? cached.lastScannedHeight ?? 0, "typed wallet scan migration height"),
+          globalSequence: 0,
+          outputIndex: 0
+        };
+        resolvedAfterHeight = undefined;
+        resolvedAfterSequence = undefined;
+        resolvedPage = undefined;
       } else if (cachedCursor.has_more && (cachedCursor.next_sequence != null || cachedCursor.nextSequence != null)) {
-        resolvedAfterHeight = cachedCursor.next_height ?? cachedCursor.nextHeight ?? cached.lastScannedHeight ?? 0;
-        resolvedAfterSequence = cachedCursor.next_sequence ?? cachedCursor.nextSequence ?? cached.lastScannedSequence ?? 0;
+        resolvedAfter = {
+          height: decrementUint64Cursor(
+            cachedCursor.next_height ?? cachedCursor.nextHeight ?? cached.lastScannedHeight ?? 0,
+            "typed wallet scan migration height"
+          ),
+          globalSequence: 0,
+          outputIndex: 0
+        };
       } else if (cachedCursor.has_more && (cachedCursor.next_page || cachedCursor.nextPage)) {
-        resolvedAfterHeight = cachedCursor.after_height ?? cachedCursor.afterHeight ?? cached.lastScannedHeight ?? 0;
-        resolvedAfterSequence = cachedCursor.after_sequence ?? cachedCursor.afterSequence ?? cached.lastScannedSequence ?? 0;
-        resolvedPage = resolvedPage ?? cachedCursor.next_page ?? cachedCursor.nextPage;
+        resolvedAfter = {
+          height: decrementUint64Cursor(
+            cachedCursor.after_height ?? cachedCursor.afterHeight ?? cached.lastScannedHeight ?? 0,
+            "typed wallet scan migration height"
+          ),
+          globalSequence: 0,
+          outputIndex: 0
+        };
       } else {
-        resolvedAfterHeight = cached.lastScannedHeight || 0;
-        resolvedAfterSequence = cached.lastScannedSequence || 0;
+        resolvedAfter = {
+          height: decrementUint64Cursor(cached.lastScannedHeight || 0, "typed wallet scan migration height"),
+          globalSequence: 0,
+          outputIndex: 0
+        };
       }
     }
     const scan = await this.scanNotes({
@@ -3076,11 +3315,12 @@ export class ClairveilJS {
       afterSequence: resolvedAfterSequence,
       page: resolvedPage,
       scanSource: resolvedScanSource,
-      eventTypes: event_types ?? eventTypes,
+      eventTypes: [],
       outputLimit: output_limit ?? outputLimit,
       eventLimit: event_limit ?? eventLimit,
       maxEncodedBytes: max_encoded_bytes ?? maxEncodedBytes,
       validationStateSnapshot: resolvedValidationStateSnapshot,
+      strictPrivacyScan: true,
       includeFoundNotes: true
     });
     if (noteStore) {
@@ -3146,8 +3386,8 @@ export class ClairveilJS {
       : current;
   }
 
-  async planWalletTransfer({ wallet, material, amount, denom, limit = 200, maxPages = defaultPrepareScanMaxPages, scan: scanOptions, scanSource, scan_source } = {}) {
-    const resolvedScanOptions = resolveScanOptions({ scan: scanOptions, limit, maxPages, scanSource, scan_source });
+  async planWalletTransfer({ wallet, material, amount, denom, limit = 200, maxPages = defaultPrepareScanMaxPages, scan: scanOptions, scanSource, scan_source, strictPrivacyScan, strict_privacy_scan } = {}) {
+    const resolvedScanOptions = resolveScanOptions({ scan: scanOptions, limit, maxPages, scanSource, scan_source, strictPrivacyScan, strict_privacy_scan });
     const scan = await this.scanWalletNotes({
       wallet,
       material,
@@ -3166,8 +3406,8 @@ export class ClairveilJS {
     };
   }
 
-  async planWalletWithdraw({ wallet, material, amount, denom, limit = 200, maxPages = defaultPrepareScanMaxPages, scan: scanOptions, scanSource, scan_source } = {}) {
-    const resolvedScanOptions = resolveScanOptions({ scan: scanOptions, limit, maxPages, scanSource, scan_source });
+  async planWalletWithdraw({ wallet, material, amount, denom, limit = 200, maxPages = defaultPrepareScanMaxPages, scan: scanOptions, scanSource, scan_source, strictPrivacyScan, strict_privacy_scan } = {}) {
+    const resolvedScanOptions = resolveScanOptions({ scan: scanOptions, limit, maxPages, scanSource, scan_source, strictPrivacyScan, strict_privacy_scan });
     const scan = await this.scanWalletNotes({
       wallet,
       material,
@@ -3186,7 +3426,25 @@ export class ClairveilJS {
     };
   }
 
-  async prepareDeposit({ wallet, material, depositMaterial, deposit_material, amount, memo = "Clairveil deposit", gasLimit = 2500000, denom, assetDenom, proof, proofHex, proof_hex } = {}) {
+  async prepareDeposit({
+    wallet,
+    material,
+    depositMaterial,
+    deposit_material,
+    amount,
+    memo = "Clairveil deposit",
+    gasLimit,
+    gas_limit,
+    feeAmount,
+    fee_amount,
+    denom,
+    assetDenom,
+    proof,
+    proofHex,
+    proof_hex
+  } = {}) {
+    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 2500000);
+    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const prepared = this.buildDepositMessage({
       depositMaterial: depositMaterial ?? deposit_material,
@@ -3202,7 +3460,8 @@ export class ClairveilJS {
     const signDoc = await this.buildDirectSignDoc({
       signer: privacy.address,
       pubKeyHex: privacy.pubKeyHex,
-      gasLimit,
+      gasLimit: resolvedGasLimit,
+      feeAmount: resolvedFeeAmount,
       messages: [
         {
           typeUrl: msgDepositTypeUrl,
@@ -3298,12 +3557,20 @@ export class ClairveilJS {
     userPrivacyPolicy = "all-private",
     userDisclosureMode,
     userDisclosureTargetPubKeyHex = "",
+    disableSelfViewDisclosure,
+    disable_self_view_disclosure,
+    selfViewDisclosureTargetPubKeyHex,
+    self_view_disclosure_target_pubkey,
     auditDisclosureTargetPubKeyHex,
     expectedRecipientHash,
     expected_recipient_hash,
     expectedAmountHash,
     expected_amount_hash,
     denom,
+    expiresAtUnix,
+    expires_at_unix,
+    chainNowUnix,
+    chain_now_unix,
     allowPlanStep = false,
     scan,
     after,
@@ -3325,11 +3592,52 @@ export class ClairveilJS {
     max_encoded_bytes,
     scanSource,
     scan_source,
-    gasLimit = 8000000,
+    strictPrivacyScan,
+    strict_privacy_scan,
+    gasLimit,
+    gas_limit,
+    feeAmount,
+    fee_amount,
     reservationManager,
     reservation_manager
   } = {}) {
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
+    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 8000000);
+    // Snapshot and canonicalize fee coins before any scan/prover await. The
+    // caller/profile can therefore choose a production fee without a mutable
+    // array changing the ProofReady sign-doc later in preparation.
+    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
+    const requestedChainNowUnix = aliasedTransferUnix(
+      chainNowUnix,
+      chain_now_unix,
+      "chainNowUnix"
+    );
+    const requestedExpiresAtUnix = aliasedTransferUnix(
+      expiresAtUnix,
+      expires_at_unix,
+      "expiresAtUnix"
+    );
+    for (const [value, label] of [
+      [disableSelfViewDisclosure, "disableSelfViewDisclosure"],
+      [disable_self_view_disclosure, "disable_self_view_disclosure"]
+    ]) {
+      if (value != null && typeof value !== "boolean") {
+        throw new Error(`${label} must be a boolean`);
+      }
+    }
+    if (disableSelfViewDisclosure != null && disable_self_view_disclosure != null &&
+        disableSelfViewDisclosure !== disable_self_view_disclosure) {
+      throw new Error("disableSelfViewDisclosure aliases conflict");
+    }
+    if (selfViewDisclosureTargetPubKeyHex != null &&
+        self_view_disclosure_target_pubkey != null &&
+        comparableBatchHex(selfViewDisclosureTargetPubKeyHex) !==
+          comparableBatchHex(self_view_disclosure_target_pubkey)) {
+      throw new Error("selfViewDisclosureTargetPubKeyHex aliases conflict");
+    }
+    const resolvedDisableSelfViewDisclosure = disableSelfViewDisclosure ?? disable_self_view_disclosure ?? false;
+    const resolvedSelfViewDisclosureTargetPubKeyHex = selfViewDisclosureTargetPubKeyHex ??
+      self_view_disclosure_target_pubkey;
     const operationEvidence = resolveDirectOperationEvidenceHashes({
       expectedRecipientHash,
       expected_recipient_hash,
@@ -3357,7 +3665,9 @@ export class ClairveilJS {
       maxEncodedBytes,
       max_encoded_bytes,
       scanSource,
-      scan_source
+      scan_source,
+      strictPrivacyScan,
+      strict_privacy_scan
     });
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
@@ -3390,6 +3700,10 @@ export class ClairveilJS {
     }
     const isFinal = plan.status === "final_transfer_ready";
     assertPlanCanBuildTx(plan);
+    const transferTime = requiredTransferPreparationTime(
+      requestedChainNowUnix,
+      requestedExpiresAtUnix
+    );
     const transferProtocolConfig = await this.assertTransferProtocolConfig(denom ?? this.defaultDenom);
     assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
       userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
@@ -3431,14 +3745,19 @@ export class ClairveilJS {
           userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
           userDisclosureMode: isFinal ? userDisclosureMode : "none",
           userDisclosureTargetPubKeyHex: isFinal ? userDisclosureTargetPubKeyHex : "",
+          disableSelfViewDisclosure: resolvedDisableSelfViewDisclosure,
+          selfViewDisclosureTargetPubKeyHex: resolvedSelfViewDisclosureTargetPubKeyHex,
           auditDisclosureTargetPubKeyHex: auditPubKeyHex,
+          expiresAtUnix: transferTime.expiresAtUnix,
+          chainNowUnix: transferTime.chainNowUnix,
           signal
         });
         assertHeartbeatHealthy();
         const signDoc = await this.buildDirectSignDoc({
           signer: privacy.address,
           pubKeyHex: privacy.pubKeyHex,
-          gasLimit,
+          gasLimit: resolvedGasLimit,
+          feeAmount: resolvedFeeAmount,
           messages: [
             {
               typeUrl: msgTransferTypeUrl,
@@ -3457,7 +3776,7 @@ export class ClairveilJS {
           expectedRecipientHash: isFinal ? operationEvidence.expectedRecipientHash : "",
           expectedAmountHash: isFinal ? operationEvidence.expectedAmountHash : "",
           signDocHash
-        }));
+        }, "signDocHash"));
         return {
           built,
           signDoc: markCosmosSignDocReservationRequired(
@@ -3486,6 +3805,8 @@ export class ClairveilJS {
           finalAmount: amount,
           finalRecipient: recipient,
           selectedInputTotal: plan.selection.total.toString(),
+          expiresAtUnix: transferTime.expiresAtUnix,
+          chainNowUnix: transferTime.chainNowUnix,
           reservation: reservationBatchSummary(reservationBatch)
         },
         privacyAccount: publicPrivacyAccount(privacy)
@@ -3542,7 +3863,12 @@ export class ClairveilJS {
     max_encoded_bytes,
     scanSource,
     scan_source,
-    gasLimit = 25000000,
+    strictPrivacyScan,
+    strict_privacy_scan,
+    gasLimit,
+    gas_limit,
+    feeAmount,
+    fee_amount,
     expiresAtUnix,
     expires_at_unix,
     chainNowUnix,
@@ -3561,6 +3887,10 @@ export class ClairveilJS {
     if (!this.enableExperimentalBatchTransfer) {
       throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
     }
+    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 25000000);
+    // Freeze the exact profile fee before scanning, proving, or either durable
+    // checkpoint callback can yield back to mutable application state.
+    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
     if (outputMode != null && output_mode != null &&
         normalizeBatchTransferOutputMode(outputMode) !== normalizeBatchTransferOutputMode(output_mode)) {
       throw new Error("outputMode aliases conflict");
@@ -3697,7 +4027,9 @@ export class ClairveilJS {
       maxEncodedBytes,
       max_encoded_bytes,
       scanSource,
-      scan_source
+      scan_source,
+      strictPrivacyScan,
+      strict_privacy_scan
     });
     if (scanOptions.scanSource != null &&
         String(scanOptions.scanSource).trim() !== "privacy_scan") {
@@ -3961,7 +4293,8 @@ export class ClairveilJS {
         const signDoc = await this.buildDirectSignDoc({
           signer: privacy.address,
           pubKeyHex: privacy.pubKeyHex,
-          gasLimit,
+          gasLimit: resolvedGasLimit,
+          feeAmount: resolvedFeeAmount,
           messages: [{
             typeUrl: msgBatchTransferTypeUrl,
             value: MsgBatchTransfer.fromPartial(message)
@@ -4212,6 +4545,9 @@ export class ClairveilJS {
     signer,
     pubKeyHex,
     gasLimit,
+    gas_limit,
+    feeAmount,
+    fee_amount,
     memo = "Clairveil batch veiled transfer",
     payments,
     amounts,
@@ -4239,6 +4575,8 @@ export class ClairveilJS {
     if (!this.enableExperimentalBatchTransfer) {
       throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
     }
+    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 25000000);
+    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
     if (operationId != null && operation_id != null && String(operationId) !== String(operation_id)) {
       throw new Error("operationId aliases conflict");
     }
@@ -4358,7 +4696,8 @@ export class ClairveilJS {
     const signDoc = await this.createBatchTransferSignDoc({
       signer: resolvedSigner,
       pubKeyHex,
-      gasLimit,
+      gasLimit: resolvedGasLimit,
+      feeAmount: resolvedFeeAmount,
       message,
       memo,
       expectedCircuitIdentity:
@@ -4366,18 +4705,23 @@ export class ClairveilJS {
       chainNowUnix: resolvedNowUnix
     });
     const effects = preparedBatchTransferEffectHex(payload);
-    if (resolvedReservation.reservation_ids.length !== effects.nullifier_hexes.length) {
-      throw new Error("prepared batch transfer reservation count does not match its input nullifiers");
-    }
+    const authoritativeReservation = await authoritativeBatchRecoveryReservation(
+      resolvedReservationManager,
+      resolvedReservation,
+      {
+        operationId: resolvedOperationID,
+        nullifierHexes: effects.nullifier_hexes
+      }
+    );
     batchTransferNullifiersUnspent(
       await this.checkNullifiers(effects.nullifier_hexes),
       effects.nullifier_hexes
     );
     const persistedOutputMode = String(
-      resolvedReservation.reservations?.[0]?.metadata?.batch_transfer_output_mode ||
+      authoritativeReservation.reservations?.[0]?.metadata?.batch_transfer_output_mode ||
       (payload.outputs.length === 32 ? "exact32" : "compact")
     );
-    await markReservationProofReady(resolvedReservationManager, resolvedReservation, {
+    await markReservationProofReady(resolvedReservationManager, authoritativeReservation, {
       payloadHash: payload.payload_hash,
       signDocHash: cosmosSignDocBindingHash(signDoc),
       expectedOperationEvidenceHash: operationEvidence.evidenceHash,
@@ -4400,8 +4744,8 @@ export class ClairveilJS {
       effects,
       operationEvidence: operationEvidence.evidence,
       operationEvidenceHash: operationEvidence.evidenceHash,
-      signDoc: markCosmosSignDocReservationRequired(signDoc, resolvedReservation),
-      reservation: reservationBatchSummary(resolvedReservation)
+      signDoc: markCosmosSignDocReservationRequired(signDoc, authoritativeReservation),
+      reservation: reservationBatchSummary(authoritativeReservation)
     };
   }
 
@@ -4434,14 +4778,21 @@ export class ClairveilJS {
     max_encoded_bytes,
     scanSource,
     scan_source,
+    strictPrivacyScan,
+    strict_privacy_scan,
     expiresAtUnix,
     chainNowUnix,
     chain_now_unix,
-    gasLimit = 5000000,
+    gasLimit,
+    gas_limit,
+    feeAmount,
+    fee_amount,
     reservationManager,
     reservation_manager
   } = {}) {
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
+    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 5000000);
+    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveScanOptions({
       scan,
@@ -4463,7 +4814,9 @@ export class ClairveilJS {
       maxEncodedBytes,
       max_encoded_bytes,
       scanSource,
-      scan_source
+      scan_source,
+      strictPrivacyScan,
+      strict_privacy_scan
     });
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
@@ -4517,7 +4870,8 @@ export class ClairveilJS {
         const signDoc = await this.buildDirectSignDoc({
           signer: privacy.address,
           pubKeyHex: privacy.pubKeyHex,
-          gasLimit,
+          gasLimit: resolvedGasLimit,
+          feeAmount: resolvedFeeAmount,
           messages: [
             {
               typeUrl: msgWithdrawTypeUrl,
@@ -4533,7 +4887,11 @@ export class ClairveilJS {
         await markReservationProofReady(
           resolvedReservationManager,
           reservationBatch,
-          withdrawProofReadyMetadata(built, { signDocHash })
+          withdrawProofReadyMetadata(built, {
+            signDocHash,
+            accountPrefix: this.accountPrefix,
+            bindOperationSuccess: Boolean(reservationBatch)
+          })
         );
         return {
           built,
@@ -4594,6 +4952,8 @@ export class ClairveilJS {
     max_encoded_bytes,
     scanSource,
     scan_source,
+    strictPrivacyScan,
+    strict_privacy_scan,
     expiresAtUnix,
     chainNowUnix,
     chain_now_unix,
@@ -4622,7 +4982,9 @@ export class ClairveilJS {
       maxEncodedBytes,
       max_encoded_bytes,
       scanSource,
-      scan_source
+      scan_source,
+      strictPrivacyScan,
+      strict_privacy_scan
     });
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
@@ -4669,7 +5031,14 @@ export class ClairveilJS {
         });
         assertHeartbeatHealthy();
         await heartbeatNow();
-        await markReservationProofReady(resolvedReservationManager, reservationBatch, withdrawProofReadyMetadata(built));
+        await markReservationProofReady(
+          resolvedReservationManager,
+          reservationBatch,
+          withdrawProofReadyMetadata(built, {
+            accountPrefix: this.accountPrefix,
+            bindOperationSuccess: Boolean(reservationBatch)
+          })
+        );
         return { built };
       });
       const { built } = heartbeatResult;
@@ -4716,6 +5085,9 @@ export class ClairveilJS {
     signer,
     pubKeyHex,
     gasLimit,
+    gas_limit,
+    feeAmount,
+    fee_amount,
     message,
     memo = "Clairveil batch veiled transfer",
     expectedCircuitIdentity,
@@ -4725,6 +5097,8 @@ export class ClairveilJS {
     if (!this.enableExperimentalBatchTransfer) {
       throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
     }
+    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 25000000);
+    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
     if (!message || typeof message !== "object") {
       throw new Error("MsgBatchTransfer message is required");
     }
@@ -4756,7 +5130,8 @@ export class ClairveilJS {
     return this.buildDirectSignDoc({
       signer,
       pubKeyHex,
-      gasLimit,
+      gasLimit: resolvedGasLimit,
+      feeAmount: resolvedFeeAmount,
       messages: [{
         typeUrl: msgBatchTransferTypeUrl,
         value: normalizedMessage
@@ -4918,6 +5293,8 @@ export class ClairveilJS {
   }
 
   async decodeUserDisclosure({
+    output,
+    scanOutput,
     txHash,
     tx_hash,
     address,
@@ -4931,12 +5308,19 @@ export class ClairveilJS {
     asset_denom,
     ...eventQuery
   }) {
+    const selectedOutput = output ?? scanOutput;
     const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
-    const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+    const event = selectedOutput
+      ? null
+      : await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
     const disclosureAssetDenom = resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom);
-    if (eventAttribute(event, "user_disclosure_mode") === "USER_DISCLOSURE_MODE_PUBLIC") {
-      return decodeUserDisclosureFromEvent(
-        event,
+    const publicMode = selectedOutput
+      ? (selectedOutput.userDisclosureMode ?? selectedOutput.user_disclosure_mode) === "USER_DISCLOSURE_MODE_PUBLIC"
+      : eventAttribute(event, "user_disclosure_mode") === "USER_DISCLOSURE_MODE_PUBLIC";
+    if (publicMode) {
+      const decode = selectedOutput ? decodeUserDisclosureFromScanOutput : decodeUserDisclosureFromEvent;
+      return decode(
+        selectedOutput ?? event,
         1n,
         "",
         normalizedTxHash,
@@ -4954,8 +5338,9 @@ export class ClairveilJS {
       signatureBase64: signatureBase64 ?? signature_base64,
       shieldedPrefix: this.shieldedPrefix
     });
-    return decodeUserDisclosureFromEvent(
-      event,
+    const decode = selectedOutput ? decodeUserDisclosureFromScanOutput : decodeUserDisclosureFromEvent;
+    return decode(
+      selectedOutput ?? event,
       material.disclosureScalar,
       material.disclosurePubKeyHex,
       normalizedTxHash,
@@ -4964,6 +5349,8 @@ export class ClairveilJS {
   }
 
   async decodeSelfViewDisclosure({
+    output,
+    scanOutput,
     txHash,
     tx_hash,
     address,
@@ -4981,14 +5368,18 @@ export class ClairveilJS {
     asset_denom,
     ...eventQuery
   }) {
+    const selectedOutput = output ?? scanOutput;
     const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
-    const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+    const event = selectedOutput
+      ? null
+      : await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
     const disclosureAssetDenom = resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom);
     const directScalar = disclosureScalar ?? disclosure_scalar;
     const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
     if (directScalar != null || directScalarHex != null) {
-      return decodeSelfViewDisclosureFromEvent(
-        event,
+      const decode = selectedOutput ? decodeSelfViewDisclosureFromScanOutput : decodeSelfViewDisclosureFromEvent;
+      return decode(
+        selectedOutput ?? event,
         directScalar != null ? directScalar : disclosureScalarFromHex(directScalarHex),
         normalizedTxHash,
         { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
@@ -5005,8 +5396,9 @@ export class ClairveilJS {
       signatureBase64: signatureBase64 ?? signature_base64,
       shieldedPrefix: this.shieldedPrefix
     });
-    return decodeSelfViewDisclosureFromEvent(
-      event,
+    const decode = selectedOutput ? decodeSelfViewDisclosureFromScanOutput : decodeSelfViewDisclosureFromEvent;
+    return decode(
+      selectedOutput ?? event,
       material.disclosureScalar,
       normalizedTxHash,
       { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
@@ -5014,6 +5406,8 @@ export class ClairveilJS {
   }
 
   async decodeAuditDisclosure({
+    output,
+    scanOutput,
     txHash,
     tx_hash,
     disclosurePrivKeyHex,
@@ -5022,11 +5416,15 @@ export class ClairveilJS {
     asset_denom,
     ...eventQuery
   }) {
+    const selectedOutput = output ?? scanOutput;
     const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
-    const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+    const event = selectedOutput
+      ? null
+      : await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
     const disclosureAssetDenom = resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom);
-    return decodeAuditDisclosureFromEvent(
-      event,
+    const decode = selectedOutput ? decodeAuditDisclosureFromScanOutput : decodeAuditDisclosureFromEvent;
+    return decode(
+      selectedOutput ?? event,
       disclosureScalarFromHex(disclosurePrivKeyHex ?? disclosure_privkey_hex),
       normalizedTxHash,
       { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
@@ -5177,6 +5575,8 @@ export class ClairveilJS {
   }
 
   async buildDirectSignDoc({ signer, pubKeyHex, messages, memo = "", gasLimit = 200000, feeAmount = [] }) {
+    const resolvedGasLimit = normalizeCosmosGasLimit(gasLimit);
+    const resolvedFeeAmount = normalizeCosmosFeeCoins(feeAmount);
     assertSignerPubKey(signer, pubKeyHex, this.bech32Prefix);
     const account = await this.getAccountInfo(signer);
     const pubkey = encodePubkey({
@@ -5189,8 +5589,8 @@ export class ClairveilJS {
     });
     const authInfoBytes = makeAuthInfoBytes(
       [{ pubkey, sequence: account.sequence }],
-      feeAmount,
-      gasLimit,
+      resolvedFeeAmount,
+      resolvedGasLimit,
       undefined,
       undefined
     );
@@ -5215,12 +5615,23 @@ export class ClairveilJS {
   async _broadcastTxRawBytes(txBytes, signedTx, waitOptions) {
     const reservationContext = broadcastReservationContext(waitOptions || signedTx || {});
     const signDocHash = cosmosSignDocBindingHash(signedTx);
+    const signedBatchTransfer = signedBatchTransferMessage(signedTx);
     const reservationRequired = cosmosSignDocMetadata(signedTx).reservationRequired ||
-      cosmosTxBodyRequiresReservation(signedTx);
+      cosmosTxBodyRequiresReservation(signedTx) ||
+      Boolean(signedBatchTransfer);
     if (reservationRequired && !reservationContext) {
       throw new Error("prepared reserved Cosmos signed transaction requires reservationManager and reservation");
     }
     const txBytesHash = sha256Hex(txBytes);
+    // A Cosmos transaction hash is SHA-256 over the exact TxRaw bytes. Keep
+    // that network identity durable before the RPC boundary; the node may
+    // accept these bytes even when its broadcast response is lost.
+    const signedTxHash = txBytesHash.toUpperCase();
+    const broadcastIdentity = {
+      txHash: signedTxHash,
+      txBytesHash,
+      signDocHash
+    };
     await validateRelayBroadcastContext(waitOptions || signedTx || {}, {
       expectedChainId: this.chainId,
       accountPrefix: this.accountPrefix,
@@ -5229,28 +5640,103 @@ export class ClairveilJS {
       signDocHash
     });
     const client = await this.connect();
-    // Batch proof preparation checks nullifiers, but wallet signing can take
-    // arbitrarily long. Re-read the exact persisted batch inputs at the final
+    // Proof preparation checks nullifiers, but wallet signing can take
+    // arbitrarily long. Re-read the exact reserved inputs at the final
     // broadcast boundary so a stale proof can never be submitted.
     await recheckReservedBatchTransferNullifiers(
       reservationContext,
+      signedTx,
       nullifiers => this.checkNullifiers(nullifiers)
     );
+    await recheckReservedDirectPrivacyNullifiers(
+      reservationContext,
+      signedTx,
+      nullifiers => this.checkNullifiers(nullifiers)
+    );
+    // The exact wallet-produced privacy message is authoritative. Re-read
+    // chain time only after the final nullifier check and block stale signed
+    // bytes before either the durable attempt marker or the broadcast RPC.
+    await assertSignedPrivacyFreshAtBroadcast(signedTx, waitOptions || signedTx || {}, {
+      expectedChainId: this.chainId,
+      accountPrefix: this.accountPrefix
+    });
     await beginBroadcastReservation(
       reservationContext,
       "cosmos_broadcast_tx_sync",
-      { txBytesHash, signDocHash }
+      broadcastIdentity
     );
-    let txhash = "";
+    let txhash = signedTxHash;
     let tx;
+    try {
+      // This hook is deliberately synchronous and directly adjacent to the
+      // RPC invocation. All asynchronous validation and the durable attempt
+      // marker have completed, so callers can fence session invalidation
+      // without opening a new await gap before submission.
+      runSynchronousBeforeBroadcast(waitOptions, broadcastIdentity);
+    } catch (error) {
+      const wrapped = attachBroadcastDisposition(
+        attachBroadcastEvidence(error, broadcastIdentity),
+        { rpcInvoked: false, broadcastAbortedBeforeRpc: true }
+      );
+      await markBroadcastReservationRejected(
+        reservationContext,
+        wrapped,
+        { kind: "before_rpc" }
+      );
+      throw wrapped;
+    }
+    let rpcTxHash = "";
     try {
       // Do not reconstruct TxRaw here: callers may have checkpointed the
       // exact wallet-produced bytes for crash-safe retransmission.
-      txhash = await client.broadcastTxSync(Uint8Array.from(txBytes));
-      tx = await this.waitForTx(txhash, waitOptions);
+      rpcTxHash = String(await client.broadcastTxSync(Uint8Array.from(txBytes)) || "").trim();
     } catch (error) {
-      const wrapped = attachBroadcastEvidence(error, { txHash: txhash, txBytesHash });
-      await markBroadcastReservationUnknown(reservationContext, wrapped, { txHash: txhash, txBytesHash });
+      if (isExplicitCheckTxRejection(error)) {
+        const wrapped = attachBroadcastDisposition(
+          attachBroadcastEvidence(error, broadcastIdentity),
+          { rpcInvoked: true, checkTxRejected: true }
+        );
+        await markBroadcastReservationRejected(reservationContext, wrapped, {
+          kind: "check_tx",
+          providerCode: error.code,
+          providerCodespace: error.codespace,
+          providerLog: error.log || ""
+        });
+        throw wrapped;
+      }
+      const wrapped = attachBroadcastDisposition(
+        attachBroadcastEvidence(error, broadcastIdentity),
+        { rpcInvoked: true }
+      );
+      await markBroadcastReservationUnknown(reservationContext, wrapped, broadcastIdentity);
+      throw wrapped;
+    }
+    try {
+      const normalizedRpcTxHash = normalizedCosmosTxHash(rpcTxHash);
+      if (rpcTxHash && normalizedRpcTxHash !== signedTxHash) {
+        const error = new Error("Cosmos broadcast returned a transaction hash that does not match the signed TxRaw bytes");
+        error.code = "COSMOS_TX_HASH_MISMATCH";
+        error.rpcTxHash = rpcTxHash;
+        throw error;
+      }
+      txhash = signedTxHash;
+      tx = await this.waitForTx(txhash, waitOptions);
+      if (tx) {
+        const indexedTxHash = normalizedCosmosTxHash(tx.txhash);
+        if (!indexedTxHash || indexedTxHash !== signedTxHash) {
+          const error = new Error("Indexed Cosmos transaction hash does not match the signed TxRaw bytes");
+          error.code = "COSMOS_TX_HASH_MISMATCH";
+          error.indexedTxHash = String(tx.txhash || "");
+          error.tx = tx;
+          throw error;
+        }
+      }
+    } catch (error) {
+      const wrapped = attachBroadcastDisposition(
+        attachBroadcastEvidence(error, broadcastIdentity),
+        { rpcInvoked: true }
+      );
+      await markBroadcastReservationUnknown(reservationContext, wrapped, broadcastIdentity);
       throw wrapped;
     }
     const rawTxCode = tx?.code;
@@ -5271,27 +5757,28 @@ export class ClairveilJS {
         : `code ${txCode}: ${rawLog || "no raw log"}`;
       const error = new Error(`broadcasted transaction did not include an explicit successful result (${detail})`);
       error.txhash = txhash;
-      error.txHash = txhash;
+      error.txHash = signedTxHash;
       error.txBytesHash = txBytesHash;
       error.broadcast = broadcast;
       error.tx = tx;
-      await markBroadcastReservationUnknown(reservationContext, error, { txHash: txhash, txBytesHash });
+      await markBroadcastReservationUnknown(reservationContext, error, broadcastIdentity);
       throw error;
     }
     const result = {
       ok: Boolean(tx && txCode === 0),
+      txHash: signedTxHash,
       broadcast,
       tx,
       txBytesHash,
       error: tx ? "" : broadcast.raw_log
     };
     if (result.ok) {
-      await markBroadcastReservationSubmitted(reservationContext, { txHash: txhash, txBytesHash });
+      await markBroadcastReservationSubmitted(reservationContext, broadcastIdentity);
     } else {
       await markBroadcastReservationUnknown(
         reservationContext,
         new Error(result.error),
-        { txHash: txhash, txBytesHash }
+        broadcastIdentity
       );
     }
     return result;
@@ -5309,7 +5796,11 @@ export class ClairveilJS {
 
   async broadcastSignedTx(signedTx, waitOptions) {
     const txBytes = this.buildTxRawBytes(signedTx);
-    return this._broadcastTxRawBytes(txBytes, signedTx, waitOptions);
+    // Treat the encoded TxRaw checkpoint as authoritative. The caller-owned
+    // SignedTx object remains mutable while async validation runs; decoding
+    // the exact bytes prevents validation from drifting away from what the
+    // RPC will receive.
+    return this._broadcastTxRawBytes(txBytes, signedTxFromRawBytes(txBytes), waitOptions);
   }
 
   /**
@@ -5365,18 +5856,48 @@ export class ClairveilJS {
       signDocHash: signedTxSignDocHash
     });
     const txRawBytes = this.buildTxRawBytes(signedTx);
+    const txBytesHash = sha256Hex(txRawBytes);
     return Object.freeze({
       signedTx: Object.freeze({ ...signedTx }),
       txRawBytes: Uint8Array.from(txRawBytes),
-      txBytesHash: sha256Hex(txRawBytes),
+      txHash: txBytesHash.toUpperCase(),
+      txBytesHash,
       signDocHash: signedTxSignDocHash
     });
   }
 
   async signDirectAndBroadcast(input = {}) {
-    const checkpoint = await this.signDirect(input);
-    const { broadcastOptions } = directBroadcastContext(input);
-    return this.broadcastTxRawBytes(checkpoint.txRawBytes, broadcastOptions);
+    const {
+      reservation,
+      reservationContext,
+      broadcastOptions
+    } = directBroadcastContext(input);
+    const signAndBroadcast = async ({ assertHeartbeatHealthy, heartbeatNow }) => {
+      const checkpoint = await this.signDirect(input);
+      // Wallet approval is unbounded. Renew once after it returns so a failed
+      // timer cannot leave a stale worker crossing the durable RPC boundary.
+      await heartbeatNow();
+      assertHeartbeatHealthy();
+      return this.broadcastTxRawBytes(checkpoint.txRawBytes, broadcastOptions);
+    };
+    if (!reservationContext) {
+      return signAndBroadcast({
+        assertHeartbeatHealthy() {},
+        async heartbeatNow() {}
+      });
+    }
+    if (typeof reservationContext.reservationManager.renewLease !== "function") {
+      throw new Error("reservationManager.renewLease is required to keep the Cosmos reservation lease alive through wallet signing and broadcast");
+    }
+    return withReservationHeartbeat(
+      reservationContext.reservationManager,
+      reservation,
+      signAndBroadcast,
+      {
+        acceptBroadcastTerminal: true,
+        phase: "wallet signing and broadcast"
+      }
+    );
   }
 }
 

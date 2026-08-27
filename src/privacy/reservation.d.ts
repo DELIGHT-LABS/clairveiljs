@@ -203,6 +203,7 @@ export interface ReservationStore {
     to: string;
     patch?: Partial<NoteReservationRecord>;
   }[]): Promise<NoteReservationRecord[]>;
+  /** Atomically releases only reservations that are still in Reserved. */
   releaseReservationBatch(options: {
     reservationIDs: readonly string[];
     ownerKeyId: string;
@@ -246,6 +247,11 @@ export declare function hashRecipient(recipient: string, options?: string | {
   shieldedPrefix?: string;
   prefix?: string;
 }): Hex;
+/** SHA-256 hash of a canonical 20-byte Cosmos account recipient for direct-withdraw success evidence. */
+export declare function hashTransparentRecipient(recipient: string, options?: string | {
+  accountPrefix?: string;
+  bech32Prefix?: string;
+}): Hex;
 /** Go-compatible SHA-256 hash of canonical non-empty denom and uint64 `denom:amount` operation evidence. */
 export declare function hashAmount(denom: string, amount: bigint | number | string): Hex;
 export declare function noteNullifierHex(noteLike: object | FoundNote): Hex;
@@ -266,13 +272,9 @@ export declare class MemoryReservationStore implements ReservationStore {
     now?: () => Date;
   });
   load(): Promise<ReservationStoreState>;
-  /** Unsafe test/migration API. Application code must use CAS transitions. */
-  unsafeReplaceState(state: ReservationStoreStateInput): Promise<ReservationStoreState>;
   listReservations(filter?: { statuses?: readonly string[]; ownerKeyId?: string; owner_key_id?: string; limit?: number }): Promise<NoteReservationRecord[]>;
   getReservation(reservationID: string): Promise<NoteReservationRecord>;
   createReservationBatch(reservations?: readonly InitialNoteReservationRecord[]): Promise<NoteReservationRecord[]>;
-  /** Unsafe test/migration API. Application code must use manager transitions. */
-  unsafeReplaceReservation(reservation: NoteReservationRecord): Promise<NoteReservationRecord>;
   compareAndSetReservationStatus(reservationID: string, from: string, to: string, patch?: Partial<NoteReservationRecord>): Promise<NoteReservationRecord>;
   compareAndSetReservationStatusBatch(transitions?: readonly {
     /** If both aliases are supplied, their string values must match. */
@@ -282,6 +284,7 @@ export declare class MemoryReservationStore implements ReservationStore {
     to: string;
     patch?: Partial<NoteReservationRecord>;
   }[]): Promise<NoteReservationRecord[]>;
+  /** Atomically releases only reservations that are still in Reserved. */
   releaseReservationBatch(options: {
     reservationIDs: readonly string[];
     ownerKeyId: string;
@@ -502,6 +505,46 @@ export type ReservationUnknownMetadata = ReservationLeaseMetadata & ReservationB
   last_broadcast_error?: string;
 };
 
+type RequiredAliasedValue<Camel extends string, Snake extends string, Value> =
+  | ({ [Key in Camel]: Value } & { [Key in Snake]?: Value })
+  | ({ [Key in Snake]: Value } & { [Key in Camel]?: Value });
+
+export type ReservationRelayTransactionEvidence =
+  RequiredAliasedValue<"operationId", "operation_id", string> &
+  RequiredAliasedValue<"payloadHash", "payload_hash", string> &
+  RequiredAliasedValue<"txHash", "tx_hash", string> &
+  RequiredAliasedValue<"checkedHeight", "checked_height", number | string> &
+  RequiredAliasedValue<"transactionIncludedConfirmed", "transaction_included_confirmed", true> &
+  RequiredAliasedValue<"payloadHashMatched", "payload_hash_matched", true>;
+
+export type ReservationBroadcastFailureEvidence =
+  RequiredAliasedValue<"txHashChecked", "tx_hash_checked", string> &
+  RequiredAliasedValue<"checkedHeight", "checked_height", number | string> &
+  RequiredAliasedValue<"nullifierUnspentConfirmed", "nullifier_unspent_confirmed", true> &
+  RequiredAliasedValue<"txAbsentOrFailedConfirmed", "tx_absent_or_failed_confirmed", true> & {
+  error?: string;
+  metadata?: ReservationMetadata;
+};
+
+export type ExpiredProofReadyBroadcastFailureRecovery =
+  RequiredAliasedValue<"operationId", "operation_id", string> &
+  RequiredAliasedValue<"txHashChecked", "tx_hash_checked", string> &
+  RequiredAliasedValue<"checkedHeight", "checked_height", number | string> &
+  RequiredAliasedValue<"txBytesHash", "tx_bytes_hash", string> &
+  RequiredAliasedValue<"signDocHash", "sign_doc_hash", string> &
+  RequiredAliasedValue<"executionFailedConfirmed", "execution_failed_confirmed", true> &
+  RequiredAliasedValue<"inputNullifiers", "input_nullifiers", readonly Hex[]> &
+  RequiredAliasedValue<
+    "checkNullifiers",
+    "check_nullifiers",
+    import("./payload.js").NullifierStatusReader
+  > & {
+  error?: string;
+  lastBroadcastError?: string;
+  last_broadcast_error?: string;
+  metadata?: ReservationMetadata;
+};
+
 export interface ReservationReplanMetadata extends ReservationLeaseMetadata {
   fromStatus?: string;
   from_status?: string;
@@ -566,9 +609,43 @@ export declare class NoteReservationManager {
   markProofReady(reservationIDs?: readonly string[], metadata?: ReservationProofReadyMetadata): Promise<NoteReservationRecord[]>;
   markProofReadyBatch(entries?: readonly ReservationProofReadyBatchEntry[]): Promise<NoteReservationRecord[]>;
   markBroadcastAttempting(reservationIDs: readonly string[], metadata: ReservationLeaseMetadata & ReservationBroadcastAttemptFields & { reason?: string; metadata?: ReservationMetadata }): Promise<NoteReservationRecord[]>;
-  markBroadcastRejected(reservationIDs: readonly string[], metadata: ReservationLeaseMetadata & { providerCode?: string | number; provider_code?: string | number; error?: string; metadata?: ReservationMetadata }): Promise<NoteReservationRecord[]>;
+  markBroadcastRejected(reservationIDs: readonly string[], metadata: ReservationLeaseMetadata & {
+    providerCode?: string | number;
+    provider_code?: string | number;
+    providerCodespace?: string;
+    provider_codespace?: string;
+    providerLog?: string;
+    provider_log?: string;
+    rpcInvoked?: boolean;
+    rpc_invoked?: boolean;
+    checkTxRejected?: boolean;
+    check_tx_rejected?: boolean;
+    broadcastAbortedBeforeRpc?: boolean;
+    broadcast_aborted_before_rpc?: boolean;
+    walletRejectedBeforeBroadcast?: boolean;
+    wallet_rejected_before_broadcast?: boolean;
+    error?: string;
+    metadata?: ReservationMetadata;
+  }): Promise<NoteReservationRecord[]>;
   markSubmitted(reservationIDs: readonly string[], metadata: ReservationSubmittedMetadata): Promise<NoteReservationRecord[]>;
   markUnknown(reservationIDs: readonly string[], metadata: ReservationUnknownMetadata): Promise<NoteReservationRecord[]>;
+  /**
+   * Replan only after authoritative evidence binds the exact failed/absent tx
+   * and confirms every input unspent. A ProofReady operation additionally
+   * requires its current, unexpired manager-owned leaseToken; Submitted and
+   * Unknown reconciliation is lease-free because those states clear the worker
+   * lease.
+   */
+  markBroadcastFailed(
+    reservationIDs: readonly string[],
+    metadata: ReservationLeaseMetadata & ReservationBroadcastFailureEvidence
+  ): Promise<NoteReservationRecord[]>;
+  /**
+   * Restart-safe recovery for an expired foreign ProofReady lease. The exact
+   * operation, stored transaction identity, positive checked height, literal
+   * execution-failure evidence, and every input nullifier must all match.
+   */
+  recoverExpiredProofReadyBroadcastFailure(input: ExpiredProofReadyBroadcastFailureRecovery): Promise<NoteReservationRecord[]>;
   /** Records a copied relay payload without exposing a generic same-status metadata patch. */
   recordRelayHandoff(reservationIDs: readonly string[], metadata: ReservationLeaseMetadata & (
     | { payloadHash: string; payload_hash?: string }
@@ -582,6 +659,13 @@ export declare class NoteReservationManager {
     handed_off_at?: string;
     metadata?: ReservationMetadata;
   }): Promise<NoteReservationRecord[]>;
+  /**
+   * Lease-independent restart recovery for an already included relay
+   * transaction. It accepts either the exact handed-off operation or a durable
+   * same-origin local-relay broadcast attempt, binds it to Submitted only, and
+   * never marks success or releases notes.
+   */
+  recordRelayTransactionEvidence(evidence: ReservationRelayTransactionEvidence): Promise<NoteReservationRecord[]>;
   markReplanRequired(reservationIDs?: readonly string[], metadata?: ReservationReplanMetadata): Promise<NoteReservationRecord[]>;
   markManualReview(reservationIDs?: readonly string[], metadata?: ReservationLeaseMetadata & {
     error?: string;
@@ -590,12 +674,18 @@ export declare class NoteReservationManager {
     metadata?: ReservationMetadata;
   }): Promise<NoteReservationRecord[]>;
   resolveManualReview(reservationIDs: readonly string[], resolution: ReservationManualReviewResolution): Promise<NoteReservationRecord[]>;
+  /**
+   * Compatibility name retained for API stability. Automatic release is
+   * accepted only while every reservation is still Reserved; Proving and
+   * ProofReady must be reconciled or quarantined instead.
+   */
   releaseReservedOrProving(reservationIDs?: readonly string[], metadata?: ReservationLeaseMetadata): Promise<NoteReservationRecord[]>;
   reconcileSpentNotes(notes?: readonly (object | FoundNote)[]): Promise<NoteReservationRecord[]>;
 }
 
 export declare function createNoteReservationManager(options: NoteReservationManagerInput): NoteReservationManager;
 export declare function preparePlanReservation(reservationManager: NoteReservationManager | null | undefined, input?: { plan?: TransferPlan | TransferBatchPlan | WithdrawPlan | object | null; kind?: string; metadata?: ReservationMetadata }): Promise<ReservationBatch | null>;
+/** Releases Reserved work; quarantines Proving/ProofReady work in ManualReview. */
 export declare function rollbackPlanReservation(reservationManager: NoteReservationManager | null | undefined, batch: ReservationBatch | null | undefined): Promise<void>;
 /** Attempts rollback without replacing the original prepare/prover error. */
 export declare function rollbackPlanReservationPreservingError(reservationManager: NoteReservationManager | null | undefined, batch: ReservationBatch | null | undefined, error: unknown): Promise<void>;
