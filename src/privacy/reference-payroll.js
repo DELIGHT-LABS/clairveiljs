@@ -1,6 +1,12 @@
-import { base64FromBytes, bytesFromBase64, hexFromBytes, randomBytes, sha256Hex, utf8Bytes } from "../core/browser-crypto.js";
+import { fromBech32, toBech32 } from "@cosmjs/encoding";
+import { Secp256k1, Secp256k1Signature } from "@cosmjs/crypto";
+import { base64FromBytes, bytesFromBase64, hash160, hexFromBytes, randomBytes, sha256, sha256Hex, utf8Bytes } from "../core/browser-crypto.js";
 import { FIELD_MODULUS, bytesFromHex, bytesToBigIntBE, decodeShieldedAddress, unpackPoint } from "../core/crypto.js";
 import { ClairveilErrorCode, OperationStateMixedError } from "../core/errors.js";
+import { PubKey as Secp256k1PubKey } from "cosmjs-types/cosmos/crypto/secp256k1/keys";
+import { SignMode } from "cosmjs-types/cosmos/tx/signing/v1beta1/signing";
+import { AuthInfo, SignDoc, TxBody, TxRaw } from "cosmjs-types/cosmos/tx/v1beta1/tx";
+import { MsgBatchTransfer as GeneratedMsgBatchTransfer } from "../generated/clairveil/privacy/v1/tx.js";
 import {
   buildPreparedBatchTransferPayload,
   buildMsgBatchTransferFromPrepared,
@@ -15,7 +21,7 @@ import {
 import { validateCircuitConfigV1 } from "./circuit-config.js";
 import { privacyPolicyValue, userDisclosureModeValue } from "./payload.js";
 import { computeNoteNullifierV1, fieldHexV1, validateNoteV1 } from "./protocol-v1.js";
-import { hashAmount, hashRecipient } from "./reservation.js";
+import { hashAmount, hashRecipient, reservationHeartbeatIntervalMs } from "./reservation.js";
 
 /** Reference Payroll contracts. The one-proof executor is intentionally separate from legacy transfer-batch. */
 export const payrollDisclosureScopes = Object.freeze([
@@ -54,6 +60,14 @@ export const oneProofPayrollOperationEvidenceVersion = "payroll-one-proof-operat
 export const oneProofPayrollExecutionVersion = "payroll-one-proof-execution-v1";
 /** Versioned, private-at-rest checkpoint for a resumable one-proof payroll operation. */
 export const oneProofPayrollArtifactVersion = "payroll-one-proof-artifact-v1";
+
+const oneProofPayrollRetryDecisionVersion = "payroll-one-proof-retry-decision-v1";
+/** Maximum age of tx/nullifier observations authorizing an exact retransmit. */
+export const oneProofPayrollRetryDecisionTTLSeconds = 30;
+// Retry evidence is deliberately an in-process, one-use capability. Persisting
+// or reconstructing this object would turn an old chain observation into fresh
+// authorization to cross the broadcast boundary.
+const oneProofPayrollRetryDecisionBindings = new WeakMap();
 
 const disclosureScopeSet = new Set(payrollDisclosureScopes);
 const disclosureModeName = new Map([
@@ -1074,7 +1088,53 @@ function payrollBroadcastIdentity({
   };
 }
 
-function assertPayrollBroadcastIdentityMatches(reservations, identity) {
+function requiredPayrollCosmosBroadcastIdentity(input = {}, label = "broadcast attempt", {
+  requireSignedBindings = false
+} = {}) {
+  const normalizedAlias = (aliasLabel, values) => {
+    const normalized = values
+      .filter(value => value !== undefined && value !== null)
+      .map(value => canonicalDigest(value, `one-proof payroll ${label} ${aliasLabel}`));
+    if (new Set(normalized).size > 1) {
+      throw new Error(`one-proof payroll ${label} ${aliasLabel} aliases must match`);
+    }
+    return normalized[0] || "";
+  };
+  const txHash = normalizedAlias("transaction hash", [input.tx_hash, input.txHash]).toUpperCase();
+  if (!txHash) {
+    throw new Error(`one-proof payroll ${label} requires the exact Cosmos transaction hash`);
+  }
+  const txBytesHash = normalizedAlias(
+    "transaction bytes hash",
+    [input.tx_bytes_hash, input.txBytesHash]
+  );
+  if (requireSignedBindings && !txBytesHash) {
+    throw new Error(`one-proof payroll ${label} requires the exact signed transaction bytes hash`);
+  }
+  if (txBytesHash && txBytesHash.toUpperCase() !== txHash) {
+    throw new Error(`one-proof payroll ${label} transaction hash does not match its signed transaction bytes hash`);
+  }
+  const signDocHash = normalizedAlias(
+    "sign-doc hash",
+    [input.sign_doc_hash, input.signDocHash]
+  );
+  if (requireSignedBindings && !signDocHash) {
+    throw new Error(`one-proof payroll ${label} requires the exact sign-doc hash`);
+  }
+  return {
+    txHash,
+    txBytesHash,
+    signDocHash
+  };
+}
+
+function assertPayrollBroadcastIdentityMatches(reservations, identity, { requireComplete = false } = {}) {
+  const storedTxHashes = [...new Set(reservations.map(reservation => text(reservation.submitted_tx_hash)).filter(Boolean))];
+  const storedTxBytesHashes = [...new Set(reservations.map(reservation => text(reservation.tx_bytes_hash)).filter(Boolean))];
+  if (storedTxHashes.length === 1 && storedTxBytesHashes.length === 1 &&
+      storedTxHashes[0].toLowerCase() !== storedTxBytesHashes[0].toLowerCase()) {
+    throw new Error("one-proof payroll durable transaction hash does not match its transaction bytes hash");
+  }
   const fields = [
     ["txHash", "submitted_tx_hash"],
     ["txBytesHash", "tx_bytes_hash"],
@@ -1087,6 +1147,11 @@ function assertPayrollBroadcastIdentityMatches(reservations, identity) {
     }
     if (identity[identityField] && stored.length && identity[identityField] !== stored[0]) {
       throw new Error(`one-proof payroll ${identityField} does not match the durable broadcast attempt`);
+    }
+    if (requireComplete && (!identity[identityField] || reservations.some(reservation =>
+      text(reservation[reservationField]) !== identity[identityField]
+    ))) {
+      throw new Error(`one-proof payroll durable broadcast attempt is missing or mismatches exact ${reservationField}`);
     }
   }
 }
@@ -1172,50 +1237,106 @@ export async function markOneProofPayrollReservationProofReady(reservationManage
   }));
 }
 
+function payrollArtifactReservationIDs(reservationBatch) {
+  const values = [...(reservationBatch?.reservation_ids || [])].map(value => text(value));
+  if (!values.length || values.some(value => !value) || new Set(values).size !== values.length) {
+    throw new Error("one-proof payroll broadcast artifact requires distinct reservation IDs");
+  }
+  return values;
+}
+
+function verifiedPayrollArtifactBroadcastIdentity(artifactInput, reservationBatch, execution) {
+  if (!artifactInput || typeof artifactInput !== "object" || Array.isArray(artifactInput) || !text(artifactInput.artifact_hash)) {
+    throw new Error("one-proof payroll broadcast attempt requires a verified signed artifact");
+  }
+  const artifact = normalizeOneProofPayrollArtifact(artifactInput);
+  if (!artifact.execution || !artifact.reservation_batch || !artifact.sign_doc || !artifact.signed_tx_bytes) {
+    throw new Error("one-proof payroll broadcast artifact must contain execution, reservation, sign-doc, and signed TxRaw checkpoints");
+  }
+  const expected = preparedFromPayrollExecution(execution);
+  const artifactExecution = preparedFromPayrollExecution(artifact.execution);
+  if (artifactExecution.prepared.operation.operation_id !== expected.prepared.operation.operation_id ||
+      artifactExecution.prepared.payload.payload_hash !== expected.prepared.payload.payload_hash ||
+      oneProofPayrollOperationEvidenceHash(artifact.execution.operation_evidence) !==
+        oneProofPayrollOperationEvidenceHash(execution.operation_evidence)) {
+    throw new Error("one-proof payroll broadcast artifact does not match the proven execution");
+  }
+  const expectedReservationIDs = payrollArtifactReservationIDs(reservationBatch);
+  const artifactReservationIDs = payrollArtifactReservationIDs(artifact.reservation_batch);
+  if (text(artifact.reservation_batch.operation_id) !== text(reservationBatch?.operation_id) ||
+      text(artifact.reservation_batch.lease_token) !== text(reservationBatch?.lease_token) ||
+      expectedReservationIDs.length !== artifactReservationIDs.length ||
+      expectedReservationIDs.some(id => !artifactReservationIDs.includes(id))) {
+    throw new Error("one-proof payroll broadcast artifact does not match the reservation batch");
+  }
+  return requiredPayrollCosmosBroadcastIdentity({
+    txHash: artifact.tx_hash,
+    txBytesHash: artifact.tx_bytes_hash,
+    signDocHash: artifact.sign_doc_hash
+  }, "broadcast artifact", { requireSignedBindings: true });
+}
+
 /**
  * Durably record crossing the external broadcast boundary before sending a
- * payroll transaction. Call this immediately before the wallet/RPC broadcast,
- * then call markOneProofPayrollReservationSubmitted with its outcome.
+ * payroll transaction. The transaction identity is derived only from a
+ * validated, exact-TxRaw artifact bound to this execution and reservation set.
+ * An idempotent return for an already Submitted/Unknown operation validates
+ * identity only; use retransmitOneProofPayrollArtifact to authorize a retry.
  */
 export async function markOneProofPayrollReservationBroadcastAttempting(reservationManager, reservationBatch, execution, {
-  tx_hash,
-  txHash,
-  tx_bytes_hash,
-  txBytesHash,
-  sign_doc_hash,
-  signDocHash,
+  artifact,
   reason,
   metadata = {}
 } = {}) {
   if (!reservationManager || typeof reservationManager.markBroadcastAttempting !== "function") {
     throw new Error("a NoteReservationManager with broadcast-attempt support is required");
   }
-  const broadcastIdentity = payrollBroadcastIdentity({ tx_hash, txHash, tx_bytes_hash, txBytesHash, sign_doc_hash, signDocHash });
+  const broadcastIdentity = verifiedPayrollArtifactBroadcastIdentity(artifact, reservationBatch, execution);
   const { prepared } = preparedFromPayrollExecution(execution);
   const reservationSet = await payrollReservationSet(reservationManager, prepared, reservationBatch);
   const evidence = execution.operation_evidence;
   if (reservationSet.reservations.some(reservation => text(reservation.payload_hash) !== evidence.payload_hash)) {
     throw new Error("one-proof payroll reservations must be payload-bound before broadcast");
   }
+  throwIfPayrollReservationStateMixed(reservationSet.reservations);
   assertPayrollBroadcastIdentityMatches(reservationSet.reservations, broadcastIdentity);
   const hasAttempt = reservationStatusesAre(reservationSet.reservations, "ProofReady") && reservationSet.reservations.every(reservation =>
     reservation.broadcast_in_flight === true && Number(reservation.broadcast_attempt_count || 0) >= 1
   );
-  if (hasAttempt) return Object.freeze([...reservationSet.reservations]);
+  if (hasAttempt) {
+    assertPayrollBroadcastIdentityMatches(reservationSet.reservations, broadcastIdentity, { requireComplete: true });
+    if (typeof reservationManager.renewLease !== "function") {
+      throw new Error("reservationManager.renewLease is required to validate an existing one-proof payroll broadcast attempt");
+    }
+    const renewed = await reservationManager.renewLease(reservationSet.reservationIDs, {
+      leaseToken: reservationBatch.lease_token
+    });
+    assertPayrollBroadcastIdentityMatches(renewed, broadcastIdentity, { requireComplete: true });
+    return Object.freeze(renewed);
+  }
+  if (reservationStatusesAre(reservationSet.reservations, "Submitted") ||
+      reservationStatusesAre(reservationSet.reservations, "Unknown")) {
+    if (reservationSet.reservations.some(reservation => Number(reservation.broadcast_attempt_count || 0) < 1)) {
+      throw new Error("one-proof payroll terminal broadcast state is missing its durable attempt count");
+    }
+    assertPayrollBroadcastIdentityMatches(reservationSet.reservations, broadcastIdentity, { requireComplete: true });
+    return Object.freeze([...reservationSet.reservations]);
+  }
   if (!reservationStatusesAre(reservationSet.reservations, "ProofReady") ||
       reservationSet.reservations.some(reservation => reservation.broadcast_in_flight || Number(reservation.broadcast_attempt_count || 0) !== 0)) {
-    throwIfPayrollReservationStateMixed(reservationSet.reservations);
     throw new Error("one-proof payroll reservations require one clean ProofReady state before a broadcast attempt");
   }
-  return Object.freeze(await reservationManager.markBroadcastAttempting(reservationSet.reservationIDs, {
+  const attempted = await reservationManager.markBroadcastAttempting(reservationSet.reservationIDs, {
     leaseToken: reservationBatch.lease_token,
     ...broadcastIdentity,
     reason,
     metadata: payrollReservationMetadata(evidence, metadata)
-  }));
+  });
+  assertPayrollBroadcastIdentityMatches(attempted, broadcastIdentity, { requireComplete: true });
+  return Object.freeze(attempted);
 }
 
-/** Persist one broadcast attempt for a proven one-proof payroll execution. */
+/** Persist Submitted only when all three exact artifact marker fields match. */
 export async function markOneProofPayrollReservationSubmitted(reservationManager, reservationBatch, execution, {
   tx_hash,
   txHash,
@@ -1227,12 +1348,21 @@ export async function markOneProofPayrollReservationSubmitted(reservationManager
   if (!reservationManager || typeof reservationManager.markSubmitted !== "function") {
     throw new Error("a NoteReservationManager with submitted-state support is required");
   }
-  const broadcastIdentity = payrollBroadcastIdentity({ tx_hash, txHash, tx_bytes_hash, txBytesHash, sign_doc_hash, signDocHash });
+  const broadcastIdentity = requiredPayrollCosmosBroadcastIdentity(
+    { tx_hash, txHash, tx_bytes_hash, txBytesHash, sign_doc_hash, signDocHash },
+    "submission",
+    { requireSignedBindings: true }
+  );
   const { prepared } = preparedFromPayrollExecution(execution);
   const reservationSet = await payrollReservationSet(reservationManager, prepared, reservationBatch);
   const evidence = execution.operation_evidence;
-  assertPayrollBroadcastIdentityMatches(reservationSet.reservations, broadcastIdentity);
-  if (reservationStatusesAre(reservationSet.reservations, "Submitted")) return Object.freeze([...reservationSet.reservations]);
+  assertPayrollBroadcastIdentityMatches(reservationSet.reservations, broadcastIdentity, { requireComplete: true });
+  if (reservationStatusesAre(reservationSet.reservations, "Submitted")) {
+    if (reservationSet.reservations.some(reservation => Number(reservation.broadcast_attempt_count || 0) < 1)) {
+      throw new Error("one-proof payroll Submitted state is missing its durable broadcast attempt");
+    }
+    return Object.freeze([...reservationSet.reservations]);
+  }
   if (!reservationStatusesAre(reservationSet.reservations, "ProofReady") ||
       reservationSet.reservations.some(reservation =>
         text(reservation.payload_hash) !== evidence.payload_hash ||
@@ -1242,10 +1372,12 @@ export async function markOneProofPayrollReservationSubmitted(reservationManager
     throwIfPayrollReservationStateMixed(reservationSet.reservations);
     throw new Error("one-proof payroll reservations need a durable payload-bound broadcast attempt before submission");
   }
-  return Object.freeze(await reservationManager.markSubmitted(reservationSet.reservationIDs, {
+  const submitted = await reservationManager.markSubmitted(reservationSet.reservationIDs, {
     leaseToken: reservationBatch.lease_token,
     ...broadcastIdentity
-  }));
+  });
+  assertPayrollBroadcastIdentityMatches(submitted, broadcastIdentity, { requireComplete: true });
+  return Object.freeze(submitted);
 }
 
 /** Invoke exactly one explicitly selected one-proof prover; no automatic prover failover is performed. */
@@ -1477,12 +1609,196 @@ function artifactOptionalText(value, label) {
   return normalized;
 }
 
+function artifactDigestInputAlias(input, snakeKey, camelKey, label) {
+  const values = [input?.[snakeKey], input?.[camelKey]]
+    .filter(value => value !== undefined && value !== null);
+  const normalized = values.map(value => {
+    if (typeof value !== "string") {
+      throw new Error(`one-proof payroll artifact ${label} must be a string`);
+    }
+    return canonicalArtifactDigest(value, `one-proof payroll artifact ${label}`);
+  });
+  if (new Set(normalized).size > 1) {
+    throw new Error(`one-proof payroll artifact ${label} aliases must match`);
+  }
+  return normalized[0] || "";
+}
+
 function artifactSignedTransactionBytes(value) {
   if (value === undefined || value === null) return null;
   if (value instanceof Uint8Array) return Uint8Array.from(value);
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
   if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
   throw new Error("one-proof payroll artifact signed transaction must be bytes");
+}
+
+function artifactBytesEqual(left, right) {
+  if (!(left instanceof Uint8Array) || !(right instanceof Uint8Array) || left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
+function artifactSignDocBytes(signDoc, field, label) {
+  if (!signDoc || typeof signDoc !== "object" || Array.isArray(signDoc)) {
+    throw new Error("one-proof payroll artifact sign-doc must be a Cosmos direct sign-doc");
+  }
+  const encoded = signDoc[field];
+  if (typeof encoded !== "string" || !encoded) {
+    throw new Error(`one-proof payroll artifact sign-doc ${label} is required`);
+  }
+  const decoded = bytesFromBase64(encoded, `one-proof payroll artifact sign-doc ${label}`);
+  if (!decoded.length || base64FromBytes(decoded) !== encoded) {
+    throw new Error(`one-proof payroll artifact sign-doc ${label} must be canonical non-empty base64`);
+  }
+  return decoded;
+}
+
+function payrollDirectSignerPublicKey(authInfo, creator) {
+  const signerInfo = authInfo?.signerInfos?.[0];
+  if (signerInfo?.modeInfo?.single?.mode !== SignMode.SIGN_MODE_DIRECT) {
+    throw new Error("one-proof payroll artifact signer must use Cosmos SIGN_MODE_DIRECT");
+  }
+  const encodedPublicKey = signerInfo.publicKey;
+  if (!encodedPublicKey || encodedPublicKey.typeUrl !== Secp256k1PubKey.typeUrl || !encodedPublicKey.value?.length) {
+    throw new Error("one-proof payroll artifact signer must contain one Cosmos secp256k1 public key");
+  }
+  let publicKey;
+  try {
+    const decoded = Secp256k1PubKey.decode(encodedPublicKey.value);
+    if (!artifactBytesEqual(Secp256k1PubKey.encode(decoded).finish(), encodedPublicKey.value)) {
+      throw new Error("public key protobuf is not canonical");
+    }
+    publicKey = Secp256k1.compressPubkey(decoded.key);
+    if (!artifactBytesEqual(publicKey, decoded.key)) {
+      throw new Error("public key must use compressed encoding");
+    }
+  } catch (error) {
+    throw new Error(`one-proof payroll artifact signer public key is invalid: ${error.message}`);
+  }
+  try {
+    const decodedCreator = fromBech32(creator);
+    if (toBech32(decodedCreator.prefix, decodedCreator.data) !== creator) {
+      throw new Error("creator address is not canonical");
+    }
+    if (toBech32(decodedCreator.prefix, hash160(publicKey)) !== creator) {
+      throw new Error("public key does not identify the message creator");
+    }
+  } catch (error) {
+    throw new Error(`one-proof payroll artifact signer does not match its message creator: ${error.message}`);
+  }
+  return publicKey;
+}
+
+function validatePayrollCosmosSignDoc(signDoc, execution) {
+  const bodyBytes = artifactSignDocBytes(signDoc, "bodyBytes", "bodyBytes");
+  const authInfoBytes = artifactSignDocBytes(signDoc, "authInfoBytes", "authInfoBytes");
+  if (typeof signDoc.chainId !== "string" || !signDoc.chainId || signDoc.chainId !== signDoc.chainId.trim()) {
+    throw new Error("one-proof payroll artifact sign-doc chainId must be a canonical non-empty string");
+  }
+  const executionChainID = execution?.payload?.chain_id;
+  if (typeof executionChainID !== "string" || !executionChainID || executionChainID !== executionChainID.trim()) {
+    throw new Error("one-proof payroll artifact execution chain_id must be a canonical non-empty string");
+  }
+  if (signDoc.chainId !== executionChainID) {
+    throw new Error("one-proof payroll artifact sign-doc chainId does not match its proven execution");
+  }
+  const accountNumber = canonicalUint64(signDoc.accountNumber, "one-proof payroll artifact sign-doc accountNumber");
+
+  let body;
+  let authInfo;
+  try {
+    body = TxBody.decode(bodyBytes);
+    authInfo = AuthInfo.decode(authInfoBytes);
+  } catch (error) {
+    throw new Error(`one-proof payroll artifact sign-doc contains invalid Cosmos protobuf: ${error.message}`);
+  }
+  if (!artifactBytesEqual(TxBody.encode(body).finish(), bodyBytes) ||
+      !artifactBytesEqual(AuthInfo.encode(authInfo).finish(), authInfoBytes)) {
+    throw new Error("one-proof payroll artifact sign-doc must use canonical Cosmos protobuf bytes");
+  }
+  if (body.messages.length !== 1 || body.messages[0].typeUrl !== GeneratedMsgBatchTransfer.typeUrl) {
+    throw new Error("one-proof payroll artifact sign-doc must contain exactly one MsgBatchTransfer");
+  }
+  if (authInfo.signerInfos.length !== 1) {
+    throw new Error("one-proof payroll artifact sign-doc must contain exactly one Cosmos signer");
+  }
+
+  const creator = text(execution?.message?.creator);
+  if (!creator) throw new Error("one-proof payroll artifact execution message creator is required");
+  const signerPublicKey = payrollDirectSignerPublicKey(authInfo, creator);
+  let expectedMessageBytes;
+  let executionMessageBytes;
+  try {
+    const expectedMessage = buildMsgBatchTransferFromPrepared(execution.payload, execution.proof, {
+      creator,
+      // Artifact recovery still has to validate an expired checkpoint. The
+      // payload's signed expiry remains part of the reconstructed message.
+      nowUnix: 0
+    });
+    expectedMessageBytes = GeneratedMsgBatchTransfer.encode(
+      GeneratedMsgBatchTransfer.fromPartial(expectedMessage)
+    ).finish();
+    executionMessageBytes = GeneratedMsgBatchTransfer.encode(
+      GeneratedMsgBatchTransfer.fromPartial(execution.message)
+    ).finish();
+  } catch (error) {
+    throw new Error(`one-proof payroll artifact execution cannot reconstruct MsgBatchTransfer: ${error.message}`);
+  }
+  if (!artifactBytesEqual(executionMessageBytes, expectedMessageBytes)) {
+    throw new Error("one-proof payroll artifact execution message does not match its payload and proof");
+  }
+  if (!artifactBytesEqual(body.messages[0].value, expectedMessageBytes)) {
+    throw new Error("one-proof payroll artifact sign-doc does not match its proven execution");
+  }
+
+  const unsignedTxRaw = TxRaw.fromPartial({ bodyBytes, authInfoBytes, signatures: [] });
+  return {
+    bodyBytes,
+    authInfoBytes,
+    chainId: signDoc.chainId,
+    accountNumber,
+    signerPublicKey,
+    signDocHash: sha256Hex(TxRaw.encode(unsignedTxRaw).finish())
+  };
+}
+
+function validatePayrollSignedTxRaw(signedTxBytes, signDocBinding) {
+  if (!(signedTxBytes instanceof Uint8Array) || !signedTxBytes.length) {
+    throw new Error("one-proof payroll artifact signed transaction must be a non-empty Cosmos TxRaw");
+  }
+  let txRaw;
+  try {
+    txRaw = TxRaw.decode(signedTxBytes);
+  } catch (error) {
+    throw new Error(`one-proof payroll artifact signed transaction is not a valid Cosmos TxRaw: ${error.message}`);
+  }
+  if (!artifactBytesEqual(TxRaw.encode(txRaw).finish(), signedTxBytes)) {
+    throw new Error("one-proof payroll artifact signed transaction must use canonical Cosmos TxRaw bytes");
+  }
+  if (!txRaw.bodyBytes.length || !txRaw.authInfoBytes.length ||
+      txRaw.signatures.length !== 1 || txRaw.signatures[0].length !== 64) {
+    throw new Error("one-proof payroll artifact signed transaction must contain one 64-byte Cosmos secp256k1 signature");
+  }
+  if (!artifactBytesEqual(txRaw.bodyBytes, signDocBinding.bodyBytes) ||
+      !artifactBytesEqual(txRaw.authInfoBytes, signDocBinding.authInfoBytes)) {
+    throw new Error("one-proof payroll artifact signed TxRaw does not match its sign-doc bodyBytes/authInfoBytes");
+  }
+  try {
+    const signature = Secp256k1Signature.fromFixedLength(txRaw.signatures[0]);
+    const signBytes = SignDoc.encode(SignDoc.fromPartial({
+      bodyBytes: signDocBinding.bodyBytes,
+      authInfoBytes: signDocBinding.authInfoBytes,
+      chainId: signDocBinding.chainId,
+      accountNumber: signDocBinding.accountNumber
+    })).finish();
+    if (!Secp256k1.verifySignature(signature, sha256(signBytes), signDocBinding.signerPublicKey)) {
+      throw new Error("signature verification failed");
+    }
+  } catch (error) {
+    throw new Error(`one-proof payroll artifact signed transaction signature is invalid: ${error.message}`);
+  }
+  return txRaw;
 }
 
 function normalizeOneProofPayrollArtifact(artifact, { nowUnix, allowExpired = false } = {}) {
@@ -1506,7 +1822,7 @@ function normalizeOneProofPayrollArtifact(artifact, { nowUnix, allowExpired = fa
   const reservationBatch = artifact.reservation_batch == null ? null : cloneArtifactValue(artifact.reservation_batch);
   const signDoc = artifact.sign_doc == null ? null : cloneArtifactValue(artifact.sign_doc);
   const signedTxBytes = artifact.signed_tx_bytes == null ? null : artifactSignedTransactionBytes(artifact.signed_tx_bytes);
-  const txHash = artifactOptionalText(artifact.tx_hash, "transaction hash");
+  const suppliedTxHash = artifactOptionalText(artifact.tx_hash, "transaction hash");
   const suppliedTxBytesHash = artifactOptionalText(artifact.tx_bytes_hash, "transaction bytes hash");
   const suppliedSignDocHash = artifactOptionalText(artifact.sign_doc_hash, "sign-doc hash");
   if (suppliedTxBytesHash) canonicalArtifactDigest(suppliedTxBytesHash, "one-proof payroll artifact transaction bytes hash");
@@ -1515,16 +1831,28 @@ function normalizeOneProofPayrollArtifact(artifact, { nowUnix, allowExpired = fa
   if (signedTxBytes && (!execution || !signDoc)) {
     throw new Error("one-proof payroll artifact signed transaction requires a proven execution and sign-doc");
   }
-  if (txHash && !signedTxBytes) throw new Error("one-proof payroll artifact transaction hash requires exact signed transaction bytes");
+  if (suppliedTxHash && !signedTxBytes) throw new Error("one-proof payroll artifact transaction hash requires exact signed transaction bytes");
   if (suppliedTxBytesHash && !signedTxBytes) {
     throw new Error("one-proof payroll artifact transaction bytes hash requires exact signed transaction bytes");
   }
   if (suppliedSignDocHash && !signDoc) throw new Error("one-proof payroll artifact sign-doc hash requires a sign-doc");
+  const signDocBinding = signDoc ? validatePayrollCosmosSignDoc(signDoc, execution) : null;
+  if (signedTxBytes) validatePayrollSignedTxRaw(signedTxBytes, signDocBinding);
   const txBytesHash = signedTxBytes ? sha256Hex(signedTxBytes) : suppliedTxBytesHash.toLowerCase();
+  const txHash = signedTxBytes ? txBytesHash.toUpperCase() : "";
+  if (suppliedTxHash) {
+    const normalizedSuppliedTxHash = canonicalArtifactDigest(
+      suppliedTxHash,
+      "one-proof payroll artifact transaction hash"
+    ).toUpperCase();
+    if (normalizedSuppliedTxHash !== txHash) {
+      throw new Error("one-proof payroll artifact signed transaction bytes do not match tx_hash");
+    }
+  }
   if (signedTxBytes && suppliedTxBytesHash && suppliedTxBytesHash.toLowerCase() !== txBytesHash) {
     throw new Error("one-proof payroll artifact signed transaction bytes do not match tx_bytes_hash");
   }
-  const signDocHash = signDoc ? artifactContentHash(signDoc) : "";
+  const signDocHash = signDocBinding?.signDocHash || "";
   if (signDoc && suppliedSignDocHash && suppliedSignDocHash.toLowerCase() !== signDocHash) {
     throw new Error("one-proof payroll artifact sign-doc does not match sign_doc_hash");
   }
@@ -1555,6 +1883,9 @@ function normalizeOneProofPayrollArtifact(artifact, { nowUnix, allowExpired = fa
  */
 export function createOneProofPayrollArtifact(input = {}) {
   if (!input || typeof input !== "object") throw new Error("one-proof payroll artifact input is required");
+  const txHash = artifactDigestInputAlias(input, "tx_hash", "txHash", "transaction hash");
+  const txBytesHash = artifactDigestInputAlias(input, "tx_bytes_hash", "txBytesHash", "transaction bytes hash");
+  const signDocHash = artifactDigestInputAlias(input, "sign_doc_hash", "signDocHash", "sign-doc hash");
   const provisional = {
     version: oneProofPayrollArtifactVersion,
     prepared: input.prepared,
@@ -1562,9 +1893,9 @@ export function createOneProofPayrollArtifact(input = {}) {
     reservation_batch: input.reservation_batch ?? input.reservationBatch ?? null,
     sign_doc: input.sign_doc ?? input.signDoc ?? null,
     signed_tx_bytes: input.signed_tx_bytes ?? input.signedTxBytes ?? null,
-    tx_hash: input.tx_hash ?? input.txHash ?? "",
-    tx_bytes_hash: input.tx_bytes_hash ?? input.txBytesHash ?? "",
-    sign_doc_hash: input.sign_doc_hash ?? input.signDocHash ?? "",
+    tx_hash: txHash,
+    tx_bytes_hash: txBytesHash,
+    sign_doc_hash: signDocHash,
     tx_result: input.tx_result ?? input.txResult ?? null
   };
   return normalizeOneProofPayrollArtifact(provisional);
@@ -1691,29 +2022,336 @@ export async function inspectOneProofPayrollArtifactRetry(value, {
     nextAction = resumed.next_action;
     reason = "every input nullifier is explicitly unspent";
   }
-  return Object.freeze({
+  const result = {
     artifact,
     transaction_state: transactionState,
     input_nullifiers: Object.freeze(inputNullifiers),
     next_action: nextAction,
     reason
-  });
+  };
+  if (nextAction === "retransmit-signed-transaction") {
+    const issuedAtWallClockMs = Date.now();
+    const expiresAtUnix = Math.min(
+      Number(prepared.payload.expires_at_unix),
+      resolvedNowUnix + oneProofPayrollRetryDecisionTTLSeconds
+    );
+    const retryDecision = Object.freeze({
+      version: oneProofPayrollRetryDecisionVersion,
+      artifact_hash: artifact.artifact_hash,
+      tx_hash: artifact.tx_hash,
+      tx_bytes_hash: artifact.tx_bytes_hash,
+      issued_at_unix: resolvedNowUnix,
+      expires_at_unix: expiresAtUnix
+    });
+    oneProofPayrollRetryDecisionBindings.set(retryDecision, Object.freeze({
+      artifactHash: artifact.artifact_hash,
+      txHash: artifact.tx_hash,
+      txBytesHash: artifact.tx_bytes_hash,
+      issuedAtUnix: resolvedNowUnix,
+      expiresAtUnix,
+      issuedAtWallClockMs,
+      expiresAtWallClockMs: issuedAtWallClockMs + Math.max(0, expiresAtUnix - resolvedNowUnix) * 1000
+    }));
+    result.retry_decision = retryDecision;
+  }
+  return Object.freeze(result);
 }
 
-/** Retransmit only the exact signed bytes checkpointed in a verified artifact. */
+function oneProofPayrollRetryDecisionInput(input = {}) {
+  const camel = input.retryDecision;
+  const snake = input.retry_decision;
+  if (camel !== undefined && snake !== undefined && camel !== snake) {
+    throw new Error("one-proof payroll retry decision aliases must identify the same decision");
+  }
+  return camel ?? snake;
+}
+
+function payrollBroadcastError(error, identity, {
+  bookkeepingError,
+  message = "one-proof payroll signed transaction outcome requires reconciliation"
+} = {}) {
+  const original = error && typeof error === "object" ? error : new Error(String(error || message));
+  let target = original;
+  try {
+    target.txHash = identity.txHash;
+    target.txBytesHash = identity.txBytesHash;
+    target.signDocHash = identity.signDocHash;
+    target.reservationReconciliationRequired = true;
+    if (bookkeepingError) target.reservationBookkeepingError = bookkeepingError;
+  } catch {
+    target = new Error(String(original?.message || message), { cause: original });
+    target.txHash = identity.txHash;
+    target.txBytesHash = identity.txBytesHash;
+    target.signDocHash = identity.signDocHash;
+    target.reservationReconciliationRequired = true;
+    if (bookkeepingError) target.reservationBookkeepingError = bookkeepingError;
+  }
+  return target;
+}
+
+function payrollBroadcastStatus(reservations) {
+  throwIfPayrollReservationStateMixed(reservations);
+  return text(reservations[0]?.status);
+}
+
+async function authoritativePayrollBroadcastSet(reservationManager, artifact, identity, {
+  requireCompleteIdentity = true
+} = {}) {
+  const reservationSet = await payrollReservationSet(
+    reservationManager,
+    artifact.prepared,
+    artifact.reservation_batch
+  );
+  assertPayrollBroadcastIdentityMatches(reservationSet.reservations, identity, {
+    requireComplete: requireCompleteIdentity
+  });
+  return reservationSet;
+}
+
+async function recordPayrollBroadcastUnknown(reservationManager, artifact, identity, error) {
+  const reservationSet = await authoritativePayrollBroadcastSet(reservationManager, artifact, identity);
+  const status = payrollBroadcastStatus(reservationSet.reservations);
+  if (status === "Unknown" || status === "ConfirmedSpent") {
+    return Object.freeze([...reservationSet.reservations]);
+  }
+  if (status !== "ProofReady" && status !== "Submitted") {
+    throw new Error(`one-proof payroll broadcast outcome cannot become Unknown from ${status}`);
+  }
+  if (status === "ProofReady" && reservationSet.reservations.some(reservation =>
+    reservation.broadcast_in_flight !== true || Number(reservation.broadcast_attempt_count || 0) < 1
+  )) {
+    throw new Error("one-proof payroll Unknown outcome requires a durable broadcast attempt");
+  }
+  const unknown = await reservationManager.markUnknown(reservationSet.reservationIDs, {
+    fromStatus: status,
+    leaseToken: artifact.reservation_batch.lease_token,
+    ...identity,
+    error: "one_proof_payroll_broadcast_result_unknown",
+    metadata: payrollReservationMetadata(artifact.execution.operation_evidence, {
+      reconcile_reason: "one_proof_payroll_broadcast_result_unknown"
+    })
+  });
+  assertPayrollBroadcastIdentityMatches(unknown, identity, { requireComplete: true });
+  return Object.freeze(unknown);
+}
+
+async function recordPayrollBroadcastResolved(reservationManager, artifact, identity) {
+  const reservationSet = await authoritativePayrollBroadcastSet(reservationManager, artifact, identity);
+  const status = payrollBroadcastStatus(reservationSet.reservations);
+  if (status === "Submitted" || status === "Unknown" || status === "ConfirmedSpent") {
+    return Object.freeze([...reservationSet.reservations]);
+  }
+  if (status !== "ProofReady") {
+    throw new Error(`one-proof payroll resolved broadcast cannot be recorded from ${status}`);
+  }
+  return markOneProofPayrollReservationSubmitted(
+    reservationManager,
+    artifact.reservation_batch,
+    artifact.execution,
+    identity
+  );
+}
+
+function startPayrollBroadcastHeartbeat(reservationManager, artifact, reservations) {
+  const intervalMs = reservationHeartbeatIntervalMs({
+    leaseDurationMs: reservationManager.leaseDurationMs,
+    leaseUntil: reservations[0]?.lease_until
+  });
+  let heartbeatError = null;
+  let inFlight = null;
+  const heartbeat = async () => {
+    if (heartbeatError || inFlight) return inFlight;
+    inFlight = reservationManager.renewLease(artifact.reservation_batch.reservation_ids, {
+      leaseToken: artifact.reservation_batch.lease_token
+    }).catch(error => {
+      heartbeatError = error;
+    }).finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
+  };
+  const timer = typeof globalThis.setInterval === "function"
+    ? globalThis.setInterval(() => { void heartbeat(); }, intervalMs)
+    : null;
+  return {
+    assertHealthy() {
+      if (!heartbeatError) return;
+      const error = new Error("one-proof payroll reservation lease heartbeat failed during signed transaction broadcast");
+      error.name = "ReservationHeartbeatError";
+      error.cause = heartbeatError;
+      throw error;
+    },
+    async stop() {
+      if (timer && typeof globalThis.clearInterval === "function") globalThis.clearInterval(timer);
+      if (inFlight) await inFlight;
+      return heartbeatError;
+    }
+  };
+}
+
+/**
+ * Retransmit exact signed bytes with a fresh one-use decision. This owns the
+ * durable marker, ProofReady heartbeat, and Submitted/Unknown outcome write.
+ */
 export async function retransmitOneProofPayrollArtifact(value, {
   broadcastSignedTx,
+  reservationManager,
+  retryDecision,
+  retry_decision,
   nowUnix
 } = {}) {
   if (typeof broadcastSignedTx !== "function") throw new Error("a broadcastSignedTx callback is required to retransmit a one-proof payroll artifact");
+  if (!reservationManager || typeof reservationManager.markBroadcastAttempting !== "function" ||
+      typeof reservationManager.markSubmitted !== "function" || typeof reservationManager.markUnknown !== "function") {
+    throw new Error("a NoteReservationManager with broadcast lifecycle support is required to retransmit a one-proof payroll artifact");
+  }
+  const decision = oneProofPayrollRetryDecisionInput({ retryDecision, retry_decision });
+  const decisionBinding = decision && typeof decision === "object"
+    ? oneProofPayrollRetryDecisionBindings.get(decision)
+    : null;
+  if (!decisionBinding) {
+    throw new Error("a fresh inspect-issued one-proof payroll retry-safe decision is required");
+  }
   const resolvedNowUnix = nowUnix ?? Math.floor(Date.now() / 1000);
   const resumed = resumeOneProofPayrollArtifact(value, { nowUnix: resolvedNowUnix });
   if (!resumed.signed_tx_bytes) throw new Error("one-proof payroll artifact does not contain exact signed transaction bytes");
+  if (
+    decisionBinding.artifactHash !== resumed.artifact.artifact_hash ||
+    decisionBinding.txHash !== resumed.artifact.tx_hash ||
+    decisionBinding.txBytesHash !== resumed.artifact.tx_bytes_hash
+  ) {
+    throw new Error("one-proof payroll retry-safe decision does not match the signed artifact identity");
+  }
+  const wallClockNowMs = Date.now();
+  if (
+    resolvedNowUnix < decisionBinding.issuedAtUnix ||
+    resolvedNowUnix >= decisionBinding.expiresAtUnix ||
+    wallClockNowMs < decisionBinding.issuedAtWallClockMs ||
+    wallClockNowMs >= decisionBinding.expiresAtWallClockMs
+  ) {
+    oneProofPayrollRetryDecisionBindings.delete(decision);
+    throw new Error("one-proof payroll retry-safe decision is stale");
+  }
   expectedPayrollEvidenceForPreparedOperation(resumed.artifact.prepared, { nowUnix: resolvedNowUnix });
-  return broadcastSignedTx(Uint8Array.from(resumed.signed_tx_bytes), {
-    artifact: resumed.artifact,
-    tx_bytes_hash: resumed.artifact.tx_bytes_hash
-  });
+  // Consume before invoking caller code so concurrent/re-entrant callers cannot
+  // use one chain observation to cross the external boundary twice.
+  oneProofPayrollRetryDecisionBindings.delete(decision);
+  const artifact = resumed.artifact;
+  if (!artifact.execution || !artifact.reservation_batch) {
+    throw new Error("one-proof payroll signed artifact requires execution and reservation checkpoints before retransmit");
+  }
+  const identity = requiredPayrollCosmosBroadcastIdentity({
+    txHash: artifact.tx_hash,
+    txBytesHash: artifact.tx_bytes_hash,
+    signDocHash: artifact.sign_doc_hash
+  }, "retry artifact", { requireSignedBindings: true });
+  const beforeMarker = await payrollReservationSet(reservationManager, artifact.prepared, artifact.reservation_batch);
+  const beforeMarkerStatus = payrollBroadcastStatus(beforeMarker.reservations);
+  const existingAttempt = beforeMarker.reservations.some(reservation =>
+    reservation.broadcast_in_flight === true || Number(reservation.broadcast_attempt_count || 0) > 0
+  );
+  if (existingAttempt) {
+    try {
+      const partialAttempt = beforeMarkerStatus === "ProofReady"
+        ? beforeMarker.reservations.some(reservation =>
+            reservation.broadcast_in_flight !== true || Number(reservation.broadcast_attempt_count || 0) < 1
+          )
+        : beforeMarker.reservations.some(reservation => Number(reservation.broadcast_attempt_count || 0) < 1);
+      if (partialAttempt) {
+        throw new Error("one-proof payroll reservations have a partial durable broadcast attempt");
+      }
+      assertPayrollBroadcastIdentityMatches(beforeMarker.reservations, identity, { requireComplete: true });
+    } catch (error) {
+      throw payrollBroadcastError(error, identity);
+    }
+  }
+  if (beforeMarkerStatus === "ProofReady") {
+    if (typeof reservationManager.renewLease !== "function") {
+      const error = new Error("reservationManager.renewLease is required to keep the one-proof payroll lease alive through broadcast");
+      if (existingAttempt) throw payrollBroadcastError(error, identity);
+      throw error;
+    }
+    try {
+      await reservationManager.renewLease(beforeMarker.reservationIDs, {
+        leaseToken: artifact.reservation_batch.lease_token
+      });
+    } catch (error) {
+      if (existingAttempt) throw payrollBroadcastError(error, identity);
+      throw error;
+    }
+  }
+  let markerReservations;
+  try {
+    markerReservations = await markOneProofPayrollReservationBroadcastAttempting(
+      reservationManager,
+      artifact.reservation_batch,
+      artifact.execution,
+      {
+        artifact,
+        reason: "one_proof_payroll_exact_txraw_retransmit"
+      }
+    );
+  } catch (error) {
+    // A custom durable store may have committed its marker before losing the
+    // acknowledgement. Do not call the RPC, and tell the caller to reconcile
+    // the exact identity before issuing another decision.
+    throw payrollBroadcastError(error, identity);
+  }
+  const markerStatus = payrollBroadcastStatus(markerReservations);
+  const heartbeat = markerStatus === "ProofReady"
+    ? startPayrollBroadcastHeartbeat(reservationManager, artifact, markerReservations)
+    : null;
+  const context = {
+    artifact,
+    tx_hash: artifact.tx_hash,
+    tx_bytes_hash: artifact.tx_bytes_hash,
+    sign_doc_hash: artifact.sign_doc_hash
+  };
+  let result;
+  try {
+    const boundaryNowMs = Date.now();
+    if (boundaryNowMs >= decisionBinding.expiresAtWallClockMs) {
+      throw new Error("one-proof payroll retry-safe decision became stale before the broadcast boundary");
+    }
+    heartbeat?.assertHealthy();
+    result = await broadcastSignedTx(Uint8Array.from(resumed.signed_tx_bytes), context);
+    heartbeat?.assertHealthy();
+    try {
+      await recordPayrollBroadcastResolved(reservationManager, artifact, identity);
+    } catch (bookkeepingError) {
+      try {
+        await recordPayrollBroadcastUnknown(reservationManager, artifact, identity, bookkeepingError);
+      } catch (unknownBookkeepingError) {
+        throw payrollBroadcastError(bookkeepingError, identity, {
+          bookkeepingError: unknownBookkeepingError
+        });
+      }
+      throw payrollBroadcastError(bookkeepingError, identity);
+    }
+    return result;
+  } catch (error) {
+    try {
+      await recordPayrollBroadcastUnknown(reservationManager, artifact, identity, error);
+    } catch (bookkeepingError) {
+      throw payrollBroadcastError(error, identity, { bookkeepingError });
+    }
+    throw payrollBroadcastError(error, identity);
+  } finally {
+    const heartbeatError = await heartbeat?.stop();
+    if (heartbeatError) {
+      // A terminal CAS can race the final timer. Exact Submitted/Unknown state
+      // is authoritative; otherwise the durable in-flight marker remains and
+      // the caller receives the primary reconciliation error above.
+      try {
+        const latest = await authoritativePayrollBroadcastSet(reservationManager, artifact, identity);
+        const latestStatus = payrollBroadcastStatus(latest.reservations);
+        if (!["Submitted", "Unknown", "ConfirmedSpent"].includes(latestStatus)) throw heartbeatError;
+      } catch {
+        // The primary result/error already carries exact durable identity. A
+        // later reconciliation will observe the still-active marker.
+      }
+    }
+  }
 }
 
 /** Validate an operation evidence artifact against the exact prepared payload. */
@@ -1796,6 +2434,9 @@ export async function createOneProofPayrollBatchSignDoc(execution, {
   signer,
   pubKeyHex,
   gasLimit,
+  gas_limit,
+  feeAmount,
+  fee_amount,
   memo,
   nowUnix
 } = {}) {
@@ -1833,6 +2474,9 @@ export async function createOneProofPayrollBatchSignDoc(execution, {
     signer,
     pubKeyHex,
     gasLimit,
+    gas_limit,
+    feeAmount,
+    fee_amount,
     message,
     expectedCircuitIdentity: circuitConfig.circuit_set_identity,
     ...(memo === undefined ? {} : { memo })

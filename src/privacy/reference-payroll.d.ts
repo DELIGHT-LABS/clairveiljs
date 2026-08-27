@@ -5,6 +5,7 @@ import type { PreparedBatchTransferProof } from "./batch-transfer.js";
 import type { NoteReservationManager, ReservationBatch, ReservationMetadata } from "./reservation.js";
 import type { NoteReservationRecord } from "./reservation.js";
 import type { CircuitConfigV1, ValidatedCircuitConfigV1 } from "./circuit-config.js";
+import type { CosmosFeeCoin, SignDocBase64 } from "../transport/cosmos-client.js";
 
 export type PayrollAmount = bigint | number | string;
 export type PayrollDisclosureScope = "employee" | "company" | "auditor" | "external";
@@ -389,11 +390,13 @@ export interface OneProofPayrollArtifact {
   prepared: PreparedOneProofPayrollOperation;
   execution: ProvenOneProofPayrollOperation | null;
   reservation_batch: OneProofPayrollReservationBatch | null;
-  sign_doc: object | null;
+  sign_doc: SignDocBase64 | null;
+  /** Canonical Cosmos TxRaw bytes with a verified direct secp256k1 signature bound to sign_doc, its chain/account domain, execution creator, and MsgBatchTransfer. */
   signed_tx_bytes: Uint8Array | null;
-  tx_hash: string;
+  /** Uppercase SHA-256 of signed_tx_bytes (the exact Cosmos network TxHash). */
+  tx_hash: Hex | "";
   tx_bytes_hash: Hex | "";
-  /** Deterministic SHA-256 of the checkpointed sign_doc. */
+  /** Cosmos sign-doc binding hash over the exact bodyBytes/authInfoBytes. */
   sign_doc_hash: Hex | "";
   tx_result: object | null;
   artifact_hash: Hex;
@@ -404,15 +407,15 @@ export interface OneProofPayrollArtifactInput {
   execution?: ProvenOneProofPayrollOperation | null;
   reservation_batch?: OneProofPayrollReservationBatch | null;
   reservationBatch?: OneProofPayrollReservationBatch | null;
-  sign_doc?: object | null;
-  signDoc?: object | null;
+  sign_doc?: SignDocBase64 | null;
+  signDoc?: SignDocBase64 | null;
   signed_tx_bytes?: Uint8Array | null;
   signedTxBytes?: Uint8Array | null;
   tx_hash?: string;
   txHash?: string;
   tx_bytes_hash?: Hex;
   txBytesHash?: Hex;
-  /** Optional assertion; when sign_doc is present it must equal its SHA-256. */
+  /** Optional assertion; must equal the Cosmos bodyBytes/authInfoBytes binding hash. */
   sign_doc_hash?: Hex;
   signDocHash?: Hex;
   tx_result?: object | null;
@@ -424,19 +427,51 @@ export interface ResumedOneProofPayrollArtifact {
   prepared: PreparedOneProofPayrollOperation;
   execution?: ProvenOneProofPayrollOperation;
   reservation_batch?: OneProofPayrollReservationBatch;
-  sign_doc?: object;
+  sign_doc?: SignDocBase64;
   signed_tx_bytes?: Uint8Array;
   next_action: "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction" | "manual-review";
 }
 
-/** Fail-closed retry decision after a tx-hash-first, then nullifier, lookup. */
-export interface InspectedOneProofPayrollArtifactRetry {
+declare const oneProofPayrollRetryDecisionBrand: unique symbol;
+
+/** A retry inspection remains authoritative for at most 30 seconds. */
+export const oneProofPayrollRetryDecisionTTLSeconds: 30;
+
+/**
+ * One-use, in-process authorization emitted only after tx-hash-first and
+ * complete-unspent-nullifier inspection. It cannot be reconstructed or stored,
+ * and expires at min(payload expiry, issued_at_unix + 30 seconds). The SDK
+ * also enforces the 30-second lifetime against its process clock, so replaying
+ * an old nowUnix cannot extend it.
+ */
+export interface OneProofPayrollRetryDecision {
+  readonly [oneProofPayrollRetryDecisionBrand]: true;
+  readonly version: "payroll-one-proof-retry-decision-v1";
+  readonly artifact_hash: Hex;
+  readonly tx_hash: Hex;
+  readonly tx_bytes_hash: Hex;
+  readonly issued_at_unix: number;
+  /** min(payload expiry, issued_at_unix + oneProofPayrollRetryDecisionTTLSeconds). */
+  readonly expires_at_unix: number;
+}
+
+interface InspectedOneProofPayrollArtifactRetryBase {
   artifact: OneProofPayrollArtifact;
   transaction_state: "succeeded" | "failed" | "not-found" | "not-checked";
   input_nullifiers: readonly { nullifier: Hex; spent: boolean }[];
-  next_action: "reconcile-succeeded" | "manual-review" | "prove" | "create-sign-doc" | "sign-transaction" | "retransmit-signed-transaction";
   reason: string;
 }
+
+/** Fail-closed retry decision after a tx-hash-first, then nullifier, lookup. */
+export type InspectedOneProofPayrollArtifactRetry =
+  | (InspectedOneProofPayrollArtifactRetryBase & {
+      next_action: "retransmit-signed-transaction";
+      retry_decision: OneProofPayrollRetryDecision;
+    })
+  | (InspectedOneProofPayrollArtifactRetryBase & {
+      next_action: "reconcile-succeeded" | "manual-review" | "prove" | "create-sign-doc" | "sign-transaction";
+      retry_decision?: never;
+    });
 
 export interface ReconciledOneProofPayrollOperationEvidence {
   operation_id: string;
@@ -462,30 +497,31 @@ export interface ReconciledOneProofPayrollReservation {
 }
 
 export interface OneProofPayrollBroadcastIdentity {
-  tx_hash?: string;
-  txHash?: string;
-  tx_bytes_hash?: string;
-  txBytesHash?: string;
-  sign_doc_hash?: string;
-  signDocHash?: string;
+  tx_hash?: Hex;
+  txHash?: Hex;
+  tx_bytes_hash?: Hex;
+  txBytesHash?: Hex;
+  sign_doc_hash?: Hex;
+  signDocHash?: Hex;
 }
 
-export type OneProofPayrollBroadcastAttempt = OneProofPayrollBroadcastIdentity & {
+export interface OneProofPayrollBroadcastAttempt {
+  /**
+   * Verified exact-TxRaw artifact from which all durable marker identity is
+   * derived. This helper records or validates the marker; an idempotent return
+   * from Submitted/Unknown does not itself authorize another RPC call. Use
+   * retransmitOneProofPayrollArtifact for retries.
+   */
+  artifact: OneProofPayrollArtifact;
   reason?: string;
   metadata?: ReservationMetadata;
-} & (
-  | { tx_hash: string }
-  | { txHash: string }
-  | { tx_bytes_hash: string }
-  | { txBytesHash: string }
-);
+}
 
-export type OneProofPayrollSubmittedBroadcast = OneProofPayrollBroadcastIdentity & (
-  | { tx_hash: string }
-  | { txHash: string }
-  | { tx_bytes_hash: string }
-  | { txBytesHash: string }
-);
+/** Complete exact-TxRaw identity previously persisted by the artifact marker. */
+export type OneProofPayrollSubmittedBroadcast = OneProofPayrollBroadcastIdentity &
+  ({ tx_hash: Hex } | { txHash: Hex }) &
+  ({ tx_bytes_hash: Hex } | { txBytesHash: Hex }) &
+  ({ sign_doc_hash: Hex } | { signDocHash: Hex });
 
 export interface OneProofPayrollReservationPlan {
   selection: { inputs: Array<{ note: object; nullifier: Hex; note_id: string; tx_hash: string; height: number | string; sequence: number | string; nullifier_status: "unspent" }> };
@@ -564,18 +600,28 @@ export function serializeOneProofPayrollArtifact(artifact: OneProofPayrollArtifa
 export function parseOneProofPayrollArtifact(serialized: string, options?: { nowUnix?: number }): OneProofPayrollArtifact;
 export function resumeOneProofPayrollArtifact(value: OneProofPayrollArtifact | string, options?: { nowUnix?: number }): ResumedOneProofPayrollArtifact;
 export function inspectOneProofPayrollArtifactRetry(value: OneProofPayrollArtifact | string, input: {
-  /** Called first when the artifact records a transaction hash. */
+  /** Called first for every signed artifact, whose exact transaction hash is derived from signed_tx_bytes. */
   queryTransaction?(txHash: string, context: { artifact: OneProofPayrollArtifact; tx_bytes_hash: Hex | ""; sign_doc_hash: Hex | "" }): Promise<"succeeded" | "failed" | "not-found" | { state?: string; status?: string }> | "succeeded" | "failed" | "not-found" | { state?: string; status?: string };
   /** Called after the transaction lookup; every prepared input must be present with an explicit boolean status. */
   checkNullifiers(nullifiers: string[]): Promise<Map<string, boolean> | Record<string, boolean>>;
   nowUnix?: number;
 }): Promise<InspectedOneProofPayrollArtifactRetry>;
 export function retransmitOneProofPayrollArtifact(value: OneProofPayrollArtifact | string, input: {
-  /** Receives the exact checkpointed TxRaw bytes. This callback performs the external broadcast. */
-  broadcastSignedTx(signedTxBytes: Uint8Array, context: { artifact: OneProofPayrollArtifact; tx_bytes_hash: Hex | "" }): Promise<unknown> | unknown;
+  /**
+   * Authoritative manager used for the internal pre-boundary marker, lease
+   * heartbeat, and Submitted/Unknown outcome writes. ProofReady retries require
+   * the artifact's current live lease; exact Submitted/Unknown retries are
+   * lease-free but remain in those states until chain reconciliation.
+   */
+  reservationManager: NoteReservationManager;
+  /** Receives the exact checkpointed TxRaw bytes only after the durable marker succeeds. */
+  broadcastSignedTx(signedTxBytes: Uint8Array, context: { artifact: OneProofPayrollArtifact; tx_hash: Hex; tx_bytes_hash: Hex; sign_doc_hash: Hex }): Promise<unknown> | unknown;
   /** Latest chain time; defaults to the local current time and rejects expired artifacts. */
   nowUnix?: number;
-}): Promise<unknown>;
+} & (
+  | { retryDecision: OneProofPayrollRetryDecision; retry_decision?: OneProofPayrollRetryDecision }
+  | { retryDecision?: OneProofPayrollRetryDecision; retry_decision: OneProofPayrollRetryDecision }
+)): Promise<unknown>;
 export function validateOneProofPayrollOperationEvidence(evidence: OneProofPayrollOperationEvidence, prepared: PreparedOneProofPayrollOperation, options?: { nowUnix?: number }): true;
 export function provePreparedOneProofPayrollOperation(prepared: PreparedOneProofPayrollOperation, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options: {
   /** Optional Cosmos relayer/signer. It may differ from the creator pinned in the prepared payload. */
@@ -584,15 +630,18 @@ export function provePreparedOneProofPayrollOperation(prepared: PreparedOneProof
   nowUnix?: number;
 }): Promise<ProvenOneProofPayrollOperation>;
 export function createOneProofPayrollBatchSignDoc(execution: ProvenOneProofPayrollOperation, input: {
-  cosmosClient: { createBatchTransferSignDoc(input: { signer?: string; pubKeyHex?: string; gasLimit?: number; message: object; memo?: string; expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<object> };
+  cosmosClient: { createBatchTransferSignDoc(input: { signer?: string; pubKeyHex?: string; gasLimit?: number | bigint; gas_limit?: number | bigint; feeAmount?: readonly CosmosFeeCoin[]; fee_amount?: readonly CosmosFeeCoin[]; message: object; memo?: string; expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<SignDocBase64> };
   signer?: string;
   pubKeyHex?: string;
-  gasLimit?: number;
+  gasLimit?: number | bigint;
+  gas_limit?: number | bigint;
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
   memo?: string;
   nowUnix?: number;
-}): Promise<{ operation_evidence: OneProofPayrollOperationEvidence; message: object; sign_doc: object }>;
+}): Promise<{ operation_evidence: OneProofPayrollOperationEvidence; message: object; sign_doc: SignDocBase64 }>;
 export function markOneProofPayrollReservationProofReady(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, options?: { metadata?: ReservationMetadata }): Promise<readonly NoteReservationRecord[]>;
-export function markOneProofPayrollReservationBroadcastAttempting(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, input?: OneProofPayrollBroadcastAttempt): Promise<readonly NoteReservationRecord[]>;
+export function markOneProofPayrollReservationBroadcastAttempting(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, input: OneProofPayrollBroadcastAttempt): Promise<readonly NoteReservationRecord[]>;
 export function markOneProofPayrollReservationSubmitted(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, input: OneProofPayrollSubmittedBroadcast): Promise<readonly NoteReservationRecord[]>;
 export function reconcileOneProofPayrollOperationEvidence(input: {
   prepared: PreparedOneProofPayrollOperation;

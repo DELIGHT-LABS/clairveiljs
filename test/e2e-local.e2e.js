@@ -23,10 +23,11 @@ import {
   prepareOneProofPayrollReservation,
   provePreparedOneProofPayrollOperation,
   createOneProofPayrollBatchSignDoc,
+  createOneProofPayrollArtifact,
+  inspectOneProofPayrollArtifactRetry,
   markOneProofPayrollReservationProofReady,
-  markOneProofPayrollReservationBroadcastAttempting,
-  markOneProofPayrollReservationSubmitted,
-  reconcileOneProofPayrollReservation
+  reconcileOneProofPayrollReservation,
+  retransmitOneProofPayrollArtifact
 } from "clairveiljs/reference-payroll";
 import {
   MemoryReservationStore,
@@ -35,6 +36,7 @@ import {
   hashRecipient
 } from "clairveiljs/reservation";
 import {
+  createPrivacyScanValidationStateV2,
   privacyScanEventTypeV2,
   processPrivacyScanPageV2,
   validatePrivacyScanPageV2
@@ -192,6 +194,46 @@ async function loadE2eWallet(config) {
   return await loadWalletFromModule(config) || await loadWalletFromMnemonic(config);
 }
 
+async function loadRelayerWalletFromModule(config) {
+  const modulePath = String(env.CLAIRVEIL_E2E_RELAYER_WALLET_MODULE || "").trim();
+  if (!modulePath) return null;
+  const specifier = modulePath.startsWith("file:")
+    ? modulePath
+    : pathToFileURL(resolve(modulePath)).href;
+  const mod = await import(specifier);
+  const factoryOrWallet = mod.createRelayerWallet ?? mod.relayerWallet ?? mod.default;
+  const walletLike = typeof factoryOrWallet === "function"
+    ? await factoryOrWallet(config)
+    : factoryOrWallet;
+  const wallet = walletLike?.relayerWallet ?? walletLike?.wallet ?? walletLike;
+  if (!wallet) {
+    throw new Error("CLAIRVEIL_E2E_RELAYER_WALLET_MODULE must export a relayer wallet or factory");
+  }
+  return createWalletAdapter(wallet);
+}
+
+async function loadRelayerWalletFromMnemonic(config) {
+  const mnemonic = String(env.CLAIRVEIL_E2E_RELAYER_MNEMONIC || "").trim();
+  if (!mnemonic) return null;
+  const signer = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
+    prefix: config.accountPrefix
+  });
+  return createOfflineSignerWalletAdapter({
+    signer,
+    address: String(env.CLAIRVEIL_E2E_RELAYER_ADDRESS || "").trim() || undefined,
+    accountPrefix: config.accountPrefix,
+    // A transparent relayer never derives shielded material. Keep the adapter
+    // boundary explicit so an accidental privacy-root request fails closed.
+    signPrivacyRoot: async () => {
+      throw new Error("the transparent E2E relayer must not sign a privacy root");
+    }
+  });
+}
+
+async function loadE2eRelayerWallet(config) {
+  return await loadRelayerWalletFromModule(config) || await loadRelayerWalletFromMnemonic(config);
+}
+
 function assertBroadcastOk(result, label) {
   const txhash = result?.broadcast?.txhash || result?.tx?.txhash || result?.txhash;
   assert.match(String(txhash || ""), /^[0-9A-F]{64}$/i, `${label} should return a tx hash`);
@@ -233,16 +275,16 @@ async function latestChainBlockTimeUnix(config) {
   return (await latestChainBlock(config)).timeUnix;
 }
 
-async function broadcastPrepared(client, wallet, prepared, label, config, { relayWithdraw = false } = {}) {
+async function broadcastPrepared(client, wallet, prepared, label, config, { withdrawPayload = false } = {}) {
   assert.equal(prepared.status, "ready", `${label} should be ready`);
   assert.ok(prepared.signDoc, `${label} should include a signDoc`);
-  if (relayWithdraw) assert.ok(prepared.payload, `${label} should include a withdraw payload`);
+  if (withdrawPayload) assert.ok(prepared.payload, `${label} should include a withdraw payload`);
   const result = await client.signDirectAndBroadcast({
     wallet,
     signDoc: prepared.signDoc,
-    ...(relayWithdraw ? {
+    getChainNowUnix: () => latestChainBlockTimeUnix(config),
+    ...(withdrawPayload ? {
       relayPayload: prepared.payload,
-      getChainNowUnix: () => latestChainBlockTimeUnix(config)
     } : {}),
     waitOptions: config.waitOptions
   });
@@ -284,21 +326,38 @@ async function prepareDepositAndBroadcast(client, wallet, material, amount, conf
     proof: proof?.proof,
     proofHex: proof?.proofHex ?? proof?.proof_hex ?? proof?.depositProofHex ?? proof?.deposit_proof_hex
   });
-  return broadcastPrepared(client, wallet, prepared, `deposit ${amount}`, config);
+  const txHash = await broadcastPrepared(client, wallet, prepared, `deposit ${amount}`, config);
+  const confirmation = await client.confirmDeposit({ txHash, prepared });
+  assert.equal(confirmation.status, "confirmed", `deposit ${amount} evidence should confirm`);
+  return txHash;
 }
 
-async function prepareFinalTransfer(client, wallet, material, proverAdapter, recipient, amount, config, depositProofProvider) {
+async function prepareFinalTransfer(
+  client,
+  wallet,
+  material,
+  proverAdapter,
+  recipient,
+  amount,
+  config,
+  depositProofProvider,
+  disclosure = {}
+) {
   let createdZeroHelper = false;
   for (let step = 1; step <= config.maxPlannerSteps; step += 1) {
+    const chainNowUnix = await latestChainBlockTimeUnix(config);
     const prepared = await client.prepareTransfer({
       wallet,
       material,
       amount,
       recipient,
       proverAdapter,
-      userPrivacyPolicy: "amount-from-to",
-      userDisclosureMode: "public",
+      userPrivacyPolicy: disclosure.userPrivacyPolicy ?? "amount-from-to",
+      userDisclosureMode: disclosure.userDisclosureMode ?? "public",
+      userDisclosureTargetPubKeyHex: disclosure.userDisclosureTargetPubKeyHex ?? "",
       allowPlanStep: true,
+      chainNowUnix,
+      expiresAtUnix: chainNowUnix + 1800,
       denom: config.denom,
       limit: config.scanLimit,
       maxPages: config.scanMaxPages
@@ -353,6 +412,7 @@ async function typedBatchOutputsForTransaction(client, txHash, commitmentHexes, 
   const remaining = new Set(requested);
   const foundByCommitment = new Map();
   let after = { height: 0, globalSequence: 0, outputIndex: 0 };
+  const validationState = createPrivacyScanValidationStateV2();
   let lastError = null;
   for (let attempt = 1; attempt <= config.waitOptions.attempts; attempt += 1) {
     try {
@@ -361,7 +421,8 @@ async function typedBatchOutputsForTransaction(client, txHash, commitmentHexes, 
           after,
           outputLimit: config.scanLimit,
           eventLimit: config.scanLimit,
-          eventTypes: []
+          eventTypes: [],
+          validationState
         };
         const scanned = validatePrivacyScanPageV2(await client.fetchPrivacyScan(request), request);
         const matchingOutputs = scanned.outputs.filter(candidate =>
@@ -396,6 +457,45 @@ async function typedBatchOutputsForTransaction(client, txHash, commitmentHexes, 
     }
   }
   throw lastError || new Error("typed privacy scan did not return every one-proof batch output");
+}
+
+async function typedTransferOutputForTransaction(client, txHash, config) {
+  let after = { height: 0, globalSequence: 0, outputIndex: 0 };
+  const validationState = createPrivacyScanValidationStateV2();
+  let lastError = null;
+  for (let attempt = 1; attempt <= config.waitOptions.attempts; attempt += 1) {
+    try {
+      for (let page = 0; page < config.scanMaxPages; page += 1) {
+        const request = {
+          after,
+          outputLimit: config.scanLimit,
+          eventLimit: config.scanLimit,
+          eventTypes: [],
+          validationState
+        };
+        const scanned = validatePrivacyScanPageV2(await client.fetchPrivacyScan(request), request);
+        const output = scanned.outputs.find(candidate =>
+          candidate.event_type === privacyScanEventTypeV2.shieldedTransfer &&
+          candidate.output_index === 0 &&
+          hexFromBytes(candidate.tx_hash).toUpperCase() === txHash.toUpperCase()
+        );
+        if (output) return output;
+        if (!scanned.has_more) break;
+        after = {
+          height: scanned.next_cursor.height,
+          globalSequence: scanned.next_cursor.global_sequence,
+          outputIndex: scanned.next_cursor.output_index
+        };
+      }
+      lastError = new Error("typed privacy scan has not indexed the shielded transfer output yet");
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < config.waitOptions.attempts) {
+      await new Promise(resolve => setTimeout(resolve, config.waitOptions.intervalMs));
+    }
+  }
+  throw lastError || new Error("typed privacy scan did not return the shielded transfer output");
 }
 
 function oneProofBatchShape(selectedValue, config) {
@@ -553,7 +653,7 @@ test("local Clairveil node endpoints respond", {
   }
 });
 
-test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
+test("local full deposit, typed scan, disclosure, direct withdraw, and separately signed relay flow", {
   timeout: positiveIntegerEnv("CLAIRVEIL_E2E_FULL_FLOW_TIMEOUT_MS", 600000),
   skip: fullFlowEnabled
     ? false
@@ -570,6 +670,15 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
     skipOrRequire(t, "set CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE to run the full deposit flow");
     return;
   }
+  const relayerWallet = await loadE2eRelayerWallet(config);
+  if (!relayerWallet) {
+    skipOrRequire(t, "set CLAIRVEIL_E2E_RELAYER_WALLET_MODULE or CLAIRVEIL_E2E_RELAYER_MNEMONIC for a separately signed relay withdraw");
+    return;
+  }
+  if (!config.auditDisclosurePrivKeyHex) {
+    skipOrRequire(t, "set CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX to verify audit disclosures");
+    return;
+  }
 
   const client = createClient(config);
   const proverAdapter = createHttpProverAdapter({
@@ -579,8 +688,12 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
 
   try {
     const material = await client.deriveWalletPrivacyMaterial(wallet);
+    const relayerAddress = await relayerWallet.getAddress();
+    const relayerPubKeyHex = await relayerWallet.getPubKeyHex();
     assert.match(material.address, new RegExp(`^${config.accountPrefix}1`));
     assert.match(material.shieldedAddress, new RegExp(`^${config.shieldedPrefix}1`));
+    assert.match(relayerAddress, new RegExp(`^${config.accountPrefix}1`));
+    assert.notEqual(relayerAddress, material.address, "relay withdraw must use a separate transparent account");
 
     await prepareDepositAndBroadcast(client, wallet, material, config.depositAmount, config, depositProofProvider);
     assert.equal((await client.queryReserve(config.denom)).invariant_holds, true, "reserve invariant should hold after deposit");
@@ -604,26 +717,82 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
       depositProofProvider
     );
     const transferTxHash = await broadcastPrepared(client, wallet, transfer, "final transfer", config);
+    const transferOutput = await typedTransferOutputForTransaction(client, transferTxHash, config);
 
-    const disclosure = await client.decodeUserDisclosure({ txHash: transferTxHash });
+    const disclosure = await client.decodeUserDisclosure({
+      output: transferOutput,
+      txHash: transferTxHash
+    });
     assertDisclosureReport(disclosure, "public transfer", config, config.transferAmount);
 
     const selfViewDisclosure = await client.decodeSelfViewDisclosure({
+      output: transferOutput,
       txHash: transferTxHash,
       disclosureScalar: material.disclosureScalar
     });
     assertDisclosureReport(selfViewDisclosure, "sender self-view", config, config.transferAmount);
 
-    if (config.auditDisclosurePrivKeyHex) {
-      const auditDisclosure = await client.decodeAuditDisclosure({
-        txHash: transferTxHash,
-        disclosurePrivKeyHex: config.auditDisclosurePrivKeyHex
-      });
-      assertDisclosureReport(auditDisclosure, "audit", config, config.transferAmount);
-    }
+    const auditDisclosure = await client.decodeAuditDisclosure({
+      output: transferOutput,
+      txHash: transferTxHash,
+      disclosurePrivKeyHex: config.auditDisclosurePrivKeyHex
+    });
+    assertDisclosureReport(auditDisclosure, "audit", config, config.transferAmount);
+
+    await prepareDepositAndBroadcast(
+      client,
+      wallet,
+      material,
+      config.transferAmount,
+      config,
+      depositProofProvider
+    );
+    const encryptedTransfer = await prepareFinalTransfer(
+      client,
+      wallet,
+      material,
+      proverAdapter,
+      material.shieldedAddress,
+      config.transferAmount,
+      config,
+      depositProofProvider,
+      {
+        userPrivacyPolicy: "amount-from-to",
+        userDisclosureMode: "recipient-encrypted",
+        userDisclosureTargetPubKeyHex: material.disclosurePubKeyHex
+      }
+    );
+    const encryptedTransferTxHash = await broadcastPrepared(
+      client,
+      wallet,
+      encryptedTransfer,
+      "recipient-encrypted transfer",
+      config
+    );
+    const encryptedTransferOutput = await typedTransferOutputForTransaction(
+      client,
+      encryptedTransferTxHash,
+      config
+    );
+    const recipientDisclosure = await client.decodeUserDisclosure({
+      output: encryptedTransferOutput,
+      txHash: encryptedTransferTxHash,
+      address: material.address,
+      pubKeyHex: material.pubKeyHex,
+      signatureBase64: material.signatureBase64
+    });
+    assertDisclosureReport(recipientDisclosure, "recipient-encrypted transfer", config, config.transferAmount);
 
     const withdrawRecipient = String(env.CLAIRVEIL_E2E_WITHDRAW_RECIPIENT || "").trim()
       || material.address;
+    await prepareDepositAndBroadcast(
+      client,
+      wallet,
+      material,
+      config.withdrawAmount,
+      config,
+      depositProofProvider
+    );
     const withdraw = await client.prepareWithdraw({
       wallet,
       material,
@@ -636,7 +805,89 @@ test("local full deposit, scan, transfer, disclosure, and withdraw flow", {
     });
     assert.equal(withdraw.status, "ready", withdraw.plan?.message || "withdraw should be ready");
 
-    await broadcastPrepared(client, wallet, withdraw, "withdraw", config, { relayWithdraw: true });
+    await broadcastPrepared(client, wallet, withdraw, "direct withdraw", config, {
+      withdrawPayload: true
+    });
+
+    await prepareDepositAndBroadcast(
+      client,
+      wallet,
+      material,
+      config.withdrawAmount,
+      config,
+      depositProofProvider
+    );
+    const relayReservationStore = new MemoryReservationStore();
+    const relayReservationManager = createNoteReservationManager({
+      store: relayReservationStore,
+      ownerKeyId: material.address,
+      indexKey: material.rootSeed,
+      leaseOwner: "cosmos-e2e-relay-owner"
+    });
+    const relayChainNowUnix = await latestChainBlockTimeUnix(config);
+    const relayWithdraw = await client.prepareRelayWithdraw({
+      wallet,
+      material,
+      amount: config.withdrawAmount,
+      recipient: withdrawRecipient,
+      proverAdapter,
+      denom: config.denom,
+      limit: config.scanLimit,
+      maxPages: config.scanMaxPages,
+      chainNowUnix: relayChainNowUnix,
+      expiresAtUnix: relayChainNowUnix + 1800,
+      reservationManager: relayReservationManager
+    });
+    assert.equal(relayWithdraw.status, "ready", relayWithdraw.plan?.message || "relay withdraw should be ready");
+    assert.ok(relayWithdraw.reservation, "relay withdraw must reserve its exact input before handoff");
+    const relayReservationIDs = relayWithdraw.reservation.reservation_ids;
+    await relayReservationManager.recordRelayHandoff(relayReservationIDs, {
+      leaseToken: relayWithdraw.reservation.lease_token,
+      payloadHash: relayWithdraw.payload.payload_hash
+    });
+    const relaySignDoc = await client.createRelayWithdrawSignDoc({
+      payload: relayWithdraw.payload,
+      relayer: relayerAddress,
+      pubKeyHex: relayerPubKeyHex,
+      chainNowUnix: await latestChainBlockTimeUnix(config),
+      expectedChainId: config.chainId,
+      expectedRecipient: withdrawRecipient,
+      accountPrefix: config.accountPrefix
+    });
+    const relayResult = await client.signDirectAndBroadcast({
+      wallet: relayerWallet,
+      signDoc: relaySignDoc.signDoc,
+      relayPayload: relayWithdraw.payload,
+      getChainNowUnix: () => latestChainBlockTimeUnix(config),
+      waitOptions: config.waitOptions
+    });
+    const relayTxHash = assertBroadcastOk(relayResult, "separately signed relay withdraw");
+    const relayTx = relayResult.tx ?? await client.getTx(relayTxHash);
+    const checkedHeight = String(relayTx?.height ?? "");
+    assert.match(checkedHeight, /^[1-9][0-9]*$/, "relay transaction evidence requires a positive included height");
+    const relayReservation = await relayReservationManager.getReservation(relayReservationIDs[0]);
+    await relayReservationManager.recordRelayTransactionEvidence({
+      operationId: relayReservation.operation_id,
+      payloadHash: relayWithdraw.payload.payload_hash,
+      txHash: relayTxHash,
+      checkedHeight,
+      transactionIncludedConfirmed: true,
+      payloadHashMatched: true
+    });
+    const relayNullifier = relayWithdraw.payload.nullifier_hex;
+    assert.equal(
+      (await client.checkNullifiers([relayNullifier])).get(relayNullifier),
+      true,
+      "relay withdraw nullifier must be spent before reservation reconciliation"
+    );
+    await relayReservationManager.reconcileSpentNotes([{
+      ...relayWithdraw.selectedNote,
+      isSpent: true
+    }]);
+    assert.equal(
+      (await relayReservationManager.getReservation(relayReservationIDs[0])).status,
+      "ConfirmedSpent"
+    );
     assert.equal((await client.queryReserve(config.denom)).invariant_holds, true, "reserve invariant should hold after withdraw");
   } finally {
     await client.disconnect();
@@ -658,6 +909,10 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
   const depositProofProvider = await loadDepositProofProvider(config);
   if (!depositProofProvider) {
     skipOrRequire(t, "set CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE to fund the one-proof batch input note");
+    return;
+  }
+  if (!config.auditDisclosurePrivKeyHex) {
+    skipOrRequire(t, "set CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX to verify typed batch audit disclosures");
     return;
   }
 
@@ -792,10 +1047,12 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
         );
       }
     }
+    const reservationStore = new MemoryReservationStore();
     const reservationManager = createNoteReservationManager({
-      store: new MemoryReservationStore(),
+      store: reservationStore,
       ownerKeyId: material.address,
-      indexKey: material.rootSeed
+      indexKey: material.rootSeed,
+      leaseOwner: `one-proof-${shape.id}-pre-broadcast`
     });
     const reservationBatch = await prepareOneProofPayrollReservation(reservationManager, prepared, {
       metadata: { e2e: "one-proof-payroll" }
@@ -825,26 +1082,122 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       gasLimit: config.oneProofBatchGasLimit,
       nowUnix: latest.timeUnix
     });
-    const broadcastingReservations = await markOneProofPayrollReservationBroadcastAttempting(
-      reservationManager,
-      reservationBatch,
-      execution,
-      { metadata: { e2e: "one-proof-payroll" } }
-    );
-    assert.equal(broadcastingReservations.every(reservation => reservation.broadcast_in_flight === true), true, shape.id);
-    const result = await client.signDirectAndBroadcast({
+    const signedCheckpoint = await client.signDirect({
       wallet,
+      signDoc: signDoc.sign_doc
+    });
+    const signedArtifact = createOneProofPayrollArtifact({
+      prepared,
+      execution,
+      reservationBatch,
       signDoc: signDoc.sign_doc,
-      waitOptions: config.waitOptions
+      signedTxBytes: signedCheckpoint.txRawBytes,
+      txHash: signedCheckpoint.txHash,
+      txBytesHash: signedCheckpoint.txBytesHash,
+      signDocHash: signedCheckpoint.signDocHash
+    });
+    const spentFenceSignDoc = await createOneProofPayrollBatchSignDoc(execution, {
+      cosmosClient: client,
+      signer: material.address,
+      pubKeyHex: material.pubKeyHex,
+      gasLimit: config.oneProofBatchGasLimit,
+      nowUnix: latest.timeUnix,
+      memo: `Clairveil spent-nullifier fence ${shape.id}`
+    });
+    const spentFenceCheckpoint = await client.signDirect({
+      wallet,
+      signDoc: spentFenceSignDoc.sign_doc
+    });
+    const spentFenceArtifact = createOneProofPayrollArtifact({
+      prepared,
+      execution,
+      reservationBatch,
+      signDoc: spentFenceSignDoc.sign_doc,
+      signedTxBytes: spentFenceCheckpoint.txRawBytes,
+      txHash: spentFenceCheckpoint.txHash,
+      txBytesHash: spentFenceCheckpoint.txBytesHash,
+      signDocHash: spentFenceCheckpoint.signDocHash
+    });
+    assert.notEqual(
+      spentFenceArtifact.tx_hash,
+      signedArtifact.tx_hash,
+      `${shape.id} spent-nullifier fence must use a distinct exact signed TxRaw`
+    );
+    const retryInspection = await inspectOneProofPayrollArtifactRetry(signedArtifact, {
+      nowUnix: latest.timeUnix,
+      queryTransaction: async txHash => {
+        const transaction = await client.getTx(txHash);
+        if (!transaction) return "not-found";
+        return Number(transaction.code) === 0 ? "succeeded" : "failed";
+      },
+      checkNullifiers: values => client.checkNullifiers(values)
+    });
+    assert.equal(retryInspection.next_action, "retransmit-signed-transaction", shape.id);
+    const result = await retransmitOneProofPayrollArtifact(signedArtifact, {
+      reservationManager,
+      retryDecision: retryInspection.retry_decision,
+      nowUnix: latest.timeUnix,
+      broadcastSignedTx: bytes => client.broadcastTxRawBytes(bytes, {
+        ...config.waitOptions,
+        reservationManager,
+        reservation: reservationBatch,
+        getChainNowUnix: () => latestChainBlockTimeUnix(config)
+      })
     });
     const batchTxHash = assertBroadcastOk(result, "one-proof payroll batch");
-    const submittedReservations = await markOneProofPayrollReservationSubmitted(
-      reservationManager,
-      reservationBatch,
-      execution,
-      { txHash: batchTxHash }
+    assert.equal(batchTxHash, signedCheckpoint.txHash, shape.id);
+    const restartedReservationStore = new MemoryReservationStore({
+      state: JSON.parse(JSON.stringify(await reservationStore.load()))
+    });
+    const restartedReservationManager = createNoteReservationManager({
+      store: restartedReservationStore,
+      ownerKeyId: material.address,
+      indexKey: material.rootSeed,
+      leaseOwner: `one-proof-${shape.id}-after-restart`
+    });
+    const restartInspection = await inspectOneProofPayrollArtifactRetry(signedArtifact, {
+      nowUnix: (await latestChainBlock(config)).timeUnix,
+      queryTransaction: async txHash => {
+        const transaction = await client.getTx(txHash);
+        if (!transaction) return "not-found";
+        return Number(transaction.code) === 0 ? "succeeded" : "failed";
+      },
+      checkNullifiers: values => client.checkNullifiers(values)
+    });
+    assert.equal(restartInspection.next_action, "reconcile-succeeded", `${shape.id} restart tx-hash lookup`);
+    const spentFenceInspection = await inspectOneProofPayrollArtifactRetry(spentFenceArtifact, {
+      nowUnix: (await latestChainBlock(config)).timeUnix,
+      queryTransaction: async txHash => {
+        const transaction = await client.getTx(txHash);
+        if (!transaction) return "not-found";
+        return Number(transaction.code) === 0 ? "succeeded" : "failed";
+      },
+      checkNullifiers: values => client.checkNullifiers(values)
+    });
+    assert.equal(spentFenceInspection.next_action, "manual-review", `${shape.id} spent-nullifier fence`);
+    let spentFenceBroadcastCalls = 0;
+    await assert.rejects(
+      async () => retransmitOneProofPayrollArtifact(spentFenceArtifact, {
+        reservationManager: restartedReservationManager,
+        retryDecision: spentFenceInspection.retry_decision,
+        nowUnix: (await latestChainBlock(config)).timeUnix,
+        broadcastSignedTx: async () => {
+          spentFenceBroadcastCalls += 1;
+          throw new Error("spent-nullifier TxRaw must not reach broadcast");
+        }
+      }),
+      /retry-safe decision|manual-review|cannot be retried/
+    );
+    assert.equal(spentFenceBroadcastCalls, 0, `${shape.id} spent-nullifier TxRaw must be rejected before RPC`);
+    const submittedReservations = await Promise.all(
+      reservationBatch.reservation_ids.map(id => restartedReservationManager.getReservation(id))
     );
     assert.equal(submittedReservations.every(reservation => reservation.status === "Submitted"), true, shape.id);
+    assert.equal(submittedReservations.every(reservation =>
+      reservation.submitted_tx_hash === signedArtifact.tx_hash &&
+      reservation.tx_bytes_hash === signedArtifact.tx_bytes_hash &&
+      reservation.sign_doc_hash === signedArtifact.sign_doc_hash
+    ), true, `${shape.id} must persist the exact signed artifact identity`);
     const expected = execution.operation_evidence.expected_evidence;
     const typed = await typedBatchOutputsForTransaction(
       client,
@@ -853,6 +1206,36 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       material,
       config
     );
+    for (const [index, entry] of typed.entries()) {
+      const mode = shape.disclosureModes[index];
+      const amount = shape.paymentAmounts[index];
+      if (mode !== "none") {
+        const userDisclosure = await client.decodeBatchUserDisclosure({
+          output: entry.output,
+          txHash: batchTxHash,
+          disclosureScalar: material.disclosureScalar,
+          disclosurePubKeyHex: material.disclosurePubKeyHex,
+          assetDenom: config.denom
+        });
+        assertDisclosureReport(userDisclosure, `${shape.id} user output ${index}`, config, amount);
+      }
+      if (shape.selfViewEnabled) {
+        const selfViewDisclosure = await client.decodeBatchSelfViewDisclosure({
+          output: entry.output,
+          txHash: batchTxHash,
+          disclosureScalar: material.disclosureScalar,
+          assetDenom: config.denom
+        });
+        assertDisclosureReport(selfViewDisclosure, `${shape.id} self-view output ${index}`, config, amount);
+      }
+      const auditDisclosure = await client.decodeBatchAuditDisclosure({
+        output: entry.output,
+        txHash: batchTxHash,
+        disclosurePrivKeyHex: config.auditDisclosurePrivKeyHex,
+        assetDenom: config.denom
+      });
+      assertDisclosureReport(auditDisclosure, `${shape.id} audit output ${index}`, config, amount);
+    }
     const observedOutputs = typed.map(entry => {
       const observedRecipient = encodeShieldedAddress({
         x: entry.found.note.receiverSpendPubKeyX,
@@ -874,7 +1257,7 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       };
     });
     const reconciliation = await reconcileOneProofPayrollReservation({
-      reservationManager,
+      reservationManager: restartedReservationManager,
       reservationBatch,
       prepared,
       operation_evidence: execution.operation_evidence,
