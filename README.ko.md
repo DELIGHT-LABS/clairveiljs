@@ -74,22 +74,17 @@ Public consumer는 내부 파일 경로를 직접 import하지 말고 package ex
 
 | ClairveilJS | 검증한 Clairveil 릴리스 | Public Cosmos wire | Downstream EVM deposit |
 | --- | --- | --- | --- |
-| `0.3.1` | `v0.3.1` (`1a6ce6a`) | 기존 `MsgDeposit`/query 계약 유지 | opt-in `payable-exact-value` |
+| `0.3.1` | `v0.3.1` handoff (`621c24a`) | 기존 `MsgDeposit`/query 계약 유지 | opt-in `payable-exact-value` |
 
-`clairveiljs@0.3.1`은 immutable Clairveil `v0.3.1` release(commit
-`1a6ce6a0a0e10b765c025072b44c2364e9711b48`)의 protocol·wire·artifact 기준을
-지원합니다. Release 검증은 복사된 protobuf 4개, 내장 `v0.3.1` conformance
-fixture와 JSON Schema의 고정 SHA-256 manifest를 확인하고 해당 계약을 required
-mode로 실행합니다. 이후 미출시 protocol 변경까지 자동으로 지원한다는 의미는
-아닙니다.
+`clairveiljs@0.3.1`은 위 표의 고정 SDK handoff를 대상으로 하며 이후 core
+변경까지 자동으로 지원하지 않습니다. Exact commit과 release 검증은
+[핸드오프 적합성](#handoff-conformance)을 참고하세요.
 
-Client reservation 구현에는 한 가지 명시적인 SDK 확장이 있습니다.
-`allowedReservationTransitions`는 v0.3.1 fixture의 일반 전이와 일치하지만,
-`releaseReservedOrProving(...)`은 유효한 lease token이 있는 `Proving` reservation을
-`Released`로 직접 바꿀 수 있습니다. 이 store 전용 atomic rollback은 ClairveilJS의
-현재 구현이며, `Proving → Released`를 거부하는 v0.3.1의 일반 전이 규칙과 동일한
-동작은 아닙니다. 세부 범위는 [상태 전이 문서](./docs/reservation-state-machine.ko.md)를
-따릅니다.
+Reservation은 v0.3.1 전이 표를 따릅니다.
+`releaseReservedOrProving(...)`은 `Reserved`만 release하고, proving 시작 후
+불명확한 작업은 `ManualReview`로 격리합니다. Evidence 규칙은
+[상태 전이](./docs/reservation-state-machine.ko.md)와
+[복구 가이드](./docs/errors-and-recovery.ko.md)를 따릅니다.
 
 Clairveil `v0.3.1`의 공개 상태는 `PUBLICATION_READY_EXPERIMENTAL`이며
 `PRODUCTION_RELEASE_READY`가 아닙니다. Formal trusted setup, 외부
@@ -145,6 +140,8 @@ const clairveil = createClairveilClient({
 
 일반 `prepareTransfer(...)`는 공식 native 2×2 `MsgTransfer` 경로로 계속 지원되며 native 2×2는 deprecated가 아닙니다. 두 입력 witness는 검증된 하나의 exact-root `commitment_paths_at_root` snapshot에서 함께 가져옵니다. Clairveil의 기존 multi-message `transfer-batch` orchestration은 별도 protocol 의미를 유지하고 `prepareTransferBatch(...)`의 alias가 아닙니다.
 
+실행 가능한 단건 transfer 준비에는 최신 체인 블록에서 얻은 `chainNowUnix`가 필수입니다. 선택적으로 지정한 `expiresAtUnix`는 prover payload와 signed `MsgTransfer`까지 그대로 유지됩니다. Broadcast 시에는 wallet 서명 이후 `getChainNowUnix`로 체인 시간을 다시 조회하며, provider 누락·오류·잘못된 값 또는 `chainNowUnix >= expiresAtUnix`이면 attempt marker와 RPC 호출 전에 fail-closed합니다.
+
 Merkle witness (`merkle_path`)와 exact snapshot (`commitment_paths_at_root`) 요청은 기본적으로 설정된 REST endpoint에 고정됩니다. 지출하려는 commitment가 여러 endpoint에 노출되어도 되는 경우에만 `merklePathFailover: true`를 설정하세요.
 
 여러 수신자와 출력별 disclosure에는 `payments`를 사용합니다. `outputMode: "compact"`는 payment와 선택적 change만 만들고, `outputMode: "exact32"`는 payment/change 뒤에 명시적인 0-value padding을 추가합니다.
@@ -187,7 +184,20 @@ console.log(prepared.prepared.inputCount, prepared.prepared.outputCount);
 console.log(prepared.operationEvidence.expected_outputs);
 ```
 
-실행 가능한 batch에는 `reservationManager`, `onPreparedPayload`, `onPreparedProof`가 모두 필수입니다. Callback 저장 구현은 caller 책임이며 private artifact를 암호화해야 합니다. Local file은 mode `0600`이어야 합니다. 두 checkpoint callback 중 하나라도 시작된 뒤 prepare가 실패하면 SDK는 재사용 가능한 input을 해제하지 않고 reservation 전체를 `ManualReview`로 격리합니다. `provePreparedBatchTransfer(...)`는 proof 단계만 복구하는 primitive입니다. 재시작 후에는 저장한 정확한 payload, 원래 operation ID와 reservation batch, proof checkpoint callback을 모두 넘겨야 합니다. 이 메서드가 반환한 message만으로 broadcast하면 안 됩니다. 저장한 payload/proof와 원래 payment 행, signer, reservation manager, reservation batch를 `finalizePreparedBatchTransfer(...)`에 넘긴 뒤에만 wallet을 열어야 합니다. 이 API는 sign-doc·operation evidence를 다시 만들고 nullifier를 재확인한 뒤 모든 input을 원자적으로 `ProofReady`로 전환합니다. 서명된 transaction까지 포함한 완전한 재시작 안전 흐름에는 reference-payroll artifact/retry API를 사용하세요. Retry 전에는 저장된 transaction hash와 모든 input nullifier를 조회하고, 이전에 저장한 정확한 TxRaw bytes만 재전송하며 atomic output 일부를 다시 만들거나 재시도하면 안 됩니다.
+실행 가능한 batch에는 `reservationManager`, `onPreparedPayload`,
+`onPreparedProof`가 모두 필수입니다. Private checkpoint는 암호화하고 local
+file은 mode `0600`으로 저장하세요. Checkpoint가 시작된 뒤 준비가 실패하면
+reservation 전체를 `ManualReview`로 격리합니다.
+
+재시작 후 `provePreparedBatchTransfer(...)`는 proof 단계만 복구하며 그
+결과는 broadcast 권한이 아닙니다. 원래 operation 입력과 checkpoint를
+`finalizePreparedBatchTransfer(...)`에 넘기면 authoritative reservation의 operation,
+lease, nullifier 집합을 재검증한 뒤 정확한 집합만 `ProofReady`로 전이합니다.
+
+Signed retry 전에는 저장된 transaction과 모든 input nullifier를 조회하고,
+checkpoint한 TxRaw bytes만 재전송하세요. `ProofReady` retry에는 artifact의
+현재 lease도 필요합니다. 자세한 절차는
+[복구 가이드](./docs/errors-and-recovery.ko.md)를 참고하세요.
 
 Batch 준비는 통합 `privacy-scan-v2`를 요구하며 ciphertext가 없는 legacy event로 fallback하지 않고 fail-closed합니다. SDK는 같은 root의 Merkle snapshot을 검증하고, proving 또는 proof 단계 복구 시 active circuit, authoritative asset mapping, audit identity, disclosure capability를 다시 확인하며, proving 전후 모든 nullifier를 확인하고 proof version/request hash/circuit identity를 검증합니다. 중단 없이 완료된 `prepareTransferBatch(...)`는 reservation 전체를 원자적으로 `ProofReady`로 전환합니다. 반면 proof 단계 복구 결과는 caller가 복원된 operation workflow를 완료할 때까지 `reservationFinalizationRequired: true`를 유지합니다. `operationEvidence`는 payment별 output index, commitment, recipient hash, amount/asset, user/audit/self-view disclosure digest를 기록합니다. Typed output reconcile에는 `fetchAuditableBatchTransfers(...)`, `decodeBatchUserDisclosure(...)`, `decodeBatchSelfViewDisclosure(...)`, `decodeBatchAuditDisclosure(...)`를 사용하고, 연속 audit-query cursor page 사이에는 같은 `createPrivacyScanValidationStateV2()` 객체를 유지하세요.
 
@@ -372,6 +382,8 @@ const proverAdapter = createHttpProverAdapter({
 - `POST /v1/prover/withdraw`
 - `POST /v1/proofs/batch-transfer`
 
+`baseURL`에 deployment path prefix를 포함할 수 있습니다. Adapter는 각 route를 붙일 때 그 prefix를 보존합니다. 예를 들어 `https://prover.example/tenant-a`는 `https://prover.example/tenant-a/v1/prover/transfer`를 호출합니다.
+
 Remote prover가 job ID를 반환하는 구조라면 `createAsyncJobProverAdapter`로 submit/poll 함수를 감싸세요. one-proof batch 전용 prover는 `submitBatchTransferJob`과 `getJob`만 제공해도 됩니다.
 
 ## Disclosure
@@ -393,7 +405,7 @@ to
 
 User disclosure decode는 JS SDK에서 처리합니다. Audit disclosure decode도 JS SDK에서 처리할 수 있지만, disclosure private scalar는 trusted admin/backend/local auditor runtime에서 주입해야 합니다.
 
-아래 relay 예제는 최신 체인 블록에서 authoritative time을 조회합니다. REST endpoint는 client 설정과 동일하게 유지하고, 최신 블록에 유효한 timestamp가 없으면 fail-closed하세요.
+아래 expiry-bound transfer와 relay 예제는 최신 체인 블록에서 authoritative time을 조회합니다. REST endpoint는 client 설정과 동일하게 유지하고, 최신 블록에 유효한 timestamp가 없으면 fail-closed하세요.
 
 ```js
 const chainRestEndpoint = "https://rest.example-chain.invalid";
@@ -478,7 +490,7 @@ const prepared = await clairveil.prepareRelayWithdraw({
   address,
   pubKeyHex,
   signatureBase64,
-  amount: "5aokrw",
+  amount: "5utest",
   recipient: "0x...",
   chainNowUnix: latestChainBlockTimeUnix,
   reservationManager
@@ -594,21 +606,36 @@ Namespace는 chain과 wallet identity 기준으로 안정적으로 잡으세요.
 
 Reservation lookup key를 직접 만들 때 32-byte nullifier hex string에는 `nullifierLookupKeyFromHex(indexKey, nullifierHex)`를 사용하세요. `nullifierLookupKey(indexKey, nullifier)`는 string nullifier를 raw UTF-8 label로 취급하며, 실수 방지를 위해 hex 형태의 nullifier string은 거부합니다.
 
-SDK는 payload 준비 중 reservation을 `Reserved -> Proving -> ProofReady`로 이동합니다. `Reserved`는 durable note inventory lock이고 worker lease를 갖지 않으며, `Proving` 시작 시 batch lease를 원자적으로 claim합니다. Worker lease field는 `Proving`과 `ProofReady`에만 남습니다. SDK는 manager마다 새 `leaseOwner`를 기본 생성하며, 직접 지정할 때는 다른 tab의 만료되지 않은 작업을 recovery가 건드리지 않도록 wallet id가 아니라 browser tab/worker마다 새 값을 사용하세요. Proof heartbeat interval은 60초 고정이 아니라 active lease window에서 계산되므로, timer가 허용하는 한 짧은 lease도 만료 전에 갱신됩니다. 그 뒤 broadcast/reconcile 단계는 wallet 또는 DApp 책임입니다.
+SDK는 reservation을 `Reserved -> Proving -> ProofReady`로 준비합니다. `Proving`과
+`ProofReady`는 worker lease를 유지하므로 caller가 지정한 `leaseOwner`는
+tab/worker마다 고유해야 합니다. Store는 검증된 생성, CAS, lease,
+reconcile API만 노출합니다. Exact 전이·evidence 표는
+[상태 전이](./docs/reservation-state-machine.ko.md)를 참고하세요.
 
-- `signDirectAndBroadcast(...)`, `broadcastSignedTx(...)`, EVM `sendTransaction(...)`에는 `reservationManager`와 prepared `reservation`을 함께 넘기세요. 이 메서드들은 외부 RPC 호출 전에 `broadcast_in_flight`를 원자적으로 설정하고 `broadcast_attempt_count`를 증가시킨 뒤, 결과를 `Submitted`, `Unknown`, `ManualReview` 중 하나로 기록합니다. Terminal 저장이 실패하면 durable marker가 남아 reconcile 전 재제출을 막습니다. Withdraw/relay 제출은 실제 transaction과 일치하는 `relayPayload`와 최신 `chainNowUnix`, 또는 권장되는 `getChainNowUnix`도 넘겨야 합니다. EVM request에 `chainId`가 있으면 같은 network ID를 `expectedEvmChainId`로 넘기세요. Binding되지 않은 relay request는 다시 만들고 caller가 넣은 sender, gas, fee 필드를 검증 후 제거합니다. Reservation에 authoritative `txBytesHash`가 이미 있으면 binding에 포함된 지원 sender, gas, fee 필드는 보존될 수 있지만, 지원하지 않는 transaction key는 제출 전에 항상 제거합니다. SDK는 Cosmos body를 decode하거나 EVM calldata를 다시 만들어 payload가 없거나 일치하지 않으면 외부 제출 전에 거부합니다. Custom EVM encoding option을 사용했다면 같은 값을 `relayTransactionOptions`로 넘기세요.
-- Custom wallet/provider 연동은 외부 broadcast 경계를 넘기 직전에 `markBroadcastAttempting(ids, { leaseToken, txHash?, txBytesHash?, signDocHash? })`을 호출해 이미 알 수 있는 transaction identity를 영속화한 뒤 아래 결과별 메서드를 사용해야 합니다.
-- 실제 transaction이 제출된 뒤에만 `markSubmitted(ids, { leaseToken, txHash | txBytesHash })`를 호출하세요. 현재 저수준 manager는 transport를 구분하지 않고 두 값 중 하나만 있으면 제출 metadata로 받습니다. 따라서 EVM의 `txBytesHash`도 형식상 허용되지만 이는 canonical request binding일 뿐 network 제출 증명이 아닙니다. 고수준 EVM send helper는 wallet이 반환한 network `txHash`를 기록합니다. `signDocHash`만으로는 `Submitted` 근거가 되지 않습니다.
-- Transaction이 네트워크에 도달했을 수 있을 때만 `markUnknown(ids, { leaseToken, txHash | txBytesHash, signDocHash?, error })`를 호출하세요. `signDocHash`는 보조 증거일 뿐 단독으로 broadcast 경계를 증명하지 못합니다.
-- Wallet 또는 relayer 대기 중에는 `ProofReady` lease를 계속 갱신하세요. `markSubmitted(...)`와 `markUnknown(...)`은 현재의 만료되지 않은 lease token을 요구하며, lease가 만료되면 stale ownership을 전진시키지 말고 reconcile 또는 replan 흐름으로 처리해야 합니다.
-- Relay payload를 복사하거나 업로드하기 직전에 `recordRelayHandoff(ids, { leaseToken, payloadHash: prepared.payload.payload_hash })`를 호출하고 영속화가 끝날 때까지 기다리세요. 이 호출이 실패하면 payload를 외부에 노출하지 마세요. 성공한 뒤에는 local proof-discard/release 경로를 쓰지 말고 외부 제출 가능한 payload로 reconcile해야 합니다.
-- Wallet rejection 또는 broadcast 전 local proof discard가 발생하면 현재 유효한 lease로 `markReplanRequired(...)`를 호출하세요. 만료된 `ProofReady` lease는 `ManualReview`로 보내야 합니다. 새로고침된 페이지는 이전 proof artifact의 폐기를 증명할 수 없으므로 note를 다시 spendable하게 만들면 안 됩니다.
-- Local batch를 직접 폐기할 때 `Reserved`는 바로 release할 수 있고, `Proving`은 현재 batch lease token을 넣어 `releaseReservedOrProving(ids, { leaseToken })`를 호출해야 합니다. `rollbackPlanReservation(...)`은 두 경우를 처리합니다. 이 `Proving → Released` 경로는 v0.3.1 fixture의 일반 전이가 아니라 ClairveilJS store가 별도로 제공하는 현재 SDK 동작입니다.
-- Rollback 시점에 lease가 이미 만료됐다면 note를 release하지 않습니다. 원래 prepare/prover error를 보존하고 note가 조용히 재사용되지 않도록 best-effort로 reservation을 `ManualReview`로 이동합니다.
-- `ManualReview`는 chain/payload 이력을 운영자가 검토한 뒤에만 해결하세요. `resolveManualReview(ids, { target: "Released" | "ReplanRequired" | "Failed", operatorId, approvalReference, reason })`는 승인 metadata를 기록하고 승인된 결과 상태로 note를 이동합니다.
-- Relay payload를 복사했거나 relayer에게 넘긴 뒤에는 TTL 만료나 local cancel 버튼만으로 reservation을 release하지 마세요. Relayer가 expiry 전까지 proof를 제출할 수 있으므로 nullifier 상태, submitted tx evidence, manual review로 reconcile해야 합니다.
-- Relay payload 검증과 relay signing에는 최신 chain block time에서 얻은 `chainNowUnix`가 필수입니다. 브라우저 시간을 대신 쓰지 말고 relay broadcast 직전에 다시 조회하며, 값을 얻지 못하면 제출을 거부하세요.
-- Submitted EVM transaction receipt가 실패하면 nullifier 상태를 확인한 뒤 `ConfirmedSpent`, `ReplanRequired`, `ManualReview` 중 하나로 정리하세요. `Submitted` 또는 `Unknown` reservation은 `markReplanRequired(...)`에 `nullifierUnspentConfirmed: true`와 `txAbsentOrFailedConfirmed: true`를 모두 넣어야 `ReplanRequired`로 이동할 수 있습니다. `checkedHeight`와 `txHashChecked`에는 해당 tx 조회의 audit trail을 남기세요.
+- 고수준 제출에는 `reservationManager`와 prepared `reservation`을 함께
+  넘기세요. Signed Cosmos transfer에는 `getChainNowUnix`, relay/withdraw에는
+  일치하는 payload와 최신 chain time, EVM에는 expected network와 같은
+  encoding option이 필요합니다. SDK는 relay transaction을 decode/rebuild하고
+  binding되지 않은 sender/gas/fee를 제거한 뒤 payload mismatch를 RPC 전에
+  거부합니다.
+- Cosmos signing은 exact TxRaw `txHash`를 RPC 전에 영속화하고 broadcast
+  또는 indexed hash 불일치를 거부합니다. Caller-owned restart fence는 RPC
+  직전의 synchronous `beforeBroadcast(identity)`를 사용할 수 있습니다.
+- Custom integration은 외부 경계에서 `markBroadcastAttempting(...)`, 실제
+  제출 후에만 `markSubmitted(...)`, 불명확한 결과에 `markUnknown(...)`을
+  사용합니다. `signDocHash`만으로는 제출을 증명할 수 없습니다.
+- Payroll retry는 `retransmitOneProofPayrollArtifact(...)`로 RPC 경계를 넘으세요.
+  Idempotent marker 결과는 retry 권한이 아니며 `ProofReady`에는 artifact의
+  현재 lease가 필요합니다.
+- Relay payload를 노출하기 전 `recordRelayHandoff(...)`를 영속화하세요.
+  Handoff 후에는 TTL이나 cancel로 release하지 말고 chain evidence를 reconcile합니다.
+- `Reserved`만 자동 release할 수 있습니다. `Proving`/`ProofReady` 실패는
+  `ManualReview`로 격리하고, 만료된 `ProofReady`는 단순 tx 부재가 아니라
+  exact transaction 실패와 모든 input unspent를 증명하는 전용 복구만
+  허용합니다.
+- `ManualReview`는 operator evidence로만 해결하세요. 실패한 EVM receipt 등
+  broadcast 후 실패는 transaction과 nullifier evidence를 모두 요구합니다.
+  절차는 [복구 가이드](./docs/errors-and-recovery.ko.md)를 참고하세요.
 
 Reservation은 operation success evidence도 저장할 수 있습니다. Nullifier spent는 입력 note가 소비됐다는 뜻이지만 payroll/payment 성공에는 저장된 tx identity와 output evidence까지 일치해야 합니다. `markProofReady(...)`는 direct item용 `expectedOutputCommitment`, `expectedDisclosureDigest`, `expectedRecipientHash`, `expectedAmount`, `expectedAmountHash`, `expectedDenom`, `batchItemIndex`, `batchItemIndexKnown` 등을 받습니다. One-proof 고수준 batch 경로는 대신 모든 input reservation에 하나의 `expectedOperationEvidenceHash`를 저장하고 전체 `operationEvidence.expected_outputs` 목록을 별도로 반환합니다. 각 entry는 item ID, output index, commitment, recipient hash, amount/asset, user/audit/self-view disclosure digest를 결합합니다. Item 성공을 보고하기 전에 aggregate hash와 모든 per-item entry를 검증해야 합니다. Go와 같은 SHA-256 recipient/amount hash는 `clairveiljs/reservation`의 `hashRecipient(recipient, { shieldedPrefix })`, `hashAmount(denom, amount)` helper로 만드세요. 두 helper는 빈 identity field를 거절하며, amount helper는 non-negative uint64 최소 단위 amount만 canonical `denom:amount` 해시로 만듭니다.
 
@@ -616,7 +643,7 @@ Scan migration에서는 최신 nullifier 확인이 명시적으로 `nullifierSta
 
 ## 통합 Privacy Scan과 Merkle Snapshot
 
-Wallet scan의 기본 경로는 Clairveil typed `privacy_scan` (`privacy-scan-v2`)입니다. SDK는 `(height, globalSequence, outputIndex)` 전체 cursor를 저장·재개하고, zero-output withdraw summary까지 포함한 unfiltered scan을 요청합니다. typed page가 malformed이면 fail-closed로 중단하며, typed endpoint가 명시적으로 없을 때만 `scan_events`로 fallback합니다.
+고수준 wallet/spend scan은 Clairveil typed `privacy_scan` (`privacy-scan-v2`)만 사용합니다. SDK는 `(height, globalSequence, outputIndex)` 전체 cursor를 저장·재개하고, zero-output withdraw summary까지 포함한 unfiltered scan을 요청합니다. Typed endpoint가 없거나 page가 malformed이면 fail-closed로 중단합니다. 저수준 `scanNotes({ scanSource: "scan_events" })`와 `fetchScanEvents(...)`는 진단/호환 API로 남지만 그 결과를 wallet balance cursor로 저장하지 않습니다.
 
 One-Proof transfer/withdraw에 여러 input을 사용할 때는 개별 `merkle_path` 응답을 섞지 말고, 하나의 검증된 root/height snapshot에서 path를 받아야 합니다.
 
@@ -638,11 +665,14 @@ Operation 단위 재시도 진단은 구조화되어 있습니다. `OPERATION_ST
 
 ## Handoff Conformance
 
-ClairveilJS는 Clairveil `v0.3.1` Go SDK conformance fixture와 wallet-contract
-JSON Schema의 immutable snapshot을 포함합니다. npm package에도 이 자료가
-포함되므로 conformance helper 사용자와 테스트 실행자는 Clairveil source
-checkout을 별도로 준비할 필요가 없습니다. 기본 fixture 경로는 다음과
-같습니다.
+ClairveilJS는 Clairveil core commit
+`621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b`의 exact contract snapshot을 포함하며
+note reservation 계약은 v3만 허용합니다. 이것은 ClairveilJS `0.3.1` package용
+commit snapshot이고 immutable Clairveil core `v0.3.1` release tag와 같다는
+표시가 아닙니다. npm package에도 fixture와 wallet-contract JSON Schema가 포함되므로
+runtime conformance helper 사용자는 Clairveil source checkout을 별도로 준비할 필요가
+없습니다. 단, release identity gate는 고정 commit object가 들어 있는 checkout을
+요구합니다. 기본 fixture 경로는 다음과 같습니다.
 
 ```bash
 fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata
@@ -657,21 +687,23 @@ npm run test:conformance
 Maintainer가 다른 fixture를 의도적으로 비교할 때만
 `CLAIRVEIL_CONFORMANCE_FIXTURE_DIR=/path/to/testdata`로 경로를 덮어씁니다.
 
-Release handoff 또는 CI에서는 strict command를 사용하세요. fixture가 없으면 실패합니다.
+Release handoff 또는 CI에서는 bundled fixture만 사용하는 strict command를
+사용하세요. fixture가 없으면 실패합니다.
 
 ```bash
 npm run test:conformance:required
 ```
 
 `npm run verify:clairveil-source`라는 release script 이름은 호환성을 위해
-유지합니다. 검증 자체는 self-contained이며 고정 release/commit metadata와
-protobuf 4개, fixture 12개, JSON Schema 1개의 SHA-256 digest를 확인합니다.
-`CLAIRVEIL_SOURCE_DIR`나 별도 source checkout을 사용하지 않습니다.
+유지합니다. 고정 metadata와 local SHA-256 manifest를 확인한 뒤 protobuf 4개,
+fixture 12개, JSON Schema 1개를 주장한 git commit과 byte-for-byte로 대조합니다.
+`CLAIRVEIL_SOURCE_DIR`로 해당 commit을 가진 Clairveil checkout을 지정할 수 있고,
+없으면 sibling `../clairveil`을 사용합니다. checkout 또는 commit object가 없으면
+fail-closed합니다.
 
 Reservation conformance test는 fixture의 allowed/rejected 전이를
-`canTransitionReservation(...)` 일반 전이 표에 대해 재생합니다. Store 전용
-`releaseReservedOrProving(...)`의 `Proving → Released` 확장까지 fixture와 같다고
-검증하는 것은 아닙니다.
+`canTransitionReservation(...)` 일반 전이 표에 대해 재생합니다. Store release helper도
+같은 `Proving → Released` 거부 규칙을 강제합니다.
 
 `prepublishOnly`는 `verify:release:integration`을 실행합니다. Package 검사,
 required conformance fixture, 필수 5-shape localnet one-proof matrix,
@@ -690,17 +722,18 @@ node, prover, payable EVM driver 설정이 없으면 skip하지 않고 실패합
 
 ## Local Node E2E와 Release Gate
 
-Local node E2E는 일반 개발에서는 opt-in이지만 `npm publish`에는 필수입니다. Release 환경은 Clairveil node, 명시적으로 선택한 prover 한 곳, wallet credential, deposit-proof provider를 제공해야 합니다.
+Local node E2E는 일반 개발에서는 opt-in이지만 `npm publish`에는 필수입니다. Release 환경은 Clairveil node, 명시적으로 선택한 prover 한 곳, owner와 별도 relayer wallet credential, audit disclosure private scalar, deposit-proof provider를 제공해야 합니다.
 
 현재 local e2e scope:
 
 - deposit
-- wallet note scan
+- typed wallet note scan
 - shielded transfer
-- disclosure decode
+- validated typed scan output 기반 public/self-view/recipient/audit disclosure decode
 - direct withdraw
+- 별도 relayer가 서명한 relayed withdraw와 reservation/nullifier reconciliation
 
-Relay withdraw payload/signDoc 생성은 SDK test와 Go conformance fixture로 검증합니다. 실제 relayer service e2e는 product-defined relayer transport와 배포 환경에 맞춰 별도로 구성하세요. One-proof payroll batch는 별도 opt-in E2E로 deposit, typed scan, same-root Merkle path, batch prover, `MsgBatchTransfer`, typed output evidence reconciliation까지 검증합니다.
+Relayed withdraw E2E는 owner와 다른 transparent account가 최종 `MsgWithdraw`를 서명·broadcast하고, 포함 tx evidence와 spent nullifier를 reservation의 `ConfirmedSpent` 상태까지 reconcile합니다. Product별 relayer transport 자체는 SDK 범위 밖입니다. One-proof payroll batch는 별도 opt-in E2E로 deposit, typed scan, same-root Merkle path, batch prover, `MsgBatchTransfer`, typed output evidence reconciliation까지 검증합니다.
 
 ```bash
 CLAIRVEIL_E2E_LOCAL=1 npm run test:e2e:local
@@ -712,6 +745,8 @@ Full flow까지 실행하려면 wallet module과 deposit proof module을 함께 
 CLAIRVEIL_E2E_LOCAL=1 \
 CLAIRVEIL_E2E_FULL_FLOW=1 \
 CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
+CLAIRVEIL_E2E_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs \
+CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<audit-private-scalar> \
 CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 npm run test:e2e:local
 ```
@@ -723,6 +758,8 @@ CLAIRVEIL_E2E_LOCAL=1 \
 CLAIRVEIL_E2E_FULL_FLOW=1 \
 CLAIRVEIL_E2E_ONE_PROOF_BATCH=1 \
 CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
+CLAIRVEIL_E2E_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs \
+CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<audit-private-scalar> \
 CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 npm run test:e2e:local
 ```

@@ -64,24 +64,17 @@ For EVM chains, ClairveilJS calls the chain-provided privacy precompile. The DAp
 
 | ClairveilJS | Verified Clairveil release | Public Cosmos wire | Downstream EVM deposit |
 | --- | --- | --- | --- |
-| `0.3.1` | `v0.3.1` (`1a6ce6a`) | unchanged `MsgDeposit`/query contracts | opt-in `payable-exact-value` |
+| `0.3.1` | `v0.3.1` handoff (`621c24a`) | unchanged `MsgDeposit`/query contracts | opt-in `payable-exact-value` |
 
-`clairveiljs@0.3.1` supports the protocol, wire, and artifact baseline of the
-immutable Clairveil `v0.3.1` release, commit
-`1a6ce6a0a0e10b765c025072b44c2364e9711b48`. Release verification checks the
-pinned SHA-256 manifest for all four copied protobuf files, the bundled
-`v0.3.1` conformance fixtures, and the JSON Schema, then runs those contracts in
-required mode. This does not imply support for later, unreleased protocol
-changes.
+`clairveiljs@0.3.1` targets the pinned SDK handoff shown above; later core
+changes are not implied. See [Handoff Conformance](#handoff-conformance) for the
+exact commit and release checks.
 
-The client reservation implementation has one explicit SDK extension.
-`allowedReservationTransitions` matches the generic v0.3.1 fixture table, but
-`releaseReservedOrProving(...)` can move a `Proving` reservation directly to
-`Released` when the current lease token is valid. This store-specific atomic
-rollback is the current ClairveilJS behavior; it is not the same as the v0.3.1
-generic transition rule, which rejects `Proving -> Released`. See the
-[reservation state document](./docs/reservation-state-machine.md) for the
-exact scope.
+Reservation behavior follows the v0.3.1 transition table:
+`releaseReservedOrProving(...)` releases only `Reserved`, while uncertain work
+after proving begins is quarantined in `ManualReview`. See the
+[state machine](./docs/reservation-state-machine.md) and
+[recovery guide](./docs/errors-and-recovery.md) for the evidence rules.
 
 Clairveil `v0.3.1` is `PUBLICATION_READY_EXPERIMENTAL`, not
 `PRODUCTION_RELEASE_READY`. Formal trusted setup, an external security/circuit
@@ -190,7 +183,21 @@ console.log(prepared.prepared.inputCount, prepared.prepared.outputCount);
 console.log(prepared.operationEvidence.expected_outputs);
 ```
 
-`reservationManager`, `onPreparedPayload`, and `onPreparedProof` are required for every executable batch. The callback storage implementation is caller-owned and must keep private artifacts encrypted; local files must be mode `0600`. Once either checkpoint callback starts, a later prepare failure quarantines the whole reservation set as `ManualReview` instead of releasing potentially reusable inputs. `provePreparedBatchTransfer(...)` is a proof-stage recovery primitive: after a restart it requires the exact checkpointed payload, original operation ID and reservation batch, plus a proof checkpoint callback. Its returned message is not authorization to broadcast. Pass that persisted payload/proof, the original payment rows, signer, reservation manager, and reservation batch to `finalizePreparedBatchTransfer(...)` before opening the wallet; it recreates the sign doc and operation evidence, rechecks nullifiers, and atomically advances every input to `ProofReady`. Use the reference-payroll artifact/retry APIs for the complete restart-safe signed-transaction workflow. Query the stored transaction hash and every input nullifier before any retry; retransmit only previously checkpointed exact TxRaw bytes and never rebuild or retry part of an atomic output list.
+Every executable batch requires `reservationManager`, `onPreparedPayload`, and
+`onPreparedProof`. Encrypt these private checkpoints; local files must use mode
+`0600`. Once checkpointing starts, a preparation failure quarantines the whole
+reservation set in `ManualReview`.
+
+After restart, `provePreparedBatchTransfer(...)` restores only the proof stage;
+its result is not broadcast authority. Call `finalizePreparedBatchTransfer(...)`
+with the original operation inputs and checkpoints. The finalizer re-reads the
+authoritative reservations, verifies their operation, lease, and nullifier set,
+then advances the exact set to `ProofReady`.
+
+For signed retries, query the stored transaction and every input nullifier, and
+retransmit only the checkpointed TxRaw bytes. A `ProofReady` retry also requires
+the artifact's current lease. See the [recovery guide](./docs/errors-and-recovery.md)
+for the full retry and expired-lease procedure.
 
 Batch preparation requires unified `privacy-scan-v2`; it fails closed rather than falling back to ciphertext-free legacy events. The SDK validates one same-root Merkle snapshot, rechecks the active circuit, authoritative asset mapping, audit identity, and disclosure capabilities when proving or recovering the proof stage, checks all input nullifiers before and after proving, and verifies proof version/request hash/circuit identity. The uninterrupted `prepareTransferBatch(...)` flow then atomically advances reservations to `ProofReady`; proof-stage recovery deliberately returns `reservationFinalizationRequired: true` until the caller completes the restored operation workflow. `operationEvidence` records output index, commitment, recipient hash, amount/asset, and user/audit/self-view disclosure digests per payment. Use `fetchAuditableBatchTransfers(...)` plus `decodeBatchUserDisclosure(...)`, `decodeBatchSelfViewDisclosure(...)`, and `decodeBatchAuditDisclosure(...)` for typed output reconciliation; retain one `createPrivacyScanValidationStateV2()` object across consecutive audit-query cursor pages.
 
@@ -210,10 +217,14 @@ For audit disclosure key generation in JS, see the repository example at [exampl
 
 ## Handoff Conformance
 
-ClairveilJS includes an immutable copy of the Clairveil `v0.3.1` Go SDK
-conformance fixtures and wallet-contract JSON Schema. The npm package ships
-this snapshot, so tests and consumers of the conformance helper do not need a
-Clairveil source checkout. The default fixture directory is:
+ClairveilJS includes the exact Clairveil core contract snapshot at commit
+`621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b`, including the v3-only note-reservation
+fixture and wallet-contract JSON Schema. This is a commit snapshot for the
+ClairveilJS `0.3.1` package, not a claim that it is the immutable Clairveil core
+`v0.3.1` release tag. The npm package ships this snapshot, so runtime consumers
+of the conformance helper do not need a Clairveil source checkout. The release
+identity gate does require a checkout containing the pinned commit object. The
+default fixture directory is:
 
 ```bash
 fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata
@@ -232,21 +243,24 @@ explicitly:
 CLAIRVEIL_CONFORMANCE_FIXTURE_DIR=/path/to/testdata npm run test:conformance
 ```
 
-For release handoff or CI, use the strict command. It sets `CLAIRVEIL_CONFORMANCE_REQUIRED=1`, so missing fixtures fail the job instead of producing an all-skip success:
+For release handoff or CI, use the strict command. It uses only the bundled
+fixtures and sets `CLAIRVEIL_CONFORMANCE_REQUIRED=1`, so missing fixtures fail
+the job instead of producing an all-skip success:
 
 ```bash
 npm run test:conformance:required
 ```
 
 `npm run verify:clairveil-source` is retained as the release-script name for
-compatibility. It is self-contained: it validates the pinned release and commit
-metadata plus SHA-256 digests for four protobufs, twelve fixtures, and one JSON
-Schema. It does not read `CLAIRVEIL_SOURCE_DIR` or require a source checkout.
+compatibility. It validates the pinned metadata and local SHA-256 manifest, then
+compares four protobufs, twelve fixtures, and one JSON Schema byte-for-byte with
+the claimed git commit. Set `CLAIRVEIL_SOURCE_DIR` to a Clairveil checkout that
+contains the commit; otherwise the command uses the sibling `../clairveil`
+checkout and fails closed when the commit object is unavailable.
 
 The reservation conformance test replays the fixture's allowed and rejected
-transitions through the generic `canTransitionReservation(...)` table. It does
-not assert that the store-specific `releaseReservedOrProving(...)`
-`Proving -> Released` extension is identical to the fixture.
+transitions through the generic `canTransitionReservation(...)` table. Store
+release helpers enforce the same rejection of `Proving -> Released`.
 
 `prepublishOnly` runs `verify:release:integration`: package checks, required
 conformance fixtures, the required five-shape localnet one-proof matrix, and
@@ -271,9 +285,9 @@ if (!result.skipped) {
 
 ## Local Node E2E and Release Gate
 
-Local-node E2E remains opt-in for ordinary development, but it is mandatory for `npm publish`. The release environment must provide a Clairveil node, one explicitly selected prover, wallet credentials, and a deposit-proof provider.
+Local-node E2E remains opt-in for ordinary development, but it is mandatory for `npm publish`. The release environment must provide a Clairveil node, one explicitly selected prover, owner and separate relayer wallet credentials, an audit-disclosure private scalar, and a deposit-proof provider.
 
-Current local e2e scope is deposit, wallet note scan, shielded transfer, disclosure decode, direct withdraw, and an opt-in one-proof payroll batch with its reservation lifecycle. Relay withdraw payload/signDoc construction is covered by SDK tests and Go conformance fixtures; full relayer service e2e depends on the product's relayer transport and deployment.
+Current local e2e scope is deposit, typed wallet note scan, shielded transfer, validated typed-scan public/self-view/recipient/audit disclosure decode, direct withdraw, a separately signed relayed withdraw with reservation reconciliation, and an opt-in one-proof payroll batch with its reservation lifecycle.
 
 Run the optional smoke/e2e command with a local Clairveil node:
 
@@ -289,6 +303,8 @@ To run the tx flow, explicitly opt in:
 CLAIRVEIL_E2E_LOCAL=1 \
 CLAIRVEIL_E2E_FULL_FLOW=1 \
 CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
+CLAIRVEIL_E2E_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs \
+CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<audit-private-scalar> \
 CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 npm run test:e2e:local
 ```
@@ -296,10 +312,11 @@ npm run test:e2e:local
 The full flow performs:
 
 - deposit
-- wallet note scan
+- typed wallet note scan
 - transfer to a shielded recipient
-- public user disclosure decode
+- public, self-view, recipient-encrypted, and audit disclosure decode from validated typed scan output
 - direct withdraw
+- separately signed relayed withdraw and reservation/nullifier reconciliation
 
 To run the actual one-proof batch contract as well, opt in separately. It creates a deposit input, obtains a verified same-root Merkle snapshot, reserves/claims the input, prepares and proves one `MsgBatchTransfer`, records the broadcast attempt, and reconciles typed `privacy_scan` output plus nullifier evidence into `ConfirmedSpent`.
 
@@ -308,6 +325,8 @@ CLAIRVEIL_E2E_LOCAL=1 \
 CLAIRVEIL_E2E_FULL_FLOW=1 \
 CLAIRVEIL_E2E_ONE_PROOF_BATCH=1 \
 CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
+CLAIRVEIL_E2E_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs \
+CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<audit-private-scalar> \
 CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 npm run test:e2e:local
 ```
@@ -345,7 +364,20 @@ skip this downstream check.
 
 `planOneProofPayroll(input, notes, { outputMode: "exact32" })` is available when an operation must explicitly fill all 32 batch output slots. `exact-32` remains a compatibility alias. It preserves payment/change ordering and appends zero-value `padding` notes; the strict Go fixture conformance suite creates and serializes all five representative 1/1, 3/4, 16/32 (31+change), exact-32, and explicit-padding shapes.
 
-For a restart-safe payroll handoff, checkpoint `createOneProofPayrollArtifact({ prepared, execution, reservationBatch, signDoc, signedTxBytes })` with `serializeOneProofPayrollArtifact(...)` before each external boundary. The typed JSON includes private prepared notes, reservation lease state, proof, sign-doc, and—once signed—the exact TxRaw bytes. Store it only in your encrypted private store (file mode `0600` for local files). After restart, use `inspectOneProofPayrollArtifactRetry(...)` with a tx-hash reader and `checkNullifiers` before retransmitting: it queries the recorded tx hash first, then requires an explicit status for every input nullifier, returning `retransmit-signed-transaction`, `reconcile-succeeded`, or fail-closed `manual-review`. Pass only the verified checkpoint bytes to `cosmos.broadcastTxRawBytes(...)` (or `retransmitOneProofPayrollArtifact(...)`); neither path reconstructs the signed transaction.
+For restart-safe payroll, serialize a `createOneProofPayrollArtifact(...)`
+checkpoint before each external boundary and store it encrypted (`0600` for
+local files). The SDK verifies the canonical direct-signature domain, creator,
+sole batch message, and exact TxRaw-derived identities; caller hashes are only
+assertions.
+
+After restart, `inspectOneProofPayrollArtifactRetry(...)` checks the network
+transaction before every input nullifier. Only its one-use `retry_decision`
+(valid for at most 30 seconds and never past payload expiry), the artifact, and
+the authoritative manager may be passed to
+`retransmitOneProofPayrollArtifact(...)`. That helper retransmits the exact
+bytes and records `Submitted` or fail-closed `Unknown`; `ProofReady` requires
+the current lease. See the [recovery guide](./docs/errors-and-recovery.md) for
+marker idempotency and `Submitted`/`Unknown` retry rules.
 
 It uses these defaults, all overrideable through environment variables:
 
@@ -360,6 +392,8 @@ CLAIRVEIL_E2E_DENOM=uclair
 CLAIRVEIL_E2E_DEPOSIT_AMOUNT=10uclair
 CLAIRVEIL_E2E_TRANSFER_AMOUNT=1uclair
 CLAIRVEIL_E2E_WITHDRAW_AMOUNT=<same as CLAIRVEIL_E2E_TRANSFER_AMOUNT>
+CLAIRVEIL_E2E_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs
+CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<audit-private-scalar>
 ```
 
 The recommended wallet input is a module that exports a ClairveilJS-compatible wallet adapter or async factory:
@@ -393,7 +427,7 @@ export async function createDepositProof({ material }) {
 }
 ```
 
-For a simple local signer, the e2e test also accepts `CLAIRVEIL_E2E_MNEMONIC` plus either `CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64` or `CLAIRVEIL_E2E_ROOT_SIGNATURE_HEX`. The root signature must match the transparent account and pubkey; CosmJS offline signers do not sign Clairveil's privacy-root message by themselves.
+For a simple local signer, the e2e test also accepts `CLAIRVEIL_E2E_MNEMONIC` plus either `CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64` or `CLAIRVEIL_E2E_ROOT_SIGNATURE_HEX`. The separate relayer can likewise be supplied through `CLAIRVEIL_E2E_RELAYER_MNEMONIC` and optional `CLAIRVEIL_E2E_RELAYER_ADDRESS`. The root signature must match the owner account and pubkey; the relayer must resolve to a different transparent account. CosmJS offline signers do not sign Clairveil's privacy-root message by themselves.
 
 ## Production Privacy Boundary
 
@@ -528,6 +562,8 @@ const noteStore = new LocalStorageNoteStore({
   allowPlaintext: true
 });
 ```
+
+`baseURL` may include a deployment path prefix. The adapter preserves it when appending `/v1/prover/transfer`, `/v1/prover/withdraw`, and the batch proof route; for example, `https://prover.example/tenant-a` calls `https://prover.example/tenant-a/v1/prover/transfer`.
 
 `LocalStorageNoteStore` is intentionally opt-in because it stores decrypted wallet notes in plaintext browser storage. Use it only for local demos/tests; production wallets should store the same fields in an encrypted wallet database.
 
@@ -679,6 +715,10 @@ const broadcast = await clairveil.signDirectAndBroadcast({
   signDoc: deposit.signDoc
 });
 if (!broadcast.ok) throw new Error(broadcast.error || "deposit was not confirmed");
+await clairveil.confirmDeposit({
+  txHash: broadcast.txHash,
+  prepared: deposit
+});
 ```
 
 ## Scan And Store Notes
@@ -705,7 +745,7 @@ const nextScan = await clairveil.scanWalletNotes({
 });
 ```
 
-Wallet scans use Clairveil's typed `privacy_scan` (`privacy-scan-v2`) by default. The SDK persists and resumes the complete `(height, globalSequence, outputIndex)` cursor, requests unfiltered summaries so zero-output withdrawals can advance it safely, and fails closed if a typed page is malformed. It falls back to `scan_events` only when the typed endpoint is explicitly unavailable.
+High-level wallet and spend scans use only Clairveil's typed `privacy_scan` (`privacy-scan-v2`). The SDK persists and resumes the complete `(height, globalSequence, outputIndex)` cursor, requests unfiltered summaries so zero-output withdrawals can advance it safely, and fails closed when the endpoint is unavailable or a typed page is malformed. Low-level `scanNotes({ scanSource: "scan_events" })` and `fetchScanEvents(...)` remain diagnostic/compatibility APIs, but their results are never committed as a wallet balance cursor.
 
 For a one-proof transfer or withdraw, fetch all input paths from one verified root/height snapshot rather than mixing individual `merkle_path` responses:
 
@@ -724,14 +764,19 @@ The SDK requires 1–16 distinct commitments, verifies the exact requested root 
 ## Transfer
 
 Transfer planning is explicit because notes may need a self-merge before the final transfer.
+Executable transfer preparation requires authoritative chain time. The requested expiry is
+bound unchanged into the prover payload and signed `MsgTransfer`; browser time is not used.
 
 ```js
+const latestChainBlockTimeUnix = await fetchLatestChainBlockTimeUnix();
 const transfer = await clairveil.prepareTransfer({
   wallet,
   amount: "10uclair",
   recipient: "clairs1...",
   proverAdapter,
-  allowPlanStep: false
+  allowPlanStep: false,
+  chainNowUnix: latestChainBlockTimeUnix,
+  expiresAtUnix: latestChainBlockTimeUnix + 1800
 });
 
 if (transfer.status === "self_merge_required") {
@@ -740,7 +785,9 @@ if (transfer.status === "self_merge_required") {
 } else if (transfer.status === "ready") {
   const broadcast = await clairveil.signDirectAndBroadcast({
     wallet,
-    signDoc: transfer.signDoc
+    signDoc: transfer.signDoc,
+    // Queried again after wallet signing; missing or malformed time fails closed.
+    getChainNowUnix: fetchLatestChainBlockTimeUnix
   });
   if (!broadcast.ok) throw new Error(broadcast.error || "transfer was not confirmed");
 }
@@ -763,11 +810,14 @@ try {
 For selective disclosure:
 
 ```js
+const chainNowUnix = await fetchLatestChainBlockTimeUnix();
 await clairveil.prepareTransfer({
   wallet,
   amount: "10uclair",
   recipient: "clairs1...",
   proverAdapter,
+  chainNowUnix,
+  expiresAtUnix: chainNowUnix + 1800,
   userPrivacyPolicy: "amount-from-to",
   userDisclosureMode: "recipient-encrypted",
   userDisclosureTargetPubKeyHex: "ab".repeat(32)
@@ -792,7 +842,7 @@ const auditReport = await dapp.decodeAuditDisclosure({
 console.log(userReport.verified, auditReport.plane);
 ```
 
-The relay examples below fetch authoritative time from the latest chain block. Keep the REST endpoint aligned with the client configuration, and fail closed if the latest block does not contain a valid timestamp.
+Expiry-bound transfer and relay examples fetch authoritative time from the latest chain block. Keep the REST endpoint aligned with the client configuration, and fail closed if the latest block does not contain a valid timestamp.
 
 ```js
 const chainRestEndpoint = "https://rest.example-chain.invalid";
@@ -877,7 +927,7 @@ const prepared = await clairveil.prepareRelayWithdraw({
   address,
   pubKeyHex,
   signatureBase64,
-  amount: "5aokrw",
+  amount: "5utest",
   recipient: "0x...",
   chainNowUnix: latestChainBlockTimeUnix,
   reservationManager
@@ -993,21 +1043,35 @@ The example derives a non-extractable, namespace-separated AES-GCM key from the 
 
 When deriving a reservation lookup key directly, use `nullifierLookupKeyFromHex(indexKey, nullifierHex)` for 32-byte nullifier hex strings. `nullifierLookupKey(indexKey, nullifier)` treats string nullifiers as raw UTF-8 labels and rejects hex-shaped nullifier strings to avoid accidental mismatches.
 
-The SDK moves reservations through `Reserved -> Proving -> ProofReady` while it prepares the payload. `Reserved` is the durable note-inventory lock and has no worker lease; beginning `Proving` atomically claims the batch lease. Only `Proving` and `ProofReady` retain worker lease fields. The SDK generates a fresh `leaseOwner` for each manager by default; callers that supply one must keep it unique per browser tab or worker so recovery can leave another tab's unexpired work alone. The proof heartbeat interval is derived from the active lease window rather than fixed at 60 seconds, so short leases are renewed before expiry where timers allow. After that, the wallet or DApp owns the broadcast/reconcile step:
+The SDK prepares reservations through `Reserved -> Proving -> ProofReady`.
+`Proving` and `ProofReady` hold a worker lease; keep a caller-supplied
+`leaseOwner` unique per tab or worker. Reservation stores expose only validated
+creation, CAS, lease, and reconciliation methods. The exact transition and
+evidence matrix is in the [state machine](./docs/reservation-state-machine.md).
 
-- Pass both `reservationManager` and the prepared `reservation` to `signDirectAndBroadcast(...)`, `broadcastSignedTx(...)`, or EVM `sendTransaction(...)`. These methods atomically set `broadcast_in_flight` and increment `broadcast_attempt_count` before the external RPC call, then record `Submitted`, `Unknown`, or `ManualReview`. A failed terminal write leaves the durable marker in place and blocks resubmission until reconciliation. Withdraw/relay submissions must also pass the matching `relayPayload` plus a fresh `chainNowUnix`, or preferably `getChainNowUnix`. When an EVM request contains `chainId`, also pass that network ID as `expectedEvmChainId`. Unbound relay requests are rebuilt and caller-supplied sender, gas, and fee fields are stripped after validation. If a reservation already carries an authoritative `txBytesHash`, supported sender, gas, and fee fields covered by that binding may be preserved; unsupported transaction keys are always stripped before submission. The SDK decodes the Cosmos body or rebuilds the EVM calldata and rejects a missing or mismatched payload before external submission. If custom EVM transaction encoding options were used, pass the same options as `relayTransactionOptions`.
-- Custom wallet/provider integrations must call `markBroadcastAttempting(ids, { leaseToken, txHash?, txBytesHash?, signDocHash? })` immediately before crossing the external broadcast boundary, persisting any transaction identity already available before using the outcome-specific methods below.
-- Call `markSubmitted(ids, { leaseToken, txHash | txBytesHash })` only after a transaction was actually submitted. The current low-level manager is transport-agnostic and accepts either value as submission metadata. An EVM `txBytesHash` is therefore accepted structurally even though it is only a canonical request binding, not proof of network submission. The high-level EVM send helper records the network `txHash` returned by the wallet. A `signDocHash` alone is not enough for `Submitted`.
-- Call `markUnknown(ids, { leaseToken, txHash | txBytesHash, signDocHash?, error })` only when the transaction may have reached the network. A `signDocHash` is supplemental evidence and cannot establish that boundary by itself.
-- Keep the `ProofReady` lease alive while a wallet or relayer is waiting. `markSubmitted(...)` and `markUnknown(...)` require the current, unexpired lease token; if the lease expires, reconcile or replan instead of advancing stale ownership.
-- Immediately before copying or uploading a relay payload, call `recordRelayHandoff(ids, { leaseToken, payloadHash: prepared.payload.payload_hash })` and wait for it to persist. If that call fails, do not expose the payload. Once it succeeds, do not use local proof-discard/release paths; reconcile the externally deliverable payload instead.
-- For wallet rejection or local proof discard before broadcast, use `markReplanRequired(...)` with the current live lease instead of leaving `ProofReady` active. An expired `ProofReady` lease must move to `ManualReview`; a refreshed page cannot prove that an older proof artifact was destroyed and must not make the note spendable again.
-- If you directly discard a local batch, `Reserved` can be released directly; `Proving` requires its current batch lease token via `releaseReservedOrProving(ids, { leaseToken })`. `rollbackPlanReservation(...)` handles both cases for you. This `Proving -> Released` path is a current ClairveilJS store behavior outside the generic v0.3.1 fixture transition table.
-- If a rollback sees that the lease already expired, it does not release the note. It moves the reservation to `ManualReview` best-effort so the original prepare/prover error is preserved and the note is not silently reused.
-- Resolve `ManualReview` only after an operator has reviewed the chain and payload history. `resolveManualReview(ids, { target: "Released" | "ReplanRequired" | "Failed", operatorId, approvalReference, reason })` records the approval metadata and moves the linked note into the approved outcome.
-- After a relay payload is copied or handed to a relayer, do not release the reservation by TTL or a local cancel button. The relayer may still submit the proof until expiry, so reconcile by checking nullifier status, submitted tx evidence, or manual review.
-- Relay payload validation and relay signing require `chainNowUnix` from the latest chain block time. Do not substitute browser time; fetch it again immediately before relay broadcast and reject submission if it is unavailable.
-- For submitted EVM transactions with a failed receipt, check nullifier status before deciding between `ConfirmedSpent`, `ReplanRequired`, or `ManualReview`. `Submitted` or `Unknown` reservations can only move to `ReplanRequired` when `markReplanRequired(...)` proves both `nullifierUnspentConfirmed: true` and `txAbsentOrFailedConfirmed: true`; retain `checkedHeight` and `txHashChecked` as the audit trail for that tx lookup.
+- High-level submission requires both `reservationManager` and the prepared
+  `reservation`. Signed Cosmos transfers also require `getChainNowUnix`;
+  relay/withdraw submission requires the matching payload and fresh chain time,
+  and EVM requests require the expected network and matching encoding options.
+  The SDK decodes or rebuilds relay transactions, strips unbound sender/gas/fee
+  fields, and rejects payload mismatches before RPC.
+- Cosmos signing derives and persists the exact TxRaw `txHash` before RPC and
+  rejects mismatched broadcast or indexed hashes. A caller-owned restart fence
+  may use synchronous `beforeBroadcast(identity)` immediately before RPC.
+- Custom integrations call `markBroadcastAttempting(...)` at the external
+  boundary, `markSubmitted(...)` only after submission, and `markUnknown(...)`
+  for ambiguity. `signDocHash` alone never proves submission.
+- Payroll retries cross the RPC boundary through
+  `retransmitOneProofPayrollArtifact(...)`; an idempotent marker result is not
+  retry authority. `ProofReady` requires the artifact's current lease.
+- Persist `recordRelayHandoff(...)` before exposing a relay payload. After
+  handoff, reconcile chain evidence instead of releasing by TTL or cancellation.
+- Only `Reserved` may be released automatically. `Proving`/`ProofReady` failures
+  are quarantined in `ManualReview`; expired `ProofReady` recovery requires the
+  dedicated exact-transaction/all-input-unspent procedure, not mere tx absence.
+- Resolve `ManualReview` only with operator evidence. Failed EVM receipts and
+  other post-broadcast failures require both transaction and nullifier evidence.
+  See the [recovery guide](./docs/errors-and-recovery.md) for these procedures.
 
 Reservations can also carry operation success evidence. Nullifier spent proves that an input note was consumed, but payroll/payment success additionally requires matching persisted transaction identity and output evidence. `markProofReady(...)` accepts direct-item fields such as `expectedOutputCommitment`, `expectedDisclosureDigest`, `expectedRecipientHash`, `expectedAmount`, `expectedAmountHash`, `expectedDenom`, `batchItemIndex`, and `batchItemIndexKnown`. The one-proof high-level batch path instead stores one `expectedOperationEvidenceHash` on every input reservation and returns the full `operationEvidence.expected_outputs` list separately; each entry binds item ID, output index, commitment, recipient hash, amount/asset, and user/audit/self-view disclosure digests. Reconciliation must validate the aggregate hash and every per-item entry before reporting item success. Use `hashRecipient(recipient, { shieldedPrefix })` and `hashAmount(denom, amount)` from `clairveiljs/reservation`; both reject empty identity fields, and the latter accepts only non-negative uint64 minimal-denom amounts before computing SHA-256 over canonical `denom:amount`.
 

@@ -24,8 +24,8 @@ It covers high-level flows that communicate with external systems or create tran
 
 ## Clairveil v0.3.1 fixed contract
 
-This document and the SDK support immutable Clairveil `v0.3.1`, release commit
-`1a6ce6a0a0e10b765c025072b44c2364e9711b48`. The values below are not deployment-profile
+This document and the SDK support the current Clairveil `v0.3.1` SDK handoff,
+commit `621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b`. The values below are not deployment-profile
 settings; they are protocol contracts fixed by the conformance fixtures and consensus
 identity.
 
@@ -98,7 +98,7 @@ The routes below are the contracts shared by the HTTP annotations in [Query prot
 | `fetchAssetByDenom(...)`, `queryAssetByDenom(...)` | GET | `/clairveil/privacy/v1/assets/by_denom/{canonical_denom=**}` | Canonical denom → asset ID. The SDK URL-encodes the canonical denom for substitution. |
 | `fetchAssetByID(...)`, `queryAssetByID(...)` | GET | `/clairveil/privacy/v1/assets/by_id/{asset_id_hex}` | Asset ID → canonical denom |
 
-`scanWalletNotes(...)` uses typed `privacy_scan` for the default wallet scan when no event filter is specified. It falls back to `scan_events` only when the typed endpoint explicitly reports that it is unavailable; a malformed typed response fails without fallback. One-Proof Batch Transfer permits typed scan only. The wallet uses the complete `(height, global_sequence, output_index)` wire cursor and must commit it in the same transaction only after every output and nullifier state up to that cursor is durably reflected.
+`scanWalletNotes(...)` and all high-level spend preparation use only typed `privacy_scan`, without event filters. An unavailable endpoint or malformed typed response fails closed and does not advance or replace the wallet cursor. `scanNotes({ scanSource: "scan_events" })` and `fetchScanEvents(...)` remain low-level diagnostic/compatibility surfaces. The wallet uses the complete `(height, global_sequence, output_index)` wire cursor and must commit it in the same transaction only after every output and nullifier state up to that cursor is durably reflected.
 
 `commitment_paths_at_root` uses paths from a snapshot with exactly the requested root/height. Current-root paths read persisted incremental nodes and do not consume the online historical-rebuild budget. A non-current historical public query requires complete root/count/height metadata and is limited to 1,024 leaves and two concurrent rebuilds per keeper process. Beyond those limits it returns `ResourceExhausted`; use the current root or a trusted local historical-path index. The separate offline recovery/export limit is `MaxMerkleRebuildLeaves = 1,048,576`. A remote historical root/path request reveals the wallet's time and state of interest to the provider.
 

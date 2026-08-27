@@ -6,7 +6,7 @@ This document explains the responsibilities and communication paths among the **
 
 The `src/` directory hierarchy explains the implementation structure, but this document focuses on real service deployment and runtime interactions. It covers both Cosmos and Clairveil-compatible EVM chains and distinguishes the path selected by the deployment environment.
 
-The supported protocol baseline is Clairveil v0.3.1 (`1a6ce6a`) `privacy-note-v1` / `privacy-fixed-v1`. The public status of that source is `PUBLICATION_READY_EXPERIMENTAL`, not production deployment approval. Formal trusted setup, external security/circuit audit, signed production artifacts, and target chain/product validation are separate release gates outside this architecture.
+The supported protocol baseline is the Clairveil v0.3.1 SDK handoff (`621c24a`) `privacy-note-v1` / `privacy-fixed-v1`. The public status of that source is `PUBLICATION_READY_EXPERIMENTAL`, not production deployment approval. Formal trusted setup, external security/circuit audit, signed production artifacts, and target chain/product validation are separate release gates outside this architecture.
 
 Note reservation, proving, submission, and reconciliation states are covered separately in [Note Reservation State Transitions](./reservation-state-machine.md).
 

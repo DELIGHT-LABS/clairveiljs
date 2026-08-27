@@ -70,7 +70,7 @@ Cosmos와 EVM profile은 아래 필드를 모두 가진다.
 | `restEndpoints` | 선택적 REST 후보 목록. 비어 있거나 중복될 수 없으며 실제 순서는 `rest`가 먼저다. |
 | `accountPrefix`, `shieldedPrefix` | account와 shielded address의 Bech32 prefix |
 | `denom`, `displayDenom`, `coinDecimals` | minimal denom, 표시 denom과 decimals |
-| `proverUrl` | transfer, withdraw, One-Proof batch용 기본 HTTP prover base URL |
+| `proverUrl` | transfer, withdraw, One-Proof batch용 기본 HTTP prover base URL. Versioned prover route를 붙일 때 path prefix를 보존함 |
 | `depositProofUrl` | 선택적 DepositCircuit 전용 exact URL. `proverUrl`에서 파생하지 않음 |
 
 Profile URL은 `http` 또는 `https`이고 query, fragment, embedded credential이 없어야 한다. Runtime validator는 로컬 개발을 위해 HTTP도 허용하지만 production endpoint에는 HTTPS를 사용하고 bearer token이나 private 값을 URL에 넣지 않는다.
@@ -231,11 +231,11 @@ redacted logging을 적용한 bounded service handler만 노출한다.
 Client timeout 또는 `AbortSignal`은 응답 대기만 취소하며 이미 시작한 in-process
 solver의 종료나 permit/memory 반환을 보장하지 않는다. 현재 일반
 transfer/withdraw prepare helper는 이 오류를 받으면 `rollbackPlanReservation(...)`을
-호출하고, lease가 유효한 `Proving` reservation을 ClairveilJS 전용 atomic release
-경로로 `Released` 처리한다. 따라서 reservation release를 solver/job 취소 evidence로
-해석하면 안 된다. Opaque job ID와 checkpoint가 필요한 async 제품은 이를 별도
-operation store에서 추적해야 한다. Hard cancellation과 OOM containment가 필요하면
-supervised worker process와 process isolation을 사용한다.
+호출한다. Proving 시작 전 `Reserved` operation은 release할 수 있지만 `Proving` 또는
+`ProofReady`는 현재 lease가 전이를 허용할 때 `ManualReview`로 격리한다. Opaque job
+ID와 checkpoint가 필요한 async 제품은 이를 별도 operation store에서 추적해야 한다.
+Hard cancellation과 OOM containment가 필요하면 supervised worker process와 process
+isolation을 사용한다.
 
 기본 prover 정책은 명시적으로 선택한 endpoint 하나와 automatic failover
 비활성화다. `retryable=true`, timeout 또는 queue saturation은 같은 private

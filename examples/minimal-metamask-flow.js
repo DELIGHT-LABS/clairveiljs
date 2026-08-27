@@ -56,6 +56,20 @@ async function ensureMetaMaskChain(provider, {
   });
 }
 
+async function latestChainBlockTimeUnix(rest) {
+  const response = await fetch(`${rest.replace(/\/$/, "")}/cosmos/base/tendermint/v1beta1/blocks/latest`);
+  if (!response.ok) {
+    throw new Error(`latest block time query failed with HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  const value = data?.block?.header?.time ?? data?.sdk_block?.header?.time;
+  const milliseconds = Date.parse(String(value || ""));
+  if (!Number.isFinite(milliseconds)) {
+    throw new Error("latest block response omitted a valid block time");
+  }
+  return Math.floor(milliseconds / 1000);
+}
+
 export async function runMinimalMetaMaskFlow({
   provider = window.ethereum,
   chainId = "evm-local",
@@ -172,12 +186,15 @@ export async function runMinimalMetaMaskFlow({
   let transferTxHash = "";
   let transferReceipt = null;
   if (recipientShieldedAddress) {
+    const chainNowUnix = await latestChainBlockTimeUnix(rest);
     transfer = await clairveil.prepareTransfer({
       ...privacyRequest,
       evmWallet,
       amount: transferAmount,
       recipient: recipientShieldedAddress,
-      allowPlanStep: false
+      allowPlanStep: false,
+      chainNowUnix,
+      expiresAtUnix: chainNowUnix + 1800
     });
     transferTxHash = await clairveil.sendEvmTransaction({
       wallet: evmWallet,

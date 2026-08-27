@@ -24,8 +24,8 @@
 
 ## Clairveil v0.3.1 고정 계약
 
-이 문서와 SDK의 지원 기준은 immutable Clairveil `v0.3.1` release commit
-`1a6ce6a0a0e10b765c025072b44c2364e9711b48`이다. 아래 값은
+이 문서와 SDK의 지원 기준은 현재 Clairveil `v0.3.1` SDK handoff commit
+`621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b`이다. 아래 값은
 배포 profile이 바꿀 수 있는 설정이 아니라 conformance fixture와 consensus
 identity가 고정한 protocol 계약이다.
 
@@ -107,7 +107,7 @@ Clairveil `v0.3.1`의 상태는 `PUBLICATION_READY_EXPERIMENTAL`이며, 이 계�
 | `fetchAssetByDenom(...)`, `queryAssetByDenom(...)` | GET | `/clairveil/privacy/v1/assets/by_denom/{canonical_denom=**}` | canonical denom → asset ID. SDK는 canonical denom을 URL encode해 치환 |
 | `fetchAssetByID(...)`, `queryAssetByID(...)` | GET | `/clairveil/privacy/v1/assets/by_id/{asset_id_hex}` | asset ID → canonical denom |
 
-`scanWalletNotes(...)`는 event filter를 명시하지 않은 기본 wallet scan에서 typed `privacy_scan`을 사용한다. Typed endpoint가 명시적으로 없음을 뜻하는 응답일 때만 `scan_events`로 fallback하며, malformed typed response는 fallback하지 않고 실패한다. One-Proof Batch Transfer는 typed scan만 허용한다. Wallet은 wire의 `(height, global_sequence, output_index)` 전체 cursor를 사용하고, 해당 cursor까지의 모든 output과 nullifier 상태가 durable하게 반영된 뒤 같은 transaction에서 cursor를 commit해야 한다.
+`scanWalletNotes(...)`와 모든 고수준 spend 준비는 event filter 없이 typed `privacy_scan`만 사용한다. Endpoint가 없거나 typed response가 malformed이면 fail-closed하며 wallet cursor를 전진시키거나 다른 source cursor로 교체하지 않는다. `scanNotes({ scanSource: "scan_events" })`와 `fetchScanEvents(...)`는 저수준 진단/호환 surface로 남는다. Wallet은 wire의 `(height, global_sequence, output_index)` 전체 cursor를 사용하고, 해당 cursor까지의 모든 output과 nullifier 상태가 durable하게 반영된 뒤 같은 transaction에서 cursor를 commit해야 한다.
 
 `commitment_paths_at_root`는 요청한 root/height와 정확히 같은 snapshot의 path만 사용한다. Current-root path는 persisted incremental node를 읽으므로 online historical-rebuild budget을 소비하지 않는다. Non-current historical public query는 complete root/count/height metadata를 요구하며 최대 1,024 leaves, keeper process당 동시 rebuild 2개로 제한된다. 한계를 넘으면 `ResourceExhausted`가 반환되며 current root 또는 trusted local historical-path index를 사용해야 한다. 별도 offline recovery/export 상한은 `MaxMerkleRebuildLeaves = 1,048,576`이다. Remote historical root/path 요청은 provider에게 wallet의 시점과 관심 state를 노출한다.
 

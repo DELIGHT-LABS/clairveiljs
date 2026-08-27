@@ -12,9 +12,9 @@ These states describe safely locking and releasing a particular note while it is
 
 ![ClairveilJS Note Reservation Lifecycle State Diagram](./assets/note-reservation-lifecycle.svg)
 
-The top shows the normal flow, while the bottom shows source-state-specific exception and recovery paths. The top `Discovered → Available` path is the conceptual pre-flow for note inventory; the persisted reservation lifecycle starts at the `Available → Reserved` boundary. The dotted boxes at the bottom point to the same states shown in the top or another card and are not separate states. `Proving → Released`, marked `SPECIAL`, is a ClairveilJS store-specific atomic release path that verifies a valid lease token; it is not a generic transition. The generic transition table in the Clairveil v0.3.1 fixture rejects this transition, so `SPECIAL` in the diagram does not mean that it is identical to the upstream generic transition. It denotes behavior additionally provided by the current SDK.
+The top shows normal flow and the bottom shows exception/recovery paths. `Discovered → Available` is conceptual; persistence begins at `Reserved`, and dotted boxes alias states elsewhere in the graph. There is no `Proving → Released` shortcut: uncertain preparation after proof execution may have started is isolated instead of reused.
 
-The diagram is intentionally regenerated with `npm run docs:diagram:reservation`, and the resulting SVG is committed. It is not generated automatically during build or package install. The generator reads `allowedReservationTransitions` from `src/privacy/reservation.js`, verifies that all 34 generic transitions are included exactly once, and fails without writing the SVG if they do not match. This check does not verify whether the separate store helper for `Proving → Released` matches the upstream fixture. `npm run docs:diagram:check` compares the committed SVG with the generated result without overwriting it.
+Regenerate and commit the diagram with `npm run docs:diagram:reservation`; build and install do not generate it. The generator verifies all 34 `allowedReservationTransitions` exactly once and writes nothing on mismatch. `npm run docs:diagram:check` compares without overwriting.
 
 ## Meaning of the main states
 
@@ -23,7 +23,7 @@ The diagram is intentionally regenerated with `npm run docs:diagram:reservation`
 | `Discovered` | A conceptual state for a note found by scan but not yet confirmed as spendable inventory | It is not created as a new persisted reservation record. A validation failure is conceptually `Failed`. |
 | `Available` | A verified note that can be used for planning | It is not created as a new persisted reservation record. When selected, the manager creates a `Reserved` record. |
 | `Reserved` | The selected note is held by a durable inventory lock | This is the start of the persisted reservation lifecycle. There is no worker lease yet, and cancellation can move it to `Released`. |
-| `Proving` | A batch lease has been acquired for prover execution | This state requires a lease token. The current general prepare helper can atomically roll back a valid lease to `Released` when preparation fails. |
+| `Proving` | A batch lease has been acquired for prover execution | This state requires a lease token. An uncertain preparation failure is quarantined in `ManualReview`; it is not automatically released. |
 | `ProofReady` | The proof and prepared payload are ready | Proof disposal before broadcast, wallet rejection, and relay handoff must be recorded and handled safely. |
 | `Submitted` | Submission metadata has been recorded by the manager | The low-level manager does not distinguish transports and requires either `txHash` or `txBytesHash`. `signDocHash` alone is insufficient. |
 | `Unknown` | The transaction may have reached the network, but the result cannot be determined | Reconcile the transaction and nullifier state before retransmitting. |
@@ -33,7 +33,7 @@ The diagram is intentionally regenerated with `npm run docs:diagram:reservation`
 | `Released` | The lock on the current persisted reservation has been released | From the note-inventory perspective it is available again, and the next high-level plan can start with a new `Reserved` record. |
 | `Failed` | The current path failed | Move to `ReplanRequired` when a new plan is needed. |
 
-The generic state transitions in the graph match the full lifecycle vocabulary in `allowedReservationTransitions`. However, the contract for creating a new record is narrower and allows only `Reserved`. `Proving → Released` is not applied by generic `transitionBatch(...)`; it is the atomic release path in `releaseReservedOrProving(...)`, which verifies a valid lease token. It is a separate exception implemented by the ClairveilJS store, not an addition of the v0.3.1 fixture's rejected transition to the generic table.
+The graph matches `allowedReservationTransitions`, but new records start at `Reserved` and the compatibility-named `releaseReservedOrProving(...)` releases only that state. The v0.3.1 fixture still rejects `Proving → Released`.
 
 ## Reservation state and operation result
 
@@ -59,13 +59,16 @@ The manager API table below covers the persisted reservation lifecycle that star
 | `markProofReady(...)` / `markProofReadyBatch(...)` | `Proving → ProofReady` | A valid lease and payload/proof binding evidence |
 | `heartbeatLease(...)` / `renewLease(...)` | Keeps the state and extends the lease | A current, unexpired lease owned by the manager |
 | `recordRelayHandoff(...)` | Keeps `ProofReady` and records relay payload handoff evidence | Matching payload hash, before broadcast begins, with a valid lease |
+| `recordRelayTransactionEvidence(...)` | Atomically moves every reservation in one relay operation from `ProofReady` to `Submitted` | Exact payload transaction inclusion and either a recorded external handoff or durable same-origin local-relay attempt. This lease-free API records transaction evidence only; reconciliation decides success/release. |
 | `markBroadcastAttempting(...)` | Keeps `ProofReady` and records `broadcast_in_flight` and the attempt count | Call immediately before crossing the external broadcast boundary, with a valid lease |
 | `markSubmitted(...)` | `ProofReady → Submitted` | A prior `markBroadcastAttempting(...)` record, a valid lease, and either `txHash` or `txBytesHash`. The manager does not distinguish transport or hash meaning. |
 | `markUnknown(...)` | `ProofReady/Submitted → Unknown` | A prior broadcast attempt, a valid lease, and either `txHash` or `txBytesHash`. `signDocHash` alone is insufficient. |
 | `markBroadcastRejected(...)` | `ProofReady → ReplanRequired` | The wallet rejected before broadcast and proof disposal can be recorded. |
+| `markBroadcastFailed(...)` | `ProofReady/Submitted/Unknown → ReplanRequired` | Exact failed/absent transaction identity and every input explicitly unspent. Live `ProofReady` also needs the current matching, unexpired manager lease; `Submitted`/`Unknown` are lease-free. |
+| `recoverExpiredProofReadyBroadcastFailure(...)` | `ProofReady → ReplanRequired` | Complete operation, expired lease, complete stored network-tx/tx-bytes/sign-doc identity, positive height, confirmed execution failure (not absence), exact raw input-nullifier set, and all inputs unspent; atomic and idempotent across restart. |
 | `markReplanRequired(...)` | Moves an allowed source state to `ReplanRequired` | Source-specific evidence for proof disposal, expiry, nullifier state, and transaction failure |
 | `transitionBatch(...)` | Atomically applies an allowed generic transition to multiple reservations | A low-level CAS API for transitions without a dedicated helper. It applies the allowed-transition, lease, and source-specific evidence rules unchanged. |
-| `releaseReservedOrProving(...)` | `Reserved/Proving → Released` | `Proving` requires the current batch lease token |
+| `releaseReservedOrProving(...)` | `Reserved → Released` | Compatibility name retained; `Proving` is rejected rather than released |
 | `markManualReview(...)` | Moves an allowed source state to `ManualReview` | The current lease is required for source states that require a lease. |
 | `resolveManualReview(...)` | `ManualReview → Released/ReplanRequired/Failed` | `operatorId`, `approvalReference`; recording `reason` is recommended |
 | `reconcileSpentNotes(...)` | Moves an allowed state to `ConfirmedSpent`, or quarantines/determines operation success from evidence | Literal spent evidence, a match for one stored `txHash`/`txBytesHash`, and required output evidence. Network identity requirements specific to a transport are not enforced here. |
@@ -73,13 +76,13 @@ The manager API table below covers the persisted reservation lifecycle that star
 ## Safety rules
 
 1. The conceptual note-use flow is `Discovered → Available → Reserved → Proving → ProofReady → Submitted → ConfirmedSpent`. The normal persisted reservation path starts at `Reserved`.
-2. `Proving` and `ProofReady` retain a worker lease. Do not advance a state with an expired lease; use reconciliation or `ManualReview`.
+2. `Proving` and `ProofReady` retain a worker lease. For an expired lease, use reconciliation, `ManualReview`, or the evidence-gated expired-`ProofReady` recovery API, not a generic transition.
 3. If the wallet rejects at `ProofReady` or the proof is discarded, move to `ReplanRequired` only when disposal of the proof can be evidenced. Otherwise isolate the reservation in `ManualReview`.
-4. To move `Submitted` or `Unknown` to `ReplanRequired` or `Failed`, confirm both that the input nullifier is unused and that the recorded transaction is absent or failed. A single failure response is not enough for either transition.
+4. Moving `Submitted`/`Unknown` to `ReplanRequired`/`Failed` requires both an unused input nullifier and an absent/failed recorded transaction. Live `ProofReady` also needs the current manager-owned, unexpired lease so inputs cannot be released under an active submitter.
 5. After handing a relay payload to a relayer, do not release the note based only on TTL expiry or local cancellation. Reconcile with on-chain evidence, including the possibility that the relayer submitted it.
 6. Resolving `ManualReview` requires `operatorId` and `approvalReference`; recording `reason` is recommended for the operational audit trail.
 7. Do not use `ConfirmedSpent` and operation `Succeeded` as synonyms. Reconcile every linked reservation and all output evidence for a multi-input operation.
-8. The current general prepare helper calls `rollbackPlanReservation(...)` when prover/payload preparation fails. A valid `Proving` reservation is directly released in this path; that is not evidence that a remote solver or async job actually stopped.
+8. On preparation failure, `rollbackPlanReservation(...)` releases only `Reserved`; with a valid lease it quarantines `Proving`/`ProofReady` in `ManualReview`, otherwise the operation stays locked for reconciliation.
 
 ## Implementation references
 

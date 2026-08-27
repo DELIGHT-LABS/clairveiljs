@@ -61,7 +61,7 @@ try {
 | `EXACT_NOTE_REQUIRED` | withdraw에 정확히 일치하는 단일 note가 필요 | shielded self-transfer로 exact note를 만든 뒤 재계획 |
 | `PROVER_UNAVAILABLE` | prover URL 없음, retryable HTTP/network failure | endpoint 상태를 확인. reservation이 안전한 pre-broadcast 상태인지 확인한 뒤 동일 checkpoint에서 재시도 |
 | `PROVER_TIMEOUT` | prover 요청 또는 async job timeout/abort | 응답이 늦게 완료될 수 있는 adapter인지 확인하고 checkpoint/job ID로 조회. 새 proof를 무조건 중복 요청하지 않음 |
-| `PROVER_CANCELLED` | client의 prover 대기 또는 async job poll 취소 | client wait가 끝났다는 뜻일 뿐 in-process solver 종료를 보장하지 않는다. 일반 prepare helper는 유효한 `Proving` lease를 `Released`로 rollback할 수 있으므로 현재 durable 상태를 다시 읽고, job/checkpoint는 별도 operation store에서 추적한다. `Released`만 보고 server-side 취소나 proof 미사용을 추론하지 않는다. |
+| `PROVER_CANCELLED` | client의 prover 대기 또는 async job poll 취소 | client wait가 끝났다는 뜻일 뿐 in-process solver 종료를 보장하지 않는다. Durable reservation을 다시 읽는다. `Proving`/`ProofReady`는 자동 release 대신 격리되며 만료·foreign lease는 명시적 reconcile이 필요할 수 있다. Job/checkpoint는 별도 operation store에서 추적한다. |
 | `PROVER_REJECTED` | non-retryable prover 응답 또는 proof job 실패 | payload/circuit/config 불일치 조사. 같은 입력의 blind retry 금지 |
 | `OPERATION_STATE_MIXED` | 같은 operation의 linked reservation 상태가 서로 다름 | `details.reservations`를 확인하고 operation 전체를 격리·reconcile |
 | `OPERATION_EVIDENCE_CONFLICT` | tx/output/disclosure evidence가 persisted expectation과 충돌 | `details.conflicts`를 보존하고 `ManualReview` 또는 `ConflictSpent` 처리 |
@@ -106,9 +106,9 @@ supervised process isolation으로 제공해야 한다.
 
 - `retryable=true`, HTTP 429, timeout과 queue saturation은 다른 prover endpoint로 failover할 권한이 아니다.
 - 기본 정책은 명시적으로 선택한 endpoint 한 곳과 automatic failover 비활성화다.
-- Same-endpoint retry를 제품 adapter에서 구현한다면 원래 payload/checkpoint와 duplicate proof job 여부를 먼저 확인한다. 일반 prepare helper가 이미 실패를 반환한 뒤에는 해당 reservation이 `Released`됐을 수 있으므로 자동으로 같은 reservation이 유지됐다고 가정하지 않는다.
+- Same-endpoint retry를 제품 adapter에서 구현한다면 원래 payload/checkpoint와 duplicate proof job 여부를 먼저 확인한다. 일반 prepare helper가 실패를 반환한 뒤에는 release 또는 ownership 유지 어느 쪽도 가정하지 말고 durable reservation을 다시 읽는다.
 - 추가 endpoint로 같은 private witness를 보내려면 privacy boundary 확대를 사용자 또는 제품 정책이 명시적으로 승인해야 한다.
-- 현재 일반 transfer/withdraw prepare helper는 준비 중 오류를 catch하면 `rollbackPlanReservation(...)`을 호출한다. lease가 유효한 `Proving` reservation은 `releaseReservedOrProving(...)`을 통해 `Released`가 되고, lease가 이미 만료된 경우에만 best-effort `ManualReview`로 이동한다. 이 release는 solver/job 종료 evidence가 아니므로 async job ID와 checkpoint가 필요한 제품은 별도 operation store에서 추적해야 한다.
+- 현재 일반 transfer/withdraw prepare helper는 준비 중 오류를 catch하면 `rollbackPlanReservation(...)`을 호출한다. `Reserved`만 release하고 `Proving`/`ProofReady`는 lease 전이가 허용될 때 `ManualReview`로 이동한다. 만료·foreign lease 때문에 전이가 거부되면 cleanup failure를 원래 error에 첨부하고 durable operation은 reconcile 전까지 잠긴 상태로 둔다.
 
 ## Broadcast 경계와 `Unknown`
 
@@ -120,6 +120,45 @@ Reservation-aware broadcast helper는 외부 호출 직전에 `broadcast_in_flig
 - provider 응답이나 bookkeeping 상태를 안전하게 판정할 수 없으면 `ManualReview`
 
 오류 객체에 `reservationReconciliationRequired: true`와 `reservationBookkeepingError`가 붙어 있으면 transaction은 broadcast됐거나 broadcast 결과를 처리하는 과정에서 durable 상태 기록이 실패한 것이다. 원래 오류와 transaction identity를 보존하고 즉시 reconcile한다.
+
+Cosmos 고수준 signer는 signed TxRaw에서 정확한 network `txHash`를 파생해 RPC 전에
+저장한다. 즉시·indexed hash는 그 byte를 식별해야 하며 없거나 다르면 `Unknown`을
+유지한다. 선택적인 synchronous `beforeBroadcast(identity)`는 RPC 직전 non-sensitive
+identity를 caller fence에 복사할 수 있고, async callback은 거부된다.
+
+Reservation-bound `signDirectAndBroadcast(...)`는 `renewLease`를 요구하고 wallet 접근
+전부터 durable outcome 기록까지 heartbeat를 유지한다. 최초 갱신 실패는 wallet 접근
+전에 중단하며, RPC 이후 실패는 attempt/`Unknown` 복구 경로를 따른다.
+
+Signed one-proof payroll artifact에는 canonical 64-byte secp256k1
+`SIGN_MODE_DIRECT` signature 하나만 허용한다. SDK는 exact body/auth byte, chain ID,
+account number에 대한 signature를 검증한 뒤 signer에서 파생한 유일한
+`MsgBatchTransfer.creator`와 proven execution에서 재구성한 message를 확인한다.
+`tx_hash`(TxRaw SHA-256 대문자), `tx_bytes_hash`(같은 digest 소문자),
+`sign_doc_hash`(canonical SignDoc binding)를 SDK가 파생하며 caller hash는 identity
+input이 아닌 assertion이다.
+
+`inspectOneProofPayrollArtifactRetry(...)`는 transaction을 모든 input nullifier보다 먼저
+조회하고, transaction 부재와 전체 input 미사용이 확인될 때만 저장하지 않는 일회용
+`retry_decision`을 발급한다. Decision은 artifact와 exact identity에 binding되고 process
+clock 기준 30초 또는 payload expiry 중 이른 시점에 만료된다.
+
+`retransmitOneProofPayrollArtifact(...)`는 authoritative manager를 요구하며 불일치,
+만료, 재사용, 위조 decision을 거부한다. Exact reservation set을 다시 읽고 identity
+3개와 현재 `ProofReady` owner/token lease를 검증한 뒤 heartbeat하며 exact byte를 보낸다.
+성공은 `Submitted`, 모호한 callback 또는 bookkeeping 실패는 `Unknown`을 기록한다.
+Exact `Submitted`/`Unknown` retry는 lease 없이 기존 상태를 유지한다.
+`markOneProofPayrollReservationBroadcastAttempting(...)`의 idempotency는 RPC 권한이
+아니며 restart나 만료된 `ProofReady` lease도 재전송 권한이 아니다.
+`markOneProofPayrollReservationSubmitted(...)`는 identity 3개를 모두 요구한다. Restart
+또는 실패 후에는 tx/nullifier evidence를 새로 조회한다. 만료 lease 복구는 아래 절을
+따른다.
+
+Staged batch finalize는 exact reservation ID를 다시 읽고 operation, lease owner/token,
+nullifier lookup-key 집합을 검증하므로 같은 수의 다른 reservation으로 바꿀 수 없다.
+Concrete store는 fresh-state 초기화만 허용하며 production 변경은 검증된 CAS, lease,
+reconciliation API로만 수행한다. 전체 transition guard는
+[reservation state machine](./reservation-state-machine.ko.md)을 참고한다.
 
 `signDocHash`는 prepared/signed artifact의 binding을 보조하며 단독으로 `Submitted`를 만들 수 없다. 현재 저수준 `markSubmitted(...)`은 transport를 구분하지 않고 `txHash` 또는 `txBytesHash` 중 하나를 받으므로 EVM canonical request binding만으로도 형식상 `Submitted`를 만들 수 있다. 반면 고수준 EVM send helper는 wallet/provider가 반환한 network `txHash`를 기록한다. EVM의 `txBytesHash`는 receipt 조회 키가 아니므로, 저수준 manager를 직접 사용하는 caller는 state 이름만으로 network 제출이 증명됐다고 해석하지 않는다.
 
@@ -147,6 +186,19 @@ await reservationManager.transitionBatch(
 ```
 
 실패 receipt 하나만 확인하고 nullifier 조회를 생략하거나, nullifier 미사용만 보고 tx lookup을 생략하면 안 된다. 어느 한쪽이 불명확하면 `Unknown` 또는 `ManualReview`에 유지한다.
+
+`markBroadcastFailed(...)`는 이 evidence 검증을 `ProofReady`, `Submitted`, `Unknown`에
+적용한다. `Submitted`/`Unknown`은 lease 없이 reconcile할 수 있지만 live `ProofReady`는
+현재 manager의 일치하는 미만료 `leaseToken`도 요구한다. 누락·foreign·stale·expired
+credential은 fail closed한다.
+
+Foreign lease가 만료된 attempted `ProofReady` operation에는
+`recoverExpiredProofReadyBroadcastFailure(...)`만 사용한다. 이 API는 complete linked
+operation과 lookup-key 집합, 저장된 network-tx/tx-bytes/sign-doc identity, positive
+height, confirmed execution failure(단순 부재는 불충분), 전체 input 미사용을 원자적으로
+검증한다. 성공 시 identity·attempt·failure evidence를 보존하고 lease/marker만 정리하며
+동일 evidence는 idempotent하다. Live lease, mixed/partial state, spent input, identity
+conflict는 operation을 바꾸지 않는다.
 
 `transitionBatch(...)`는 전용 helper가 없는 전이에 사용하는 저수준 CAS API다. 허용 전이, lease와 evidence guard를 우회하지 않으며, 일반 제품 코드에서는 `markSubmitted`, `markUnknown`, `markReplanRequired`, `resolveManualReview` 같은 전용 helper를 우선한다.
 

@@ -70,7 +70,7 @@ Cosmos and EVM profiles both contain the following fields.
 | `restEndpoints` | Optional REST candidate list. It cannot be empty or contain duplicates; `rest` is first in the effective order. |
 | `accountPrefix`, `shieldedPrefix` | Bech32 prefixes for account and shielded addresses |
 | `denom`, `displayDenom`, `coinDecimals` | Minimal denom, display denom, and decimals |
-| `proverUrl` | Default HTTP prover base URL for transfer, withdraw, and One-Proof batch |
+| `proverUrl` | Default HTTP prover base URL for transfer, withdraw, and One-Proof batch. A path prefix is preserved when versioned prover routes are appended. |
 | `depositProofUrl` | Optional exact URL dedicated to DepositCircuit; it is not derived from `proverUrl` |
 
 Profile URLs must use `http` or `https` and must not contain a query, fragment, or embedded credential. The runtime validator allows HTTP for local development, but production endpoints should use HTTPS and must not put bearer tokens or private values in URLs.
@@ -223,7 +223,7 @@ Do not concatenate `depositProofUrl` from `proverUrl` or use a fallback. Evaluat
 
 When operating the Clairveil reference prover remotely, the server-side default admission is `max_in_flight=1` per circuit, `max_queued=4`, and positive `max_request_bytes=8,388,608` (8 MiB); zero is invalid. These are prover deployment settings, not `ClairveilBrowserClientOptions`. Do not expose a raw transport handler; expose only a bounded service handler with body limits, authentication, TLS, timeouts, rate limits, and redacted logging.
 
-Client timeout or `AbortSignal` cancels waiting for the response only; it does not guarantee that an in-process solver already running has stopped or that its permit/memory was returned. Current general transfer/withdraw prepare helpers call `rollbackPlanReservation(...)` on this error and use the ClairveilJS-specific atomic release path to move a valid leased `Proving` reservation to `Released`. Do not interpret reservation release as solver/job-cancellation evidence. Async products that need opaque job IDs and checkpoints must track them in a separate operation store. Use a supervised worker process and process isolation when hard cancellation and OOM containment are required.
+Client timeout or `AbortSignal` cancels waiting for the response only; it does not guarantee that an in-process solver already running has stopped or that its permit/memory was returned. Current general transfer/withdraw prepare helpers call `rollbackPlanReservation(...)` on this error. A `Reserved` operation can be released before proving starts, but `Proving` or `ProofReady` is quarantined in `ManualReview` when the current lease permits that transition. Async products that need opaque job IDs and checkpoints must track them in a separate operation store. Use a supervised worker process and process isolation when hard cancellation and OOM containment are required.
 
 The default prover policy is one explicitly selected endpoint with automatic failover disabled. `retryable=true`, a timeout, or queue saturation does not authorize sending the same private witness to another endpoint. Bounded retries to the same endpoint are possible, but sending to an additional endpoint must be implemented by a separate adapter only after explaining and explicitly approving the expanded privacy boundary in user or product policy.
 

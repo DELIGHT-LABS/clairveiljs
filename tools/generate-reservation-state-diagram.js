@@ -72,13 +72,7 @@ const groups = [
         transitions: [
           { to: "Reserved", label: "proof 생성 전 rollback", tone: "confirmed" },
           { to: "ReplanRequired", label: "재계획 필요", tone: "recovery" },
-          { to: "ManualReview", label: "lease / 증명 예외", tone: "uncertain" },
-          {
-            to: "Released",
-            label: "SDK store atomic release",
-            tone: "neutral",
-            special: true
-          }
+          { to: "ManualReview", label: "lease / 증명 예외", tone: "uncertain" }
         ]
       },
       {
@@ -453,7 +447,7 @@ text(1610, 1486, "operation 성공 matcher는 txHash/txBytesHash와 output evide
   fill: colors.muted,
   anchor: "start"
 });
-text(1610, 1510, "SPECIAL = v0.3.1 generic table 외부의 ClairveilJS store atomic release", {
+text(1610, 1510, "Proving 결과가 불명확하면 release하지 않고 ManualReview로 격리", {
   size: 12.5,
   fill: colors.muted,
   anchor: "start"

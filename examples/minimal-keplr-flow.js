@@ -36,6 +36,16 @@ export async function runMinimalClairveilFlow({
 
   await keplr.enable(chainId);
 
+  const fetchLatestChainBlockTimeUnix = async () => {
+    const response = await fetch(`${rest.replace(/\/$/, "")}/cosmos/base/tendermint/v1beta1/blocks/latest`);
+    if (!response.ok) throw new Error(`latest block time query failed with HTTP ${response.status}`);
+    const data = await response.json();
+    const value = data?.block?.header?.time ?? data?.sdk_block?.header?.time;
+    const milliseconds = Date.parse(String(value || ""));
+    if (!Number.isFinite(milliseconds)) throw new Error("latest block response omitted a valid block time");
+    return Math.floor(milliseconds / 1000);
+  };
+
   const material = await clairveil.deriveWalletPrivacyMaterial(wallet);
   if (typeof depositProofProvider !== "function") {
     throw new Error("depositProofProvider is required for Cosmos deposits");
@@ -69,6 +79,10 @@ export async function runMinimalClairveilFlow({
   if (!depositBroadcast.ok) {
     throw new Error(depositBroadcast.error || "Clairveil deposit was broadcast but not confirmed");
   }
+  await clairveil.confirmDeposit({
+    txHash: depositBroadcast.txHash,
+    prepared: deposit
+  });
 
   const scan = await clairveil.scanWalletNotes({
     wallet,
@@ -77,13 +91,16 @@ export async function runMinimalClairveilFlow({
     includeFoundNotes: true
   });
 
+  const chainNowUnix = await fetchLatestChainBlockTimeUnix();
   const transfer = await clairveil.prepareTransfer({
     wallet,
     material,
     amount: transferAmount,
     recipient: recipientShieldedAddress,
     proverAdapter,
-    allowPlanStep: false
+    allowPlanStep: false,
+    chainNowUnix,
+    expiresAtUnix: chainNowUnix + 1800
   });
 
   if (transfer.status !== "ready") {
@@ -92,7 +109,8 @@ export async function runMinimalClairveilFlow({
 
   const broadcast = await clairveil.signDirectAndBroadcast({
     wallet,
-    signDoc: transfer.signDoc
+    signDoc: transfer.signDoc,
+    getChainNowUnix: fetchLatestChainBlockTimeUnix
   });
   if (!broadcast.ok) {
     throw new Error(broadcast.error || "Clairveil transfer was broadcast but not confirmed");
