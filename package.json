@@ -46,6 +46,7 @@
     "docs:diagram:reservation": "node tools/generate-reservation-state-diagram.js",
     "docs:diagram:check": "node tools/generate-architecture-diagram.js --check && node tools/generate-reservation-state-diagram.js --check",
     "codegen:proto": "telescope transpile --config ./telescope.config.json && node tools/patch-generated-helpers.js codegen/generated/helpers.ts codegen/generated/varint.ts && tsc -p tsconfig.codegen.json && node tools/patch-generated-helpers.js src/generated/helpers.js",
+    "check:proto-freshness": "node tools/check-generated-proto-freshness.js",
     "check:codegen": "node tools/patch-generated-helpers.js --check codegen/generated/helpers.ts codegen/generated/varint.ts src/generated/helpers.js",
     "check:generated": "find src/generated -name '*.js' -exec node --check {} \\;",
     "check": "find src -path src/generated -prune -o -name '*.js' -exec node --check {} \\; && find examples -name '*.js' -exec node --check {} \\; && find tools -name '*.js' -exec node --check {} \\; && npm run check:generated && npm run check:codegen && npm run docs:diagram:check",
@@ -59,7 +60,7 @@
     "test:e2e:evm-payable": "node tools/verify-evm-payable-integration.js",
     "verify:clairveil-source": "node tools/verify-clairveil-source.js",
     "verify:package": "npm run check && npm run typecheck && npm test",
-    "verify:release": "npm run verify:package && npm run verify:clairveil-source && npm run test:conformance:required",
+    "verify:release": "npm run verify:package && npm run check:proto-freshness && npm run verify:clairveil-source && npm run test:conformance:required",
     "verify:release:integration": "npm run verify:release && npm run test:e2e:local:one-proof-all && CLAIRVEIL_EVM_PAYABLE_E2E_REQUIRED=1 npm run test:e2e:evm-payable",
     "prepack": "npm run verify:package",
     "prepublishOnly": "npm run verify:release:integration"

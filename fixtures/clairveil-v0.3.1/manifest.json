@@ -1,9 +1,9 @@
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "source": {
     "repository": "https://github.com/DELIGHT-LABS/clairveil",
-    "release": "v0.3.1",
-    "commit": "1a6ce6a0a0e10b765c025072b44c2364e9711b48"
+    "kind": "commit_snapshot",
+    "commit": "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b"
   },
   "files": [
     {
@@ -94,7 +94,7 @@
       "kind": "conformance_fixture",
       "local_path": "fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata/privacy_note_reservation_contract.json",
       "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_note_reservation_contract.json",
-      "sha256": "3ff15bb9688abf1b2d89a9ee9722b12ed12f52d0ba793ea0d5503cbf28ec3c83"
+      "sha256": "b6fa02f6d8927dfe436c8c2525081b037898ecaad26105ca3851699338ce8a2b"
     },
     {
       "kind": "conformance_fixture",
@@ -106,7 +106,7 @@
       "kind": "json_schema",
       "local_path": "fixtures/clairveil-v0.3.1/docs/schemas/clairveil-js-wallet-contract.schema.json",
       "upstream_path": "docs/schemas/clairveil-js-wallet-contract.schema.json",
-      "sha256": "38a574f6781614ec158aa3a98a4374c287edd674ea7f5502b8dc2aa345c32234"
+      "sha256": "d8eb7739b434e195de77151707b4853e4d0818f5d15d57b2b7578ac7d4ae98ab"
     }
   ]
 }

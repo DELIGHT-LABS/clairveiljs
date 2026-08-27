@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fromBech32, toBech32 } from "@cosmjs/encoding";
 import {
   buildRootSigningMessage,
@@ -58,15 +61,20 @@ import {
   requiresReservationLeaseToken,
   reservationStatuses
 } from "clairveiljs/reservation";
-import { runClairveilConformanceFixtures } from "clairveiljs/conformance";
 import {
   batchTransferConformanceFixtureName,
+  clairveilConformanceBundleVersion,
   conformanceFixtureRelativePath,
   defaultConformanceFixtureDir,
   defaultConformanceFixtureNames,
+  noteReservationConformanceFixtureName,
+  noteReservationContractVersionV3,
+  readClairveilConformanceFixture,
+  runClairveilConformanceFixtures,
   supportedClairveilCommit,
-  supportedClairveilRelease,
-  suggestClairveilConformanceFixtureDirs
+  supportedClairveilSourceKind,
+  suggestClairveilConformanceFixtureDirs,
+  validateNoteReservationContractV3
 } from "clairveiljs/conformance";
 import {
   fixtureDir,
@@ -147,14 +155,12 @@ test("conformance helper loads selected handoff fixtures", fixtureTestOptions, a
 test("conformance helper default fixtures include the reservation contract", fixtureTestOptions, async () => {
   assert.ok(defaultConformanceFixtureNames.includes("privacy_batch_joinsplit_v1_contract.json"));
   assert.ok(defaultConformanceFixtureNames.includes(batchTransferConformanceFixtureName));
-  assert.ok(defaultConformanceFixtureNames.includes("privacy_note_reservation_contract.json"));
+  assert.ok(defaultConformanceFixtureNames.includes(noteReservationConformanceFixtureName));
   assert.ok(defaultConformanceFixtureNames.includes("privacy_relay_withdraw_contract.json"));
   const result = await runClairveilConformanceFixtures({ fixtureDir });
-  const contract = result.fixtures["privacy_note_reservation_contract.json"];
-  // Clairveil v0.3.1 publishes reservation contract v1. Later client-only
-  // reservation revisions are exercised by the SDK's own reservation tests
-  // instead of being attributed to the immutable upstream release fixture.
-  assert.equal(contract.version, 1);
+  const contract = result.fixtures[noteReservationConformanceFixtureName];
+  assert.equal(contract.version, noteReservationContractVersionV3);
+  assert.strictEqual(validateNoteReservationContractV3(contract), contract);
   const leaseTransitions = contract.lease_transition_preconditions.token_required_for;
   for (const transition of [
     ["Reserved", "Proving"],
@@ -164,24 +170,122 @@ test("conformance helper default fixtures include the reservation contract", fix
   ]) {
     assert.ok(leaseTransitions.some(actual => actual[0] === transition[0] && actual[1] === transition[1]));
   }
-  assert.ok(
-    contract.success_evidence_required.includes("tx_hash_or_tx_result") ||
-    contract.success_evidence_required.includes("matching_persisted_tx_identity")
-  );
+  assert.ok(contract.success_evidence_required.includes("matching_persisted_tx_identity"));
   assert.ok(contract.success_evidence_required.includes("expected_recipient_hash"));
   assert.ok(contract.success_evidence_required.includes("expected_amount_hash"));
   assert.equal(contract.batch_reserve.atomic, true);
 });
 
+test("reservation contract v3 validator rejects incomplete or downgraded semantics", fixtureTestOptions, () => {
+  const contract = readFixture(noteReservationConformanceFixtureName);
+  assert.strictEqual(validateNoteReservationContractV3(contract), contract);
+
+  const malformed = [
+    {
+      name: "downgraded version",
+      mutate: value => { value.version = 1; },
+      error: /version/
+    },
+    {
+      name: "unexpected root field",
+      mutate: value => { value[""] = true; },
+      error: /unexpected field/
+    },
+    {
+      name: "missing allowed transition",
+      mutate: value => { value.allowed_transitions.pop(); },
+      error: /allowed_transitions length/
+    },
+    {
+      name: "weakened transition evidence",
+      mutate: value => {
+        value.transition_evidence_preconditions[0].positive.proof_discarded = false;
+      },
+      error: /transition_evidence_preconditions\[0\]\.positive\.proof_discarded/
+    },
+    {
+      name: "weakened relay handoff rejection",
+      mutate: value => {
+        value.relay_handoff.negative_vectors[0].payload_hash_matches = true;
+      },
+      error: /relay_handoff\.negative_vectors\[0\]\.payload_hash_matches/
+    },
+    {
+      name: "incomplete heartbeat coverage",
+      mutate: value => { value.fail_closed_runtime_policy.heartbeat.coverage.pop(); },
+      error: /heartbeat\.coverage length/
+    },
+    {
+      name: "mutable write-once evidence",
+      mutate: value => {
+        value.evidence_immutability.mutation_rejection_vectors[0].mutation =
+          value.evidence_immutability.mutation_rejection_vectors[0].original;
+      },
+      error: /original and mutation must differ/
+    },
+    {
+      name: "incorrect identity outcome",
+      mutate: value => {
+        const vector = value.operation_identity_evidence.vectors.find(
+          candidate => candidate.name === "matching identity succeeds"
+        );
+        vector.operation_status = "ConflictSpent";
+      },
+      error: /operation_status/
+    },
+    {
+      name: "missing success example",
+      mutate: value => { value.operation_success_examples.pop(); },
+      error: /operation_success_examples length/
+    }
+  ];
+
+  for (const vector of malformed) {
+    const value = structuredClone(contract);
+    vector.mutate(value);
+    assert.throws(
+      () => validateNoteReservationContractV3(value),
+      vector.error,
+      vector.name
+    );
+  }
+});
+
+test("direct reservation fixture reads enforce the v3 runtime type", fixtureTestOptions, () => {
+  const contract = readClairveilConformanceFixture(
+    noteReservationConformanceFixtureName,
+    { fixtureDir }
+  );
+  assert.equal(contract.version, noteReservationContractVersionV3);
+
+  const temporaryFixtureDir = mkdtempSync(join(tmpdir(), "clairveil-reservation-v3-"));
+  try {
+    const downgraded = structuredClone(contract);
+    downgraded.version = 1;
+    writeFileSync(
+      join(temporaryFixtureDir, noteReservationConformanceFixtureName),
+      JSON.stringify(downgraded)
+    );
+    assert.throws(
+      () => readClairveilConformanceFixture(
+        noteReservationConformanceFixtureName,
+        { fixtureDir: temporaryFixtureDir }
+      ),
+      /note reservation contract v3 version/
+    );
+  } finally {
+    rmSync(temporaryFixtureDir, { recursive: true, force: true });
+  }
+});
+
 test("reservation contract fixtures replay lookup, lease, and tx identity semantics", fixtureTestOptions, async () => {
-  const contract = readFixture("privacy_note_reservation_contract.json");
+  const contract = readFixture(noteReservationConformanceFixtureName);
   const vector = contract.nullifier_lookup_key.test_vectors[0];
   assert.equal(
     nullifierLookupKey(vector.index_key_utf8, vector.nullifier_utf8),
     vector.lookup_key_hex
   );
-  if (!contract.operation_hash_test_vectors || !contract.operation_identity_evidence) return;
-  for (const hashVector of contract.operation_hash_test_vectors || []) {
+  for (const hashVector of contract.operation_hash_test_vectors) {
     assert.equal(hashRecipient(hashVector.recipient), hashVector.recipient_hash);
     assert.equal(
       hashAmount(hashVector.denom, hashVector.amount),
@@ -298,7 +402,7 @@ test("reservation contract fixtures replay lookup, lease, and tx identity semant
 });
 
 test("reservation contract fixture replays state, lease, and direct operation-evidence policy", fixtureTestOptions, async () => {
-  const contract = readFixture("privacy_note_reservation_contract.json");
+  const contract = readFixture(noteReservationConformanceFixtureName);
   assert.deepEqual(activeReservationStatuses, contract.active_reservation_statuses);
   for (const [from, to] of contract.allowed_transitions) {
     assert.equal(canTransitionReservation(from, to), true, `${from} -> ${to}`);
@@ -309,15 +413,13 @@ test("reservation contract fixture replays state, lease, and direct operation-ev
   for (const [from, to] of contract.lease_transition_preconditions.token_required_for) {
     assert.equal(requiresReservationLeaseToken(from, to), true, `${from} -> ${to} requires a lease token`);
   }
-  if (contract.lease_transition_preconditions.recovery_without_token_after_expiry_for) {
-    const actualExpiredLeaseRecoveryTransitions = contract.allowed_transitions.filter(([from, to]) =>
-      canRecoverReservationAfterLeaseExpiry(from, to)
-    );
-    assert.deepEqual(
-      actualExpiredLeaseRecoveryTransitions,
-      contract.lease_transition_preconditions.recovery_without_token_after_expiry_for
-    );
-  }
+  const actualExpiredLeaseRecoveryTransitions = contract.allowed_transitions.filter(([from, to]) =>
+    canRecoverReservationAfterLeaseExpiry(from, to)
+  );
+  assert.deepEqual(
+    actualExpiredLeaseRecoveryTransitions,
+    contract.lease_transition_preconditions.recovery_without_token_after_expiry_for
+  );
 
   const makeManager = () => createNoteReservationManager({
     store: new MemoryReservationStore(),
@@ -373,11 +475,6 @@ test("reservation contract fixture replays state, lease, and direct operation-ev
     amountHash: "AMOUNT",
     denom: "uclair"
   };
-
-  // The v0.2.0 reservation fixture intentionally predates the later
-  // operation-evidence extension.  Its state and lease vectors above remain
-  // normative; only run the extension vectors when the fixture supplies them.
-  if (!contract.evidence_immutability || !contract.operation_identity_evidence) return;
 
   const immutableManager = makeManager();
   const immutableNote = makeNote("ab".repeat(32), 3);
@@ -474,14 +571,15 @@ test("reservation contract fixture replays state, lease, and direct operation-ev
   assert.deepEqual(matching.metadata.operation_success_evidence_errors, []);
 });
 
-test("conformance helper defaults use the bundled v0.3.1 fixture snapshot", () => {
+test("conformance helper defaults use the bundled commit fixture snapshot", () => {
   assert.equal(conformanceFixtureRelativePath, "x/privacy/client/sdk/conformance/testdata");
   assert.equal(
     defaultConformanceFixtureDir,
     `fixtures/clairveil-v0.3.1/${conformanceFixtureRelativePath}`
   );
-  assert.equal(supportedClairveilRelease, "v0.3.1");
-  assert.equal(supportedClairveilCommit, "1a6ce6a0a0e10b765c025072b44c2364e9711b48");
+  assert.equal(clairveilConformanceBundleVersion, "v0.3.1");
+  assert.equal(supportedClairveilSourceKind, "commit_snapshot");
+  assert.equal(supportedClairveilCommit, "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b");
   assert.ok(
     suggestClairveilConformanceFixtureDirs()[0].endsWith(defaultConformanceFixtureDir)
   );

@@ -1,18 +1,21 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  clairveilConformanceBundleVersion,
   conformanceFixtureRelativePath,
   defaultConformanceFixtureNames,
   supportedClairveilCommit,
-  supportedClairveilRelease
+  supportedClairveilSourceKind
 } from "../src/conformance.js";
 
 const defaultPackageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const defaultClairveilSourceRoot = resolve(defaultPackageRoot, "..", "clairveil");
 
-export const clairveilReleaseManifestRelativePath =
-  `fixtures/clairveil-${supportedClairveilRelease}/manifest.json`;
+export const clairveilContractManifestRelativePath =
+  `fixtures/clairveil-${clairveilConformanceBundleVersion}/manifest.json`;
 
 export const clairveilProtoContractRelativePaths = Object.freeze([
   "clairveil/privacy/v1/batch_feasibility.proto",
@@ -34,20 +37,20 @@ function expectedManifestFiles() {
     ...defaultConformanceFixtureNames.map(name => ({
       kind: "conformance_fixture",
       local_path:
-        `fixtures/clairveil-${supportedClairveilRelease}/${conformanceFixtureRelativePath}/${name}`,
+        `fixtures/clairveil-${clairveilConformanceBundleVersion}/${conformanceFixtureRelativePath}/${name}`,
       upstream_path: `${conformanceFixtureRelativePath}/${name}`
     })),
     {
       kind: "json_schema",
       local_path:
-        `fixtures/clairveil-${supportedClairveilRelease}/${walletContractSchemaRelativePath}`,
+        `fixtures/clairveil-${clairveilConformanceBundleVersion}/${walletContractSchemaRelativePath}`,
       upstream_path: walletContractSchemaRelativePath
     }
   ];
 }
 
 function fail(message) {
-  throw new Error(`Clairveil release contract verification failed: ${message}`);
+  throw new Error(`Clairveil contract snapshot verification failed: ${message}`);
 }
 
 function fileSha256(filePath) {
@@ -58,6 +61,40 @@ function fileSha256(filePath) {
   }
 }
 
+function gitOutput(sourceRoot, args, { encoding = "utf8" } = {}) {
+  try {
+    return execFileSync("git", ["-C", sourceRoot, ...args], {
+      encoding,
+      maxBuffer: 32 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+  } catch (error) {
+    const detail = Buffer.isBuffer(error?.stderr)
+      ? error.stderr.toString("utf8").trim()
+      : String(error?.stderr || error?.message || "git command failed").trim();
+    fail(`${detail} (Clairveil source checkout: ${sourceRoot})`);
+  }
+}
+
+function verifyClairveilCommitObject(sourceRoot) {
+  const insideWorkTree = gitOutput(sourceRoot, ["rev-parse", "--is-inside-work-tree"]).trim();
+  if (insideWorkTree !== "true") {
+    fail(`${sourceRoot} is not a Clairveil git checkout`);
+  }
+  const objectType = gitOutput(sourceRoot, ["cat-file", "-t", supportedClairveilCommit]).trim();
+  if (objectType !== "commit") {
+    fail(`${supportedClairveilCommit} is not a commit object in ${sourceRoot}`);
+  }
+}
+
+function clairveilCommitFile(sourceRoot, upstreamPath) {
+  return gitOutput(
+    sourceRoot,
+    ["cat-file", "blob", `${supportedClairveilCommit}:${upstreamPath}`],
+    { encoding: null }
+  );
+}
+
 function readManifest(manifestPath) {
   try {
     return JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -66,25 +103,36 @@ function readManifest(manifestPath) {
   }
 }
 
-export function verifyVendoredClairveilRelease({
-  packageRoot = defaultPackageRoot
+export function verifyVendoredClairveilContractSnapshot({
+  packageRoot = defaultPackageRoot,
+  clairveilSourceRoot = process.env.CLAIRVEIL_SOURCE_DIR || defaultClairveilSourceRoot
 } = {}) {
   const resolvedPackageRoot = resolve(packageRoot);
+  const resolvedClairveilSourceRoot = resolve(clairveilSourceRoot);
+  verifyClairveilCommitObject(resolvedClairveilSourceRoot);
   const manifestPath = join(
     resolvedPackageRoot,
-    clairveilReleaseManifestRelativePath
+    clairveilContractManifestRelativePath
   );
   const manifest = readManifest(manifestPath);
 
-  if (manifest.manifest_version !== 1) {
-    fail(`manifest_version is ${manifest.manifest_version}; expected 1`);
+  if (manifest.manifest_version !== 2) {
+    fail(`manifest_version is ${manifest.manifest_version}; expected 2`);
   }
   if (manifest.source?.repository !== "https://github.com/DELIGHT-LABS/clairveil") {
     fail("manifest source repository is not the Clairveil repository");
   }
-  if (manifest.source?.release !== supportedClairveilRelease) {
+  const sourceKeys = Object.keys(manifest.source || {}).sort();
+  const expectedSourceKeys = ["commit", "kind", "repository"];
+  if (
+    sourceKeys.length !== expectedSourceKeys.length ||
+    sourceKeys.some((key, index) => key !== expectedSourceKeys[index])
+  ) {
+    fail("manifest source must identify only an exact commit snapshot");
+  }
+  if (manifest.source?.kind !== supportedClairveilSourceKind) {
     fail(
-      `manifest release is ${manifest.source?.release}; expected ${supportedClairveilRelease}`
+      `manifest source kind is ${manifest.source?.kind}; expected ${supportedClairveilSourceKind}`
     );
   }
   if (manifest.source?.commit !== supportedClairveilCommit) {
@@ -141,17 +189,31 @@ export function verifyVendoredClairveilRelease({
       fail(`${expected.local_path} has an invalid SHA-256 digest`);
     }
 
-    const actualSha256 = fileSha256(join(resolvedPackageRoot, entry.local_path));
+    const localFilePath = join(resolvedPackageRoot, entry.local_path);
+    const actualSha256 = fileSha256(localFilePath);
     if (actualSha256 !== entry.sha256) {
       fail(
         `${entry.local_path} SHA-256 is ${actualSha256}; expected ${entry.sha256}`
       );
     }
+    const localBytes = readFileSync(localFilePath);
+    const upstreamBytes = clairveilCommitFile(
+      resolvedClairveilSourceRoot,
+      entry.upstream_path
+    );
+    if (!localBytes.equals(upstreamBytes)) {
+      fail(
+        `${entry.local_path} does not match ${entry.upstream_path} at ` +
+        `Clairveil commit ${supportedClairveilCommit}`
+      );
+    }
   }
 
   return {
-    release: supportedClairveilRelease,
+    bundleVersion: clairveilConformanceBundleVersion,
+    sourceKind: supportedClairveilSourceKind,
     commit: supportedClairveilCommit,
+    clairveilSourceRoot: resolvedClairveilSourceRoot,
     manifestPath,
     fileCount: expectedFiles.length,
     protobufCount: clairveilProtoContractRelativePaths.length,
@@ -169,9 +231,10 @@ function isDirectInvocation() {
 
 if (isDirectInvocation()) {
   try {
-    const result = verifyVendoredClairveilRelease();
+    const result = verifyVendoredClairveilContractSnapshot();
     console.log(
-      `verified bundled Clairveil ${result.release} (${result.commit}): ` +
+      `verified bundled Clairveil ${result.sourceKind} ${result.commit} ` +
+      `for ClairveilJS ${result.bundleVersion}: ` +
       `${result.protobufCount} protobufs, ${result.fixtureCount} conformance fixtures, ` +
       `${result.schemaCount} JSON Schema`
     );
