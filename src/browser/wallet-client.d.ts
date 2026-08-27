@@ -7,6 +7,7 @@ import type {
   PrivacyEventsQuery,
   PrivacyEventsCursor,
   PrivacyScanOptions,
+  WalletPrivacyScanOptions,
   PrivacyScanResumeOptions,
   TypedWalletScanOptions,
   QueryRetryOptions,
@@ -37,6 +38,7 @@ import type {
 } from "../privacy/asset-registry.js";
 import type {
   EvmDepositMode,
+  EvmContractAdapter,
   EvmPrivacyAuthorizationTypedDataDomain,
   Eip1193WalletAdapter,
   EvmPrivacyActionAuthorization,
@@ -48,8 +50,12 @@ import type {
   EvmTransactionRequest,
   EvmTransactionIdentityVerification,
   EvmTransactionWallet,
-  EvmWithdrawMessage
+  EvmWithdrawMessage,
+  EvmFinalityEvidence,
+  EvmFinalityMode,
+  EvmFinalityPolicy
 } from "../transport/evm.js";
+import type { PrivacyStateAdapter } from "../transport/privacy-state.js";
 import type { CoinString } from "../core/note.js";
 import type { DisclosureReport } from "../core/disclosure.js";
 import type {
@@ -71,7 +77,7 @@ import type {
 import type { MsgBatchTransfer as MsgBatchTransferMessage } from "../generated/clairveil/privacy/v1/tx.js";
 import type { TransferBatchPlan, TransferPlan, WithdrawPlan } from "../privacy/planner.js";
 import type { NoteReservationManager, ReservationBatch } from "../privacy/reservation.js";
-import type { ScanResult } from "../privacy/scan.js";
+import type { ScanResult, ValidatedPrivacyScanOutputV2 } from "../privacy/scan.js";
 import type { MemoryNoteStore } from "../privacy/note-store.js";
 import type { WalletAdapterLike } from "../wallet/adapter.js";
 
@@ -167,6 +173,20 @@ export type BrowserEvmWalletProfile = BrowserEvmWalletProfileBase & {
 /** A complete, document-validated browser DApp profile. */
 export type BrowserWalletProfile = BrowserCosmosWalletProfile | BrowserEvmWalletProfile;
 
+/**
+ * Runtime-only EVM profile accepted when a complete PrivacyStateAdapter is
+ * injected. Serializable web-client configuration must use BrowserWalletProfile.
+ */
+export type BrowserEvmPrivacyStateAdapterProfile =
+  Omit<BrowserEvmWalletProfile, "rpc" | "rest"> & {
+    rpc?: string;
+    rest?: string;
+  };
+
+export type BrowserRuntimeWalletProfile =
+  | BrowserWalletProfile
+  | BrowserEvmPrivacyStateAdapterProfile;
+
 export type BrowserWalletType = "cosmos" | "evm";
 
 /** Server-provided feature visibility flags from clairveil-web-client-config-v1. */
@@ -228,7 +248,10 @@ export type ValidatedClairveilWebClientConfig = Omit<ClairveilWebClientConfig, "
 };
 
 export interface ClairveilBrowserClientOptions {
-  profile?: BrowserWalletProfile;
+  profile?: BrowserRuntimeWalletProfile;
+  /** Direct-construction transport; set to EVM when no validated profile is supplied. */
+  transport?: BrowserWalletType;
+  walletType?: BrowserWalletType;
   rpc?: string;
   rest?: string;
   restEndpoints?: string[];
@@ -253,12 +276,18 @@ export interface ClairveilBrowserClientOptions {
   nullifierFailover?: boolean;
   /** Allow Merkle witness and exact-snapshot queries to fail over across REST endpoints. */
   merklePathFailover?: boolean;
+  /** Contract-getter, indexer, or REST replacement for every privacy-state read. */
+  privacyStateAdapter?: PrivacyStateAdapter;
   evmRpc?: string;
   evmChainId?: string;
   evmPrivacyPrecompileAddress?: string;
   evmDepositMode?: EvmDepositMode;
   evmNativeDenom?: string;
   evmAuthorizationProfile?: BrowserEvmAuthorizationProfile;
+  /** Runtime adapter injection; its contract address must match an active EVM profile. */
+  evmContractAdapter?: EvmContractAdapter;
+  /** Runtime EVM finality/reorg policy. EVM confirmation fails closed when omitted. */
+  evmFinalityPolicy?: EvmFinalityMode | EvmFinalityPolicy;
   evmGasLimit?: string;
   evmSendGasLimit?: string;
   enableExperimentalBatchTransfer?: boolean;
@@ -316,9 +345,12 @@ export interface BrowserEvmTransactionWaitResult {
   transactionVerification: Readonly<EvmTransactionIdentityVerification> | null;
   /** Action-specific EVM privacy-event verification. */
   privacyReceipt: Readonly<{ verified: true; event: string; operation: string }> | null;
+  /** Verification evidence produced by the selected EVM finality policy. */
+  finality: Readonly<EvmFinalityEvidence> | null;
   tx: EvmRpcTransaction | object | null;
   evmTransactionVerified: boolean;
   evmPrivacyReceiptVerified: boolean;
+  evmFinalityVerified: boolean;
   ok: boolean;
   error: string;
   errors: string[];
@@ -383,6 +415,10 @@ export type PrepareDepositBaseInput = Omit<BrowserWalletIdentityInput, "walletTy
   depositMaterial?: object;
   deposit_material?: object;
   signal?: AbortSignal;
+  gasLimit?: number;
+  gas_limit?: number;
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
 };
 
 export type PrepareCosmosDepositInput = PrepareDepositBaseInput & PrepareDepositProofInput & {
@@ -445,37 +481,16 @@ export type PreparedDeposit = PreparedCosmosDeposit | PreparedEvmDeposit;
 export type PreparedDepositForDefault<TDefaultWalletType extends BrowserWalletType> =
   TDefaultWalletType extends "evm" ? PreparedEvmDeposit : PreparedCosmosDeposit;
 
-export type DirectOperationEvidenceHashes =
-  | {
-      expectedRecipientHash?: never;
-      expected_recipient_hash?: never;
-      expectedAmountHash?: never;
-      expected_amount_hash?: never;
-    }
-  | {
-      expectedRecipientHash: string;
-      expectedAmountHash: string;
-      expected_recipient_hash?: string;
-      expected_amount_hash?: string;
-    }
-  | {
-      expected_recipient_hash: string;
-      expected_amount_hash: string;
-      expectedRecipientHash?: string;
-      expectedAmountHash?: string;
-    }
-  | {
-      expectedRecipientHash: string;
-      expected_amount_hash: string;
-      expected_recipient_hash?: string;
-      expectedAmountHash?: string;
-    }
-  | {
-      expected_recipient_hash: string;
-      expectedAmountHash: string;
-      expectedRecipientHash?: string;
-      expected_amount_hash?: string;
-    };
+export type DirectOperationEvidenceHashes = {
+  /** Optional assertion; the SDK always derives this hash from `recipient`. */
+  expectedRecipientHash?: string;
+  /** Snake-case alias for `expectedRecipientHash`. */
+  expected_recipient_hash?: string;
+  /** Optional assertion; the SDK always derives this hash from `amount`. */
+  expectedAmountHash?: string;
+  /** Snake-case alias for `expectedAmountHash`. */
+  expected_amount_hash?: string;
+};
 
 type AuthoritativeBrowserTransferPreparationTime =
   | { chainNowUnix: number; chain_now_unix?: number }
@@ -634,6 +649,9 @@ export type PrepareTransferBatchInput = BrowserWalletIdentityInput &
   root_hex?: Hex;
   snapshotHeight?: number | bigint | string;
   snapshot_height?: number | bigint | string;
+  /** Advanced deterministic selection; every listed typed-scan note is consumed in this order. */
+  inputCommitmentHexes?: readonly Hex[];
+  input_commitment_hexes?: readonly Hex[];
   disableSelfViewDisclosure?: boolean;
   disable_self_view_disclosure?: boolean;
   selfViewDisclosureTargetPubKeyHex?: Hex;
@@ -953,6 +971,7 @@ export interface PreparedEvmRelayWithdraw extends ReservationReconciliationState
   payload: PreparedWithdrawPayload;
   signDoc?: never;
   transaction: EvmTransactionRequest;
+  txBytesHash: string;
   reservation?: ReservationBatch | null;
   prepared: PreparedEvmRelayWithdrawSummary;
   plan: WithdrawPlan;
@@ -1009,6 +1028,12 @@ export interface DecodeUserDisclosureInput extends Partial<BrowserWalletIdentity
   asset_denom?: string;
   skipSignerPubKeyCheck?: boolean;
   skip_signer_pubkey_check?: boolean;
+  disclosureScalar?: bigint | string | number;
+  disclosure_scalar?: bigint | string | number;
+  disclosureScalarHex?: Hex;
+  disclosure_scalar_hex?: Hex;
+  disclosurePubKeyHex?: Hex;
+  disclosure_pubkey_hex?: Hex;
 }
 
 export interface DecodeSelfViewDisclosureInput extends DecodeUserDisclosureInput {
@@ -1116,8 +1141,10 @@ export class ClairveilBrowserClient<
   TDefaultWalletType extends BrowserWalletType = "cosmos",
   TProfileTransport extends BrowserProfileTransport = null
 > {
-  constructor(options: ClairveilBrowserClientOptions & { profile: BrowserWalletProfile & { transport: TProfileTransport } });
+  constructor(options: ClairveilBrowserClientOptions & { profile: BrowserRuntimeWalletProfile & { transport: TProfileTransport } });
   constructor(options?: ClairveilBrowserClientOptions);
+  privacyStateAdapter: Readonly<PrivacyStateAdapter> | null;
+  evmFinalityPolicy: Readonly<EvmFinalityPolicy> | null;
   /**
    * Verify the configured chain, tree, and audit configuration.
    *
@@ -1176,6 +1203,7 @@ export class ClairveilBrowserClient<
     sender: string;
     attempts?: number;
     intervalMs?: number;
+    finalityPolicy?: EvmFinalityMode | EvmFinalityPolicy;
   }): Promise<BrowserEvmTransactionWaitResult>;
   /**
    * Executes an allowlisted read request against the configured EVM JSON-RPC endpoint.
@@ -1274,7 +1302,7 @@ export class ClairveilBrowserClient<
 }
 
 export function createClairveilBrowserClient<TWalletType extends BrowserWalletType>(
-  options: ClairveilBrowserClientOptions & { profile: BrowserWalletProfile & { transport: TWalletType } }
+  options: ClairveilBrowserClientOptions & { profile: BrowserRuntimeWalletProfile & { transport: TWalletType } }
 ): ClairveilBrowserClient<TWalletType, TWalletType>;
 export function createClairveilBrowserClient(options?: ClairveilBrowserClientOptions): ClairveilBrowserClient;
 export function validateBrowserWalletProfile<TProfile extends BrowserWalletProfile>(profile: TProfile): TProfile;
@@ -1288,6 +1316,6 @@ export type BrowserDappProfile = BrowserWalletProfile;
 export type ClairveilBrowserDappClientOptions = ClairveilBrowserClientOptions;
 export { ClairveilBrowserClient as ClairveilBrowserDappClient };
 export function createClairveilBrowserDappClient<TWalletType extends BrowserWalletType>(
-  options: ClairveilBrowserClientOptions & { profile: BrowserWalletProfile & { transport: TWalletType } }
+  options: ClairveilBrowserClientOptions & { profile: BrowserRuntimeWalletProfile & { transport: TWalletType } }
 ): ClairveilBrowserClient<TWalletType, TWalletType>;
 export function createClairveilBrowserDappClient(options?: ClairveilBrowserClientOptions): ClairveilBrowserClient;

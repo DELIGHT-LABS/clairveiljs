@@ -490,8 +490,15 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
       }))
     })
   );
-  const proofReadyReservations = await markOneProofPayrollReservationProofReady(reservationManager, reservation, execution);
+  const payrollSignDocHash = "ab".repeat(32);
+  const proofReadyReservations = await markOneProofPayrollReservationProofReady(
+    reservationManager,
+    reservation,
+    execution,
+    { signDocHash: payrollSignDocHash }
+  );
   assert.equal(proofReadyReservations[0].status, "ProofReady");
+  assert.equal(proofReadyReservations[0].sign_doc_hash, payrollSignDocHash);
   assert.equal(proofReadyReservations[0].metadata.operation_success_evidence_required, true);
   assert.equal(proofReadyReservations[0].expected_operation_evidence_hash, oneProofPayrollOperationEvidenceHash(execution.operation_evidence));
   const markerSignDoc = payrollCosmosSignDoc(execution.message);
@@ -1090,7 +1097,9 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     full_disclosure_digest: item.expected_audit_disclosure_digest,
     recipient_hash: item.expected_recipient_hash,
     amount_hash: item.expected_amount_hash,
-    denom: item.expected_denom
+    denom: item.expected_denom,
+    audit_key_id: item.audit_key_id,
+    audit_key_epoch: item.audit_key_epoch
   }));
   const operationReconciliation = await reconcileOneProofPayrollOperationEvidence({
     prepared,
@@ -1235,6 +1244,31 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     /authoritative CircuitConfig resolver is required/
   );
   assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence, observed_outputs: observed, tx_succeeded: true })[0].status, "Succeeded");
+  assert.equal(reconcileOneProofPayrollEvidence({
+    expected_evidence: prepared.expected_evidence,
+    observed_outputs: observed.map(item => ({ ...item, audit_key_id: "rotated-audit-key" })),
+    tx_succeeded: true
+  })[0].status, "ManualReview");
+  assert.equal(reconcileOneProofPayrollEvidence({
+    expected_evidence: prepared.expected_evidence,
+    observed_outputs: observed.map(item => ({ ...item, audit_key_epoch: "99" })),
+    tx_succeeded: true
+  })[0].status, "ManualReview");
+  assert.throws(() => reconcileOneProofPayrollEvidence({
+    expected_evidence: prepared.expected_evidence,
+    observed_outputs: observed.map(item => ({ ...item, auditKeyId: "conflicting-audit-key" })),
+    tx_succeeded: true
+  }), /audit key ID aliases conflict/);
+  assert.throws(() => reconcileOneProofPayrollEvidence({
+    expected_evidence: prepared.expected_evidence,
+    observed_outputs: observed.map(item => ({ ...item, auditKeyEpoch: BigInt(item.audit_key_epoch) + 1n })),
+    tx_succeeded: true
+  }), /audit key epoch aliases conflict/);
+  assert.throws(() => reconcileOneProofPayrollEvidence({
+    expected_evidence: prepared.expected_evidence,
+    observed_outputs: observed.map(item => ({ ...item, recipientHash: "00".repeat(32) })),
+    tx_succeeded: true
+  }), /recipient hash aliases conflict/);
   assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence, tx_succeeded: true })[0].status, "ManualReview");
   assert.equal(reconcileOneProofPayrollEvidence({ expected_evidence: prepared.expected_evidence })[0].status, "Pending");
 });

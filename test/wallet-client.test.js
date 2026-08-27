@@ -5,7 +5,13 @@ import {
   resolveActiveClairveilWebClientProfile,
   validateClairveilWebClientConfig
 } from "clairveiljs/browser-dapp";
+import { CURVE_BASE, encodeShieldedAddress } from "clairveiljs/core";
+import { createEvmContractAdapter } from "clairveiljs/evm";
 import { fixtureTestOptions, readFixture } from "./helpers.js";
+
+const validClairsRecipient = encodeShieldedAddress(CURVE_BASE, CURVE_BASE, {
+  shieldedPrefix: "clairs"
+});
 
 function browserClient(options = {}) {
   return new ClairveilBrowserClient({
@@ -93,6 +99,24 @@ function webEvmProfile(overrides = {}) {
   };
 }
 
+function completePrivacyStateAdapter() {
+  const empty = async () => ({});
+  return {
+    fetchPrivacyScan: empty,
+    fetchTreeState: empty,
+    fetchCommitmentInfo: empty,
+    lookupMerklePath: empty,
+    fetchAuditConfig: empty,
+    fetchDisclosureConfig: empty,
+    fetchCircuitConfig: empty,
+    fetchReserve: empty,
+    fetchAssetByDenom: empty,
+    fetchAssetByID: empty,
+    fetchCommitmentPathsAtRoot: empty,
+    checkNullifiers: async () => ({})
+  };
+}
+
 test("profiled browser clients retain the caller's explicit batch opt-in", () => {
   const client = browserClient({
     profile: webCosmosProfile(),
@@ -147,6 +171,32 @@ test("browser Web config validation resolves one complete active profile and rej
   );
 });
 
+test("EVM browser profile may omit Cosmos REST and RPC only with a complete privacy state adapter", () => {
+  const profile = webEvmProfile();
+  delete profile.rpc;
+  delete profile.rest;
+
+  assert.throws(
+    () => new ClairveilBrowserClient({ profile }),
+    /profile\.rpc must be a string/
+  );
+  assert.throws(
+    () => validateClairveilWebClientConfig({
+      schemaVersion: "clairveil-web-client-config-v1",
+      activeChainProfileId: profile.id,
+      chainProfiles: [profile]
+    }),
+    /config\.chainProfiles\[0\].*profile\.rpc must be a string/
+  );
+  const client = new ClairveilBrowserClient({
+    profile,
+    privacyStateAdapter: completePrivacyStateAdapter()
+  });
+  assert.equal(client.rpc, "");
+  assert.equal(client.rest, "");
+  assert.ok(client.privacyStateAdapter);
+});
+
 test("waitForEvmTransaction requires RPC identity and privacy-event verification", async () => {
   const client = browserClient({ profile: webEvmProfile() });
   const txHash = `0x${"ab".repeat(32)}`;
@@ -165,18 +215,124 @@ test("waitForEvmTransaction requires RPC identity and privacy-event verification
     value: privacyTransaction.value,
     chainId: privacyTransaction.chainId
   };
-  client.waitForEvmReceipt = async () => ({ transactionHash: txHash, status: "0x01", logs: [] });
+  client.waitForEvmReceipt = async () => ({
+    transactionHash: txHash,
+    status: "0x01",
+    blockNumber: "0xa",
+    blockHash: `0x${"12".repeat(32)}`,
+    logs: []
+  });
   client.evmJsonRpc = async method => method === "eth_chainId" ? "0x539" : rpcTransaction;
   client.evm.verifyTransactionIdentity = () => ({ verified: true, txHash });
   client.evm.verifyPrivacyReceipt = () => ({ verified: true, event: "PrivacyTransfer", operation: "transfer" });
 
-  const result = await client.waitForEvmTransaction(txHash, { privacyTransaction, sender });
+  const result = await client.waitForEvmTransaction(txHash, {
+    privacyTransaction,
+    sender,
+    finalityPolicy: "receipt"
+  });
 
   assert.equal(result.ok, true);
   assert.equal(result.error, "");
   assert.equal(result.tx, rpcTransaction);
   assert.equal(result.evmTransactionVerified, true);
   assert.equal(result.evmPrivacyReceiptVerified, true);
+  assert.equal(result.evmFinalityVerified, true);
+  assert.equal(result.finality.mode, "receipt");
+});
+
+test("waitForEvmTransaction fails closed when no EVM finality policy is configured", async () => {
+  const client = browserClient({ profile: webEvmProfile() });
+  const txHash = `0x${"ad".repeat(32)}`;
+  const sender = "0x1111111111111111111111111111111111111111";
+  const privacyTransaction = {
+    to: "0x0000000000000000000000000000000000000900",
+    data: "0x1234",
+    value: "0x0",
+    chainId: "0x539"
+  };
+  client.waitForEvmReceipt = async () => ({
+    transactionHash: txHash,
+    status: "0x1",
+    blockNumber: "0xa",
+    blockHash: `0x${"13".repeat(32)}`,
+    logs: []
+  });
+  client.evmJsonRpc = async method => method === "eth_chainId" ? "0x539" : ({
+    hash: txHash,
+    from: sender,
+    to: privacyTransaction.to,
+    input: privacyTransaction.data,
+    value: privacyTransaction.value,
+    chainId: privacyTransaction.chainId
+  });
+  client.evm.verifyTransactionIdentity = () => ({ verified: true, txHash });
+  client.evm.verifyPrivacyReceipt = () => ({
+    verified: true,
+    event: "PrivacyTransfer",
+    operation: "transfer"
+  });
+
+  const result = await client.waitForEvmTransaction(txHash, { privacyTransaction, sender });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.finality, null);
+  assert.equal(result.evmFinalityVerified, false);
+  assert.match(result.error, /finality policy is required/);
+});
+
+test("waitForEvmTransaction accepts custom calldata only through its adapter receipt verifier", async () => {
+  const profile = webEvmProfile();
+  const sender = "0x1111111111111111111111111111111111111111";
+  const txHash = `0x${"ac".repeat(32)}`;
+  const adapter = createEvmContractAdapter({
+    contractAddress: profile.evmPrivacyPrecompileAddress,
+    encodeTransfer: () => "0xdeadbeef",
+    verifyPrivacyReceipt({ receipt, operation }) {
+      assert.equal(receipt.logs[0].data, "0xcafe");
+      return { verified: true, operation, event: "CustomPrivacyTransfer" };
+    }
+  });
+  const client = browserClient({ profile, evmContractAdapter: adapter });
+  const prepared = await client.evm.buildTransferTransaction({ message: {} });
+  const rpcTransaction = {
+    hash: txHash,
+    from: sender,
+    to: prepared.transaction.to,
+    input: prepared.transaction.data,
+    value: prepared.transaction.value,
+    chainId: profile.evmChainId
+  };
+  client.waitForEvmReceipt = async () => ({
+    transactionHash: txHash,
+    status: "0x1",
+    blockNumber: "0xa",
+    blockHash: `0x${"14".repeat(32)}`,
+    logs: [{ address: prepared.transaction.to, topics: [], data: "0xcafe" }]
+  });
+  client.evmJsonRpc = async method => method === "eth_chainId"
+    ? profile.evmChainId
+    : rpcTransaction;
+
+  const result = await client.waitForEvmTransaction(txHash, {
+    privacyTransaction: prepared.transaction,
+    sender,
+    finalityPolicy: "receipt"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.transactionVerification.operation, "transfer");
+  assert.equal(result.privacyReceipt.event, "CustomPrivacyTransfer");
+  assert.equal(result.evmFinalityVerified, true);
+  assert.throws(
+    () => browserClient({
+      profile,
+      evmContractAdapter: createEvmContractAdapter({
+        contractAddress: "0x0000000000000000000000000000000000000999"
+      })
+    }),
+    /contractAddress conflicts/
+  );
 });
 
 test("waitForEvmTransaction keeps missing receipt status ambiguous", async () => {
@@ -206,6 +362,7 @@ test("waitForEvmTransaction keeps missing receipt status ambiguous", async () =>
   assert.match(result.error, /explicit successful receipt status/);
   assert.doesNotMatch(result.error, /failed with receipt status/);
   assert.equal(result.evmPrivacyReceiptVerified, false);
+  assert.equal(result.evmFinalityVerified, false);
 });
 
 test("waitForEvmTransaction rejects receipt-status-only confirmation", async () => {
@@ -434,6 +591,43 @@ test("browser batch preparation rejects conflicting snapshot and disclosure alia
     }),
     /pubKeyHex aliases conflict/
   );
+  await assert.rejects(
+    () => client.prepareWithdraw({
+      amount: "1uclair",
+      recipient: "clair1recipient",
+      expiresAtUnix: 10,
+      expires_at_unix: 11
+    }),
+    /expiresAtUnix aliases conflict/
+  );
+  await assert.rejects(
+    () => client.prepareWithdraw({
+      amount: "1uclair",
+      recipient: "clair1recipient",
+      chainNowUnix: 10,
+      chain_now_unix: 11
+    }),
+    /chainNowUnix aliases conflict/
+  );
+  await assert.rejects(
+    () => client.prepareRelayWithdraw({
+      amount: "1uclair",
+      recipient: "clair1recipient",
+      expiresAtUnix: 10,
+      expires_at_unix: 11,
+      chainNowUnix: 9
+    }),
+    /expiresAtUnix aliases conflict/
+  );
+  await assert.rejects(
+    () => client.prepareRelayWithdraw({
+      amount: "1uclair",
+      recipient: "clair1recipient",
+      chainNowUnix: 10,
+      now_unix: 11
+    }),
+    /chainNowUnix aliases conflict/
+  );
 });
 
 test("browser batch preparation forwards profile fees to the Cosmos sign-doc path", async () => {
@@ -523,7 +717,10 @@ test("browser client delegates signDirectAndBroadcast to the Cosmos client", asy
 test("browser Cosmos deposit preserves exact encrypted output for confirmation", async () => {
   const client = browserClient();
   client.privacyMaterial = () => ({ address: "clair1sender", rootSeed: new Uint8Array(32) });
-  client.cosmos.prepareDeposit = async () => ({
+  let received = null;
+  client.cosmos.prepareDeposit = async input => {
+    received = input;
+    return ({
     signDoc: { chainId: "clairveil-local-3" },
     material: {
       note_commitment_hex: "11".repeat(32),
@@ -531,12 +728,20 @@ test("browser Cosmos deposit preserves exact encrypted output for confirmation",
       amount: "1uclair",
     },
     privacyAccount: { shielded_address: "clairs1sender" },
-  });
+    });
+  };
 
-  const prepared = await client.prepareDeposit({ amount: "1uclair", proofHex: "ab" });
+  const prepared = await client.prepareDeposit({
+    amount: "1uclair",
+    proofHex: "ab",
+    gas_limit: 3123456,
+    fee_amount: [{ denom: "uclair", amount: "17" }]
+  });
 
   assert.equal(prepared.prepared.noteCommitmentHex, "11".repeat(32));
   assert.equal(prepared.prepared.encryptedNoteHex, "22".repeat(48));
+  assert.equal(received.gas_limit, 3123456);
+  assert.deepEqual(received.fee_amount, [{ denom: "uclair", amount: "17" }]);
 });
 
 test("browser profile uses only its pinned DepositCircuit endpoint", async () => {
@@ -1031,40 +1236,31 @@ test("browser client uses an injected prover adapter and bearer auth for the HTT
   }
 });
 
-test("browser relay cleanup preserves a frozen transaction build error", async () => {
-  const client = browserClient();
+test("browser relay execution builder preserves a frozen transaction build error", async () => {
+  const client = browserClient({
+    evmPrivacyPrecompileAddress: "0x0000000000000000000000000000000000000900"
+  });
   client.privacyMaterial = () => ({});
   client.proverAdapter = () => ({});
-  const reservation = {
-    reservation_ids: ["reservation-1"],
-    lease_token: "lease-token"
-  };
-  client.cosmos.prepareRelayWithdraw = async () => ({
-    status: "ready",
-    payload: {},
-    proof: {},
-    proverPayload: {},
-    selectedNote: {},
-    reservation,
-    privacyAccount: { shielded_address: "clairs1sender" }
-  });
   const original = Object.freeze(new Error("frozen EVM transaction build failure"));
   client.evm.buildWithdrawTransaction = async () => {
     throw original;
   };
-  const reservationManager = {
-    async markReplanRequired() {
-      throw new Error("reservation cleanup failed");
-    }
-  };
+  client.cosmos.prepareRelayWithdraw = async input => input.executionBuilder({
+    payload: {},
+    proof: {},
+    proverPayload: {},
+    selectedNote: {},
+    plan: {},
+    reservation: null
+  });
 
   await assert.rejects(
     () => client.prepareRelayWithdraw({
       walletType: "evm",
       amount: "1uclair",
       recipient: "clair1recipient",
-      chainNowUnix: 4102444800,
-      reservationManager
+      chainNowUnix: 4102444800
     }),
     error => error === original
   );
@@ -1110,6 +1306,26 @@ test("browser relay helpers preserve legacy chain-time aliases", async () => {
     nowUnix: 4102444802
   });
   assert.equal(signDocInput.chainNowUnix, 4102444802);
+
+  assert.throws(
+    () => client.buildRelayWithdrawMessageFromPayload({
+      payload: {},
+      address: "clair1relayer",
+      chainNowUnix: 4102444800,
+      nowUnix: 4102444801
+    }),
+    /chainNowUnix aliases conflict/
+  );
+  await assert.rejects(
+    () => client.createRelayWithdrawSignDoc({
+      payload: {},
+      address: "clair1relayer",
+      pubKeyHex: "02".padEnd(66, "0"),
+      chain_now_unix: 4102444800,
+      now_unix: 4102444801
+    }),
+    /chainNowUnix aliases conflict/
+  );
 });
 
 test("browser health fails closed when a required chain query fails", async () => {
@@ -1123,6 +1339,27 @@ test("browser health fails closed when a required chain query fails", async () =
   await assert.rejects(
     () => client.health(),
     /browser health check failed: tree endpoint unavailable/
+  );
+});
+
+test("endpoint-less default Cosmos browser health fails closed instead of reporting EVM", async () => {
+  const client = new ClairveilBrowserClient({
+    chainId: "clairveil-local-3",
+    privacyStateAdapter: completePrivacyStateAdapter()
+  });
+  client.cosmos.fetchTreeState = async () => ({
+    root: "00".repeat(32),
+    leaf_count: "0",
+    depth: 32,
+    initialized: true,
+    max_leaves: "4294967296",
+    remaining_leaves: "4294967296"
+  });
+  client.cosmos.queryAuditConfig = async () => ({ audit_key_id: "audit-key-1" });
+
+  await assert.rejects(
+    () => client.health(),
+    /browser health check failed: Cosmos RPC endpoint is required/
   );
 });
 
@@ -1182,7 +1419,7 @@ test("browser health permits only an empty uninitialized tree when explicitly re
 test("browser EVM prepareTransfer preflights audit and disclosure config before scanning notes", async () => {
   const client = browserClient({
     evmChainId: "0x7a69",
-    evmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b"
+    evmPrivacyPrecompileAddress: "0x0000000000000000000000000000000000000900"
   });
   client.privacyMaterial = () => ({
     rootSeed: new Uint8Array(32),
@@ -1201,7 +1438,7 @@ test("browser EVM prepareTransfer preflights audit and disclosure config before 
     () => client.prepareTransfer({
       walletType: "evm",
       amount: "1uclair",
-      recipient: "clairs1recipient"
+      recipient: validClairsRecipient
     }),
     /active audit config is invalid/
   );

@@ -1,9 +1,20 @@
-import { deriveShieldedAddress, derivePrivacyMaterial } from "clairveiljs/core";
+import { deriveShieldedAddress, derivePrivacyMaterial, hexFromBytes } from "clairveiljs/core";
 import { createNoteReservationManager as createRootNoteReservationManager } from "clairveiljs";
 import { createClairveilPublicClient } from "clairveiljs/browser-public";
 import {
+  createPrivacyStateAdapter,
+  type PrivacyStateAdapter
+} from "clairveiljs/privacy-state";
+import {
+  createEvmFinalityPolicy,
+  waitForEvmFinality,
+  type EvmFinalityEvidence
+} from "clairveiljs/evm-finality";
+import {
   ClairveilBrowserDappClient,
   createClairveilBrowserDappClient,
+  type BrowserEvmPrivacyStateAdapterProfile,
+  type ClairveilWebClientConfig,
   type DecodeAuditDisclosureInput,
   type DecodeSelfViewDisclosureInput,
   type PrepareDepositInput,
@@ -47,11 +58,19 @@ import {
   type BatchPrivacyScanDisclosureOutputV2,
   type DisclosureReport
 } from "clairveiljs/disclosure";
-import type { NullifierStatusReader, PreparedWithdrawPayload, WithdrawMessage } from "clairveiljs/payload";
+import {
+  buildTransferMsgFromPayloadAndProof,
+  type NullifierStatusReader,
+  type PreparedTransferPayload,
+  type PreparedTransferProof,
+  type PreparedWithdrawPayload,
+  type WithdrawMessage
+} from "clairveiljs/payload";
 import { buildPreparedTransferV5Payload } from "clairveiljs/transfer-v5";
 import {
   createPrivacyScanValidationStateV2,
   scanNotes,
+  type ValidatedPrivacyScanOutputV2,
   type ValidatedPrivacyScanPageV2
 } from "clairveiljs/scan";
 import type { PreparedBatchTransferPayload } from "clairveiljs/batch-transfer";
@@ -88,6 +107,7 @@ import {
   parseOneProofPayrollArtifact,
   provePreparedOneProofPayrollOperation,
   reconcileOneProofPayrollOperationEvidence,
+  reconcileOneProofPayrollReservation,
   resumeOneProofPayrollArtifact,
   retransmitOneProofPayrollArtifact,
   type NotePreparationReport,
@@ -120,11 +140,13 @@ import {
 import {
   bech32AddressToEvm,
   createClairveilEvmClient,
+  createEvmContractAdapter,
   createEip1193WalletAdapter,
+  defaultEvmPrivacyPrecompileAddress,
   evmAddressToBech32,
+  evmPrivacyPrecompileAddress,
   type Eip1193WalletAdapter,
-  functionSelector,
-  evmPrivacyPrecompileAddress
+  functionSelector
 } from "clairveiljs/evm";
 import type { WalletAdapterLike } from "clairveiljs/wallet-adapter";
 import type { MsgDeposit as GeneratedMsgDepositWithExtension } from "clairveiljs/generated/clairveil/privacy/v1/tx.js";
@@ -242,6 +264,29 @@ async function provePayrollOperationTypes(): Promise<void> {
     checkNullifiers: async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]))
   });
   const reservationBatch = {} as OneProofPayrollReservationBatch;
+  await reconcileOneProofPayrollReservation({
+    reservationManager,
+    reservationBatch,
+    prepared,
+    operationEvidence,
+    txFailed: true,
+    checked_height: 123,
+    checkedHeight: "123",
+    tx_hash_checked: "TX-HASH",
+    txHashChecked: "TX-HASH",
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]))
+  });
+  await reconcileOneProofPayrollReservation({
+    reservationManager,
+    reservationBatch,
+    prepared,
+    operationEvidence,
+    txFailed: true,
+    checkedHeight: 123,
+    // @ts-expect-error Checked transaction hashes must be strings.
+    txHashChecked: true,
+    checkNullifiers: async nullifiers => new Map(nullifiers.map(nullifier => [nullifier, false]))
+  });
   const artifact: OneProofPayrollArtifact = createOneProofPayrollArtifact({
     prepared,
     execution: proven,
@@ -345,6 +390,55 @@ const cosmos = createClairveilClient({
   nullifierFailover: false,
   merklePathFailover: false,
   enableExperimentalBatchTransfer: true
+});
+declare const cosmosTransferSignDocInput: Parameters<typeof cosmos.prepareTransfer>[0];
+declare const cosmosTransferBatchSignDocInput: Parameters<typeof cosmos.prepareTransferBatch>[0];
+declare const cosmosWithdrawSignDocInput: Parameters<typeof cosmos.prepareWithdraw>[0];
+// @ts-expect-error Cosmos sign-doc helpers cannot return an executionBuilder artifact.
+cosmos.createTransferSignDoc({ ...cosmosTransferSignDocInput, executionBuilder: async () => ({}) });
+// @ts-expect-error Cosmos sign-doc helpers cannot return an executionBuilder artifact.
+cosmos.createTransferBatchSignDoc({ ...cosmosTransferBatchSignDocInput, executionBuilder: async () => ({}) });
+// @ts-expect-error Cosmos sign-doc helpers cannot return an executionBuilder artifact.
+cosmos.createWithdrawSignDoc({ ...cosmosWithdrawSignDocInput, executionBuilder: async () => ({}) });
+declare const privacyStateAdapterImplementation: PrivacyStateAdapter;
+const privacyStateAdapter = createPrivacyStateAdapter(privacyStateAdapterImplementation);
+const adapterOnlyEvmProfile: BrowserEvmPrivacyStateAdapterProfile = {
+  id: "evm-adapter-only",
+  label: "EVM adapter only",
+  chainName: "EVM adapter only",
+  chainId: "evm-only-1",
+  transport: "evm",
+  wallet: "metamask",
+  accountPrefix: "clair",
+  shieldedPrefix: "clairs",
+  denom: "uclair",
+  displayDenom: "CLAIR",
+  coinDecimals: 6,
+  proverUrl: "https://prover.example",
+  evmRpc: "https://evm.example",
+  evmChainId: "0x539",
+  evmChainName: "EVM adapter only",
+  evmPrivacyPrecompileAddress: "0x0000000000000000000000000000000000000900",
+  evmNativeDenom: "uclair",
+  evmGasLimit: "0x989680",
+  evmSendGasLimit: "0x5208"
+};
+const adapterOnlyBrowserClient = new ClairveilBrowserDappClient({
+  profile: adapterOnlyEvmProfile,
+  privacyStateAdapter
+});
+const adapterOnlyBrowserStateAdapter: Readonly<PrivacyStateAdapter> | null = adapterOnlyBrowserClient.privacyStateAdapter;
+const adapterOnlyClient = createClairveilClient({
+  chainId: "evm-only-1",
+  privacyStateAdapter
+});
+const adapterTree: Promise<object> = adapterOnlyClient.fetchTreeState();
+const confirmationPolicy = createEvmFinalityPolicy({ mode: "confirmations", confirmations: 12 });
+const finalityEvidence: Promise<Readonly<EvmFinalityEvidence>> = waitForEvmFinality({
+  txHash: `0x${"12".repeat(32)}`,
+  receipt: {},
+  rpc: async () => null,
+  policy: confirmationPolicy
 });
 const publicClient = createClairveilPublicClient({
   rest: "http://127.0.0.1:1317",
@@ -544,6 +638,48 @@ const evmProfileDappClient = createClairveilBrowserDappClient({
     evmSendGasLimit: "0x5208"
   }
 });
+const customEvmContractAdapter = createEvmContractAdapter({
+  contractAddress: "0x0000000000000000000000000000000000000900",
+  verifyPrivacyReceipt: ({ operation }) => ({
+    verified: true,
+    operation,
+    event: "CustomPrivacyOperation"
+  })
+});
+createClairveilBrowserDappClient({
+  profile: {
+    id: "demo-custom-evm",
+    label: "Demo Custom EVM",
+    chainName: "Demo Custom EVM",
+    transport: "evm",
+    wallet: "metamask",
+    chainId: "demo-custom-evm-1",
+    rpc: "http://127.0.0.1:26657",
+    accountPrefix: "demo",
+    shieldedPrefix: "demos",
+    denom: "udemo",
+    displayDenom: "DEMO",
+    coinDecimals: 6,
+    proverUrl: "http://127.0.0.1:8080",
+    rest: "http://127.0.0.1:1317",
+    evmRpc: "http://127.0.0.1:8545",
+    evmChainId: "0x539",
+    evmChainName: "Demo Custom EVM",
+    evmPrivacyPrecompileAddress: "0x0000000000000000000000000000000000000900",
+    evmNativeDenom: "udemo",
+    evmGasLimit: "0x989680",
+    evmSendGasLimit: "0x5208"
+  },
+  evmContractAdapter: customEvmContractAdapter
+});
+const webConfigRejectsRuntimeAdapter: ClairveilWebClientConfig = {
+  schemaVersion: "clairveil-web-client-config-v1",
+  activeChainProfileId: "none",
+  chainProfiles: [],
+  // @ts-expect-error Runtime adapters contain functions and are not web-client JSON config.
+  evmContractAdapter: customEvmContractAdapter
+};
+void webConfigRejectsRuntimeAdapter;
 const typedEvmReceipt = evmProfileDappClient.evmJsonRpc<{ blockNumber: string } | null>(
   "eth_getTransactionReceipt",
   ["0x".padEnd(66, "0")]
@@ -638,11 +774,9 @@ const expectedRecipientHash: string = hashRecipient(shielded);
 const customRecipientHash: string = hashRecipient(shielded, { shieldedPrefix: "demos" });
 void customRecipientHash;
 const expectedAmountHash: string = hashAmount("uclair", 42n);
-// @ts-expect-error direct operation evidence is none-or-both, never one hash alone.
 const incompleteBrowserOperationEvidence: BrowserDirectOperationEvidenceHashes = {
   expectedRecipientHash: "recipient-hash"
 };
-// @ts-expect-error Cosmos direct operation evidence follows the same none-or-both contract.
 const incompleteCosmosOperationEvidence: CosmosDirectOperationEvidenceHashes = {
   expected_amount_hash: "amount-hash"
 };
@@ -737,6 +871,17 @@ const submittedAliasReservations = reservationManager.markSubmitted([], {
   leaseToken: "lease",
   submitted_tx_hash: "TX-ALIAS"
 });
+const relaySubmittedReservations = reservationManager.recordRelaySubmission([], {
+  leaseToken: "lease",
+  payloadHash: "relay-payload",
+  txHash: "RELAY-TX"
+});
+// @ts-expect-error relay submission requires a network tx hash, not only a prepared transaction hash.
+reservationManager.recordRelaySubmission([], {
+  leaseToken: "lease",
+  payloadHash: "relay-payload",
+  txBytesHash: "prepared-transaction"
+});
 // @ts-expect-error markSubmitted requires txHash or txBytesHash; signDocHash alone can exist before broadcast.
 reservationManager.markSubmitted([], {
   leaseToken: "lease",
@@ -786,6 +931,16 @@ const depositInput: PrepareDepositInput = {
   gasLimit: 2500000,
   feeAmount: [{ denom: "udemo", amount: "1250" }]
 };
+const browserBankSendSignDoc: Promise<SignDocBase64> = dappClient.buildBankSendSignDoc({
+  from: "demo1sender",
+  pubKeyHex: "02".repeat(33),
+  to: "demo1recipient",
+  amount: "1udemo",
+  gasLimit: 200000n,
+  gas_limit: 200000n,
+  feeAmount: [{ denom: "udemo", amount: "5" }],
+  fee_amount: [{ denom: "udemo", amount: "5" }]
+});
 const transferInput: PrepareCosmosTransferInput = {
   ...walletIdentity,
   amount: "1udemo",
@@ -797,7 +952,7 @@ const transferInput: PrepareCosmosTransferInput = {
   expectedAmountHash: "amount-hash",
   feeAmount: [{ denom: "udemo", amount: "200000" }],
   scan: {
-    afterHeight: 0,
+    after: { height: 0, globalSequence: 0, outputIndex: 0 },
     limit: 200,
     maxPages: 1000
   },
@@ -817,17 +972,17 @@ const invalidCosmosTransferEvidence: PrepareCosmosTransferInput = {
   recipient: "demos1recipient",
   expectedRecipientHash: "recipient-hash"
 };
-// @ts-expect-error Explicit EVM transfer evidence requires both recipient and amount hashes.
 const invalidEvmTransferEvidence: PrepareEvmTransferInput = {
   ...walletIdentity,
   walletType: "evm",
+  evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demos1recipient",
   expectedAmountHash: "amount-hash"
 };
-// @ts-expect-error Default EVM profile transfer evidence requires both hashes.
 const invalidDefaultEvmTransferEvidence: PrepareDefaultEvmProfileTransferInput = {
   ...walletIdentity,
+  evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demos1recipient",
   expectedRecipientHash: "recipient-hash"
@@ -838,7 +993,7 @@ const withdrawInput: PrepareCosmosWithdrawInput = {
   recipient: "demo1recipient",
   fee_amount: [{ denom: "udemo", amount: "125000" }],
   scan: {
-    afterHeight: 0,
+    after: { height: 0, globalSequence: 0, outputIndex: 0 },
     limit: 200,
     maxPages: 1000
   },
@@ -962,8 +1117,12 @@ const evmWaitResult = evmProfileDappClient.waitForEvmTransaction(`0x${"ab".repea
   sender: "0x1111111111111111111111111111111111111111"
 });
 evmWaitResult.then(result => {
-  const verified: boolean = result.evmTransactionVerified && result.evmPrivacyReceiptVerified;
+  const verified: boolean = result.evmTransactionVerified &&
+    result.evmPrivacyReceiptVerified &&
+    result.evmFinalityVerified;
+  const finality: EvmFinalityEvidence | null = result.finality;
   void verified;
+  void finality;
 });
 // @ts-expect-error EVM confirmation requires the original prepared request and sender.
 evmProfileDappClient.waitForEvmTransaction(`0x${"ab".repeat(32)}`);
@@ -973,6 +1132,8 @@ const transferBatchInput: PrepareCosmosTransferBatchInput = {
   ...batchSafetyBindings,
   amounts: ["1udemo", "2udemo"],
   recipient: "demos1recipient",
+  feeAmount: [{ denom: "udemo", amount: "7" }],
+  fee_amount: [{ denom: "udemo", amount: "7" }],
   expectedRecipientHash: "recipient-hash",
   expectedAmountHashes: ["amount-hash-0", "amount-hash-1"]
 };
@@ -1046,7 +1207,8 @@ const evmTransferBatchInput: PrepareEvmTransferBatchInput = {
   walletType: "evm",
   evmWallet: evmPreparationWallet,
   amounts: ["1udemo"],
-  recipient: "demos1recipient"
+  recipient: "demos1recipient",
+  inputCommitmentHexes: ["01".repeat(32)]
 };
 const evmTransferBatchResult: Promise<PreparedEvmTransferBatch> = evmProfileDappClient.prepareTransferBatch(evmTransferBatchInput);
 // @ts-expect-error EVM batch preparation requires the connected EVM wallet binding.
@@ -1170,15 +1332,23 @@ const cosmosPreparedTransferBatch = cosmos.prepareTransferBatch({
   material,
   amounts: ["1udemo", "2udemo"],
   recipient: "demos1recipient",
+  feeAmount: [{ denom: "udemo", amount: "11" }],
+  fee_amount: [{ denom: "udemo", amount: "11" }],
   proverAdapter: undefined as never,
-  afterHeight: 10,
-  afterSequence: 11,
+  after: { height: 10, globalSequence: 11, outputIndex: 0 },
+  inputCommitmentHexes: ["01".repeat(32)],
   expectedRecipientHash: "recipient-hash",
   expectedAmountHashes: ["amount-hash-0", "amount-hash-1"],
   fee_amount: [{ denom: "udemo", amount: "250000" }],
   reservationManager,
   onPreparedPayload() {},
   onPreparedProof() {}
+});
+cosmos.queryCommitmentPathsAtRoot({
+  commitmentHexes: ["01".repeat(32)],
+  rootHex: "02".repeat(32),
+  // @ts-expect-error deterministic batch input selection is not a path-query option.
+  inputCommitmentHexes: ["03".repeat(32)]
 });
 const checkpointedBatchPayload = undefined as unknown as PreparedBatchTransferPayload;
 const finalizedCosmosBatch = cosmos.finalizePreparedBatchTransfer({
@@ -1209,6 +1379,7 @@ const finalizedDappBatch: Promise<FinalizedCosmosPreparedBatchTransfer> = dappCl
   reservation: {} as ReservationBatch,
   chainNowUnix: 4102444800
 });
+void browserBankSendSignDoc;
 const finalizedEvmBatch: Promise<FinalizedEvmPreparedBatchTransfer> = evmProfileDappClient.finalizePreparedBatchTransfer({
   payload: checkpointedBatchPayload,
   proof: undefined as never,
@@ -1297,8 +1468,7 @@ cosmos.prepareRelayWithdraw({
   amount: "1udemo",
   recipient: "demo1recipient",
   proverAdapter: undefined as never,
-  after_height: 40,
-  after_sequence: 41,
+  after: { height: 40, globalSequence: 41, outputIndex: 0 },
   expiresAtUnix: 4102448400,
   chainNowUnix: 4102444800
 });
@@ -1308,28 +1478,28 @@ const nativeSendTx = evmProfileDappClient.evmNativeSendTransaction({
   amount: "1udemo"
 });
 const relayBroadcastPayload = {} as PreparedWithdrawPayload;
-const nativeSendResult: Promise<string> = createClairveilEvmClient().sendTransaction(null, nativeSendTx);
-const reservationBoundEvmSendResult: Promise<string> = createClairveilEvmClient().sendTransaction(
+const nativeSendResult: Promise<string> = createClairveilEvmClient({ contractAddress: testPrivacyContractAddress }).sendTransaction(null, nativeSendTx);
+const reservationBoundEvmSendResult: Promise<string> = createClairveilEvmClient({ contractAddress: testPrivacyContractAddress }).sendTransaction(
   null,
   nativeSendTx,
   { reservationManager, reservation: {} as ReservationBatch }
 );
-const reservationBatchBoundEvmSendResult: Promise<string> = createClairveilEvmClient().sendTransaction(
+const reservationBatchBoundEvmSendResult: Promise<string> = createClairveilEvmClient({ contractAddress: testPrivacyContractAddress }).sendTransaction(
   null,
   nativeSendTx,
   { reservationManager, reservationBatch: {} as ReservationBatch }
 );
-const snakeReservationBatchBoundEvmSendResult: Promise<string> = createClairveilEvmClient().sendTransaction(
+const snakeReservationBatchBoundEvmSendResult: Promise<string> = createClairveilEvmClient({ contractAddress: testPrivacyContractAddress }).sendTransaction(
   null,
   nativeSendTx,
   { reservation_manager: reservationManager, reservation_batch: {} as ReservationBatch }
 );
-createClairveilEvmClient().sendTransaction(null, nativeSendTx, {
+createClairveilEvmClient({ contractAddress: testPrivacyContractAddress }).sendTransaction(null, nativeSendTx, {
   relayPayload: relayBroadcastPayload,
   getChainNowUnix: async () => 4102444800
 });
 // @ts-expect-error relay EVM broadcasts require authoritative chain time at the submission boundary.
-createClairveilEvmClient().sendTransaction(null, nativeSendTx, { relayPayload: relayBroadcastPayload });
+createClairveilEvmClient({ contractAddress: testPrivacyContractAddress }).sendTransaction(null, nativeSendTx, { relayPayload: relayBroadcastPayload });
 const cleanInitialReservation: InitialNoteReservationRecord = {
   reservation_id: "reservation-a",
   owner_key_id: "chain:demo1owner",
@@ -1411,7 +1581,7 @@ void missingStatusRowUsageReader;
 void conflictingNullifierAliasReader;
 planTransferBatchNotes({ notes: [legacyFoundNote], amounts: ["1udemo"] });
 // @ts-expect-error reserved-note broadcasts require both manager and reservation batch.
-createClairveilEvmClient().sendTransaction(null, nativeSendTx, { reservationManager });
+createClairveilEvmClient({ contractAddress: testPrivacyContractAddress }).sendTransaction(null, nativeSendTx, { reservationManager });
 const reservationBoundCosmosBroadcast = cosmos.broadcastSignedTx(
   { bodyBytes: "" as never, authInfoBytes: "" as never, signature: "" as never },
   {
@@ -1561,7 +1731,7 @@ async function browserDappTypeSmoke() {
 
   const scan = await scanResult;
   const spendableTotal: string = scan.summary.total_spendable;
-  const nextScanAfterHeight: number | string | undefined = scan.nextScanOptions.after?.height ?? scan.nextScanOptions.afterHeight;
+  const nextScanAfterHeight: number | string | undefined = scan.nextScanOptions.after?.height;
   const nullifier = await nullifierResult;
   const nullifierUsed: boolean | undefined = nullifier.used;
   const dappReserve = await dappReserveResult;
@@ -1615,7 +1785,6 @@ const evm = createClairveilEvmClient({
 evm.buildDepositTransaction({ amount: "1udemo" });
 evm.buildDepositTransaction({ amount: "1udemo", proof: new Uint8Array([1]) });
 const selector: string = functionSelector("deposit((bytes,bytes,bytes))");
-const evmPrecompileAddress: string = evmPrivacyPrecompileAddress;
 const bech32: string = evmAddressToBech32("0x1111111111111111111111111111111111111111", "demo");
 const evmAddress: string = bech32AddressToEvm(bech32, "demo");
 const evmExistingTransferMessage = {
@@ -1761,7 +1930,6 @@ void {
   evmTransactionTypeSmoke,
   evm,
   selector,
-  evmPrecompileAddress,
   bech32,
   evmAddress
 };

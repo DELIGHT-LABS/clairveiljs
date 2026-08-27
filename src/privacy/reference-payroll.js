@@ -1208,16 +1208,25 @@ function preparedFromPayrollExecution(execution) {
 }
 
 /** Bind a proven one-proof payroll execution to its claimed reservations before broadcast. */
-export async function markOneProofPayrollReservationProofReady(reservationManager, reservationBatch, execution, { metadata = {} } = {}) {
+export async function markOneProofPayrollReservationProofReady(reservationManager, reservationBatch, execution, {
+  signDocHash,
+  sign_doc_hash,
+  metadata = {}
+} = {}) {
   const { prepared } = preparedFromPayrollExecution(execution);
   const reservationSet = await payrollReservationSet(reservationManager, prepared, reservationBatch);
   const evidence = execution.operation_evidence;
   const operationEvidenceHash = oneProofPayrollOperationEvidenceHash(evidence);
+  const resolvedSignDocHash = consistentPayrollBroadcastIdentity(
+    "sign-doc hash",
+    [signDocHash, sign_doc_hash]
+  );
   if (reservationStatusesAre(reservationSet.reservations, "ProofReady")) {
     if (reservationSet.reservations.some(reservation =>
       text(reservation.payload_hash) !== evidence.payload_hash ||
       text(reservation.metadata?.payroll_proof_hash) !== text(evidence.proof_hash) ||
       text(reservation.expected_operation_evidence_hash) !== operationEvidenceHash ||
+      (resolvedSignDocHash && text(reservation.sign_doc_hash) !== resolvedSignDocHash) ||
       reservation.metadata?.operation_success_evidence_required !== true
     )) {
       throw new Error("one-proof payroll ProofReady reservation evidence does not match the execution");
@@ -1231,6 +1240,7 @@ export async function markOneProofPayrollReservationProofReady(reservationManage
   return Object.freeze(await reservationManager.markProofReady(reservationSet.reservationIDs, {
     leaseToken: reservationBatch.lease_token,
     payloadHash: evidence.payload_hash,
+    ...(resolvedSignDocHash ? { signDocHash: resolvedSignDocHash } : {}),
     expectedOperationEvidenceHash: operationEvidenceHash,
     operationSuccessEvidenceRequired: true,
     metadata: payrollReservationMetadata(evidence, metadata)
@@ -2478,6 +2488,7 @@ export async function createOneProofPayrollBatchSignDoc(execution, {
     feeAmount,
     fee_amount,
     message,
+    chainNowUnix: resolvedNowUnix,
     expectedCircuitIdentity: circuitConfig.circuit_set_identity,
     ...(memo === undefined ? {} : { memo })
   });
@@ -2606,7 +2617,11 @@ function payrollReconciliationSuccessEvidence(operationEvidence, {
   sign_doc_hash,
   signDocHash,
   tx_result,
-  txResult
+  txResult,
+  checked_height,
+  checkedHeight,
+  tx_hash_checked,
+  txHashChecked
 } = {}) {
   if (tx_result !== undefined && txResult !== undefined && JSON.stringify(tx_result) !== JSON.stringify(txResult)) {
     throw new Error("one-proof payroll reconciliation tx result aliases must match");
@@ -2686,14 +2701,26 @@ export async function reconcileOneProofPayrollReservation({
   sign_doc_hash,
   signDocHash,
   tx_result,
-  txResult
+  txResult,
+  checked_height,
+  checkedHeight,
+  tx_hash_checked,
+  txHashChecked
 } = {}) {
   const manager = reservation_manager ?? reservationManager;
   const batch = reservation_batch ?? reservationBatch;
   const evidence = operation_evidence ?? operationEvidence;
-  if (!manager || typeof manager.reconcileSpentNotes !== "function" || typeof manager.markReplanRequired !== "function" || typeof manager.markManualReview !== "function") {
+  if (!manager || typeof manager.reconcileSpentNotes !== "function" || typeof manager.markBroadcastFailed !== "function" || typeof manager.markManualReview !== "function") {
     throw new Error("a NoteReservationManager with reconciliation support is required");
   }
+  const resolvedCheckedHeight = consistentPayrollBroadcastIdentity(
+    "checked height",
+    [checked_height, checkedHeight]
+  );
+  const resolvedTxHashChecked = consistentPayrollBroadcastIdentity(
+    "checked transaction hash",
+    [tx_hash_checked, txHashChecked]
+  );
   const reservationSet = await payrollReservationSet(manager, prepared, batch);
   throwIfPayrollReservationStateMixed(reservationSet.reservations);
   const reconciliation = await reconcileOneProofPayrollOperationEvidence({
@@ -2755,11 +2782,12 @@ export async function reconcileOneProofPayrollReservation({
       ? "Unknown"
       : "";
   if (reconciliation.status === "Failed" && failedFromStatus) {
-    const reservations = await manager.markReplanRequired(reservationSet.reservationIDs, {
-      fromStatus: failedFromStatus,
-      leaseToken: batch.lease_token,
+    const reservations = await manager.markBroadcastFailed(reservationSet.reservationIDs, {
+      checkedHeight: resolvedCheckedHeight,
+      txHashChecked: resolvedTxHashChecked,
       nullifierUnspentConfirmed: true,
       txAbsentOrFailedConfirmed: true,
+      error: "payroll_transaction_failed_unspent",
       metadata: payrollReservationMetadata(evidence, {
         reconcile_reason: "payroll_transaction_failed_unspent",
         payroll_reconciliation_status: reconciliation.status
@@ -2771,20 +2799,62 @@ export async function reconcileOneProofPayrollReservation({
   return Object.freeze({ reconciliation, reservation_action: manual.action, reservations: Object.freeze([...manual.reservations]) });
 }
 
+function consistentObservedEvidenceAlias(value, names, label, normalize) {
+  const aliases = names
+    .map(name => value[name])
+    .filter(alias => alias !== undefined && alias !== null);
+  if (!aliases.length) return normalize(undefined);
+  const normalized = aliases.map(alias => normalize(alias));
+  if (normalized.some(alias => alias !== normalized[0])) {
+    throw new Error(`${label} aliases conflict`);
+  }
+  return normalized[0];
+}
+
 function observedEvidenceByIndex(observedOutputs) {
   if (!Array.isArray(observedOutputs)) throw new Error("observed one-proof payroll outputs must be an array");
   const observed = new Map();
   for (const value of observedOutputs) {
     if (!value || typeof value !== "object") throw new Error("observed one-proof payroll output must be an object");
-    const index = Number(value.batch_item_index ?? value.batchItemIndex ?? value.output_index ?? value.outputIndex);
+    const index = consistentObservedEvidenceAlias(
+      value,
+      ["batch_item_index", "batchItemIndex", "output_index", "outputIndex"],
+      "observed one-proof payroll output index",
+      Number
+    );
     if (!Number.isSafeInteger(index) || index < 0 || observed.has(index)) throw new Error("observed one-proof payroll outputs require unique non-negative output indexes");
+    const digest = (names, label) => consistentObservedEvidenceAlias(
+      value,
+      names,
+      `observed output ${index} ${label}`,
+      alias => canonicalDigest(alias, `observed output ${index} ${label}`)
+    );
     observed.set(index, {
-      commitment: canonicalDigest(value.commitment ?? value.expected_output_commitment ?? value.expectedOutputCommitment, `observed output ${index} commitment`),
-      user: canonicalDigest(value.user_disclosure_digest ?? value.userDisclosureDigest, `observed output ${index} user disclosure digest`),
-      full: canonicalDigest(value.full_disclosure_digest ?? value.fullDisclosureDigest ?? value.audit_disclosure_digest ?? value.auditDisclosureDigest, `observed output ${index} full disclosure digest`),
-      recipient: canonicalDigest(value.recipient_hash ?? value.recipientHash, `observed output ${index} recipient hash`),
-      amount: canonicalDigest(value.amount_hash ?? value.amountHash, `observed output ${index} amount hash`),
-      denom: text(value.denom ?? value.expected_denom ?? value.expectedDenom)
+      commitment: digest(["commitment", "expected_output_commitment", "expectedOutputCommitment"], "commitment"),
+      user: digest(["user_disclosure_digest", "userDisclosureDigest"], "user disclosure digest"),
+      full: digest(["full_disclosure_digest", "fullDisclosureDigest", "audit_disclosure_digest", "auditDisclosureDigest"], "full disclosure digest"),
+      recipient: digest(["recipient_hash", "recipientHash"], "recipient hash"),
+      amount: digest(["amount_hash", "amountHash"], "amount hash"),
+      denom: consistentObservedEvidenceAlias(
+        value,
+        ["denom", "expected_denom", "expectedDenom"],
+        `observed output ${index} denom`,
+        text
+      ),
+      auditKeyID: consistentObservedEvidenceAlias(
+        value,
+        ["audit_key_id", "auditKeyId"],
+        `observed output ${index} audit key ID`,
+        text
+      ),
+      auditKeyEpoch: consistentObservedEvidenceAlias(
+        value,
+        ["audit_key_epoch", "auditKeyEpoch"],
+        `observed output ${index} audit key epoch`,
+        alias => text(alias) === ""
+          ? ""
+          : canonicalUint64(alias, `observed output ${index} audit key epoch`, { positive: true }).toString()
+      )
     });
   }
   return observed;
@@ -2812,7 +2882,9 @@ export function reconcileOneProofPayrollEvidence({ expected_evidence, expectedEv
       [item.expected_audit_disclosure_digest, value.full, "full disclosure digest"],
       [item.expected_recipient_hash, value.recipient, "recipient hash"],
       [item.expected_amount_hash, value.amount, "amount hash"],
-      [item.expected_denom, value.denom, "denom"]
+      [item.expected_denom, value.denom, "denom"],
+      [item.audit_key_id, value.auditKeyID, "audit key ID"],
+      [String(item.audit_key_epoch), value.auditKeyEpoch, "audit key epoch"]
     ].find(([needed, actual]) => needed !== actual);
     return mismatch
       ? { item_id: item.item_id, batch_item_index: item.batch_item_index, status: "ManualReview", reason: `typed output evidence ${mismatch[2]} does not match` }

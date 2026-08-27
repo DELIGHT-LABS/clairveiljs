@@ -4,6 +4,7 @@ import type {
   ValidatedPrivacyScanPageV2
 } from "../privacy/scan.js";
 import type { ValidatedDisclosureConfigV1 } from "../privacy/network-config.js";
+import type { PrivacyStateAdapter } from "./privacy-state.js";
 
 export * from "../core/crypto.js";
 export * from "../core/disclosure.js";
@@ -20,6 +21,7 @@ export * from "../privacy/merkle-path.js";
 export * from "../privacy/note-store.js";
 export * from "../core/schemas.js";
 export * from "../wallet/adapter.js";
+export * from "./privacy-state.js";
 export {
   UserDisclosureMode,
   userDisclosureModeFromJSON,
@@ -478,7 +480,8 @@ export interface WalletScanInput extends TypedWalletScanOptions {
 }
 
 export interface ClairveilClientOptions {
-  rpc: string;
+  /** Required for Cosmos transaction/balance APIs; optional for adapter-backed EVM state queries. */
+  rpc?: string;
   rest?: string;
   restEndpoints?: string[];
   chainId: string;
@@ -494,6 +497,8 @@ export interface ClairveilClientOptions {
   nullifierFailover?: boolean;
   /** Allow Merkle witness and exact-snapshot queries to fail over across REST endpoints. */
   merklePathFailover?: boolean;
+  /** Replaces Clairveil REST privacy reads while preserving SDK validation/planning. */
+  privacyStateAdapter?: PrivacyStateAdapter;
   expectedCircuitIdentity?: CircuitSetIdentityV1;
   /** Explicit downstream gate required until this integration passes its own localnet matrix. */
   enableExperimentalBatchTransfer?: boolean;
@@ -650,6 +655,8 @@ export interface PreparedRelayWithdraw extends ReservationReconciliationState {
   proof?: PreparedWithdrawProof;
   payload?: PreparedWithdrawPayload;
   selectedNote?: FoundNote;
+  /** Present when executionBuilder atomically bound a downstream execution artifact before ProofReady. */
+  execution?: PreparedWithdrawExecutionArtifact;
   reservation?: ReservationBatch | null;
   privacyAccount: PrivacyAccountSummary;
 }
@@ -735,37 +742,16 @@ export function assertTransferDisclosureCapabilities(
 ): { policy: string; mode: string };
 export function cosmosSignDocBindingHash(signDoc: Pick<SignDocBase64, "bodyBytes" | "authInfoBytes">): Hex;
 
-export type DirectOperationEvidenceHashes =
-  | {
-      expectedRecipientHash?: never;
-      expected_recipient_hash?: never;
-      expectedAmountHash?: never;
-      expected_amount_hash?: never;
-    }
-  | {
-      expectedRecipientHash: string;
-      expectedAmountHash: string;
-      expected_recipient_hash?: string;
-      expected_amount_hash?: string;
-    }
-  | {
-      expected_recipient_hash: string;
-      expected_amount_hash: string;
-      expectedRecipientHash?: string;
-      expectedAmountHash?: string;
-    }
-  | {
-      expectedRecipientHash: string;
-      expected_amount_hash: string;
-      expected_recipient_hash?: string;
-      expectedAmountHash?: string;
-    }
-  | {
-      expected_recipient_hash: string;
-      expectedAmountHash: string;
-      expectedRecipientHash?: string;
-      expected_amount_hash?: string;
-    };
+export type DirectOperationEvidenceHashes = {
+  /** Optional assertion; the SDK always derives this hash from `recipient`. */
+  expectedRecipientHash?: string;
+  /** Snake-case alias for `expectedRecipientHash`. */
+  expected_recipient_hash?: string;
+  /** Optional assertion; the SDK always derives this hash from `amount`. */
+  expectedAmountHash?: string;
+  /** Snake-case alias for `expectedAmountHash`. */
+  expected_amount_hash?: string;
+};
 
 type BatchRecipientHashEvidence =
   | {
@@ -956,6 +942,15 @@ export type PreparedWithdrawExecutionBuilder = (input: {
   reservation: ReservationBatch | null;
 }) => PreparedWithdrawExecutionArtifact | Promise<PreparedWithdrawExecutionArtifact>;
 
+export type PreparedRelayWithdrawExecutionBuilder = (input: {
+  payload: PreparedWithdrawPayload;
+  proof: PreparedWithdrawProof;
+  proverPayload: PreparedWithdrawProverPayload;
+  selectedNote: FoundNote;
+  plan: WithdrawPlan;
+  reservation: ReservationBatch | null;
+}) => PreparedWithdrawExecutionArtifact | Promise<PreparedWithdrawExecutionArtifact>;
+
 export type PreparedBatchTransferExecutionBuilder = (input: {
   payload: PreparedBatchTransferPayload;
   proof: PreparedBatchTransferProof;
@@ -1005,6 +1000,9 @@ export type PrepareTransferBatchInput = {
   root_hex?: Hex;
   snapshotHeight?: Uint64CursorInput;
   snapshot_height?: Uint64CursorInput;
+  /** Advanced deterministic selection; every listed typed-scan note is consumed in this order. */
+  inputCommitmentHexes?: readonly Hex[];
+  input_commitment_hexes?: readonly Hex[];
   disableSelfViewDisclosure?: boolean;
   disable_self_view_disclosure?: boolean;
   selfViewDisclosureTargetPubKeyHex?: Hex;
@@ -1065,6 +1063,8 @@ export type FinalizePreparedBatchTransferInput = {
   feeAmount?: readonly CosmosFeeCoin[];
   fee_amount?: readonly CosmosFeeCoin[];
   memo?: string;
+  feeAmount?: readonly CosmosFeeCoin[];
+  fee_amount?: readonly CosmosFeeCoin[];
   userPrivacyPolicy?: string | number;
   userDisclosureMode?: string | number;
   userDisclosureTargetPubKeyHex?: Hex;
@@ -1099,6 +1099,7 @@ export class ClairveilJS {
   disconnect(): Promise<void>;
   restEndpoints: string[];
   activeRestEndpoint: string;
+  privacyStateAdapter: Readonly<PrivacyStateAdapter> | null;
   restUrl(path: string, endpoint?: string): string;
   fetchJson<T = object>(pathOrUrl: string, options?: {
     failover?: boolean;
@@ -1158,7 +1159,7 @@ export class ClairveilJS {
     lookupMerklePath(commitmentHex: Hex): Promise<object>;
   }>;
   lookupMerklePath(commitmentHex: Hex): Promise<object>;
-  checkNullifier(nullifierHex: Hex): Promise<object>;
+  checkNullifier(nullifierHex: Hex): Promise<{ nullifier: string; used: boolean }>;
   checkNullifiers(nullifierHexes: readonly Hex[]): Promise<Map<Hex, boolean>>;
   deriveWalletPrivacyMaterial(wallet: WalletAdapterLike): Promise<PrivacyMaterial>;
   scanNotes(input: WalletScanInput): Promise<ScanResult & {
@@ -1318,6 +1319,7 @@ export class ClairveilJS {
     scanSource?: "privacy_scan";
     scan_source?: "privacy_scan";
     expiresAtUnix?: number;
+    expires_at_unix?: number;
     chainNowUnix?: number;
     chain_now_unix?: number;
     /** Exact profile/caller-selected fee coins, snapshotted before proof preparation. */
@@ -1347,12 +1349,13 @@ export class ClairveilJS {
     scanSource?: "privacy_scan";
     scan_source?: "privacy_scan";
     expiresAtUnix?: number;
+    expires_at_unix?: number;
     reservationManager?: NoteReservationManager | null;
     reservation_manager?: NoteReservationManager | null;
   } & TypedWalletScanOptions & RelayChainTimeInput): Promise<PreparedRelayWithdraw>;
   createDepositSignDoc(input: Parameters<ClairveilJS["prepareDeposit"]>[0]): Promise<PreparedDeposit>;
-  createTransferSignDoc(input: Parameters<ClairveilJS["prepareTransfer"]>[0]): Promise<PreparedTransfer & { status: "ready"; signDoc: SignDocBase64 }>;
-  createTransferBatchSignDoc(input: Parameters<ClairveilJS["prepareTransferBatch"]>[0]): Promise<PreparedTransferBatch & { status: "ready"; signDoc: SignDocBase64 }>;
+  createTransferSignDoc(input: Omit<Parameters<ClairveilJS["prepareTransfer"]>[0], "executionBuilder"> & { executionBuilder?: never }): Promise<PreparedTransfer & { status: "ready"; signDoc: SignDocBase64 }>;
+  createTransferBatchSignDoc(input: Omit<Parameters<ClairveilJS["prepareTransferBatch"]>[0], "executionBuilder"> & { executionBuilder?: never }): Promise<PreparedTransferBatch & { status: "ready"; signDoc: SignDocBase64 }>;
   createBatchTransferSignDoc(input: {
     signer: ClairAddress;
     pubKeyHex: Hex;
@@ -1366,7 +1369,7 @@ export class ClairveilJS {
     chainNowUnix?: number;
     chain_now_unix?: number;
   }): Promise<SignDocBase64>;
-  createWithdrawSignDoc(input: Parameters<ClairveilJS["prepareWithdraw"]>[0]): Promise<PreparedWithdrawReady>;
+  createWithdrawSignDoc(input: Omit<Parameters<ClairveilJS["prepareWithdraw"]>[0], "executionBuilder"> & { executionBuilder?: never }): Promise<PreparedWithdrawReady>;
   createRelayWithdrawPayload(input: Parameters<ClairveilJS["prepareRelayWithdraw"]>[0]): Promise<PreparedRelayWithdraw & { status: "ready"; payload: PreparedWithdrawPayload }>;
   buildPreparedTransferPayload(input: PreparedTransferPayloadInput & { chainNowUnix: number }): Promise<PreparedTransferPayload>;
   buildTransferMessage(input: PreparedTransferPayloadInput & AuthoritativeTransferPreparationTime & {
@@ -1416,6 +1419,12 @@ export class ClairveilJS {
     signature_base64?: Base64;
     skipSignerPubKeyCheck?: boolean;
     skip_signer_pubkey_check?: boolean;
+    disclosureScalar?: bigint | string | number;
+    disclosure_scalar?: bigint | string | number;
+    disclosureScalarHex?: Hex;
+    disclosure_scalar_hex?: Hex;
+    disclosurePubKeyHex?: Hex;
+    disclosure_pubkey_hex?: Hex;
     /** Optional denom override, independently verified against the disclosure asset field. */
     assetDenom?: string;
     /** Alias for `assetDenom`. */
@@ -1538,26 +1547,7 @@ export class ClairveilJS {
   signDirectAndBroadcast(input: ReservationBroadcastOptions & { wallet: WalletAdapterLike; signDoc: SignDocBase64; waitOptions?: { attempts?: number; intervalMs?: number } }): Promise<BroadcastSignedTxResult>;
 }
 
-export function createClairveilClient(options: {
-  rpc: string;
-  rest?: string;
-  restEndpoints?: string[];
-  chainId: string;
-  accountPrefix?: string;
-  bech32Prefix?: string;
-  shieldedPrefix?: string;
-  defaultDenom?: string;
-  assetDenom?: string;
-  registry?: object;
-  queryTimeoutMs?: number;
-  fetchTimeoutMs?: number;
-  queryRetry?: QueryRetryOptions | false;
-  nullifierFailover?: boolean;
-  merklePathFailover?: boolean;
-  expectedCircuitIdentity?: CircuitSetIdentityV1;
-  enableExperimentalBatchTransfer?: boolean;
-  enable_experimental_batch_transfer?: boolean;
-}): ClairveilJS;
+export function createClairveilClient(options: ClairveilClientOptions): ClairveilJS;
 
 export function nextPrivacyScanOptions(scanOrCursor?: object, defaults?: PrivacyScanOptions & {
   includeFoundNotes?: boolean;

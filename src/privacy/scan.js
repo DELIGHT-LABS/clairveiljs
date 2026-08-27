@@ -43,6 +43,49 @@ export const privacyScanValidationStateVersionV2 = "privacy-scan-validation-v2";
 // produced by this validator, never an arbitrary protobuf-shaped object.
 const validatedPrivacyScanOutputBrandV2 = Symbol("validatedPrivacyScanOutputV2");
 const validatedPrivacyScanPageBrandV2 = Symbol("validatedPrivacyScanPageV2");
+const validatedPrivacyScanOutputIntegrityV2 = new WeakMap();
+const validatedPrivacyScanPageIntegrityV2 = new WeakMap();
+
+function scanIntegrityValue(value, seen = new Set()) {
+  if (value instanceof Uint8Array) return ["bytes", hexFromBytes(value)];
+  if (Array.isArray(value)) {
+    if (seen.has(value)) throw new Error("privacy scan value contains a cycle");
+    seen.add(value);
+    const normalized = ["array", value.map(entry => scanIntegrityValue(entry, seen))];
+    seen.delete(value);
+    return normalized;
+  }
+  if (value && typeof value === "object") {
+    if (seen.has(value)) throw new Error("privacy scan value contains a cycle");
+    seen.add(value);
+    const normalized = ["object", Object.keys(value).sort().map(key => [
+      key,
+      scanIntegrityValue(value[key], seen)
+    ])];
+    seen.delete(value);
+    return normalized;
+  }
+  if (typeof value === "bigint") return ["bigint", value.toString()];
+  if (value === undefined) return ["undefined"];
+  return [typeof value, value];
+}
+
+function scanIntegrityFingerprint(value) {
+  return JSON.stringify(scanIntegrityValue(value));
+}
+
+function hasCurrentScanIntegrity(value, brand, registry) {
+  if (!value || typeof value !== "object" ||
+      !Object.prototype.hasOwnProperty.call(value, brand) ||
+      value[brand] !== true || !registry.has(value)) {
+    return false;
+  }
+  try {
+    return registry.get(value) === scanIntegrityFingerprint(value);
+  } catch {
+    return false;
+  }
+}
 
 const maxUint64 = (1n << 64n) - 1n;
 
@@ -568,8 +611,6 @@ function scanOutput(input, index, summaries) {
     tx_hash: txHash,
     event_type: eventType
   };
-  Object.defineProperty(output, validatedPrivacyScanOutputBrandV2, { value: true });
-  Object.freeze(output);
   if (output.audit_key_id !== summary.audit_key_id || String(output.audit_key_epoch) !== String(summary.audit_key_epoch) || !equalScanBytes(output.audit_target_pubkey, summary.audit_target_pubkey)) {
     throw new Error(`privacy scan output ${index} does not match its summary audit identity`);
   }
@@ -588,12 +629,19 @@ function scanOutput(input, index, summaries) {
   } else {
     throw new Error(`privacy scan output ${index} has unsupported event type ${JSON.stringify(eventType)}`);
   }
+  Object.defineProperty(output, validatedPrivacyScanOutputBrandV2, { value: true });
+  Object.freeze(output);
+  validatedPrivacyScanOutputIntegrityV2.set(output, scanIntegrityFingerprint(output));
   return output;
 }
 
 /** True only for an output emitted by validatePrivacyScanPageV2 in this SDK instance. */
 export function isValidatedPrivacyScanOutputV2(value) {
-  return Boolean(value && typeof value === "object" && value[validatedPrivacyScanOutputBrandV2] === true);
+  return hasCurrentScanIntegrity(
+    value,
+    validatedPrivacyScanOutputBrandV2,
+    validatedPrivacyScanOutputIntegrityV2
+  );
 }
 
 function scanRequest(input = {}) {
@@ -1033,6 +1081,14 @@ export function validatePrivacyScanPageV2(response, request = {}) {
   return page;
 }
 
+function isValidatedPrivacyScanPageV2(value) {
+  return hasCurrentScanIntegrity(
+    value,
+    validatedPrivacyScanPageBrandV2,
+    validatedPrivacyScanPageIntegrityV2
+  );
+}
+
 /** Trial-decrypt one already-validated privacy-scan-v2 output. Returns null when it is not owned. */
 export function processPrivacyScanOutputV2(output, { rootSeed, spendScalar, viewScalar } = {}) {
   if (!isValidatedPrivacyScanOutputV2(output)) throw new Error("privacy scan output must be issued by validatePrivacyScanPageV2");
@@ -1083,7 +1139,7 @@ export function processPrivacyScanOutputV2(output, { rootSeed, spendScalar, view
 
 /** Decrypt the owned notes from one validated unified scan page. */
 export function processPrivacyScanPageV2(page, { rootSeed, spendScalar, viewScalar } = {}) {
-  if (!page || typeof page !== "object" || page[validatedPrivacyScanPageBrandV2] !== true || !Array.isArray(page.outputs)) {
+  if (!isValidatedPrivacyScanPageV2(page) || !Array.isArray(page.outputs)) {
     throw new Error("privacy scan page must be issued by validatePrivacyScanPageV2");
   }
   const spend = spendScalar ?? deriveSpendKeys(rootSeed).scalar;

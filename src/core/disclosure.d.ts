@@ -36,6 +36,7 @@ export interface DisclosurePayload {
 export interface DisclosureVerification {
   verified: boolean;
   fixed_encoding?: boolean;
+  typed_scan_output?: boolean;
   batch_typed_scan_output?: boolean;
   output_index_match?: boolean;
   output_commitment_match?: boolean;

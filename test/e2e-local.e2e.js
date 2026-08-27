@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stringToPath } from "@cosmjs/crypto";
 import { DirectSecp256k1HdWallet } from "@cosmjs/proto-signing";
 import {
+  cosmosSignDocBindingHash,
   createClairveilClient,
   createHttpProverAdapter
 } from "clairveiljs";
@@ -12,11 +14,16 @@ import {
   createWalletAdapter
 } from "clairveiljs/wallet-adapter";
 import {
+  bytesToBigIntBE,
   createSpendNoteHashSigner,
   encodeShieldedAddress,
   computeNoteCommitmentV1,
   fieldHexV1
 } from "clairveiljs/core";
+import {
+  computeBatchEffectIdV1,
+  computeChainDomainV1
+} from "clairveiljs/protocol-v1";
 import {
   planOneProofPayroll,
   prepareOneProofPayrollOperation,
@@ -33,7 +40,8 @@ import {
   MemoryReservationStore,
   createNoteReservationManager,
   hashAmount,
-  hashRecipient
+  hashRecipient,
+  reservationStatuses
 } from "clairveiljs/reservation";
 import {
   createPrivacyScanValidationStateV2,
@@ -44,12 +52,26 @@ import {
 import {
   hexFromBytes
 } from "clairveiljs/browser-crypto";
+import {
+  batchTransferConformanceFixtureName,
+  readClairveilConformanceFixture,
+  suggestClairveilConformanceFixtureDirs
+} from "clairveiljs/conformance";
 
 const env = process.env;
 const localE2eEnabled = env.CLAIRVEIL_E2E_LOCAL === "1";
-const fullFlowEnabled = localE2eEnabled && env.CLAIRVEIL_E2E_FULL_FLOW === "1";
+const testnetE2eEnabled = env.CLAIRVEIL_E2E_TESTNET === "1";
+if (localE2eEnabled && testnetE2eEnabled) {
+  throw new Error("CLAIRVEIL_E2E_LOCAL and CLAIRVEIL_E2E_TESTNET are mutually exclusive");
+}
+const cosmosE2eEnabled = localE2eEnabled || testnetE2eEnabled;
+const fullFlowEnabled = cosmosE2eEnabled && env.CLAIRVEIL_E2E_FULL_FLOW === "1";
 const oneProofBatchEnabled = fullFlowEnabled && env.CLAIRVEIL_E2E_ONE_PROOF_BATCH === "1";
-const e2eRequired = env.CLAIRVEIL_E2E_REQUIRED === "1";
+const e2eRequired = testnetE2eEnabled || env.CLAIRVEIL_E2E_REQUIRED === "1";
+const pinnedBatchTransferContract = readClairveilConformanceFixture(
+  batchTransferConformanceFixtureName,
+  { fixtureDir: suggestClairveilConformanceFixtureDirs()[0] }
+);
 
 function skipOrRequire(t, message) {
   if (e2eRequired) throw new Error(message);
@@ -80,10 +102,61 @@ function coinEnvOrDefaultCoin(name, defaultCoin, denom) {
   return value;
 }
 
+function assertTestnetEndpoint(value, name) {
+  let endpoint;
+  try {
+    endpoint = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an absolute HTTP(S) URL for testnet E2E`);
+  }
+  if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
+    throw new Error(`${name} must be an HTTP(S) URL for testnet E2E`);
+  }
+  const hostname = endpoint.hostname.toLowerCase();
+  if (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname.startsWith("127.") ||
+    hostname === "0.0.0.0" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  ) {
+    throw new Error(`${name} must not use a loopback endpoint for testnet E2E`);
+  }
+}
+
+const requiredTestnetEnvNames = Object.freeze([
+  "CLAIRVEIL_E2E_CHAIN_ID",
+  "CLAIRVEIL_E2E_RPC",
+  "CLAIRVEIL_E2E_REST",
+  "CLAIRVEIL_E2E_PROVER_URL",
+  "CLAIRVEIL_E2E_ACCOUNT_PREFIX",
+  "CLAIRVEIL_E2E_SHIELDED_PREFIX",
+  "CLAIRVEIL_E2E_DENOM"
+]);
+
+function assertTestnetDeployment(config) {
+  if (/local/i.test(config.chainId)) {
+    throw new Error("CLAIRVEIL_E2E_CHAIN_ID must identify a testnet, not a local chain");
+  }
+  assertTestnetEndpoint(config.rpc, "CLAIRVEIL_E2E_RPC");
+  assertTestnetEndpoint(config.rest, "CLAIRVEIL_E2E_REST");
+  assertTestnetEndpoint(config.proverUrl, "CLAIRVEIL_E2E_PROVER_URL");
+}
+
+function assertExplicitTestnetConfig(config) {
+  for (const name of requiredTestnetEnvNames) {
+    if (!String(env[name] ?? "").trim()) {
+      throw new Error(`${name} is required for Cosmos testnet E2E`);
+    }
+  }
+  assertTestnetDeployment(config);
+}
+
 function configFromEnv() {
   const denom = String(env.CLAIRVEIL_E2E_DENOM || "uclair");
   const transferAmount = coinEnv("CLAIRVEIL_E2E_TRANSFER_AMOUNT", "1", denom);
-  return {
+  const config = {
     chainId: String(env.CLAIRVEIL_E2E_CHAIN_ID || "clairveil-local-1"),
     rpc: String(env.CLAIRVEIL_E2E_RPC || "http://127.0.0.1:26657"),
     rest: String(env.CLAIRVEIL_E2E_REST || "http://127.0.0.1:1317"),
@@ -94,12 +167,9 @@ function configFromEnv() {
     depositAmount: coinEnv("CLAIRVEIL_E2E_DEPOSIT_AMOUNT", "10", denom),
     transferAmount,
     withdrawAmount: coinEnvOrDefaultCoin("CLAIRVEIL_E2E_WITHDRAW_AMOUNT", transferAmount, denom),
-    oneProofBatchDepositAmount: coinEnv("CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT", "10", denom),
-    oneProofBatchPayrollAmount: coinEnvOrDefaultCoin(
-      "CLAIRVEIL_E2E_ONE_PROOF_PAYROLL_AMOUNT",
-      coinEnv("CLAIRVEIL_E2E_ONE_PROOF_DEPOSIT_AMOUNT", "10", denom),
-      denom
-    ),
+    relayWithdrawAmount: coinEnvOrDefaultCoin("CLAIRVEIL_E2E_RELAY_WITHDRAW_AMOUNT", transferAmount, denom),
+    relayWithdrawGasLimit: positiveIntegerEnv("CLAIRVEIL_E2E_RELAY_WITHDRAW_GAS_LIMIT", 5000000),
+    relayWithdrawExpirySeconds: positiveIntegerEnv("CLAIRVEIL_E2E_RELAY_WITHDRAW_EXPIRY_SECONDS", 1800),
     oneProofBatchGasLimit: positiveIntegerEnv("CLAIRVEIL_E2E_ONE_PROOF_BATCH_GAS_LIMIT", 25000000),
     scanLimit: positiveIntegerEnv("CLAIRVEIL_E2E_SCAN_LIMIT", 200),
     scanMaxPages: positiveIntegerEnv("CLAIRVEIL_E2E_SCAN_MAX_PAGES", 1000),
@@ -115,6 +185,16 @@ function configFromEnv() {
       intervalMs: positiveIntegerEnv("CLAIRVEIL_E2E_TX_INTERVAL_MS", 1500)
     }
   };
+  if (testnetE2eEnabled) assertExplicitTestnetConfig(config);
+  return config;
+}
+
+function requireAuditDisclosureKey(config, flowLabel) {
+  if (e2eRequired && !config.auditDisclosurePrivKeyHex) {
+    throw new Error(
+      `set CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX for required ${flowLabel} audit-disclosure E2E`
+    );
+  }
 }
 
 function createClient(config) {
@@ -124,7 +204,8 @@ function createClient(config) {
     chainId: config.chainId,
     accountPrefix: config.accountPrefix,
     shieldedPrefix: config.shieldedPrefix,
-    defaultDenom: config.denom
+    defaultDenom: config.denom,
+    enableExperimentalBatchTransfer: oneProofBatchEnabled
   });
 }
 
@@ -161,6 +242,22 @@ async function loadWalletFromModule(config) {
   return createWalletAdapter(wallet);
 }
 
+function mnemonicWalletOptions(config) {
+  const explicitPath = String(env.CLAIRVEIL_E2E_HD_PATH || "").trim();
+  const coinType = String(env.CLAIRVEIL_E2E_COIN_TYPE || "").trim();
+  if (explicitPath && coinType) {
+    throw new Error("set only one of CLAIRVEIL_E2E_HD_PATH or CLAIRVEIL_E2E_COIN_TYPE");
+  }
+  if (coinType && !/^(0|[1-9][0-9]*)$/.test(coinType)) {
+    throw new Error("CLAIRVEIL_E2E_COIN_TYPE must be a non-negative integer");
+  }
+  const hdPath = explicitPath || (coinType ? `m/44'/${coinType}'/0'/0/0` : "");
+  return {
+    prefix: config.accountPrefix,
+    ...(hdPath ? { hdPaths: [stringToPath(hdPath)] } : {})
+  };
+}
+
 async function loadDepositProofProvider(config) {
   const modulePath = String(env.CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE || "").trim();
   if (!modulePath) return null;
@@ -179,9 +276,7 @@ async function loadWalletFromMnemonic(config) {
   const mnemonic = String(env.CLAIRVEIL_E2E_MNEMONIC || "").trim();
   const signatureBase64 = rootSignatureBase64FromEnv();
   if (!mnemonic || !signatureBase64) return null;
-  const signer = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
-    prefix: config.accountPrefix
-  });
+  const signer = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, mnemonicWalletOptions(config));
   return createOfflineSignerWalletAdapter({
     signer,
     address: String(env.CLAIRVEIL_E2E_ADDRESS || "").trim() || undefined,
@@ -388,7 +483,7 @@ function coinAmount(coin, denom, label) {
   return match[1];
 }
 
-async function createCurrentRootPathProvider(client, commitmentHexes, snapshotHeight) {
+async function createCurrentRootPathProvider(client, commitmentHexes) {
   const configuredRoot = String(env.CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX || "").trim();
   const configuredHeight = String(env.CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT || "").trim();
   if (Boolean(configuredRoot) !== Boolean(configuredHeight)) {
@@ -396,14 +491,14 @@ async function createCurrentRootPathProvider(client, commitmentHexes, snapshotHe
   }
   const treeState = await client.fetchTreeState();
   const rootHex = configuredRoot || String(treeState?.root ?? treeState?.root_hex ?? treeState?.rootHex ?? "").trim();
-  const exactSnapshotHeight = configuredHeight || String(snapshotHeight ?? "").trim();
-  if (!rootHex || !/^(0|[1-9][0-9]*)$/.test(exactSnapshotHeight)) {
-    throw new Error("one-proof batch E2E requires a current tree root and exact snapshot height");
-  }
+  if (!rootHex) throw new Error("one-proof batch E2E requires a current tree root");
   return client.createCommitmentPathSnapshotProvider({
     commitmentHexes: Array.isArray(commitmentHexes) ? commitmentHexes : [commitmentHexes],
     rootHex,
-    snapshotHeight: exactSnapshotHeight
+    // For a dynamically fetched current root, let the endpoint resolve and
+    // return the root's authoritative snapshot height. A deposit event height
+    // is not necessarily the same snapshot when the testnet is active.
+    ...(configuredHeight ? { snapshotHeight: configuredHeight } : {})
   });
 }
 
@@ -415,6 +510,7 @@ async function typedBatchOutputsForTransaction(client, txHash, commitmentHexes, 
   const validationState = createPrivacyScanValidationStateV2();
   let lastError = null;
   for (let attempt = 1; attempt <= config.waitOptions.attempts; attempt += 1) {
+    let after = { height: 0, globalSequence: 0, outputIndex: 0 };
     try {
       for (let page = 0; page < config.scanMaxPages; page += 1) {
         const request = {
@@ -425,21 +521,95 @@ async function typedBatchOutputsForTransaction(client, txHash, commitmentHexes, 
           validationState
         };
         const scanned = validatePrivacyScanPageV2(await client.fetchPrivacyScan(request), request);
+        const output = scanned.outputs.find(candidate =>
+          candidate.event_type === privacyScanEventTypeV2.shieldedTransfer &&
+          hexFromBytes(candidate.tx_hash).toUpperCase() === txHash.toUpperCase() &&
+          hexFromBytes(candidate.commitment).toLowerCase() === requestedCommitment
+        );
+        if (output) return output;
+        if (!scanned.has_more) break;
+        after = {
+          height: scanned.next_cursor.height,
+          globalSequence: scanned.next_cursor.global_sequence,
+          outputIndex: scanned.next_cursor.output_index
+        };
+      }
+      lastError = new Error("typed privacy scan has not indexed the direct transfer output yet");
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < config.waitOptions.attempts) {
+      await new Promise(resolve => setTimeout(resolve, config.waitOptions.intervalMs));
+    }
+  }
+  throw lastError || new Error("typed privacy scan did not return the direct transfer output");
+}
+
+async function typedBatchOutputsForTransaction(client, txHash, outputCount, material, config, expectedSummary) {
+  if (!Number.isSafeInteger(outputCount) || outputCount < 1 || outputCount > 32) {
+    throw new Error("typed batch E2E requires an output count in 1..32");
+  }
+  let lastError = null;
+  for (let attempt = 1; attempt <= config.waitOptions.attempts; attempt += 1) {
+    let after = { height: 0, globalSequence: 0, outputIndex: 0 };
+    const foundByIndex = new Map();
+    let matchingSummarySeen = false;
+    try {
+      for (let page = 0; page < config.scanMaxPages; page += 1) {
+        const request = {
+          after,
+          outputLimit: config.scanLimit,
+          eventLimit: config.scanLimit,
+          eventTypes: []
+        };
+        const scanned = validatePrivacyScanPageV2(await client.fetchPrivacyScan(request), request);
+        for (const summary of scanned.summaries) {
+          if (summary.event_type === privacyScanEventTypeV2.batchTransfer &&
+              hexFromBytes(summary.tx_hash).toUpperCase() === txHash.toUpperCase()) {
+            matchingSummarySeen = true;
+            if (summary.output_count !== outputCount) {
+              throw new Error("typed batch summary output count differs from the prepared operation");
+            }
+            if (hexFromBytes(summary.effect_id).toLowerCase() !== expectedSummary.effectIdHex) {
+              throw new Error("typed batch summary effect ID differs from the executed operation");
+            }
+            assert.deepEqual(
+              summary.nullifiers.map(value => hexFromBytes(value).toLowerCase()),
+              expectedSummary.nullifierHexes,
+              "typed batch summary nullifiers differ from the executed operation"
+            );
+            if (hexFromBytes(summary.audit_target_pubkey).toLowerCase() !== expectedSummary.auditTargetHex) {
+              throw new Error("typed batch summary audit target differs from the executed operation");
+            }
+          }
+        }
         const matchingOutputs = scanned.outputs.filter(candidate =>
           candidate.event_type === privacyScanEventTypeV2.batchTransfer &&
-          hexFromBytes(candidate.tx_hash).toUpperCase() === txHash.toUpperCase() &&
-          remaining.has(hexFromBytes(candidate.commitment).toLowerCase())
+          hexFromBytes(candidate.tx_hash).toUpperCase() === txHash.toUpperCase()
         );
         if (matchingOutputs.length) {
           const found = processPrivacyScanPageV2(scanned, { rootSeed: material.rootSeed });
           for (const output of matchingOutputs) {
+            const index = Number(output.output_index);
+            if (!Number.isSafeInteger(index) || index < 0 || index >= outputCount) {
+              throw new Error("typed batch output index is outside the prepared output set");
+            }
             const commitment = hexFromBytes(output.commitment).toLowerCase();
             const note = found.find(candidate => fieldHexV1(computeNoteCommitmentV1(candidate.note)) === commitment);
             if (!note) throw new Error("typed batch output did not decrypt for the configured E2E wallet");
-            foundByCommitment.set(commitment, { output, found: note });
-            remaining.delete(commitment);
+            const prior = foundByIndex.get(index);
+            if (prior && hexFromBytes(prior.output.commitment).toLowerCase() !== commitment) {
+              throw new Error("typed batch output index maps to conflicting commitments");
+            }
+            foundByIndex.set(index, { output, found: note });
           }
-          if (!remaining.size) return requested.map(commitment => foundByCommitment.get(commitment));
+          if (matchingSummarySeen && foundByIndex.size === outputCount) {
+            return Array.from({ length: outputCount }, (_, index) => {
+              const entry = foundByIndex.get(index);
+              if (!entry) throw new Error("typed batch output indexes are not a contiguous prefix");
+              return entry;
+            });
+          }
         }
         if (!scanned.has_more) break;
         after = {
@@ -448,7 +618,7 @@ async function typedBatchOutputsForTransaction(client, txHash, commitmentHexes, 
           outputIndex: scanned.next_cursor.output_index
         };
       }
-      lastError = new Error("typed privacy scan has not indexed every one-proof batch output yet");
+      lastError = new Error("typed privacy scan has not indexed the complete one-proof batch output set yet");
     } catch (error) {
       lastError = error;
     }
@@ -456,7 +626,7 @@ async function typedBatchOutputsForTransaction(client, txHash, commitmentHexes, 
       await new Promise(resolve => setTimeout(resolve, config.waitOptions.intervalMs));
     }
   }
-  throw lastError || new Error("typed privacy scan did not return every one-proof batch output");
+  throw lastError || new Error("typed privacy scan did not return the complete one-proof batch output set");
 }
 
 async function typedTransferOutputForTransaction(client, txHash, config) {
@@ -500,58 +670,45 @@ async function typedTransferOutputForTransaction(client, txHash, config) {
 
 function oneProofBatchShape(selectedValue, config) {
   const selected = String(selectedValue || "one-input-one-payment").trim().toLowerCase();
+  const aliases = {
+    "1-1": "one-input-one-payment",
+    "three-input-four-output": "three-input-four-output-mixed-disclosure",
+    "3-4": "three-input-four-output-mixed-disclosure",
+    "16-31-change": "thirty-one-payments-plus-change",
+    "16-32": "exact-thirty-two-payments",
+    padding: "explicit-zero-padding"
+  };
+  const canonicalID = aliases[selected] ?? selected;
+  const vector = pinnedBatchTransferContract.cases?.find(candidate => candidate.id === canonicalID);
+  if (!vector) {
+    throw new Error(
+      "CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE must select one of the five pinned privacy_batch_transfer_v1_contract.json cases"
+    );
+  }
   const coin = amount => `${amount}${config.denom}`;
-  if (selected === "one-input-one-payment" || selected === "1-1") {
-    return {
-      id: "one-input-one-payment",
-      inputAmounts: [config.oneProofBatchDepositAmount],
-      paymentAmounts: [config.oneProofBatchPayrollAmount],
-      disclosureModes: ["none"],
-      outputMode: "compact",
-      selfViewEnabled: true
-    };
+  const inputTotal = vector.input_amounts.reduce((sum, amount) => sum + BigInt(amount), 0n);
+  const paymentTotal = vector.payment_amounts.reduce((sum, amount) => sum + BigInt(amount), 0n);
+  let paymentIndex = 0;
+  const expectedOutputAmounts = vector.expected_output_roles.map(role => {
+    if (role === "payment") return String(vector.payment_amounts[paymentIndex++]);
+    if (role === "change") return String(inputTotal - paymentTotal);
+    if (role === "padding") return "0";
+    throw new Error(`pinned batch fixture ${vector.id} has unsupported output role ${role}`);
+  });
+  if (paymentIndex !== vector.payment_amounts.length) {
+    throw new Error(`pinned batch fixture ${vector.id} payment/output roles do not match`);
   }
-  if (selected === "three-input-four-output" || selected === "3-4") {
-    return {
-      id: "three-input-four-output",
-      inputAmounts: [coin(4), coin(5), coin(7)],
-      paymentAmounts: [coin(4), coin(5), coin(6)],
-      disclosureModes: ["none", "public", "recipient-encrypted"],
-      outputMode: "compact",
-      selfViewEnabled: true
-    };
-  }
-  if (selected === "thirty-one-payments-plus-change" || selected === "16-31-change") {
-    return {
-      id: "thirty-one-payments-plus-change",
-      inputAmounts: Array(16).fill(coin(100)),
-      paymentAmounts: Array(31).fill(coin(50)),
-      disclosureModes: Array(31).fill("none"),
-      outputMode: "compact",
-      selfViewEnabled: false
-    };
-  }
-  if (selected === "exact-thirty-two-payments" || selected === "16-32") {
-    return {
-      id: "exact-thirty-two-payments",
-      inputAmounts: Array(16).fill(coin(64)),
-      paymentAmounts: Array(32).fill(coin(32)),
-      disclosureModes: Array(32).fill("none"),
-      outputMode: "compact",
-      selfViewEnabled: true
-    };
-  }
-  if (selected === "explicit-zero-padding" || selected === "padding") {
-    return {
-      id: "explicit-zero-padding",
-      inputAmounts: [coin(5)],
-      paymentAmounts: [coin(5)],
-      disclosureModes: ["none"],
-      outputMode: "exact32",
-      selfViewEnabled: false
-    };
-  }
-  throw new Error("CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE must be one-input-one-payment, three-input-four-output, thirty-one-payments-plus-change, exact-thirty-two-payments, or explicit-zero-padding");
+  return {
+    id: vector.id,
+    inputAmounts: vector.input_amounts.map(coin),
+    paymentAmounts: vector.payment_amounts.map(coin),
+    disclosureModes: vector.disclosure_modes.slice(0, vector.payment_amounts.length),
+    expectedDisclosureModes: [...vector.disclosure_modes],
+    expectedOutputRoles: [...vector.expected_output_roles],
+    expectedOutputAmounts,
+    outputMode: vector.output_mode,
+    selfViewEnabled: vector.self_view === "enabled"
+  };
 }
 
 function selectedOneProofBatchShape(config) {
@@ -561,93 +718,96 @@ function selectedOneProofBatchShape(config) {
 function selectedOneProofBatchShapes(config) {
   const selected = String(env.CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE || "one-input-one-payment").trim().toLowerCase();
   if (selected !== "all") return [selectedOneProofBatchShape(config)];
-  return [
-    "one-input-one-payment",
-    "three-input-four-output",
-    "thirty-one-payments-plus-change",
-    "exact-thirty-two-payments",
-    "explicit-zero-padding"
-  ].map(shape => oneProofBatchShape(shape, config));
+  return pinnedBatchTransferContract.cases.map(vector => oneProofBatchShape(vector.id, config));
 }
 
-test("one-proof local E2E shape profiles retain the Clairveil v0.3.1 disclosure contract", () => {
-  const config = {
-    denom: "uclair",
-    oneProofBatchDepositAmount: "10uclair",
-    oneProofBatchPayrollAmount: "10uclair"
+test("one-proof Cosmos E2E shapes are generated from the pinned Clairveil v0.3.1 fixture", () => {
+  const config = { denom: "uclair" };
+  assert.equal(pinnedBatchTransferContract.schema_version, "clairveil.batch-transfer.contract.v1");
+  assert.equal(pinnedBatchTransferContract.cases.length, 5);
+  for (const vector of pinnedBatchTransferContract.cases) {
+    const shape = oneProofBatchShape(vector.id, config);
+    assert.deepEqual(shape.inputAmounts, vector.input_amounts.map(amount => `${amount}uclair`), vector.id);
+    assert.deepEqual(shape.paymentAmounts, vector.payment_amounts.map(amount => `${amount}uclair`), vector.id);
+    assert.deepEqual(shape.expectedOutputRoles, vector.expected_output_roles, vector.id);
+    assert.deepEqual(shape.expectedDisclosureModes, vector.disclosure_modes, vector.id);
+    assert.deepEqual(
+      shape.disclosureModes,
+      vector.disclosure_modes.slice(0, vector.payment_amounts.length),
+      vector.id
+    );
+    assert.equal(shape.selfViewEnabled, vector.self_view === "enabled", vector.id);
+    assert.equal(shape.outputMode, vector.output_mode, vector.id);
+  }
+  assert.equal(
+    oneProofBatchShape("three-input-four-output", config).id,
+    "three-input-four-output-mixed-disclosure"
+  );
+});
+
+test("Cosmos testnet E2E rejects local deployment identities and endpoints", () => {
+  const deployment = {
+    chainId: "clairveil-test-1",
+    rpc: "https://rpc.testnet.example",
+    rest: "https://rest.testnet.example",
+    proverUrl: "https://prover.testnet.example"
   };
-  const cases = [
-    {
-      id: "one-input-one-payment",
-      selfViewEnabled: true,
-      outputMode: "compact",
-      inputCount: 1,
-      paymentCount: 1,
-      disclosureModes: ["none"]
-    },
-    {
-      id: "three-input-four-output",
-      selfViewEnabled: true,
-      outputMode: "compact",
-      inputCount: 3,
-      paymentCount: 3,
-      disclosureModes: ["none", "public", "recipient-encrypted"]
-    },
-    {
-      id: "thirty-one-payments-plus-change",
-      selfViewEnabled: false,
-      outputMode: "compact",
-      inputCount: 16,
-      paymentCount: 31,
-      disclosureModes: Array(31).fill("none")
-    },
-    {
-      id: "exact-thirty-two-payments",
-      selfViewEnabled: true,
-      outputMode: "compact",
-      inputCount: 16,
-      paymentCount: 32,
-      disclosureModes: Array(32).fill("none")
-    },
-    {
-      id: "explicit-zero-padding",
-      selfViewEnabled: false,
-      outputMode: "exact32",
-      inputCount: 1,
-      paymentCount: 1,
-      disclosureModes: ["none"]
-    }
-  ];
-  for (const expected of cases) {
-    const shape = oneProofBatchShape(expected.id, config);
-    assert.equal(shape.selfViewEnabled, expected.selfViewEnabled, expected.id);
-    assert.equal(shape.outputMode, expected.outputMode, expected.id);
-    assert.equal(shape.inputAmounts.length, expected.inputCount, expected.id);
-    assert.equal(shape.paymentAmounts.length, expected.paymentCount, expected.id);
-    assert.deepEqual(shape.disclosureModes, expected.disclosureModes, expected.id);
+  assert.doesNotThrow(() => assertTestnetDeployment(deployment));
+  assert.throws(
+    () => assertTestnetDeployment({ ...deployment, chainId: "clairveil-local-1" }),
+    /must identify a testnet/
+  );
+  for (const [field, endpoint] of [
+    ["rpc", "http://127.0.0.2:26657"],
+    ["rest", "http://localhost:1317"],
+    ["proverUrl", "http://[::1]:8080"]
+  ]) {
+    assert.throws(
+      () => assertTestnetDeployment({ ...deployment, [field]: endpoint }),
+      /must not use a loopback endpoint/
+    );
   }
 });
 
-test("local Clairveil node endpoints respond", {
-  skip: localE2eEnabled ? false : "set CLAIRVEIL_E2E_LOCAL=1 to run against a local Clairveil node"
+test("configured Cosmos node passes the Clairveil v0.3.1 query preflight", {
+  skip: cosmosE2eEnabled
+    ? false
+    : "set CLAIRVEIL_E2E_LOCAL=1 or CLAIRVEIL_E2E_TESTNET=1 to run Cosmos endpoint preflight"
 }, async () => {
   const config = configFromEnv();
   const client = createClient(config);
+  const probeNullifier = "01".repeat(32);
 
   try {
-    const [events, treeState, auditConfig, disclosureConfig, reserve] = await Promise.all([
-      client.fetchPrivacyEvents({ limit: 1 }),
+    const [treeState, protocol, auditConfig, disclosureConfig, reserve, scan, nullifiers] = await Promise.all([
       client.fetchTreeState(),
+      client.assertProtocolPreflight(config.denom),
       client.queryAuditConfig(),
       client.queryDisclosureConfig(),
-      client.queryReserve(config.denom)
+      client.queryReserve(config.denom),
+      client.queryPrivacyScan({
+        after: { height: 0, globalSequence: 0, outputIndex: 0 },
+        outputLimit: 1,
+        eventLimit: 1
+      }),
+      client.checkNullifiers([probeNullifier])
     ]);
+    const reverseAsset = await client.queryAssetByID(protocol.asset.asset_id_hex);
 
-    assert.ok(Array.isArray(events.events), "privacy events response should include events");
     assert.equal(typeof treeState, "object", "tree state should be an object");
+    assert.equal(
+      protocol.circuit_config.circuit_set_identity.circuit_set_id,
+      "privacy-note-v1",
+      "circuit preflight should use the Clairveil v0.3.1 circuit set"
+    );
+    assert.equal(protocol.asset.canonical_denom, config.denom, "asset registry should resolve the configured denom");
+    assert.equal(reverseAsset.asset.canonical_denom, config.denom, "asset registry reverse lookup should agree");
     assert.equal(typeof auditConfig, "object", "audit config should be an object");
     assert.equal(disclosureConfig.audit_disclosure_required, true, "disclosure config should require audit disclosure");
     assert.equal(reserve.denom, config.denom, "reserve response should echo denom");
+    assert.equal(reserve.invariant_holds, true, "reserve invariant should hold before E2E execution");
+    assert.equal(scan.scan_schema_version, "privacy-scan-v2", "wallet state must expose typed privacy_scan v2");
+    assert.equal(typeof nullifiers.get(probeNullifier), "boolean", "nullifier batch query must return an explicit status");
   } finally {
     await client.disconnect();
   }
@@ -657,9 +817,10 @@ test("local full deposit, typed scan, disclosure, direct withdraw, and separatel
   timeout: positiveIntegerEnv("CLAIRVEIL_E2E_FULL_FLOW_TIMEOUT_MS", 600000),
   skip: fullFlowEnabled
     ? false
-    : "set CLAIRVEIL_E2E_LOCAL=1 and CLAIRVEIL_E2E_FULL_FLOW=1 to run tx flow"
+    : "enable local or testnet Cosmos E2E and set CLAIRVEIL_E2E_FULL_FLOW=1 to run tx flow"
 }, async t => {
   const config = configFromEnv();
+  requireAuditDisclosureKey(config, "Cosmos full-flow");
   const wallet = await loadE2eWallet(config);
   if (!wallet) {
     skipOrRequire(t, "set CLAIRVEIL_E2E_WALLET_MODULE or CLAIRVEIL_E2E_MNEMONIC plus CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64");
@@ -724,6 +885,7 @@ test("local full deposit, typed scan, disclosure, direct withdraw, and separatel
       txHash: transferTxHash
     });
     assertDisclosureReport(disclosure, "public transfer", config, config.transferAmount);
+    assert.equal(disclosure.verification?.typed_scan_output, true);
 
     const selfViewDisclosure = await client.decodeSelfViewDisclosure({
       output: transferOutput,
@@ -731,6 +893,7 @@ test("local full deposit, typed scan, disclosure, direct withdraw, and separatel
       disclosureScalar: material.disclosureScalar
     });
     assertDisclosureReport(selfViewDisclosure, "sender self-view", config, config.transferAmount);
+    assert.equal(selfViewDisclosure.verification?.typed_scan_output, true);
 
     const auditDisclosure = await client.decodeAuditDisclosure({
       output: transferOutput,
@@ -889,18 +1052,111 @@ test("local full deposit, typed scan, disclosure, direct withdraw, and separatel
       "ConfirmedSpent"
     );
     assert.equal((await client.queryReserve(config.denom)).invariant_holds, true, "reserve invariant should hold after withdraw");
+
+    if (!relayerWallet) {
+      t.diagnostic("Cosmos relayed withdraw skipped: configure a separately funded relayer wallet");
+      return;
+    }
+    const relayerAddress = await relayerWallet.getAddress();
+    const relayerPubKeyHex = await relayerWallet.getPubKeyHex();
+    assert.notEqual(relayerAddress, material.address, "relay E2E requires a distinct relayer account");
+
+    await prepareDepositAndBroadcast(
+      client,
+      wallet,
+      material,
+      config.relayWithdrawAmount,
+      config,
+      depositProofProvider
+    );
+    const relayReservationManager = createNoteReservationManager({
+      store: new MemoryReservationStore(),
+      ownerKeyId: material.address,
+      indexKey: material.rootSeed
+    });
+    const relayRecipient = String(env.CLAIRVEIL_E2E_RELAY_WITHDRAW_RECIPIENT || "").trim()
+      || material.address;
+    const relayChainNowUnix = await latestChainBlockTimeUnix(config);
+    const relay = await client.prepareRelayWithdraw({
+      wallet,
+      material,
+      amount: config.relayWithdrawAmount,
+      recipient: relayRecipient,
+      proverAdapter,
+      denom: config.denom,
+      limit: config.scanLimit,
+      maxPages: config.scanMaxPages,
+      expiresAtUnix: relayChainNowUnix + config.relayWithdrawExpirySeconds,
+      chainNowUnix: relayChainNowUnix,
+      reservationManager: relayReservationManager
+    });
+    assert.equal(relay.status, "ready", relay.plan?.message || "relay withdraw should be ready");
+    assert.ok(relay.reservation?.reservation_ids?.length, "relay withdraw should reserve its exact input note");
+
+    const relaySignDoc = await client.createRelayWithdrawSignDoc({
+      payload: relay.payload,
+      relayer: relayerAddress,
+      pubKeyHex: relayerPubKeyHex,
+      gasLimit: config.relayWithdrawGasLimit,
+      chainNowUnix: await latestChainBlockTimeUnix(config),
+      expectedChainId: config.chainId,
+      expectedRecipient: relayRecipient
+    });
+    await relayReservationManager.recordRelayHandoff(relay.reservation.reservation_ids, {
+      leaseToken: relay.reservation.lease_token,
+      payloadHash: relay.payload.payload_hash,
+      signDocHash: cosmosSignDocBindingHash(relaySignDoc.signDoc),
+      metadata: { e2e: "cosmos-relay-withdraw" }
+    });
+    const relayResult = await client.signDirectAndBroadcast({
+      wallet: relayerWallet,
+      signDoc: relaySignDoc.signDoc,
+      // The relayer validates and submits independently. The owner's handed-off
+      // reservation is reconciled from authoritative spent evidence below.
+      relayPayload: relay.payload,
+      getChainNowUnix: () => latestChainBlockTimeUnix(config),
+      expectedChainId: config.chainId,
+      expectedRecipient: relayRecipient,
+      waitOptions: config.waitOptions
+    });
+    const relayTxHash = assertBroadcastOk(relayResult, "relayed withdraw");
+    assert.equal(relaySignDoc.message.creator, relayerAddress);
+    assert.equal(relaySignDoc.message.recipient, relayRecipient);
+    const handedOffReservation = await relayReservationManager.getReservation(
+      relay.reservation.reservation_ids[0]
+    );
+    assert.equal(handedOffReservation.status, reservationStatuses.ProofReady);
+    assert.equal(handedOffReservation.metadata?.relay_handed_off, true);
+    const relayNullifier = String(relay.payload.nullifier_hex).toLowerCase();
+    assert.equal((await client.checkNullifiers([relayNullifier])).get(relayNullifier), true);
+    await relayReservationManager.reconcileSpentNotes([{
+      ...relay.selectedNote,
+      isSpent: true,
+      spent: true,
+      nullifierStatus: "spent",
+      operationSuccessEvidence: {
+        txHash: relayTxHash,
+        txResult: relayResult.tx
+      }
+    }]);
+    assert.equal(
+      (await relayReservationManager.getReservation(relay.reservation.reservation_ids[0])).status,
+      reservationStatuses.ConfirmedSpent
+    );
+    assert.equal((await client.queryReserve(config.denom)).invariant_holds, true, "reserve invariant should hold after relayed withdraw");
   } finally {
     await client.disconnect();
   }
 });
 
-test("local one-proof payroll batch proves, broadcasts, and reconciles typed output evidence", {
+test("Cosmos one-proof payroll batch proves, broadcasts, and reconciles typed output evidence", {
   timeout: positiveIntegerEnv("CLAIRVEIL_E2E_ONE_PROOF_BATCH_TIMEOUT_MS", 1800000),
   skip: oneProofBatchEnabled
     ? false
-    : "set CLAIRVEIL_E2E_LOCAL=1, CLAIRVEIL_E2E_FULL_FLOW=1, and CLAIRVEIL_E2E_ONE_PROOF_BATCH=1 to run one-proof batch E2E"
+    : "enable local or testnet Cosmos E2E, full flow, and one-proof batch flags to run batch E2E"
 }, async t => {
   const config = configFromEnv();
+  requireAuditDisclosureKey(config, "Cosmos one-proof batch");
   const wallet = await loadE2eWallet(config);
   if (!wallet) {
     skipOrRequire(t, "set CLAIRVEIL_E2E_WALLET_MODULE or CLAIRVEIL_E2E_MNEMONIC plus CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64");
@@ -940,14 +1196,10 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       assert.ok(inputNote, `typed wallet scan should find one-proof ${shape.id} input ${index}`);
       return inputNote;
     });
-    const snapshotHeight = inputNotes.reduce((latestHeight, note) =>
-      BigInt(note.height) > BigInt(latestHeight) ? String(note.height) : latestHeight,
-    String(inputNotes[0].height));
     const inputCommitmentHexes = inputNotes.map(note => fieldHexV1(computeNoteCommitmentV1(note.note)));
     const pathProvider = await createCurrentRootPathProvider(
       client,
-      inputCommitmentHexes,
-      snapshotHeight
+      inputCommitmentHexes
     );
     const treasuryNotes = await Promise.all(inputNotes.map(async (inputNote, index) => {
       const commitmentHex = inputCommitmentHexes[index];
@@ -970,7 +1222,7 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
     const plan = planOneProofPayroll({
       company_id: "clairveiljs-e2e",
       payroll_id: `one-proof-${shape.id}`,
-      batch_id: `localnet-${depositTxHashes[0].slice(0, 16).toLowerCase()}`,
+      batch_id: `cosmos-e2e-${depositTxHashes[0].slice(0, 16).toLowerCase()}`,
       denom: config.denom,
       default_disclosure_policy: { user_privacy_policy: "all-private", user_disclosure_mode: "none" },
       items: shape.paymentAmounts.map((amount, index) => {
@@ -982,7 +1234,7 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
             : undefined;
         return {
           item_id: `one-proof-item-${String(index).padStart(2, "0")}`,
-          employee_id: `localnet-recipient-${String(index).padStart(2, "0")}`,
+          employee_id: `cosmos-e2e-recipient-${String(index).padStart(2, "0")}`,
           recipient_address: recipient,
           amount: coinAmount(amount, config.denom, `one-proof ${shape.id} payroll amount`),
           ...(disclosurePolicy ? { disclosure_policy: disclosurePolicy } : {})
@@ -995,6 +1247,7 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       (plan.operations[0].has_change ? 1 : 0) +
       Number(plan.operations[0].padding_count ?? 0);
     assert.equal(plan.operations[0].output_count, expectedOutputCount, shape.id);
+    assert.equal(expectedOutputCount, shape.expectedOutputRoles.length, `${shape.id} output count must match the pinned fixture`);
     const expectedPaymentDisclosure = shape.disclosureModes.map(mode => {
       if (mode === "public") return [1, 1];
       if (mode === "recipient-encrypted") return [7, 2]; // amount-from-to / recipient-encrypted
@@ -1038,6 +1291,26 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       expectedPaymentDisclosure,
       `${shape.id} prepared payload must retain per-payment disclosure policy`
     );
+    assert.deepEqual(
+      prepared.payload.outputs.map(output => output.kind),
+      shape.expectedOutputRoles,
+      `${shape.id} prepared output roles must match the pinned fixture`
+    );
+    assert.deepEqual(
+      prepared.payload.outputs.map(output => String(output.note.am)),
+      shape.expectedOutputAmounts,
+      `${shape.id} prepared output amounts must match the pinned fixture`
+    );
+    const expectedOutputDisclosure = shape.expectedDisclosureModes.map(mode => {
+      if (mode === "public") return [1, 1];
+      if (mode === "recipient-encrypted") return [7, 2];
+      return [0, 0];
+    });
+    assert.deepEqual(
+      prepared.payload.outputs.map(output => [output.privacy_policy, output.disclosure_mode]),
+      expectedOutputDisclosure,
+      `${shape.id} all output disclosure modes must match the pinned fixture`
+    );
     for (const [index, mode] of shape.disclosureModes.entries()) {
       if (mode === "recipient-encrypted") {
         assert.notEqual(
@@ -1067,14 +1340,8 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
     assert.equal(
       execution.message.outputs.every(output => output.selfViewDisclosurePayload.length === (shape.selfViewEnabled ? 472 : 0)),
       true,
-      `${shape.id} self-view disclosure shape must match the Clairveil localnet contract`
+      `${shape.id} self-view disclosure shape must match the pinned Clairveil contract`
     );
-    const proofReadyReservations = await markOneProofPayrollReservationProofReady(
-      reservationManager,
-      reservationBatch,
-      execution
-    );
-    assert.equal(proofReadyReservations.every(reservation => reservation.status === "ProofReady"), true, shape.id);
     const signDoc = await createOneProofPayrollBatchSignDoc(execution, {
       cosmosClient: client,
       signer: material.address,
@@ -1199,12 +1466,32 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
       reservation.sign_doc_hash === signedArtifact.sign_doc_hash
     ), true, `${shape.id} must persist the exact signed artifact identity`);
     const expected = execution.operation_evidence.expected_evidence;
+    const chainDomain = computeChainDomainV1(prepared.payload.chain_id, prepared.payload.circuit_set_id);
+    const expectedSummary = {
+      effectIdHex: computeBatchEffectIdV1({
+        chainDomainHi: chainDomain.hi,
+        chainDomainLo: chainDomain.lo,
+        merkleRoot: bytesToBigIntBE(execution.message.root),
+        inputCount: execution.message.nullifiers.length,
+        outputCount: execution.message.outputs.length,
+        nullifierRoot: BigInt(prepared.payload.nullifier_root),
+        commitmentRoot: BigInt(prepared.payload.commitment_root),
+        userDisclosureRoot: BigInt(prepared.payload.user_disclosure_root),
+        fullDisclosureRoot: BigInt(prepared.payload.full_disclosure_root),
+        payloadDigestHi: BigInt(prepared.payload.payload_digest_hi),
+        payloadDigestLo: BigInt(prepared.payload.payload_digest_lo),
+        expiresAtUnix: prepared.payload.expires_at_unix
+      }),
+      nullifierHexes: execution.message.nullifiers.map(value => hexFromBytes(value).toLowerCase()),
+      auditTargetHex: hexFromBytes(execution.message.auditDisclosureTargetPubkey).toLowerCase()
+    };
     const typed = await typedBatchOutputsForTransaction(
       client,
       batchTxHash,
-      expected.map(item => item.expected_output_commitment),
+      expectedOutputCount,
       material,
-      config
+      config,
+      expectedSummary
     );
     for (const [index, entry] of typed.entries()) {
       const mode = shape.disclosureModes[index];
@@ -1253,7 +1540,9 @@ test("local one-proof payroll batch proves, broadcasts, and reconciles typed out
         full_disclosure_digest: hexFromBytes(entry.output.full_disclosure_digest),
         recipient_hash: hashRecipient(observedRecipient, { shieldedPrefix: config.shieldedPrefix }),
         amount_hash: hashAmount(config.denom, entry.found.note.amount),
-        denom: config.denom
+        denom: config.denom,
+        audit_key_id: entry.output.audit_key_id,
+        audit_key_epoch: entry.output.audit_key_epoch
       };
     });
     const reconciliation = await reconcileOneProofPayrollReservation({

@@ -17,6 +17,13 @@ import type {
 import type { ProverAdapter } from "../privacy/prover.js";
 import type { NoteReservationManager, ReservationBatch } from "../privacy/reservation.js";
 
+export * from "./evm-finality.js";
+
+/** @deprecated Resolve the privacy contract address from the active chain configuration. */
+export const evmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b";
+/** @deprecated Use an explicit chain-configured contractAddress. */
+export const defaultEvmPrivacyPrecompileAddress: typeof evmPrivacyPrecompileAddress;
+
 export interface Eip1193Provider {
   request(input: { method: string; params?: unknown[] }): Promise<unknown>;
 }
@@ -57,6 +64,24 @@ export interface EvmTransactionIdentityVerification {
   readonly chainId: EvmQuantity;
   readonly txBytesHash: Hex;
 }
+
+export interface EvmPrivacyReceiptVerification {
+  readonly verified: true;
+  readonly event: string;
+  readonly operation: string;
+}
+
+export interface EvmPrivacyReceiptVerifierInput {
+  transaction: EvmTransactionRequest;
+  receipt: { status?: EvmQuantity; logs?: EvmLog[] };
+  sender: string;
+  contractAddress: string;
+  operation: string;
+}
+
+export type EvmPrivacyReceiptVerifier = (
+  input: Readonly<EvmPrivacyReceiptVerifierInput>
+) => EvmPrivacyReceiptVerification;
 
 type EvmReservationManagerBinding =
   | { reservationManager: NoteReservationManager; reservation_manager?: NoteReservationManager | null }
@@ -138,7 +163,12 @@ export type EvmRelayBroadcastValidation =
       relay_transaction_options?: never;
     };
 
-export type EvmReservationBroadcastOptions = EvmReservationBroadcastBinding & EvmRelayBroadcastValidation;
+export type EvmReservationBroadcastOptions = EvmReservationBroadcastBinding &
+  EvmRelayBroadcastValidation & {
+    /** Required for every reserved or relayed spend; re-read immediately before wallet submission. */
+    checkNullifiers?: NullifierStatusReader;
+    check_nullifiers?: NullifierStatusReader;
+  };
 
 export interface EvmCallRequest extends Partial<Omit<EvmTransactionRequest, "to">> {
   to?: string;
@@ -248,7 +278,7 @@ export interface EvmPrivacyAuthorizationTypedDataRequest {
   authorization: EvmPrivacyAuthorizationRequest;
   cosmosChainId: string;
   evmChainId: EvmQuantity;
-  contractAddress?: string;
+  contractAddress: string;
   batchId?: BytesLike;
   batchItemIndex?: string | number | bigint;
 }
@@ -334,6 +364,8 @@ export interface EvmContractAdapter {
   contractAddress: string;
   abi?: readonly AbiItem[];
   authorizationProfile?: EvmAuthorizationProfile;
+  /** Required for strong confirmation when this adapter emits non-canonical calldata/events. */
+  verifyPrivacyReceipt?: EvmPrivacyReceiptVerifier;
   buildDepositTransaction(message: EvmDepositMessage, options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
   buildTransferTransaction(message: TransferMessage, options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
   buildWithdrawTransaction(message: EvmWithdrawMessage, options?: EvmPrivacyTransactionOptions): EvmTransactionRequest;
@@ -482,8 +514,6 @@ export interface EvmWithdrawTransactionResult {
   transaction: EvmTransactionRequest;
 }
 
-export const evmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b";
-export const defaultEvmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b";
 export const evmDepositModeNonpayable: "nonpayable";
 export const evmDepositModePayableExactValue: "payable-exact-value";
 export const defaultEvmDepositMode: "payable-exact-value";
@@ -529,15 +559,16 @@ export function verifyEvmPrivacyReceipt(input: {
   receipt: { status?: EvmQuantity; logs?: EvmLog[] };
   sender: string;
   contractAddress?: string;
-}): Readonly<{ verified: true; event: string; operation: string }>;
+}): Readonly<EvmPrivacyReceiptVerification>;
 export function createEip1193WalletAdapter(input?: { provider: Eip1193Provider; account?: string }): Eip1193WalletAdapter;
-export function createEvmContractAdapter(input?: {
-  contractAddress?: string;
+export function createEvmContractAdapter(input: {
+  contractAddress: string;
   accountPrefix?: string;
   chainId?: string | number;
   depositMode?: EvmDepositMode;
   nativeDenom?: string;
   authorizationProfile?: EvmAuthorizationProfile;
+  verifyPrivacyReceipt?: EvmPrivacyReceiptVerifier;
   encodeDeposit?: EvmDepositEncoder;
   encodeTransfer?: EvmTransferEncoder;
   encodeWithdraw?: EvmWithdrawEncoder;
@@ -548,13 +579,14 @@ export function createEvmContractAdapter(input?: {
   encodeSingleProofBatchTransfer?: (message: EvmSingleProofBatchTransferMessage, options?: EvmPrivacyTransactionOptions) => Hex;
   encodeSingleProofBatchTransferWithAuthorization?: (message: EvmSingleProofBatchTransferMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions) => Hex;
 }): EvmContractAdapter;
-export function createEvmPrivacyPrecompileAdapter(input?: {
-  contractAddress?: string;
+export function createEvmPrivacyPrecompileAdapter(input: {
+  contractAddress: string;
   accountPrefix?: string;
   chainId?: string | number;
   depositMode?: EvmDepositMode;
   nativeDenom?: string;
   authorizationProfile?: EvmAuthorizationProfile;
+  verifyPrivacyReceipt?: EvmPrivacyReceiptVerifier;
   encodeDeposit?: EvmDepositEncoder;
   encodeTransfer?: EvmTransferEncoder;
   encodeWithdraw?: EvmWithdrawEncoder;
@@ -566,10 +598,8 @@ export function createEvmPrivacyPrecompileAdapter(input?: {
   encodeSingleProofBatchTransferWithAuthorization?: (message: EvmSingleProofBatchTransferMessage, authorization: EvmPrivacyActionAuthorization, options?: EvmPrivacyTransactionOptions) => Hex;
 }): EvmContractAdapter;
 
-export class ClairveilEvmClient {
-  constructor(options?: {
+export interface ClairveilEvmClientBaseOptions {
     provider?: Eip1193Provider;
-    contractAddress?: string;
     chainId?: string | number;
     /** Expected EIP-155 network for connected-wallet transaction submission. */
     evmChainId?: string | number;
@@ -581,9 +611,16 @@ export class ClairveilEvmClient {
     depositMode?: EvmDepositMode;
     /** Runtime-native minimal denom whose amount must equal EVM msg.value. */
     nativeDenom?: string;
-    contractAdapter?: EvmContractAdapter;
     authorizationProfile?: EvmAuthorizationProfile;
-  });
+}
+
+export type ClairveilEvmClientOptions = ClairveilEvmClientBaseOptions & (
+  | { contractAddress: string; contractAdapter?: EvmContractAdapter }
+  | { contractAddress?: string; contractAdapter: EvmContractAdapter }
+);
+
+export class ClairveilEvmClient {
+  constructor(options: ClairveilEvmClientOptions);
   buildDepositMaterial(input?: {
     creator?: string;
     rootSeed?: BytesLike;
@@ -615,8 +652,8 @@ export class ClairveilEvmClient {
     expectedChainId?: EvmQuantity;
     actualChainId: EvmQuantity;
   }): Readonly<EvmTransactionIdentityVerification>;
-  verifyPrivacyReceipt(input: { transaction: EvmTransactionRequest; receipt: { status?: EvmQuantity; logs?: EvmLog[] }; sender: string }): Readonly<{ verified: true; event: string; operation: string }>;
+  verifyPrivacyReceipt(input: { transaction: EvmTransactionRequest; receipt: { status?: EvmQuantity; logs?: EvmLog[] }; sender: string }): Readonly<EvmPrivacyReceiptVerification>;
   privacyAccount(material: PrivacyMaterial): EvmPublicPrivacyAccount;
 }
 
-export function createClairveilEvmClient(options?: ConstructorParameters<typeof ClairveilEvmClient>[0]): ClairveilEvmClient;
+export function createClairveilEvmClient(options: ConstructorParameters<typeof ClairveilEvmClient>[0]): ClairveilEvmClient;

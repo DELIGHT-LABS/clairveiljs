@@ -78,7 +78,7 @@ export async function runMinimalMetaMaskFlow({
   proverUrl = "http://127.0.0.1:8080",
   evmRpc = "http://127.0.0.1:8545",
   evmChainId = "0x32f",
-  evmPrivacyPrecompileAddress = "0x100000000000000000000000000000000000000b",
+  evmPrivacyPrecompileAddress,
   accountPrefix = "clair",
   shieldedPrefix = "clairs",
   denom = "uclair",
@@ -93,6 +93,7 @@ export async function runMinimalMetaMaskFlow({
   coinDecimals = 6,
   evmGasLimit = "0x989680",
   evmSendGasLimit = "0x5208",
+  evmFinalityPolicy,
   depositProofProvider,
   waitForDeposit = true,
   waitForTransfer = false
@@ -102,6 +103,12 @@ export async function runMinimalMetaMaskFlow({
   }
   if (typeof depositProofProvider !== "function") {
     throw new Error("depositProofProvider is required to build the canonical EVM DepositCircuit proof");
+  }
+  if (!evmPrivacyPrecompileAddress) {
+    throw new Error("evmPrivacyPrecompileAddress is required from the target chain configuration");
+  }
+  if ((waitForDeposit || waitForTransfer) && evmFinalityPolicy == null) {
+    throw new Error("evmFinalityPolicy is required when waiting for an EVM transaction");
   }
 
   const clairveil = createClairveilBrowserDappClient({
@@ -126,7 +133,8 @@ export async function runMinimalMetaMaskFlow({
       denom,
       displayDenom,
       coinDecimals
-    }
+    },
+    evmFinalityPolicy
   });
 
   await ensureMetaMaskChain(provider, {

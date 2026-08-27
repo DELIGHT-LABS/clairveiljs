@@ -29,7 +29,10 @@ import {
   validatePreparedTransferV5PayloadMetadata,
   validatePreparedTransferV5Proof
 } from "clairveiljs/transfer-v5";
-import { buildPreparedTransferPayload } from "clairveiljs/payload";
+import {
+  buildPreparedTransferPayload,
+  buildTransferMsgFromPayloadAndProof
+} from "clairveiljs/payload";
 
 function field(value) {
   return BigInt(value).toString(16).padStart(64, "0");

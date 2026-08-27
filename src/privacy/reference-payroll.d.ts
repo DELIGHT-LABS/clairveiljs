@@ -544,6 +544,10 @@ export interface ObservedPayrollOutputEvidence {
   amount_hash?: string;
   amountHash?: string;
   denom?: string;
+  audit_key_id?: string;
+  auditKeyId?: string;
+  audit_key_epoch?: bigint | number | string;
+  auditKeyEpoch?: bigint | number | string;
 }
 
 export interface OneProofPayrollReconciliationTxEvidence {
@@ -555,6 +559,10 @@ export interface OneProofPayrollReconciliationTxEvidence {
   signDocHash?: string;
   tx_result?: object;
   txResult?: object;
+  checked_height?: number | string;
+  checkedHeight?: number | string;
+  tx_hash_checked?: string;
+  txHashChecked?: string;
 }
 
 export interface ReconciledPayrollItemEvidence {

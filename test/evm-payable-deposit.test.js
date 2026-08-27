@@ -34,6 +34,7 @@ test("payable EVM deposits derive exact msg.value from the native minimal denom"
   );
 
   const client = createClairveilEvmClient({
+    contractAddress: "0x0000000000000000000000000000000000000900",
     accountPrefix: "demo",
     shieldedPrefix: "demos",
     defaultDenom: "udemo",
@@ -60,6 +61,7 @@ test("payable EVM deposits derive exact msg.value from the native minimal denom"
 
 test("nonpayable operations reject value and payable deposit bindings survive serialization", async () => {
   const nonpayable = createEvmContractAdapter({
+    contractAddress: "0x0000000000000000000000000000000000000900",
     encodeDeposit: () => "0x01",
     encodeTransfer: () => "0x02",
     encodeWithdraw: () => "0x03",
@@ -80,6 +82,7 @@ test("nonpayable operations reject value and payable deposit bindings survive se
   );
 
   const client = createClairveilEvmClient({
+    contractAddress: "0x0000000000000000000000000000000000000900",
     defaultDenom: "udemo",
     depositMode: "payable-exact-value",
     nativeDenom: "udemo"

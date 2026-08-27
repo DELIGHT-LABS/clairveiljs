@@ -21,6 +21,21 @@ import {
   normalizeHex
 } from "../core/crypto.js";
 import { sha256Hex } from "../core/browser-crypto.js";
+import {
+  getBroadcastReservationRecords,
+  recheckReservedInputNullifiers
+} from "../privacy/reservation.js";
+
+export * from "./evm-finality.js";
+
+/**
+ * @deprecated Resolve the privacy contract address from the active chain
+ * configuration. This compatibility export is never used as an implicit
+ * client default.
+ */
+export const evmPrivacyPrecompileAddress = "0x100000000000000000000000000000000000000b";
+/** @deprecated Use an explicit chain-configured contractAddress. */
+export const defaultEvmPrivacyPrecompileAddress = evmPrivacyPrecompileAddress;
 
 const { keccak_256: keccak256 } = sha3;
 const zeroWord = "0".repeat(64);
@@ -36,6 +51,7 @@ const evmPrivacySingleProofBatchTransferSignature = "singleProofBatchTransfer((b
 const evmPrivacySingleProofBatchTransferWithAuthorizationSignature = "singleProofBatchTransferWithAuthorization((bytes,bytes,bytes[],(bytes,bytes,bytes,uint32,uint8,bytes,bytes,bytes,bytes,bytes,bytes)[],string,uint64,bytes,uint64),(address,address,uint256,uint64,uint8,bytes))";
 const evmTransactionMarker = Symbol("clairveil.evm-transaction");
 const evmTransactionMetadataField = "__clairveilEvmTransaction";
+const evmAuthorizationProfileMetadata = Symbol("clairveil.evm-authorization-profile-metadata");
 
 export const evmDepositModeNonpayable = "nonpayable";
 export const evmDepositModePayableExactValue = "payable-exact-value";
@@ -338,14 +354,6 @@ function assertPrivacyTransactionBinding(transaction, depositMode, contractAddre
   }
 }
 
-async function authoritativeReservationRecords(context) {
-  if (!context) return [];
-  if (typeof context.reservationManager.getReservation !== "function") {
-    throw new Error("reservationManager.getReservation is required for reserved-note broadcast validation");
-  }
-  return Promise.all(context.reservationIDs.map(id => context.reservationManager.getReservation(id)));
-}
-
 function assertReservationPayloadMatches(records, payload) {
   if (!records.length) return;
   const payloadHash = String(payload?.payload_hash || "").trim();
@@ -376,7 +384,7 @@ async function validateRelayBroadcastContext(options, {
   transactionHash
 } = {}) {
   const payload = options?.relayPayload ?? options?.relay_payload ?? null;
-  const reservationRecords = await authoritativeReservationRecords(reservationContext);
+  const reservationRecords = await getBroadcastReservationRecords(reservationContext);
   assertReservationTransactionMatches(reservationRecords, transactionHash, { allowPayloadBinding: Boolean(payload) });
   const reservationHasTransactionBinding = reservationRecords.some(record =>
     Boolean(String(record?.tx_bytes_hash ?? record?.txBytesHash ?? "").trim())
@@ -500,8 +508,7 @@ async function markBroadcastReservationRejected(context, error) {
   try {
     await context.reservationManager.markBroadcastRejected(context.reservationIDs, {
       leaseToken: context.leaseToken,
-      providerCode: "4001",
-      error: "wallet_rejected_before_broadcast"
+      providerCode: "4001"
     });
   } catch (bookkeepingError) {
     throw attachReservationBookkeepingError(error, bookkeepingError);
@@ -521,9 +528,6 @@ async function markBroadcastReservationSubmitted(context, txHash) {
     throw attachReservationBookkeepingError(error, bookkeepingError);
   }
 }
-
-export const evmPrivacyPrecompileAddress = "0x100000000000000000000000000000000000000b";
-export const defaultEvmPrivacyPrecompileAddress = evmPrivacyPrecompileAddress;
 
 const evmPrivacyDepositTuple = {
   name: "request",
@@ -633,7 +637,7 @@ function evmPrivacyEvent(name, inputs) {
   return { type: "event", name, inputs, anonymous: false };
 }
 
-/** Canonical ABI surface for Clairveil-compatible EVM privacy precompiles. */
+/** Default ClairveilJS adapter ABI for compatible EVM privacy precompiles. */
 export const evmPrivacyPrecompileAbi = Object.freeze([
   evmPrivacyFunction("deposit", [evmPrivacyDepositTuple], "payable"),
   evmPrivacyFunction("transfer", [evmPrivacyTransferTuple]),
@@ -762,6 +766,12 @@ function encodeStaticAbi(type, value) {
   if (/^uint(8|16|32|64|128|256)?$/.test(name)) {
     const bits = Number(name.slice(4) || "256");
     return uintWord(value, bits);
+  }
+  if (name === "bool") {
+    if (typeof value !== "boolean") {
+      throw new Error("bool ABI value must be a boolean");
+    }
+    return uintWord(value ? 1 : 0, 8);
   }
   if (name === "address") return addressWord(value);
   if (name === "bytes32") return bytes32Word(value);
@@ -1408,7 +1418,7 @@ export function createEvmAuthorizationProfile({
     if (validate) validate(authorization);
     return authorization;
   };
-  return Object.freeze({
+  const profile = {
     validate(authorization) {
       applyPolicy(authorization);
     },
@@ -1424,7 +1434,48 @@ export function createEvmAuthorizationProfile({
         });
       }
     } : {})
+  };
+  Object.defineProperty(profile, evmAuthorizationProfileMetadata, {
+    value: Object.freeze({
+      supportedAuthorizationKinds: supportedKinds
+        ? Object.freeze([...supportedKinds].sort((left, right) => left < right ? -1 : left > right ? 1 : 0))
+        : null,
+      typedDataDomain: domain,
+      validate: validate ?? null
+    })
   });
+  return Object.freeze(profile);
+}
+
+function authorizationProfilesCompatible(left, right) {
+  if (left === right) return true;
+  const leftMetadata = left?.[evmAuthorizationProfileMetadata];
+  const rightMetadata = right?.[evmAuthorizationProfileMetadata];
+  if (!leftMetadata || !rightMetadata) return false;
+  return operationIndependentValuesEqual(
+    leftMetadata.supportedAuthorizationKinds,
+    rightMetadata.supportedAuthorizationKinds
+  ) && operationIndependentValuesEqual(
+    leftMetadata.typedDataDomain,
+    rightMetadata.typedDataDomain
+  ) && leftMetadata.validate === rightMetadata.validate;
+}
+
+function operationIndependentValuesEqual(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => operationIndependentValuesEqual(value, right[index]));
+  }
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") {
+    return false;
+  }
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) =>
+    key === rightKeys[index] && operationIndependentValuesEqual(left[key], right[key])
+  );
 }
 
 /** Build a canonical Clairveil EVM PrivacyActionAuthorization EIP-712 payload. */
@@ -1434,7 +1485,7 @@ export function buildEvmPrivacyAuthorizationTypedData({
   authorization,
   cosmosChainId,
   evmChainId,
-  contractAddress = evmPrivacyPrecompileAddress,
+  contractAddress,
   batchId = `0x${zeroWord}`,
   batchItemIndex = 0,
   domain
@@ -1478,6 +1529,9 @@ export function buildEvmPrivacyAuthorizationTypedData({
   const normalizedCosmosChainId = String(cosmosChainId || "").trim();
   if (!normalizedCosmosChainId) throw new Error("cosmosChainId is required for privacy authorization");
   const normalizedEvmChainId = requiredUint(evmChainId, "evmChainId");
+  if (contractAddress == null || String(contractAddress).trim() === "") {
+    throw new Error("privacy authorization contractAddress is required");
+  }
   const verifyingContract = normalizeEvmAddress(contractAddress, "privacy authorization verifying contract");
   const normalizedBatchId = actionConfig.batch ? evmPrivacyBatchId(batchId) : `0x${zeroWord}`;
   const normalizedBatchItemIndex = actionConfig.batch
@@ -1709,7 +1763,7 @@ export function verifyEvmTransactionIdentity({
     throw new Error("EVM transaction identity verification requires eth_getTransactionByHash output");
   }
   const metadata = evmTransactionMetadata(transaction);
-  if (!metadata.operation || !metadata.receiptExpectation ||
+  if (!metadata.operation ||
       !metadata.expectedTo || !metadata.expectedData || !metadata.expectedValue) {
     throw new Error("EVM transaction identity verification requires an SDK-prepared privacy transaction");
   }
@@ -1954,7 +2008,7 @@ export function createEip1193WalletAdapter({ provider, account } = {}) {
 }
 
 export function createEvmContractAdapter({
-  contractAddress = defaultEvmPrivacyPrecompileAddress,
+  contractAddress,
   encodeDeposit = defaultEncodeEvmDeposit,
   encodeTransfer = defaultEncodeEvmTransfer,
   encodeWithdraw = defaultEncodeEvmWithdraw,
@@ -1968,12 +2022,19 @@ export function createEvmContractAdapter({
   chainId,
   depositMode = defaultEvmDepositMode,
   nativeDenom = "uclair",
-  authorizationProfile = null
+  authorizationProfile = null,
+  verifyPrivacyReceipt: verifyPrivacyReceiptHook
 } = {}) {
+  if (contractAddress == null || String(contractAddress).trim() === "") {
+    throw new Error("EVM contract adapter requires contractAddress");
+  }
   const to = normalizeEvmAddress(contractAddress, "contractAddress");
   const resolvedDepositMode = normalizeEvmDepositMode(depositMode);
   const resolvedNativeDenom = normalizeEvmNativeDenom(nativeDenom);
   const resolvedAuthorizationProfile = normalizeEvmAuthorizationProfile(authorizationProfile);
+  if (verifyPrivacyReceiptHook != null && typeof verifyPrivacyReceiptHook !== "function") {
+    throw new Error("EVM contract adapter verifyPrivacyReceipt must be a function");
+  }
   const validateAuthorization = (authorization, options = {}) => validateEvmPrivacyAuthorization(
     authorization,
     resolvedAuthorizationProfile,
@@ -1982,6 +2043,7 @@ export function createEvmContractAdapter({
   return {
     contractAddress: to,
     ...(resolvedAuthorizationProfile ? { authorizationProfile: resolvedAuthorizationProfile } : {}),
+    ...(verifyPrivacyReceiptHook ? { verifyPrivacyReceipt: verifyPrivacyReceiptHook } : {}),
     abi: resolvedDepositMode === evmDepositModePayableExactValue
       ? evmPrivacyPrecompilePayableDepositAbi
       : evmPrivacyPrecompileAbi,
@@ -2098,12 +2160,13 @@ export function createEvmContractAdapter({
 
 export function createEvmPrivacyPrecompileAdapter(options = {}) {
   return createEvmContractAdapter({
-    contractAddress: options.contractAddress ?? evmPrivacyPrecompileAddress,
+    contractAddress: options.contractAddress,
     accountPrefix: options.accountPrefix,
     chainId: options.chainId,
     depositMode: options.depositMode,
     nativeDenom: options.nativeDenom,
     authorizationProfile: options.authorizationProfile,
+    verifyPrivacyReceipt: options.verifyPrivacyReceipt,
     encodeDeposit: options.encodeDeposit ?? encodeEvmPrivacyDeposit,
     encodeTransfer: options.encodeTransfer ?? encodeEvmPrivacyTransfer,
     encodeWithdraw: options.encodeWithdraw ?? encodeEvmPrivacyWithdraw,
@@ -2130,7 +2193,7 @@ function publicPrivacyAccount(material) {
 export class ClairveilEvmClient {
   constructor({
     provider,
-    contractAddress = defaultEvmPrivacyPrecompileAddress,
+    contractAddress,
     chainId,
     evmChainId,
     accountPrefix,
@@ -2153,16 +2216,29 @@ export class ClairveilEvmClient {
     this.defaultDenom = String(defaultDenom || "uclair");
     this.depositMode = normalizeEvmDepositMode(depositMode);
     this.nativeDenom = normalizeEvmNativeDenom(nativeDenom, this.defaultDenom);
+    const adapterContractAddress = contractAdapter?.contractAddress;
+    if (contractAdapter && (adapterContractAddress == null || String(adapterContractAddress).trim() === "")) {
+      throw new Error("EVM contractAdapter.contractAddress is required");
+    }
+    const resolvedContractAddress = contractAddress ?? adapterContractAddress;
+    if (resolvedContractAddress == null || String(resolvedContractAddress).trim() === "") {
+      throw new Error("Clairveil EVM client requires contractAddress or contractAdapter.contractAddress");
+    }
+    if (contractAdapter && contractAddress != null &&
+        normalizeEvmAddress(adapterContractAddress, "contractAdapter.contractAddress") !==
+          normalizeEvmAddress(contractAddress, "contractAddress")) {
+      throw new Error("contractAddress conflicts with contractAdapter.contractAddress");
+    }
     const adapterAuthorizationProfile = contractAdapter?.authorizationProfile ?? null;
     if (authorizationProfile != null && adapterAuthorizationProfile != null &&
-        authorizationProfile !== adapterAuthorizationProfile) {
+        !authorizationProfilesCompatible(authorizationProfile, adapterAuthorizationProfile)) {
       throw new Error("authorizationProfile conflicts with contractAdapter.authorizationProfile");
     }
     this.authorizationProfile = normalizeEvmAuthorizationProfile(
       authorizationProfile ?? adapterAuthorizationProfile
     );
     this.contract = contractAdapter || createEvmPrivacyPrecompileAdapter({
-      contractAddress,
+      contractAddress: resolvedContractAddress,
       accountPrefix: this.accountPrefix,
       chainId,
       depositMode: this.depositMode,
@@ -2614,6 +2690,11 @@ export class ClairveilEvmClient {
       this.contract.contractAddress
     );
     const reservationContext = broadcastReservationContext(reservationOptions);
+    const checkNullifiers = reservationOptions.checkNullifiers ?? reservationOptions.check_nullifiers;
+    if (reservationOptions.checkNullifiers != null && reservationOptions.check_nullifiers != null &&
+        reservationOptions.checkNullifiers !== reservationOptions.check_nullifiers) {
+      throw new Error("checkNullifiers aliases conflict");
+    }
     if (evmTransactionMetadata(transaction).reservationRequired && !reservationContext) {
       throw new Error("prepared reserved EVM transaction requires reservationManager and reservation");
     }
@@ -2632,6 +2713,12 @@ export class ClairveilEvmClient {
       ? wallet
       : createEip1193WalletAdapter({ provider: this.provider });
     await assertWalletEvmChainId(submissionWallet, this.evmChainId);
+    const relayPayload = reservationOptions.relayPayload ?? reservationOptions.relay_payload;
+    await recheckReservedInputNullifiers(
+      reservationContext,
+      checkNullifiers,
+      relayPayload?.nullifier_hex ? [relayPayload.nullifier_hex] : []
+    );
     await beginBroadcastReservation(reservationContext, broadcastTransactionHash);
     let txHash;
     try {
@@ -2655,6 +2742,32 @@ export class ClairveilEvmClient {
   }
 
   verifyPrivacyReceipt({ transaction, receipt, sender } = {}) {
+    if (!receiptSucceeded(receipt?.status)) {
+      throw new Error("privacy receipt does not have an explicit successful status");
+    }
+    const metadata = evmTransactionMetadata(transaction);
+    if (typeof this.contract.verifyPrivacyReceipt === "function") {
+      const result = this.contract.verifyPrivacyReceipt(Object.freeze({
+        transaction,
+        receipt,
+        sender,
+        contractAddress: this.contract.contractAddress,
+        operation: metadata.operation
+      }));
+      if (!result || typeof result !== "object" || Array.isArray(result) ||
+          result.verified !== true) {
+        throw new Error("custom EVM privacy receipt verifier must return { verified: true, operation, event }");
+      }
+      const operation = String(result.operation ?? "").trim();
+      const event = String(result.event ?? "").trim();
+      if (!metadata.operation || !operation || operation !== metadata.operation) {
+        throw new Error("custom EVM privacy receipt verifier operation does not match the prepared transaction");
+      }
+      if (!event) {
+        throw new Error("custom EVM privacy receipt verifier must identify the verified event");
+      }
+      return Object.freeze({ verified: true, operation, event });
+    }
     return verifyEvmPrivacyReceipt({
       transaction,
       receipt,

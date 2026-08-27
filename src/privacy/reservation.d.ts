@@ -1,5 +1,6 @@
 import type { BytesLike, Hex } from "../core/crypto.js";
 import type { FoundNote } from "../core/note.js";
+import type { NullifierStatusResult } from "./payload.js";
 import type { TransferBatchPlan, TransferPlan, WithdrawPlan } from "./planner.js";
 
 export declare const reservationStatuses: Readonly<{
@@ -63,6 +64,36 @@ export interface ReservationStoreStateInput {
 }
 
 export declare const activeReservationStatuses: readonly ReservationStatus[];
+
+export interface BroadcastReservationContext {
+  reservationManager: Pick<NoteReservationManager, "getReservation">;
+  reservationIDs: readonly string[];
+  leaseToken?: string;
+}
+
+export type ReservedInputNullifierStatuses = NullifierStatusResult;
+export type BatchNullifierStatuses = ReservedInputNullifierStatuses;
+
+export declare function getBroadcastReservationRecords(
+  context: BroadcastReservationContext | null | undefined
+): Promise<NoteReservationRecord[]>;
+export declare function assertBatchTransferNullifiersUnspent(
+  statuses: BatchNullifierStatuses,
+  nullifiers: readonly string[]
+): void;
+export declare function assertReservedInputNullifiersUnspent(
+  statuses: ReservedInputNullifierStatuses,
+  nullifiers: readonly string[]
+): void;
+export declare function recheckReservedInputNullifiers(
+  context: BroadcastReservationContext | null | undefined,
+  checkNullifiers?: (nullifiers: readonly string[]) => Promise<ReservedInputNullifierStatuses> | ReservedInputNullifierStatuses,
+  fallbackNullifiers?: readonly string[]
+): Promise<readonly string[]>;
+export declare function recheckReservedBatchTransferNullifiers(
+  context: BroadcastReservationContext | null | undefined,
+  checkNullifiers?: (nullifiers: readonly string[]) => Promise<BatchNullifierStatuses> | BatchNullifierStatuses
+): Promise<readonly string[]>;
 
 export interface NoteReservationRecord {
   reservation_id: string;
@@ -424,6 +455,11 @@ export interface ReservationOperationSuccessEvidenceMetadata {
   /** Set by strict EVM confirmation after action-specific Privacy* event verification. */
   evmPrivacyReceiptVerified?: boolean;
   evm_privacy_receipt_verified?: boolean;
+  evmFinalityVerified?: boolean;
+  evm_finality_verified?: boolean;
+  finality?: { verified?: boolean; [key: string]: unknown };
+  evmFinality?: { verified?: boolean; [key: string]: unknown };
+  evm_finality?: { verified?: boolean; [key: string]: unknown };
   privacyReceiptVerified?: boolean;
   privacy_receipt_verified?: boolean;
   expectedOutputCommitment?: string;
@@ -474,11 +510,6 @@ export type ReservationProofReadyMetadata = ReservationLeaseMetadata & Reservati
   metadata?: ReservationMetadata;
 };
 
-export type ReservationCheckpointRecoveryMetadata = ReservationProofReadyMetadata & (
-  | { nullifierUnspentConfirmed: true; nullifier_unspent_confirmed?: true }
-  | { nullifier_unspent_confirmed: true; nullifierUnspentConfirmed?: true }
-);
-
 export type ReservationProofReadyBatchEntry = {
   /** If both aliases are supplied, they must contain the same IDs in the same order. */
   reservationIDs?: readonly string[];
@@ -515,6 +546,17 @@ type ReservationSubmittedBroadcastAttempt = ReservationBroadcastAttemptFields & 
 );
 
 export type ReservationSubmittedMetadata = ReservationLeaseMetadata & ReservationBroadcastMetadataFields & ReservationSubmittedBroadcastAttempt;
+
+export type ReservationRelaySubmissionMetadata = ReservationLeaseMetadata & ReservationBroadcastMetadataFields & ReservationBroadcastAttemptFields & (
+  | { payloadHash: string; payload_hash?: string }
+  | { payload_hash: string; payloadHash?: string }
+) & (
+  | { txHash: string; tx_hash?: string; submittedTxHash?: string; submitted_tx_hash?: string; txHashSubmitted?: string }
+  | { tx_hash: string; txHash?: string; submittedTxHash?: string; submitted_tx_hash?: string; txHashSubmitted?: string }
+  | { submittedTxHash: string; txHash?: string; tx_hash?: string; submitted_tx_hash?: string; txHashSubmitted?: string }
+  | { submitted_tx_hash: string; txHash?: string; tx_hash?: string; submittedTxHash?: string; txHashSubmitted?: string }
+  | { txHashSubmitted: string; txHash?: string; tx_hash?: string; submittedTxHash?: string; submitted_tx_hash?: string }
+);
 
 export type ReservationUnknownMetadata = ReservationLeaseMetadata & ReservationBroadcastMetadataFields & ReservationSubmittedBroadcastAttempt & {
   fromStatus?: "ProofReady" | "Submitted";
@@ -584,8 +626,8 @@ export interface ReservationReplanMetadata extends ReservationLeaseMetadata {
   tx_absent_or_failed_confirmed?: boolean;
   checkedHeight?: number | string;
   checked_height?: number | string;
-  txHashChecked?: string | boolean;
-  tx_hash_checked?: string | boolean;
+  txHashChecked?: string;
+  tx_hash_checked?: string;
   /** Required when discarding a local ProofReady proof before any broadcast attempt. */
   proofDiscarded?: boolean;
   proof_discarded?: boolean;
@@ -625,8 +667,6 @@ export declare class NoteReservationManager {
   renewLease(reservationIDs?: readonly string[], metadata?: ReservationLeaseMetadata): Promise<NoteReservationRecord[]>;
   heartbeatLease(reservationIDs?: readonly string[], metadata?: ReservationLeaseMetadata): Promise<NoteReservationRecord[]>;
   markProving(reservationIDs?: readonly string[], metadata?: ReservationProvingMetadata): Promise<NoteReservationRecord[]>;
-  /** Restores an exact, unbroadcast checkpoint-quarantined batch after callers explicitly confirm every nullifier is unspent. */
-  recoverCheckpointedProofReady(reservationIDs: readonly string[], metadata: ReservationCheckpointRecoveryMetadata): Promise<NoteReservationRecord[]>;
   markProofReady(reservationIDs?: readonly string[], metadata?: ReservationProofReadyMetadata): Promise<NoteReservationRecord[]>;
   markProofReadyBatch(entries?: readonly ReservationProofReadyBatchEntry[]): Promise<NoteReservationRecord[]>;
   markBroadcastAttempting(reservationIDs: readonly string[], metadata: ReservationLeaseMetadata & ReservationBroadcastAttemptFields & { reason?: string; metadata?: ReservationMetadata }): Promise<NoteReservationRecord[]>;

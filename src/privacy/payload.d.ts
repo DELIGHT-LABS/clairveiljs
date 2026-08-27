@@ -129,6 +129,15 @@ export interface TransferMessageBuildResult {
   message: TransferMessage;
 }
 
+export interface TransferMessageBuildOptions {
+  nowUnix?: number;
+  /** Replaceable Cosmos fee payer/relayer; owner intent remains unchanged. */
+  creator?: ClairAddress | string;
+  /** Optional target-chain assertion that rejects cross-chain payload reuse. */
+  expectedChainId?: string;
+  expected_chain_id?: string;
+}
+
 export function summarizeSpendableNotesByDenom(notes: FoundNote[], denom?: string): { notes: FoundNote[]; total: bigint };
 export function selectTransferInputs(notes: FoundNote[], denom: string, targetAmount: string | number | bigint): TransferInputSelection;
 export function selectBatchTransferInputs(notes: FoundNote[], denom: string, targetAmount: string | number | bigint): TransferInputSelection;

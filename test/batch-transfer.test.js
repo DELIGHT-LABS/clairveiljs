@@ -436,7 +436,7 @@ test("Batch V1 typed-scan disclosure decoders bind output index, commitment, pol
     validationState
   });
   assert.deepEqual(auditableRequest.eventTypes, ["batch_transfer"]);
-  assert.equal(auditableRequest.validationState, validationState);
+  assert.equal(auditableRequest.validationState, undefined);
   assert.equal(auditablePage.summaries.length, 1);
   assert.equal(auditablePage.outputs.length, message.outputs.length);
   assert.equal(auditablePage.outputs.every(entry => entry.event_type === "batch_transfer"), true);

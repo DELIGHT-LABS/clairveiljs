@@ -91,8 +91,8 @@ Clairveil `v0.3.1`의 상태는 `PUBLICATION_READY_EXPERIMENTAL`이며, 이 계�
 
 | SDK 메서드 | HTTP | Clairveil REST route | 용도 |
 | --- | --- | --- | --- |
-| `fetchPrivacyEvents(...)` | GET | `/clairveil/privacy/v1/events` | legacy/general privacy event page |
-| `fetchScanEvents(...)` | GET | `/clairveil/privacy/v1/scan_events` | sequence cursor가 있는 legacy wallet scan projection |
+| `fetchPrivacyEvents(...)` | GET | `/clairveil/privacy/v1/events` | raw privacy event 진단 page |
+| `fetchScanEvents(...)` | GET | `/clairveil/privacy/v1/scan_events` | compatibility/debugging sequence-cursor page; wallet sync에서는 typed endpoint가 첫 요청부터 미구현인 경우에만 fallback으로 사용 |
 | `fetchPrivacyScan(...)`, `queryPrivacyScan(...)` | POST | `/clairveil/privacy/v1/privacy_scan` | `privacy-scan-v2` typed summary/output와 완전한 cursor |
 | `fetchTreeState()` | GET | `/clairveil/privacy/v1/tree_state` | 현재 Merkle root, leaf count, depth |
 | `fetchCommitmentInfo(...)` | GET | `/clairveil/privacy/v1/commitment/{commitment_hex}` | commitment 존재와 leaf 위치 |
@@ -122,10 +122,10 @@ Nullifier와 Merkle path 요청은 spend 대상의 linkage를 query provider에 
 | `signDirectAndBroadcast(...)`, `broadcastSignedTx(...)` | CosmJS/Comet RPC broadcast와 tx lookup | ClairveilJS가 별도 product REST broadcast route를 정의하지 않음 |
 | EVM prepare preflight | read-only `eth_chainId` | configured `evmRpc`와 연결 wallet network를 각각 확인 |
 | `sendEvmTransaction(...)` | wallet `eth_sendTransaction` | transaction 권한은 EIP-1193 wallet 또는 relayer에 있음 |
-| `waitForEvmTransaction(...)` | read-only `eth_getTransactionReceipt`, `eth_getTransactionByHash`, `eth_chainId` | prepared request·sender를 받아 receipt, hash/from/to/input/value/network, action별 privacy event를 모두 검증. configured `evmRpc` 사용 |
+| `waitForEvmTransaction(...)` | read-only `eth_getTransactionReceipt`, `eth_getTransactionByHash`, `eth_chainId`; 정책에 따라 `eth_blockNumber`, `eth_getBlockByNumber` | prepared request·sender를 받아 receipt, hash/from/to/input/value/network, action별 privacy event와 명시적으로 선택한 finality policy를 검증. Policy가 없으면 fail-closed하며 depth/safe/finalized 정책은 canonical inclusion block hash를 재검증 |
 | relay expiry 검증용 chain time | caller가 최신 chain block time 제공 | README의 latest-block REST helper는 예시이며 SDK 고정 relayer API가 아님 |
 
-EVM profile도 privacy scan, circuit, asset, Merkle path, nullifier 같은 Clairveil module 조회에는 configured Clairveil REST endpoint를 사용한다. `evmRpc`는 network ID, receipt 등 EVM JSON-RPC 조회에 사용한다.
+Privacy scan, circuit, asset, Merkle path, nullifier 같은 Clairveil module 조회는 기본적으로 configured Clairveil REST endpoint를 사용한다. EVM 체인은 완전한 `PrivacyStateAdapter`를 주입해 같은 조회를 contract getter나 indexer로 대체할 수 있다. 이 경우 같은 constructor 호출에 adapter를 함께 전달한 런타임 EVM profile만 Cosmos `rpc`/`rest`를 생략할 수 있다. Adapter read도 `queryTimeoutMs`와 동일 adapter 내부의 bounded `queryRetry`를 적용한다. 직렬화되는 `BrowserWalletProfile`과 `ClairveilWebClientConfig`는 완전한 배포 계약이므로 두 endpoint를 계속 요구하고, Cosmos profile도 항상 `rpc`와 `rest`가 필수다. SDK의 typed scan·circuit·asset·Merkle·reserve 검증은 adapter 경계 뒤에서도 그대로 적용된다. `evmRpc`는 network ID, receipt와 finality/reorg 검증 등 EVM JSON-RPC 조회에 사용한다.
 
 ## 온체인 실행 매핑
 
@@ -161,9 +161,9 @@ DApp proxy도 마찬가지로 제품 계약이다. 단순 CORS proxy라도 priva
 | EVM `txBytesHash` | prepared EVM transaction request와 reservation의 로컬 binding | network 제출, RPC tx identity 또는 chain 성공. `eth_sendTransaction`이 반환한 `txHash`가 별도로 필요 |
 | successful tx result / receipt | 해당 transaction 실행 성공 | 기대한 payment/output과의 일치 |
 | input nullifier spent | 입력 note가 소비됨 | payment 또는 payroll item 성공 |
-| EVM network `txHash` + prepared `txBytesHash` + successful receipt + verified RPC call/event + expected output evidence 일치 | EVM operation 성공 판정 가능 | linked input 일부만 확인한 상태 |
+| EVM network `txHash` + prepared `txBytesHash` + successful receipt + verified RPC call/event + verified finality policy + expected output evidence 일치 | EVM operation 성공 판정 가능 | linked input 일부만 확인한 상태 |
 
-Reservation API를 사용하는 흐름은 외부 broadcast 직전에 `markBroadcastAttempting(...)`, 실제 제출 후 `markSubmitted(...)` 또는 불확실한 경우 `markUnknown(...)`에 해당하는 durable evidence를 남겨야 한다. 고수준 EVM prepare는 `execution_transport: "evm"`과 prepared `txBytesHash`를 `ProofReady`에 기록한다. 이 record의 `markSubmitted(...)`은 network `txHash`를 요구하고, `reconcileSpentNotes(...)`는 network hash와 artifact hash가 각각 일치하는지와 `waitForEvmTransaction(...)`이 제공하는 successful receipt·RPC transaction identity·privacy event 검증을 모두 요구한다. 저수준 custom EVM 경로도 `markProofReady(...)`에서 같은 transport tag를 넣어야 한다. SDK broadcast helper는 이 lifecycle을 대신 관리할 수 있다.
+Reservation API를 사용하는 직접 제출 흐름은 외부 broadcast 직전에 `markBroadcastAttempting(...)`, 실제 제출 후 `markSubmitted(...)` 또는 불확실한 경우 `markUnknown(...)`에 해당하는 durable evidence를 남겨야 한다. 이미 `recordRelayHandoff(...)`한 payload는 로컬 broadcast를 시작하지 않고, relayer가 network hash를 반환하면 동일 payload hash와 함께 `recordRelaySubmission(...)`으로 `Submitted`를 기록한다. 고수준 EVM prepare는 `execution_transport: "evm"`과 prepared `txBytesHash`를 `ProofReady`에 기록한다. 이 record의 `markSubmitted(...)`과 `recordRelaySubmission(...)`은 network `txHash`를 요구하고, `reconcileSpentNotes(...)`는 network hash와 artifact hash가 각각 일치하는지와 `waitForEvmTransaction(...)`이 제공하는 successful receipt·RPC transaction identity·privacy event·finality 검증을 모두 요구한다. 저수준 custom EVM 경로도 `markProofReady(...)`에서 같은 transport tag를 넣어야 한다. SDK broadcast helper는 직접 제출 lifecycle을 대신 관리할 수 있다.
 
 ## 관련 package entrypoint
 

@@ -17,6 +17,8 @@ import {
   encryptDisclosureV1,
   marshalDisclosurePlaintextV1
 } from "clairveiljs/protocol-v1";
+import { bytesFromHex } from "clairveiljs/browser-crypto";
+import { validatePrivacyScanPageV2 } from "clairveiljs/scan";
 import {
   asymEncrypt,
   derivePubKeyFromScalar,
@@ -151,6 +153,75 @@ function transferDisclosureEvent(payload, txHash = "AABBCC") {
       { key: "self_view_disclosure_payload", value: payload.self_view_disclosure_payload_hex }
     ]
   };
+}
+
+function validatedTransferScanOutput(payload, {
+  userPrivacyPolicy = payload.user_privacy_policy,
+  txHash = new Uint8Array(32).fill(0xab)
+} = {}) {
+  const summary = {
+    height: 10,
+    globalSequence: 4,
+    txHash,
+    eventType: "shielded_transfer",
+    nullifiers: payload.inputs.map(input => bytesFromHex(input.nullifier_hex)),
+    outputCount: 2,
+    effectId: new Uint8Array(),
+    circuitSetId: "privacy-note-v1",
+    payloadVersion: "privacy-fixed-v1",
+    scanSchemaVersion: "privacy-scan-v2",
+    auditKeyId: "",
+    auditKeyEpoch: 0,
+    auditTargetPubkey: bytesFromHex(payload.audit_disclosure_target_pubkey_hex)
+  };
+  const outputs = payload.outputs.map((output, outputIndex) => ({
+    height: summary.height,
+    globalSequence: summary.globalSequence,
+    outputIndex,
+    effectId: summary.effectId,
+    txHash,
+    eventType: summary.eventType,
+    circuitSetId: summary.circuitSetId,
+    payloadVersion: summary.payloadVersion,
+    scanSchemaVersion: summary.scanSchemaVersion,
+    auditKeyId: summary.auditKeyId,
+    auditKeyEpoch: summary.auditKeyEpoch,
+    auditTargetPubkey: summary.auditTargetPubkey,
+    commitment: bytesFromHex(output.commitment_hex),
+    ciphertext: bytesFromHex(payload.cipher_text_hexes[outputIndex]),
+    viewTag: bytesFromHex(payload.view_tag_hexes[outputIndex]),
+    leafIndexFound: true,
+    leafIndex: outputIndex,
+    userPrivacyPolicy: outputIndex === 0 ? userPrivacyPolicy : 0,
+    userDisclosureMode: outputIndex === 0
+      ? "USER_DISCLOSURE_MODE_RECIPIENT_ENCRYPTED"
+      : "",
+    userDisclosureDigest: outputIndex === 0
+      ? bytesFromHex(payload.user_disclosure_digest_hex)
+      : new Uint8Array(),
+    userDisclosureTargetPubkey: outputIndex === 0
+      ? bytesFromHex(payload.user_disclosure_target_pubkey_hex)
+      : new Uint8Array(),
+    userDisclosurePayload: outputIndex === 0
+      ? bytesFromHex(payload.user_disclosure_payload_hex)
+      : new Uint8Array(),
+    fullDisclosureDigest: outputIndex === 0
+      ? bytesFromHex(payload.audit_disclosure_digest_hex)
+      : new Uint8Array(),
+    auditDisclosurePayload: outputIndex === 0
+      ? bytesFromHex(payload.audit_disclosure_payload_hex)
+      : new Uint8Array(),
+    selfViewDisclosurePayload: outputIndex === 0
+      ? bytesFromHex(payload.self_view_disclosure_payload_hex)
+      : new Uint8Array()
+  }));
+  return validatePrivacyScanPageV2({
+    scanSchemaVersion: summary.scanSchemaVersion,
+    summaries: [summary],
+    outputs,
+    nextCursor: { height: summary.height, globalSequence: summary.globalSequence, outputIndex: 1 },
+    hasMore: false
+  }).outputs[0];
 }
 
 function compactReport(report) {
@@ -309,6 +380,126 @@ test("self-view disclosure decodes and verifies against the send-capable fixture
   );
 
   assert.deepEqual(compactReport(report), expectedDisclosure(flow.transfer.self_view_disclosure));
+});
+
+test("direct transfer typed-scan disclosure decoders verify user, audit, and self-view planes", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const flow = readFixture("privacy_send_capable_reference_flow.json");
+  const payload = examples.transfer.request.payload;
+  const output = validatedTransferScanOutput(payload);
+
+  const user = decodeUserDisclosureFromScanOutput(output, {
+    disclosureScalar: 79n,
+    disclosurePubKeyHex: payload.user_disclosure_target_pubkey_hex,
+    shieldedPrefix: "clairs"
+  });
+  const audit = decodeAuditDisclosureFromScanOutput(output, {
+    disclosureScalar: 83n,
+    shieldedPrefix: "clairs"
+  });
+  const selfView = decodeSelfViewDisclosureFromScanOutput(output, {
+    disclosureScalar: 89n,
+    shieldedPrefix: "clairs"
+  });
+
+  assert.deepEqual(compactReport(user), expectedDisclosure(flow.transfer.user_disclosure));
+  assert.deepEqual(compactReport(audit), expectedDisclosure(flow.transfer.audit_disclosure));
+  assert.deepEqual(compactReport(selfView), expectedDisclosure(flow.transfer.self_view_disclosure));
+  assert.equal(user.verification.typed_scan_output, true);
+  assert.equal(audit.verification.typed_scan_output, true);
+  assert.equal(selfView.verification.typed_scan_output, true);
+  assert.throws(
+    () => decodeUserDisclosureFromScanOutput(output, {
+      disclosureScalar: 79n,
+      disclosurePubKeyHex: payload.user_disclosure_target_pubkey_hex,
+      txHash: "cd".repeat(32)
+    }),
+    /transaction hash does not match/
+  );
+  assert.throws(
+    () => decodeUserDisclosureFromScanOutput(
+      validatedTransferScanOutput(payload, { txHash: new Uint8Array() }),
+      {
+        disclosureScalar: 79n,
+        disclosurePubKeyHex: payload.user_disclosure_target_pubkey_hex,
+        txHash: "ab".repeat(32)
+      }
+    ),
+    /does not carry a transaction hash/
+  );
+  assert.throws(
+    () => decodeUserDisclosureFromScanOutput(
+      validatedTransferScanOutput(payload, {
+        userPrivacyPolicy: payload.user_privacy_policy === 1 ? 2 : 1
+      }),
+      {
+        disclosureScalar: 79n,
+        disclosurePubKeyHex: payload.user_disclosure_target_pubkey_hex
+      }
+    ),
+    /policy does not match/
+  );
+  assert.throws(
+    () => decodeUserDisclosureFromScanOutput({ ...output }, {
+      disclosureScalar: 79n,
+      disclosurePubKeyHex: payload.user_disclosure_target_pubkey_hex
+    }),
+    /must come from validatePrivacyScanPageV2/
+  );
+  const inheritedOutput = Object.create(output);
+  Object.defineProperty(inheritedOutput, "tx_hash", {
+    value: new Uint8Array(32).fill(0xcd),
+    enumerable: true
+  });
+  assert.throws(
+    () => decodeUserDisclosureFromScanOutput(inheritedOutput, {
+      disclosureScalar: 79n,
+      disclosurePubKeyHex: payload.user_disclosure_target_pubkey_hex
+    }),
+    /must come from validatePrivacyScanPageV2/
+  );
+  const mutatedOutput = validatedTransferScanOutput(payload);
+  mutatedOutput.full_disclosure_digest[0] ^= 0xff;
+  assert.throws(
+    () => decodeAuditDisclosureFromScanOutput(mutatedOutput, {
+      disclosureScalar: 83n,
+      shieldedPrefix: "clairs"
+    }),
+    /must come from validatePrivacyScanPageV2/
+  );
+
+  const client = createClairveilClient({
+    rest: "http://127.0.0.1:1317",
+    rpc: "http://127.0.0.1:26657",
+    chainId: "clairveil-test-1",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs"
+  });
+  const wrapped = await client.decodeUserDisclosure({
+    output,
+    disclosureScalar: 79n,
+    disclosurePubKeyHex: payload.user_disclosure_target_pubkey_hex
+  });
+  const wrappedAudit = await client.decodeAuditDisclosure({
+    output,
+    disclosurePrivKeyHex: 83n.toString(16).padStart(64, "0")
+  });
+  const wrappedSelfView = await client.decodeSelfViewDisclosure({
+    output,
+    disclosureScalar: 89n
+  });
+  assert.equal(wrapped.digest_hex, user.digest_hex);
+  assert.equal(wrappedAudit.digest_hex, audit.digest_hex);
+  assert.equal(wrappedSelfView.digest_hex, selfView.digest_hex);
+  await assert.rejects(
+    () => client.decodeUserDisclosure({
+      output,
+      scanOutput: validatedTransferScanOutput(payload),
+      disclosureScalar: 79n,
+      disclosurePubKeyHex: payload.user_disclosure_target_pubkey_hex
+    }),
+    /disclosure output aliases conflict/
+  );
 });
 
 test("Cosmos client decodes self-view disclosure through the high-level API", fixtureTestOptions, async () => {

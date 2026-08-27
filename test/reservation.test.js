@@ -8,8 +8,10 @@ import {
   createNoteReservationManager,
   IndexedDbReservationStore,
   MemoryReservationStore,
+  assertReservedInputNullifiersUnspent,
   hashAmount,
   hashRecipient,
+  hashTransparentRecipient,
   nullifierLookupKey,
   nullifierLookupKeyFromHex,
   noteReservationIdentity,
@@ -458,6 +460,42 @@ test("reservation heartbeat interval follows the active lease window", () => {
     leaseUntil: "2026-01-02T03:04:05.090Z",
     now: "2026-01-02T03:04:05.000Z"
   }), 30);
+});
+
+test("final reserved-input checks consume status list aliases and reject missing or conflicting entries", () => {
+  const first = "01".repeat(32);
+  const second = "02".repeat(32);
+  assert.doesNotThrow(() => assertReservedInputNullifiersUnspent(
+    { statuses: [
+      { nullifier: first, used: false },
+      { Nullifier: second, Used: false }
+    ] },
+    [first, second]
+  ));
+  assert.doesNotThrow(() => assertReservedInputNullifiersUnspent(
+    {
+      statuses: [{ nullifier: first, used: false }],
+      Statuses: [{ Nullifier: second, Used: false }]
+    },
+    [first, second]
+  ));
+  assert.throws(
+    () => assertReservedInputNullifiersUnspent(
+      new Map([[first, { used: false }]]),
+      [first, second]
+    ),
+    /at index 1 is spent, missing, or has an invalid status/
+  );
+  assert.throws(
+    () => assertReservedInputNullifiersUnspent(
+      {
+        statuses: [{ nullifier: first, used: false }],
+        Statuses: [{ Nullifier: first, Used: true }]
+      },
+      [first]
+    ),
+    /at index 0 is spent, missing, or has an invalid status/
+  );
 });
 
 test("indexeddb reservation store requires web locks unless explicitly scoped to single-tab", async () => {
@@ -1480,7 +1518,7 @@ test("spent reconciliation atomically quarantines a concurrent matching reservat
   assert.ok(!records.some(record => activeStatuses.has(record.status)));
 });
 
-test("a live ProofReady lease blocks other workers from replan or manual review", async () => {
+test("ProofReady recovery requires the worker lease until expiry", async () => {
   let currentTime = new Date("2026-01-02T03:04:05.000Z");
   const now = () => currentTime;
   const store = new MemoryReservationStore({ now });
@@ -1508,29 +1546,21 @@ test("a live ProofReady lease blocks other workers from replan or manual review"
   await owner.markProofReady(batch.reservation_ids, { leaseToken: batch.lease_token });
 
   await assert.rejects(
-    () => otherWorker.markReplanRequired(batch.reservation_ids, {
-      error: "other tab attempted recovery"
-    }),
-    /lease token is required for reservation transition: ProofReady -> ReplanRequired/
-  );
-  await assert.rejects(
     () => otherWorker.markManualReview(batch.reservation_ids, {
-      error: "other tab attempted recovery"
+      error: "independent reconcile recovery"
     }),
-    /lease token is required for reservation transition: ProofReady -> ManualReview/
+    /lease token is required/
   );
-  assert.equal((await otherWorker.reservationForNote(note)).status, reservationStatuses.ProofReady);
-
   currentTime = new Date("2026-01-02T03:04:06.001Z");
   await otherWorker.markManualReview(batch.reservation_ids, {
-    error: "expired lease recovery"
+    error: "expired reconcile recovery"
   });
   const recovered = await store.getReservation(batch.reservation_ids[0]);
   assert.equal(recovered.status, reservationStatuses.ManualReview);
   assert.equal(recovered.lease_token, "");
 });
 
-test("a live Proving lease blocks other workers until expiry, even with its token", async () => {
+test("Proving recovery requires the worker lease until expiry", async () => {
   let currentTime = new Date("2026-01-02T03:04:05.000Z");
   const now = () => currentTime;
   const store = new MemoryReservationStore({ now });
@@ -1558,19 +1588,10 @@ test("a live Proving lease blocks other workers until expiry, even with its toke
 
   await assert.rejects(
     () => otherWorker.markManualReview(batch.reservation_ids, {
-      error: "other tab attempted cleanup"
+      error: "independent proving recovery"
     }),
-    /lease token is required for reservation transition: Proving -> ManualReview/
+    /lease token is required/
   );
-  await assert.rejects(
-    () => otherWorker.markReplanRequired(batch.reservation_ids, {
-      leaseToken: batch.lease_token,
-      error: "other tab has the token but not the lease owner"
-    }),
-    /reservation lease owner mismatch/
-  );
-  assert.equal((await store.getReservation(batch.reservation_ids[0])).status, reservationStatuses.Proving);
-
   currentTime = new Date("2026-01-02T03:04:06.001Z");
   await otherWorker.markManualReview(batch.reservation_ids, {
     error: "expired proving recovery"
@@ -2195,7 +2216,7 @@ test("store CAS enforces replan, failure, and ManualReview evidence without a ma
       reservationStatuses.Submitted,
       reservationStatuses.Failed
     ),
-    /requires nullifier_unspent_confirmed/
+    /requires exact tx_hash_checked/
   );
 
   const reviewNote = noteFixture({ nullifier: "60".repeat(32), sequence: 17 });
@@ -2329,7 +2350,7 @@ test("reservation creation rejects reuse of a historical operation id", async ()
   assert.equal(reservations[0].status, reservationStatuses.Released);
 });
 
-test("expired proof-ready leases reject submitted or unknown evidence", async () => {
+test("expired proof-ready leases reject worker submission but allow canonical recovery", async () => {
   let currentTime = new Date("2026-01-02T03:04:05.000Z");
   const now = () => currentTime;
   const manager = createNoteReservationManager({
@@ -2399,15 +2420,19 @@ test("expired proof-ready leases reject submitted or unknown evidence", async ()
   assert.equal(unknown.sign_doc_hash, "");
   await assert.rejects(
     () => manager.markReplanRequired(unknownBatch.reservation_ids, {
-      leaseToken: unknownBatch.lease_token,
-      error: "expired worker attempted to discard proof",
+      error: "reconcile discarded an unsubmitted proof",
       metadata: {
         no_broadcast_attempt: true,
         proof_discarded: true
       }
     }),
-    /lease expired/
+    /lease token is required/
   );
+  const recovered = await manager.markManualReview(unknownBatch.reservation_ids, {
+    error: "expired ProofReady recovery requires review"
+  });
+  assert.equal(recovered[0].status, reservationStatuses.ManualReview);
+  assert.equal(recovered[0].lease_token, "");
 
   const expiredRelayNote = noteFixture({ nullifier: "5c".repeat(32), sequence: 13 });
   const expiredRelayBatch = await preparePlanReservation(manager, {
@@ -2428,7 +2453,7 @@ test("expired proof-ready leases reject submitted or unknown evidence", async ()
         checked_height: 123
       }
     }),
-    /lease expired/
+    /reservation lease expired/
   );
   const reviewed = await manager.markManualReview(expiredRelayBatch.reservation_ids, {
     error: "relay payload expired after worker lease",
@@ -3553,6 +3578,20 @@ test("unknown reservations require reconcile evidence before replan releases the
     reservationStatuses.Unknown
   );
 
+  await assert.rejects(
+    () => manager.markReplanRequired(batch.reservation_ids, {
+      fromStatus: reservationStatuses.Unknown,
+      nullifierUnspentConfirmed: true,
+      txAbsentOrFailedConfirmed: true,
+      error: "tx failure evidence omitted its exact lookup identity"
+    }),
+    /Unknown -> ReplanRequired requires exact tx_hash_checked/
+  );
+  assert.equal(
+    (await manager.reservationForNote(note)).status,
+    reservationStatuses.Unknown
+  );
+
   await manager.markReplanRequired(batch.reservation_ids, {
     fromStatus: reservationStatuses.Unknown,
     error: "tx failed and nullifier is unspent",
@@ -3922,7 +3961,7 @@ test("explicit EVM success statuses mark the operation succeeded", async () => {
   }
 });
 
-test("EVM reservations require network, artifact, receipt, call, and privacy-event evidence", async () => {
+test("EVM reservations require network, artifact, receipt, call, privacy-event, and finality evidence", async () => {
   const setup = async (nullifier, sequence) => {
     const store = new MemoryReservationStore();
     const manager = createNoteReservationManager({
@@ -3986,6 +4025,9 @@ test("EVM reservations require network, artifact, receipt, call, and privacy-eve
   assert.ok(incompleteRecord.metadata.operation_success_evidence_errors.includes(
     "EVM privacy receipt verification missing"
   ));
+  assert.ok(incompleteRecord.metadata.operation_success_evidence_errors.includes(
+    "EVM finality verification missing"
+  ));
 
   const complete = await setup("d2".repeat(32), 222);
   await markSubmittedAfterAttempt(complete.manager, complete.batch, {
@@ -4002,7 +4044,8 @@ test("EVM reservations require network, artifact, receipt, call, and privacy-eve
         txBytesHash: "EVM-ARTIFACT-BINDING",
         receipt: { transactionHash: networkTxHash, status: "0x1", logs: [] },
         transactionVerification: { verified: true },
-        privacyReceipt: { verified: true }
+        privacyReceipt: { verified: true },
+        finality: { verified: true, mode: "safe" }
       },
       operationEvidenceHash: "EVM-OPERATION-EVIDENCE"
     }
@@ -4011,6 +4054,127 @@ test("EVM reservations require network, artifact, receipt, call, and privacy-eve
   assert.equal(completeRecord.status, reservationStatuses.ConfirmedSpent);
   assert.equal(completeRecord.metadata.operation_status, operationStatuses.Succeeded);
   assert.deepEqual(completeRecord.metadata.operation_success_evidence_errors, []);
+
+  const contradictoryTxHash = `0x${"aa".repeat(32)}`;
+  await assert.rejects(
+    () => complete.manager.reconcileSpentNotes([{
+      ...complete.note,
+      isSpent: true,
+      txHash: contradictoryTxHash,
+      txBytesHash: "EVM-ARTIFACT-BINDING",
+      txResult: {
+        transactionHash: contradictoryTxHash,
+        status: "0x1",
+        logs: []
+      },
+      operationEvidenceHash: "EVM-OPERATION-EVIDENCE",
+      evmTransactionVerified: true,
+      evmPrivacyReceiptVerified: true,
+      evmFinalityVerified: false,
+      finality: { verified: false, mode: "safe" }
+    }]),
+    error => {
+      assert.equal(error.code, ClairveilErrorCode.OPERATION_EVIDENCE_CONFLICT);
+      assert.ok(error.details.conflicts.some(conflict =>
+        conflict.field === "tx_hash" && conflict.reason === "mismatch"
+      ));
+      assert.ok(error.details.conflicts.some(conflict =>
+        conflict.source_field === "evm_finality_verification"
+      ));
+      return true;
+    }
+  );
+  assert.deepEqual(
+    await complete.store.getReservation(complete.batch.reservation_ids[0]),
+    completeRecord
+  );
+});
+
+test("duplicate EVM evidence rejects verification disagreement and alias conflicts atomically", async () => {
+  const setup = async (nullifier, sequence) => {
+    const store = new MemoryReservationStore();
+    const manager = createNoteReservationManager({
+      store,
+      ownerKeyId: "chain:clair1owner",
+      indexKey: "index-key-v1"
+    });
+    const note = noteFixture({ nullifier, sequence });
+    const batch = await preparePlanReservation(manager, {
+      plan: { selectedNote: note },
+      kind: "payment"
+    });
+    await manager.markProofReady(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      txBytesHash: "EVM-ARTIFACT-BINDING",
+      executionTransport: "evm",
+      expectedOperationEvidenceHash: "EVM-OPERATION-EVIDENCE",
+      operationSuccessEvidenceRequired: true
+    });
+    await markSubmittedAfterAttempt(manager, batch, {
+      leaseToken: batch.lease_token,
+      txHash: `0x${"ef".repeat(32)}`,
+      txBytesHash: "EVM-ARTIFACT-BINDING"
+    });
+    return { store, manager, note, batch };
+  };
+  const txHash = `0x${"ef".repeat(32)}`;
+  const evidence = finality => ({
+    txResult: {
+      txHash,
+      txBytesHash: "EVM-ARTIFACT-BINDING",
+      receipt: { transactionHash: txHash, status: "0x1", logs: [] },
+      transactionVerification: { verified: true },
+      privacyReceipt: { verified: true },
+      finality
+    },
+    operationEvidenceHash: "EVM-OPERATION-EVIDENCE"
+  });
+
+  for (const [nullifier, sequence, first, second, expectedSourceField] of [
+    [
+      "d4".repeat(32),
+      304,
+      evidence({ verified: true, mode: "safe" }),
+      evidence({ verified: false, mode: "safe" }),
+      "evm_finality_verification"
+    ],
+    [
+      "d5".repeat(32),
+      305,
+      evidence({ verified: true, mode: "safe" }),
+      {
+        ...evidence({ verified: true, mode: "safe" }),
+        evmFinalityVerified: false
+      },
+      "evm_finality_verification"
+    ]
+  ]) {
+    const { store, manager, note, batch } = await setup(nullifier, sequence);
+    await assert.rejects(
+      () => manager.reconcileSpentNotes([{
+        ...note,
+        isSpent: true,
+        operationSuccessEvidence: first
+      }, {
+        ...note,
+        isSpent: true,
+        operationSuccessEvidence: second
+      }]),
+      error => {
+        assert.equal(error.code, ClairveilErrorCode.OPERATION_EVIDENCE_CONFLICT);
+        assert.equal(error.details.operation_id, batch.operation_id);
+        assert.ok(error.details.conflicts.some(conflict =>
+          conflict.source_field === expectedSourceField &&
+          conflict.reason === "duplicate_conflict"
+        ));
+        return true;
+      }
+    );
+    assert.equal(
+      (await store.getReservation(batch.reservation_ids[0])).status,
+      reservationStatuses.Submitted
+    );
+  }
 });
 
 test("top-level failed EVM receipt overrides a nested successful tx result", async () => {
@@ -4363,7 +4527,15 @@ test("reconciliation rejects contradictory nested evidence envelopes atomically"
         }
       }
     }]),
-    /operation success evidence envelope aliases conflict/
+    error => {
+      assert.equal(error.code, ClairveilErrorCode.OPERATION_EVIDENCE_CONFLICT);
+      assert.ok(error.details.conflicts.some(conflict =>
+        conflict.field === "operation_evidence" &&
+        conflict.source_field === "operation_evidence_envelope" &&
+        conflict.reason === "alias_conflict"
+      ));
+      return true;
+    }
   );
   assert.equal(
     (await store.getReservation(batch.reservation_ids[0])).status,
@@ -4449,7 +4621,23 @@ test("inactive transitions require reconciled discard or operator evidence", asy
       reservationStatuses.Submitted,
       reservationStatuses.Failed
     ),
-    /Submitted -> Failed requires nullifier_unspent_confirmed/
+    /Submitted -> Failed requires exact tx_hash_checked/
+  );
+  await assert.rejects(
+    () => manager.transitionBatch(
+      submittedBatch.reservation_ids,
+      reservationStatuses.Submitted,
+      reservationStatuses.Failed,
+      {
+        nullifierUnspentConfirmed: true,
+        txAbsentOrFailedConfirmed: true
+      }
+    ),
+    /Submitted -> Failed requires exact tx_hash_checked/
+  );
+  assert.equal(
+    (await manager.store.getReservation(submittedBatch.reservation_ids[0])).status,
+    reservationStatuses.Submitted
   );
   await manager.transitionBatch(
     submittedBatch.reservation_ids,
@@ -4497,7 +4685,7 @@ test("inactive transitions require reconciled discard or operator evidence", asy
   assert.equal(resolvedReview[0].metadata.operator_approval_reference, "case-205");
 });
 
-test("checkpoint recovery atomically restores an unbroadcast ManualReview batch to ProofReady", async () => {
+test("ManualReview cannot return directly to ProofReady outside the canonical transition table", async () => {
   const store = new MemoryReservationStore();
   const manager = createNoteReservationManager({
     store,
@@ -4527,42 +4715,12 @@ test("checkpoint recovery atomically restores an unbroadcast ManualReview batch 
       reservationStatuses.ProofReady,
       { payloadHash: "payload-hash" }
     ),
-    /managed checkpoint recovery/
+    /invalid reservation transition/
   );
-  await assert.rejects(
-    () => manager.recoverCheckpointedProofReady(batch.reservation_ids, {
-      leaseToken: batch.lease_token,
-      payloadHash: "different-payload-hash",
-      txBytesHash: "transaction-binding"
-    }),
-    /requires explicit unspent-nullifier evidence/
+  assert.equal(
+    (await manager.getReservation(batch.reservation_ids[0])).status,
+    reservationStatuses.ManualReview
   );
-  await assert.rejects(
-    () => manager.recoverCheckpointedProofReady(batch.reservation_ids, {
-      leaseToken: batch.lease_token,
-      payloadHash: "different-payload-hash",
-      txBytesHash: "transaction-binding",
-      nullifierUnspentConfirmed: true
-    }),
-    /payload hash does not match/
-  );
-
-  const recovered = await manager.recoverCheckpointedProofReady(batch.reservation_ids, {
-    leaseToken: batch.lease_token,
-    payloadHash: "payload-hash",
-    txBytesHash: "transaction-binding",
-    expectedOperationEvidenceHash: "operation-evidence",
-    operationSuccessEvidenceRequired: true,
-    nullifierUnspentConfirmed: true
-  });
-  assert.equal(recovered[0].status, reservationStatuses.ProofReady);
-  assert.equal(recovered[0].payload_hash, "payload-hash");
-  assert.equal(recovered[0].tx_bytes_hash, "transaction-binding");
-  assert.equal(recovered[0].metadata.batch_checkpoint_recovered, true);
-  assert.equal(recovered[0].metadata.nullifier_unspent_confirmed, true);
-  assert.equal(recovered[0].metadata.no_broadcast_attempt, true);
-  assert.equal(recovered[0].lease_token, batch.lease_token);
-  assert.ok(Date.parse(recovered[0].lease_until) > Date.now());
 });
 
 test("spent-note reconciliation applies multi-note updates in one atomic batch", async () => {
@@ -4605,6 +4763,201 @@ test("spent-note reconciliation applies multi-note updates in one atomic batch",
     const reservation = await store.getReservation(reservationID);
     assert.equal(reservation.status, reservationStatuses.Submitted);
   }
+});
+
+test("spent-note reconciliation rejects conflicting duplicate evidence atomically", async () => {
+  const store = new MemoryReservationStore();
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1owner",
+    indexKey: "index-key-v1"
+  });
+  const note = noteFixture({ nullifier: "d3".repeat(32), sequence: 303 });
+  const batch = await preparePlanReservation(manager, {
+    plan: { selectedNote: note },
+    kind: "transfer"
+  });
+  await manager.markProofReady(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    expectedOutputCommitment: "OUTPUT",
+    expectedDisclosureDigest: "DIGEST",
+    expectedRecipientHash: "RECIPIENT",
+    expectedAmount: "5",
+    expectedAmountHash: "AMOUNT",
+    expectedDenom: "uclair",
+    batchItemIndexKnown: false,
+    operationSuccessEvidenceRequired: true
+  });
+  await markSubmittedAfterAttempt(manager, batch, {
+    leaseToken: batch.lease_token,
+    txHash: "EXPECTED-TX"
+  });
+  const matchingEvidence = {
+    txHash: "EXPECTED-TX",
+    outputCommitment: "OUTPUT",
+    auditDisclosureDigest: "DIGEST",
+    recipientHash: "RECIPIENT",
+    amount: "5",
+    amountHash: "AMOUNT",
+    denom: "uclair"
+  };
+
+  await assert.rejects(
+    () => manager.reconcileSpentNotes([{
+      ...note,
+      isSpent: true,
+      operationSuccessEvidence: matchingEvidence
+    }, {
+      ...note,
+      isSpent: true,
+      operationSuccessEvidence: {
+        ...matchingEvidence,
+        txHash: "OTHER-TX",
+        outputCommitment: "OTHER-OUTPUT",
+        auditDisclosureDigest: "OTHER-DIGEST",
+        amount: "6",
+        amountHash: "OTHER-AMOUNT"
+      }
+    }]),
+    error => {
+      assert.equal(error.code, ClairveilErrorCode.OPERATION_EVIDENCE_CONFLICT);
+      assert.equal(error.details.operation_id, batch.operation_id);
+      assert.deepEqual(
+        [...new Set(error.details.conflicts.map(conflict => conflict.field))],
+        ["tx_hash", "commitment", "digest", "amount"]
+      );
+      assert.ok(error.details.conflicts.every(conflict =>
+        conflict.reservation_id === batch.reservation_ids[0] &&
+        conflict.reason === "duplicate_conflict" &&
+        conflict.expected !== conflict.actual
+      ));
+      return true;
+    }
+  );
+  assert.equal(
+    (await manager.getReservation(batch.reservation_ids[0])).status,
+    reservationStatuses.Submitted
+  );
+
+  await assert.rejects(
+    () => manager.reconcileSpentNotes([{
+      ...note,
+      isSpent: true,
+      operationSuccessEvidence: { txHash: "EXPECTED-TX" }
+    }, {
+      ...note,
+      isSpent: true,
+      operationSuccessEvidence: {
+        outputCommitment: "OUTPUT",
+        auditDisclosureDigest: "DIGEST",
+        recipientHash: "RECIPIENT",
+        amount: "5",
+        amountHash: "AMOUNT",
+        denom: "uclair"
+      }
+    }, {
+      ...note,
+      isSpent: true,
+      operationSuccessEvidence: { txHash: "OTHER-TX" }
+    }]),
+    error => {
+      assert.equal(error.code, ClairveilErrorCode.OPERATION_EVIDENCE_CONFLICT);
+      assert.deepEqual(
+        [...new Set(error.details.conflicts.map(conflict => conflict.field))],
+        ["tx_hash"]
+      );
+      return true;
+    }
+  );
+  assert.equal(
+    (await manager.getReservation(batch.reservation_ids[0])).status,
+    reservationStatuses.Submitted
+  );
+
+  await assert.rejects(
+    () => manager.reconcileSpentNotes([{
+      ...note,
+      isSpent: true,
+      operationSuccessEvidence: {
+        ...matchingEvidence,
+        txResult: { txHash: "EXPECTED-TX", code: 0 }
+      }
+    }, {
+      ...note,
+      isSpent: true,
+      operationSuccessEvidence: {
+        ...matchingEvidence,
+        txResult: { txHash: "EXPECTED-TX", code: 7 }
+      }
+    }]),
+    error => {
+      assert.equal(error.code, ClairveilErrorCode.OPERATION_EVIDENCE_CONFLICT);
+      assert.ok(error.details.conflicts.some(conflict =>
+        conflict.field === "transaction_outcome" &&
+        conflict.source_field === "transaction_outcome" &&
+        conflict.reason === "duplicate_conflict" &&
+        conflict.expected === "cosmos-code:0" &&
+        conflict.actual === "cosmos-code:7"
+      ));
+      return true;
+    }
+  );
+  assert.equal(
+    (await manager.getReservation(batch.reservation_ids[0])).status,
+    reservationStatuses.Submitted
+  );
+
+  await assert.rejects(
+    () => manager.reconcileSpentNotes([{
+      ...note,
+      isSpent: true,
+      operationSuccessEvidence: { txHash: "EXPECTED-TX" }
+    }, {
+      ...note,
+      isSpent: true,
+      operationSuccessEvidence: {
+        outputCommitment: "OUTPUT",
+        auditDisclosureDigest: "DIGEST",
+        recipientHash: "RECIPIENT",
+        amount: "5",
+        amountHash: "AMOUNT",
+        denom: "uclair"
+      }
+    }]),
+    error => {
+      assert.equal(error.code, ClairveilErrorCode.OPERATION_EVIDENCE_CONFLICT);
+      assert.ok(error.details.conflicts.some(conflict =>
+        conflict.field === "tx_hash" &&
+        conflict.reason === "duplicate_unlinked"
+      ));
+      return true;
+    }
+  );
+  assert.equal(
+    (await manager.getReservation(batch.reservation_ids[0])).status,
+    reservationStatuses.Submitted
+  );
+
+  await manager.reconcileSpentNotes([{
+    ...note,
+    isSpent: true,
+    operationSuccessEvidence: { txHash: "EXPECTED-TX" }
+  }, {
+    ...note,
+    isSpent: true,
+    operationSuccessEvidence: {
+      txHash: "EXPECTED-TX",
+      outputCommitment: "OUTPUT",
+      auditDisclosureDigest: "DIGEST",
+      recipientHash: "RECIPIENT",
+      amount: "5",
+      amountHash: "AMOUNT",
+      denom: "uclair"
+    }
+  }]);
+  const reconciled = await manager.getReservation(batch.reservation_ids[0]);
+  assert.equal(reconciled.status, reservationStatuses.ConfirmedSpent);
+  assert.equal(reconciled.metadata.operation_status, operationStatuses.Succeeded);
 });
 
 test("reservation creation accepts only clean Reserved records and relay handoff binds the payload hash", async () => {
@@ -4679,6 +5032,23 @@ test("reservation creation accepts only clean Reserved records and relay handoff
     payloadHash: "relay-payload-a"
   });
   await assert.rejects(
+    () => manager.recordRelaySubmission(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      payloadHash: "relay-payload-a",
+      payload_hash: "relay-payload-b",
+      txHash: "RELAY-TX-BEFORE-HANDOFF"
+    }),
+    /relay submission payload hash aliases conflict/
+  );
+  await assert.rejects(
+    () => manager.recordRelaySubmission(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      payloadHash: "relay-payload-a",
+      txHash: "RELAY-TX-BEFORE-HANDOFF"
+    }),
+    /requires a previously recorded relay handoff/
+  );
+  await assert.rejects(
     () => manager.recordRelayHandoff(batch.reservation_ids, {
       leaseToken: batch.lease_token,
       payloadHash: "relay-payload-b"
@@ -4698,6 +5068,40 @@ test("reservation creation accepts only clean Reserved records and relay handoff
     }),
     /relay payload was handed off/
   );
+  await assert.rejects(
+    () => manager.markSubmitted(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      txHash: "FORGED-LOCAL-RELAY-TX"
+    }),
+    /durable broadcast attempt is required/
+  );
+  await assert.rejects(
+    () => manager.recordRelaySubmission(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      payloadHash: "relay-payload-b",
+      txHash: "RELAY-TX"
+    }),
+    /payload hash must match/
+  );
+  await assert.rejects(
+    () => manager.recordRelaySubmission(batch.reservation_ids, {
+      leaseToken: batch.lease_token,
+      payloadHash: "relay-payload-a",
+      txHash: "RELAY-TX",
+      submitted_tx_hash: "OTHER-RELAY-TX"
+    }),
+    /relay submission network tx hash aliases conflict/
+  );
+  const relaySubmitted = await manager.recordRelaySubmission(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    payloadHash: "relay-payload-a",
+    txHash: "RELAY-TX"
+  });
+  assert.equal(relaySubmitted[0].status, reservationStatuses.Submitted);
+  assert.equal(relaySubmitted[0].submitted_tx_hash, "RELAY-TX");
+  assert.equal(relaySubmitted[0].broadcast_attempt_count, 1);
+  assert.equal(relaySubmitted[0].metadata.relay_handed_off, true);
+  assert.equal(relaySubmitted[0].metadata.no_broadcast_attempt, false);
 
   const attemptedNotes = [
     noteFixture({ nullifier: "f4".repeat(32), sequence: 404 }),
@@ -5219,4 +5623,435 @@ test("batch lifecycle preflight loads reservation state once per operation", asy
   });
   assert.equal(listCalls, 2);
   assert.equal(getCalls, 0);
+});
+
+test("transparent recipient hashes canonical Cosmos account bytes", () => {
+  const accountBytes = Uint8Array.from({ length: 20 }, (_, index) => index + 1);
+  const clair = toBech32("clair", accountBytes);
+  const cosmos = toBech32("cosmos", accountBytes);
+
+  assert.equal(
+    hashTransparentRecipient(clair),
+    createHash("sha256").update(clair).digest("hex")
+  );
+  assert.equal(
+    hashTransparentRecipient(cosmos, { accountPrefix: "cosmos" }),
+    createHash("sha256").update(cosmos).digest("hex")
+  );
+  assert.throws(() => hashTransparentRecipient(cosmos), /clair account address/);
+  assert.throws(
+    () => hashTransparentRecipient(toBech32("clair", new Uint8Array(32))),
+    /clair account address/
+  );
+});
+
+test("authoritative transaction failure replans an exact submitted operation", async () => {
+  const store = new MemoryReservationStore();
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1broadcast-failure",
+    indexKey: "broadcast-failure-index"
+  });
+  const notes = [
+    noteFixture({ nullifier: "a1".repeat(32), sequence: 901 }),
+    noteFixture({ nullifier: "a2".repeat(32), sequence: 902 })
+  ];
+  const batch = await preparePlanReservation(manager, {
+    plan: { selection: { inputs: notes } },
+    kind: "transfer",
+    operationId: "broadcast-failure-operation"
+  });
+  await manager.markProofReady(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    signDocHash: "11".repeat(32)
+  });
+  const txHash = "22".repeat(32);
+  await manager.markBroadcastAttempting(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    txHash
+  });
+  await manager.markUnknown(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    txHash
+  });
+
+  await assert.rejects(
+    () => manager.markBroadcastFailed([batch.reservation_ids[0]], {
+      txHashChecked: txHash,
+      checkedHeight: 400,
+      nullifierUnspentConfirmed: true,
+      txAbsentOrFailedConfirmed: true
+    }),
+    /exact linked reservation set/
+  );
+  const replanned = await manager.markBroadcastFailed(batch.reservation_ids, {
+    txHashChecked: txHash.toUpperCase(),
+    checkedHeight: 400,
+    nullifierUnspentConfirmed: true,
+    txAbsentOrFailedConfirmed: true
+  });
+  assert.deepEqual(
+    replanned.map(record => record.status),
+    [reservationStatuses.ReplanRequired, reservationStatuses.ReplanRequired]
+  );
+  assert.ok(replanned.every(record =>
+    record.metadata.tx_absent_or_failed_confirmed === true &&
+    record.metadata.nullifier_unspent_confirmed === true &&
+    record.metadata.proof_discarded === true
+  ));
+});
+
+test("authoritative EVM failure requires the submitted network hash, not the prepared binding", async () => {
+  const store = new MemoryReservationStore();
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1evm-broadcast-failure",
+    indexKey: "evm-broadcast-failure-index"
+  });
+  const note = noteFixture({ nullifier: "a3".repeat(32), sequence: 903 });
+  const batch = await preparePlanReservation(manager, {
+    plan: { selectedNote: note },
+    kind: "transfer",
+    operationId: "evm-broadcast-failure-operation"
+  });
+  const preparedTxBytesHash = "23".repeat(32);
+  const submittedTxHash = "24".repeat(32);
+  await manager.markProofReady(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    txBytesHash: preparedTxBytesHash,
+    executionTransport: "evm"
+  });
+  await markSubmittedAfterAttempt(manager, batch, {
+    leaseToken: batch.lease_token,
+    txHash: submittedTxHash,
+    txBytesHash: preparedTxBytesHash
+  });
+
+  await assert.rejects(
+    () => manager.markBroadcastFailed(batch.reservation_ids, {
+      txHashChecked: preparedTxBytesHash,
+      checkedHeight: 401,
+      nullifierUnspentConfirmed: true,
+      txAbsentOrFailedConfirmed: true
+    }),
+    /requires exact tx_hash_checked/
+  );
+  const stillSubmitted = await store.getReservation(batch.reservation_ids[0]);
+  assert.equal(stillSubmitted.status, reservationStatuses.Submitted);
+  assert.equal(stillSubmitted.tx_bytes_hash, preparedTxBytesHash);
+  assert.equal(stillSubmitted.submitted_tx_hash, submittedTxHash);
+
+  const replanned = await manager.markBroadcastFailed(batch.reservation_ids, {
+    txHashChecked: submittedTxHash,
+    checkedHeight: 401,
+    nullifierUnspentConfirmed: true,
+    txAbsentOrFailedConfirmed: true
+  });
+  assert.equal(replanned[0].status, reservationStatuses.ReplanRequired);
+  assert.equal(replanned[0].tx_bytes_hash, preparedTxBytesHash);
+  assert.equal(replanned[0].submitted_tx_hash, submittedTxHash);
+});
+
+test("external relay inclusion evidence atomically binds the exact handed-off operation", async () => {
+  const store = new MemoryReservationStore();
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1relay-evidence",
+    indexKey: "relay-evidence-index",
+    leaseOwner: "original-worker"
+  });
+  const notes = [
+    noteFixture({ nullifier: "b1".repeat(32), sequence: 911 }),
+    noteFixture({ nullifier: "b2".repeat(32), sequence: 912 })
+  ];
+  const operationId = "external-relay-evidence-operation";
+  const payloadHash = "33".repeat(32);
+  const batch = await manager.reserveNotes({ notes, operationId });
+  await manager.markProving(batch.reservation_ids, { leaseToken: batch.lease_token });
+  await manager.markProofReady(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    payloadHash
+  });
+  await manager.recordRelayHandoff(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    payloadHash
+  });
+
+  const recovered = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1relay-evidence",
+    indexKey: "relay-evidence-index",
+    leaseOwner: "recovered-worker"
+  });
+  const evidence = {
+    operationId,
+    payloadHash,
+    txHash: "44".repeat(32),
+    checkedHeight: 500,
+    transactionIncludedConfirmed: true,
+    payloadHashMatched: true
+  };
+  const submitted = await recovered.recordRelayTransactionEvidence(evidence);
+  assert.deepEqual(
+    submitted.map(record => record.status),
+    [reservationStatuses.Submitted, reservationStatuses.Submitted]
+  );
+  assert.ok(submitted.every(record =>
+    record.submitted_tx_hash === evidence.txHash &&
+    record.metadata.transaction_included_confirmed === true &&
+    record.metadata.payload_hash_matched === true
+  ));
+  const idempotent = await recovered.recordRelayTransactionEvidence(evidence);
+  assert.deepEqual(
+    idempotent.map(record => record.reservation_id),
+    batch.reservation_ids
+  );
+  await assert.rejects(
+    () => recovered.recordRelayTransactionEvidence({
+      ...evidence,
+      txHash: "55".repeat(32)
+    }),
+    /conflicts with the persisted Submitted operation/
+  );
+});
+
+test("local relay inclusion evidence recovers an exact durable same-origin attempt", async () => {
+  let now = new Date("2026-08-25T00:00:00.000Z");
+  const store = new MemoryReservationStore({ now: () => now });
+  const originalManager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1local-relay-evidence",
+    indexKey: "local-relay-evidence-index",
+    leaseOwner: "original-tab",
+    leaseDurationMs: 1_000,
+    now: () => now
+  });
+  const notes = [
+    noteFixture({ nullifier: "d1".repeat(32), sequence: 931 }),
+    noteFixture({ nullifier: "d2".repeat(32), sequence: 932 })
+  ];
+  const operationId = "same-origin-local-relay-recovery";
+  const payloadHash = "91".repeat(32);
+  const preparedTxBytesHash = "90".repeat(32);
+  const batch = await originalManager.reserveNotes({ notes, operationId });
+  await originalManager.markProving(batch.reservation_ids, { leaseToken: batch.lease_token });
+  await originalManager.markProofReady(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    payloadHash,
+    txBytesHash: preparedTxBytesHash,
+    executionTransport: "evm"
+  });
+  await originalManager.markBroadcastAttempting(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    txBytesHash: preparedTxBytesHash,
+    reason: "same_origin_local_relayer_submit",
+    metadata: {
+      local_relayer: "clair1relayer",
+      payload_hash: payloadHash,
+      nullifier_unspent_confirmed: true,
+      checked_height: "700"
+    }
+  });
+
+  now = new Date("2026-08-25T01:00:00.000Z");
+  const recoveryManager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1local-relay-evidence",
+    indexKey: "local-relay-evidence-index",
+    leaseOwner: "reloaded-tab",
+    now: () => now
+  });
+  const evidence = {
+    operationId,
+    payloadHash,
+    txHash: "92".repeat(32),
+    checkedHeight: 705,
+    transactionIncludedConfirmed: true,
+    payloadHashMatched: true
+  };
+  const submitted = await recoveryManager.recordRelayTransactionEvidence(evidence);
+  assert.equal(submitted.length, 2);
+  for (const reservation of submitted) {
+    assert.equal(reservation.status, reservationStatuses.Submitted);
+    assert.equal(reservation.submitted_tx_hash, evidence.txHash);
+    assert.equal(reservation.tx_bytes_hash, preparedTxBytesHash);
+    assert.equal(reservation.broadcast_attempt_count, 1);
+    assert.equal(reservation.broadcast_in_flight, false);
+    assert.equal(reservation.lease_owner, "");
+    assert.equal(reservation.metadata.relay_handed_off, undefined);
+    assert.equal(reservation.metadata.local_relayer, "clair1relayer");
+    assert.equal(reservation.metadata.broadcast_attempt_reason, "same_origin_local_relayer_submit");
+    assert.equal(reservation.metadata.checked_height, "705");
+  }
+  const idempotent = await recoveryManager.recordRelayTransactionEvidence(evidence);
+  assert.deepEqual(idempotent.map(record => record.reservation_id), batch.reservation_ids);
+  assert.deepEqual(idempotent.map(record => record.broadcast_attempt_count), [1, 1]);
+  assert.ok(idempotent.every(record =>
+    record.submitted_tx_hash === evidence.txHash &&
+    record.tx_bytes_hash === preparedTxBytesHash
+  ));
+});
+
+test("relay inclusion evidence rejects a generic in-flight broadcast", async () => {
+  const store = new MemoryReservationStore();
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1generic-relay-evidence",
+    indexKey: "generic-relay-evidence-index"
+  });
+  const operationId = "generic-broadcast-is-not-local-relay";
+  const payloadHash = "93".repeat(32);
+  const batch = await manager.reserveNotes({
+    notes: [noteFixture({ nullifier: "d3".repeat(32), sequence: 933 })],
+    operationId
+  });
+  await manager.markProving(batch.reservation_ids, { leaseToken: batch.lease_token });
+  await manager.markProofReady(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    payloadHash
+  });
+  await manager.markBroadcastAttempting(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    reason: "cosmos_broadcast_tx_sync"
+  });
+
+  await assert.rejects(
+    () => manager.recordRelayTransactionEvidence({
+      operationId,
+      payloadHash,
+      txHash: "94".repeat(32),
+      checkedHeight: 706,
+      transactionIncludedConfirmed: true,
+      payloadHashMatched: true
+    }),
+    /requires a recorded relay handoff or durable local relay attempt/
+  );
+  const current = await store.getReservation(batch.reservation_ids[0]);
+  assert.equal(current.status, reservationStatuses.ProofReady);
+  assert.equal(current.broadcast_in_flight, true);
+});
+
+test("direct and relay withdraw reconcile transparent success predicates", async t => {
+  for (const kind of ["withdraw", "relay_withdraw"]) {
+    for (const matches of [true, false]) {
+      await t.test(`${kind} ${matches ? "succeeds" : "conflicts"}`, async () => {
+        const store = new MemoryReservationStore();
+        const manager = createNoteReservationManager({
+          store,
+          ownerKeyId: `chain:clair1-${kind}-${matches}`,
+          indexKey: `withdraw-evidence-${kind}-${matches}`
+        });
+        const note = noteFixture({
+          nullifier: (kind === "withdraw" ? "c1" : "c2").repeat(32),
+          sequence: matches ? 921 : 922
+        });
+        const batch = await preparePlanReservation(manager, {
+          plan: { selectedNote: note },
+          kind,
+          operationId: `${kind}-operation-${matches}`
+        });
+        const recipientHash = "66".repeat(32);
+        const amountHash = "77".repeat(32);
+        const txHash = "88".repeat(32);
+        await manager.markProofReady(batch.reservation_ids, {
+          leaseToken: batch.lease_token,
+          expectedRecipientHash: recipientHash,
+          expectedAmount: "5",
+          expectedAmountHash: amountHash,
+          expectedDenom: "uclair",
+          operationSuccessEvidenceRequired: true
+        });
+        await manager.markBroadcastAttempting(batch.reservation_ids, {
+          leaseToken: batch.lease_token,
+          txHash
+        });
+        await manager.markSubmitted(batch.reservation_ids, {
+          leaseToken: batch.lease_token,
+          txHash
+        });
+
+        await manager.reconcileSpentNotes([{
+          ...note,
+          isSpent: true,
+          operationSuccessEvidence: {
+            txHash,
+            txResult: { code: 0 },
+            recipientHash: matches ? recipientHash : "99".repeat(32),
+            amount: "5",
+            amountHash,
+            denom: "uclair"
+          }
+        }]);
+        const reconciled = await store.getReservation(batch.reservation_ids[0]);
+        assert.equal(reconciled.status, reservationStatuses.ConfirmedSpent);
+        assert.equal(
+          reconciled.metadata.operation_status,
+          matches ? operationStatuses.Succeeded : operationStatuses.ConflictSpent
+        );
+        assert.equal(reconciled.metadata.operation_success_evidence_matches, matches);
+        if (matches) {
+          assert.deepEqual(reconciled.metadata.operation_success_evidence_errors, []);
+        } else {
+          assert.ok(reconciled.metadata.operation_success_evidence_errors.includes("expected_recipient_hash mismatch"));
+        }
+      });
+    }
+  }
+});
+
+test("transfer cannot downgrade to a withdraw predicate when shielded output evidence is absent", async () => {
+  const store = new MemoryReservationStore();
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1-transfer-missing-output",
+    indexKey: "transfer-missing-output-evidence"
+  });
+  const note = noteFixture({ nullifier: "c3".repeat(32), sequence: 923 });
+  const batch = await preparePlanReservation(manager, {
+    plan: { selectedNote: note },
+    kind: "transfer",
+    operationId: "transfer-missing-output-operation"
+  });
+  const recipientHash = "66".repeat(32);
+  const amountHash = "77".repeat(32);
+  const txHash = "88".repeat(32);
+  await manager.markProofReady(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    expectedRecipientHash: recipientHash,
+    expectedAmount: "5",
+    expectedAmountHash: amountHash,
+    expectedDenom: "uclair",
+    operationSuccessEvidenceRequired: true
+  });
+  await manager.markBroadcastAttempting(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    txHash
+  });
+  await manager.markSubmitted(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    txHash
+  });
+
+  await manager.reconcileSpentNotes([{
+    ...note,
+    isSpent: true,
+    operationSuccessEvidence: {
+      txHash,
+      txResult: { code: 0 },
+      recipientHash,
+      amount: "5",
+      amountHash,
+      denom: "uclair"
+    }
+  }]);
+  const reconciled = await store.getReservation(batch.reservation_ids[0]);
+  assert.equal(reconciled.status, reservationStatuses.ConfirmedSpent);
+  assert.equal(reconciled.metadata.operation_status, operationStatuses.ConflictSpent);
+  assert.equal(reconciled.metadata.operation_success_evidence_matches, false);
+  assert.ok(reconciled.metadata.operation_success_evidence_errors.includes(
+    "expected_output_commitment expected value missing"
+  ));
+  assert.ok(reconciled.metadata.operation_success_evidence_errors.includes(
+    "expected_disclosure_digest expected value missing"
+  ));
 });

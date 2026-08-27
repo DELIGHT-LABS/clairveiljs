@@ -18,6 +18,12 @@ import {
   normalizeReserveResponseV1
 } from "../privacy/network-config.js";
 import { validateCircuitConfigV1 } from "../privacy/circuit-config.js";
+import {
+  checkPrivacyStateAdapterNullifiers,
+  createPrivacyStateAdapter,
+  invokePrivacyStateAdapter,
+  normalizePrivacyNullifierStatuses
+} from "../transport/privacy-state.js";
 
 function trimTrailingSlash(value) {
   return String(value || "").replace(/\/$/, "");
@@ -41,7 +47,7 @@ function normalizeTimeoutMs(value, label = "timeoutMs") {
   return timeoutMs;
 }
 
-function normalizeRestEndpoints(primary, restEndpoints = []) {
+function normalizeRestEndpoints(primary, restEndpoints = [], { allowEmpty = false } = {}) {
   const endpoints = [];
   for (const endpoint of [primary, ...(Array.isArray(restEndpoints) ? restEndpoints : [])]) {
     const normalized = trimTrailingSlash(endpoint);
@@ -49,7 +55,7 @@ function normalizeRestEndpoints(primary, restEndpoints = []) {
       endpoints.push(normalized);
     }
   }
-  if (!endpoints.length) {
+  if (!endpoints.length && !allowEmpty) {
     throw new Error("rest endpoint is required");
   }
   return endpoints;
@@ -132,10 +138,20 @@ async function fetchJson(url, { timeoutMs = defaultFetchTimeoutMs, method = "GET
   }
 }
 
-async function fetchJsonWithRetry(urlForEndpoint, endpoints, { timeoutMs, retry, method, body, headers } = {}) {
+async function fetchJsonWithRetry(urlForEndpoint, endpoints, {
+  timeoutMs,
+  retry,
+  method,
+  body,
+  headers,
+  failoverStatuses = []
+} = {}) {
   const normalizedRetry = normalizeQueryRetry(retry);
+  const normalizedFailoverStatuses = new Set(failoverStatuses || []);
   let lastError = null;
-  for (const endpoint of endpoints) {
+  let lastNonCapabilityError = null;
+  for (let endpointIndex = 0; endpointIndex < endpoints.length; endpointIndex += 1) {
+    const endpoint = endpoints[endpointIndex];
     for (let attempt = 0; attempt <= normalizedRetry.retries; attempt += 1) {
       try {
         return {
@@ -144,17 +160,22 @@ async function fetchJsonWithRetry(urlForEndpoint, endpoints, { timeoutMs, retry,
         };
       } catch (error) {
         lastError = error;
+        if (normalizedFailoverStatuses.has(Number(error?.status))) {
+          if (endpointIndex < endpoints.length - 1) break;
+          throw lastNonCapabilityError || error;
+        }
         const retryable = isRetryableFetchError(error, normalizedRetry);
         if (!retryable) {
           throw error;
         }
+        lastNonCapabilityError = error;
         const canRetry = attempt < normalizedRetry.retries && retryable;
         if (!canRetry) break;
         await sleep(retryDelayMs(attempt + 1, normalizedRetry));
       }
     }
   }
-  throw lastError;
+  throw lastNonCapabilityError || lastError;
 }
 
 function privacyEventsQuery({
@@ -275,9 +296,14 @@ export function isAuditableTransfer(event) {
 }
 
 export class ClairveilPublicClient {
-  constructor({ rest, restEndpoints, queryTimeoutMs = defaultFetchTimeoutMs, fetchTimeoutMs, queryRetry, nullifierFailover = false, merklePathFailover = false } = {}) {
-    this.restEndpoints = normalizeRestEndpoints(rest, restEndpoints);
-    this.rest = this.restEndpoints[0];
+  constructor({ rest, restEndpoints, queryTimeoutMs = defaultFetchTimeoutMs, fetchTimeoutMs, queryRetry, nullifierFailover = false, merklePathFailover = false, privacyStateAdapter } = {}) {
+    this.privacyStateAdapter = privacyStateAdapter == null
+      ? null
+      : createPrivacyStateAdapter(privacyStateAdapter);
+    this.restEndpoints = normalizeRestEndpoints(rest, restEndpoints, {
+      allowEmpty: Boolean(this.privacyStateAdapter)
+    });
+    this.rest = this.restEndpoints[0] || "";
     this.activeRestEndpoint = this.rest;
     this.queryTimeoutMs = normalizeTimeoutMs(fetchTimeoutMs ?? queryTimeoutMs, "queryTimeoutMs");
     this.queryRetry = normalizeQueryRetry(queryRetry);
@@ -286,7 +312,24 @@ export class ClairveilPublicClient {
   }
 
   restUrl(path, endpoint = this.activeRestEndpoint) {
+    if (!endpoint) {
+      throw new Error("rest endpoint is required for this query; implement the corresponding PrivacyStateAdapter method");
+    }
     return `${endpoint}${path.startsWith("/") ? path : `/${path}`}`;
+  }
+
+  async queryPrivacyStateAdapter(method, args, restQuery) {
+    const adapterMethod = this.privacyStateAdapter?.[method];
+    if (typeof adapterMethod === "function") {
+      return invokePrivacyStateAdapter(this.privacyStateAdapter, method, args, {
+        timeoutMs: this.queryTimeoutMs,
+        retry: this.queryRetry
+      });
+    }
+    if (!this.restEndpoints.length) {
+      throw new Error(`PrivacyStateAdapter.${method} is required because no REST endpoint is configured`);
+    }
+    return restQuery();
   }
 
   async fetchJson(pathOrUrl, {
@@ -295,7 +338,8 @@ export class ClairveilPublicClient {
     headers,
     failover = true,
     endpoint,
-    updateActiveEndpoint = endpoint == null
+    updateActiveEndpoint = endpoint == null,
+    failoverStatuses
   } = {}) {
     const text = String(pathOrUrl || "");
     const isAbsolute = /^https?:\/\//i.test(text);
@@ -308,13 +352,15 @@ export class ClairveilPublicClient {
           retry: this.queryRetry,
           method,
           body,
-          headers
+          headers,
+          failoverStatuses
         }
       );
       return result.data;
     }
     const path = text;
     const initialEndpoint = endpoint || this.activeRestEndpoint;
+    if (!initialEndpoint) throw new Error("rest endpoint is required for this query");
     const endpoints = failover
       ? [initialEndpoint, ...this.restEndpoints.filter(candidate => candidate !== initialEndpoint)]
       : [initialEndpoint];
@@ -326,7 +372,8 @@ export class ClairveilPublicClient {
         retry: this.queryRetry,
         method,
         body,
-        headers
+        headers,
+        failoverStatuses
       }
     );
     if (updateActiveEndpoint) this.activeRestEndpoint = result.endpoint;
@@ -361,19 +408,32 @@ export class ClairveilPublicClient {
   }
 
   async fetchPrivacyEvents(options = {}) {
-    return this.fetchJson(`/clairveil/privacy/v1/events${privacyEventsQuery(options)}`);
+    return this.queryPrivacyStateAdapter(
+      "fetchPrivacyEvents",
+      [options],
+      () => this.fetchJson(`/clairveil/privacy/v1/events${privacyEventsQuery(options)}`)
+    );
   }
 
   async fetchScanEvents(options = {}) {
-    return this.fetchJson(`/clairveil/privacy/v1/scan_events${scanEventsQuery(options)}`);
+    return this.queryPrivacyStateAdapter(
+      "fetchScanEvents",
+      [options],
+      () => this.fetchJson(`/clairveil/privacy/v1/scan_events${scanEventsQuery(options)}`)
+    );
   }
 
   async fetchPrivacyScan(options = {}) {
-    return this.fetchJson("/clairveil/privacy/v1/privacy_scan", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: jsonRequestBody(privacyScanRequestBody(options))
-    });
+    return this.queryPrivacyStateAdapter(
+      "fetchPrivacyScan",
+      [options],
+      () => this.fetchJson("/clairveil/privacy/v1/privacy_scan", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: jsonRequestBody(privacyScanRequestBody(options)),
+        failoverStatuses: [404, 405, 501]
+      })
+    );
   }
 
   /** Fetch a typed privacy-scan-v2 page and fail closed before it is consumed. */
@@ -395,27 +455,80 @@ export class ClairveilPublicClient {
   }
 
   async fetchTreeState() {
-    return this.fetchJson("/clairveil/privacy/v1/tree_state");
+    return this.queryPrivacyStateAdapter(
+      "fetchTreeState",
+      [],
+      () => this.fetchJson("/clairveil/privacy/v1/tree_state")
+    );
   }
 
   async fetchCommitmentInfo(commitmentHex) {
     const normalized = String(commitmentHex || "").trim();
     if (!normalized) throw new Error("commitment is required");
-    return this.fetchJson(`/clairveil/privacy/v1/commitment/${encodeURIComponent(normalized)}`);
+    return this.queryPrivacyStateAdapter(
+      "fetchCommitmentInfo",
+      [normalized],
+      () => this.fetchJson(`/clairveil/privacy/v1/commitment/${encodeURIComponent(normalized)}`)
+    );
   }
 
   async lookupMerklePath(commitmentHex) {
     const normalized = String(commitmentHex || "").trim();
     if (!normalized) throw new Error("commitment is required");
-    return this.fetchMerklePathJson(`/clairveil/privacy/v1/merkle_path/${encodeURIComponent(normalized)}`);
+    return this.queryPrivacyStateAdapter(
+      "lookupMerklePath",
+      [normalized],
+      () => this.fetchMerklePathJson(`/clairveil/privacy/v1/merkle_path/${encodeURIComponent(normalized)}`)
+    );
   }
 
   async checkNullifier(nullifierHex) {
-    return this.fetchNullifierJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`);
+    const normalized = String(nullifierHex || "").trim().toLowerCase();
+    if (this.privacyStateAdapter) {
+      if (typeof this.privacyStateAdapter.checkNullifier === "function") {
+        const result = await invokePrivacyStateAdapter(
+          this.privacyStateAdapter,
+          "checkNullifier",
+          [normalized],
+          { timeoutMs: this.queryTimeoutMs, retry: this.queryRetry }
+        );
+        const used = parseNullifierUsage(result);
+        if (used === null) {
+          throw new Error("privacyStateAdapter.checkNullifier returned an ambiguous status");
+        }
+        return { nullifier: normalized, used };
+      }
+      const statuses = normalizePrivacyNullifierStatuses(
+        await invokePrivacyStateAdapter(
+          this.privacyStateAdapter,
+          "checkNullifiers",
+          [[normalized]],
+          { timeoutMs: this.queryTimeoutMs, retry: this.queryRetry }
+        ),
+        [normalized]
+      );
+      return { nullifier: normalized, used: statuses.get(normalized) };
+    }
+    const result = await this.fetchNullifierJson(
+      `/clairveil/privacy/v1/nullifier/${encodeURIComponent(normalized)}`
+    );
+    const used = parseNullifierUsage(result);
+    if (used === null) {
+      throw new Error("nullifier response returned an ambiguous status");
+    }
+    return { nullifier: normalized, used };
   }
 
   async checkNullifiers(nullifierHexes = []) {
     const normalized = [...new Set((nullifierHexes || []).map(value => String(value || "").trim().toLowerCase()).filter(Boolean))];
+    if (normalized.length === 0) return new Map();
+    if (this.privacyStateAdapter) {
+      return checkPrivacyStateAdapterNullifiers(
+        this.privacyStateAdapter,
+        normalized,
+        { timeoutMs: this.queryTimeoutMs, retry: this.queryRetry }
+      );
+    }
     const usedByNullifier = new Map();
     const invalidNullifiers = new Set();
     const addStatus = (nullifier, value) => {
@@ -434,7 +547,10 @@ export class ClairveilPublicClient {
         method: "POST",
         body: JSON.stringify({ nullifiers: normalized.slice(start, start + 1000) })
       });
-      for (const status of response?.statuses || response?.Statuses || []) {
+      for (const status of [
+        ...(Array.isArray(response?.statuses) ? response.statuses : []),
+        ...(Array.isArray(response?.Statuses) ? response.Statuses : [])
+      ]) {
         const canonical = status?.nullifier;
         const alias = status?.Nullifier;
         if (canonical != null && alias != null &&
@@ -465,13 +581,21 @@ export class ClairveilPublicClient {
     )) {
       throw new Error("auditable batch transfer query only accepts the batch_transfer event type");
     }
-    const request = { ...options, eventTypes: ["batch_transfer"] };
+    const {
+      validationState,
+      validation_state,
+      ...transportOptions
+    } = options || {};
+    const request = { ...transportOptions, eventTypes: ["batch_transfer"] };
     delete request.event_types;
-    // Preserve the existing auditable query request shape, including the
-    // caller-owned validation state used by downstream pagination adapters.
     const page = validatePrivacyScanPageV2(
       await this.fetchPrivacyScan(request),
-      request
+      {
+        ...request,
+        ...(validationState ?? validation_state
+          ? { validationState: validationState ?? validation_state }
+          : {})
+      }
     );
     if (page.summaries.some(summary => summary.event_type !== "batch_transfer") ||
         page.outputs.some(output => output.event_type !== "batch_transfer")) {
@@ -485,15 +609,19 @@ export class ClairveilPublicClient {
     if (!normalizedDenom) {
       throw new Error("reserve denom is required");
     }
-    return this.fetchJson(`/clairveil/privacy/v1/reserve/${encodeURIComponent(normalizedDenom)}`);
+    return this.queryPrivacyStateAdapter(
+      "fetchReserve",
+      [normalizedDenom],
+      () => this.fetchJson(`/clairveil/privacy/v1/reserve/${encodeURIComponent(normalizedDenom)}`)
+    );
   }
 
   async fetchAuditConfig() {
-    return this.fetchJson("/clairveil/privacy/v1/audit_config");
+    return this.queryPrivacyStateAdapter("fetchAuditConfig", [], () => this.fetchJson("/clairveil/privacy/v1/audit_config"));
   }
 
   async fetchDisclosureConfig() {
-    return this.fetchJson("/clairveil/privacy/v1/disclosure_config");
+    return this.queryPrivacyStateAdapter("fetchDisclosureConfig", [], () => this.fetchJson("/clairveil/privacy/v1/disclosure_config"));
   }
 
   async queryAuditConfig() {
@@ -506,7 +634,11 @@ export class ClairveilPublicClient {
 
   async fetchCircuitConfig(options = {}) {
     return validateCircuitConfigV1(
-      await this.fetchJson("/clairveil/privacy/v1/circuit_config"),
+      await this.queryPrivacyStateAdapter(
+        "fetchCircuitConfig",
+        [],
+        () => this.fetchJson("/clairveil/privacy/v1/circuit_config")
+      ),
       options
     );
   }
@@ -523,13 +655,21 @@ export class ClairveilPublicClient {
   async fetchAssetByDenom(denom) {
     const canonicalDenom = String(denom || "").trim();
     if (!canonicalDenom) throw new Error("asset denom is required");
-    return this.fetchJson(`/clairveil/privacy/v1/assets/by_denom/${encodeURIComponent(canonicalDenom)}`);
+    return this.queryPrivacyStateAdapter(
+      "fetchAssetByDenom",
+      [canonicalDenom],
+      () => this.fetchJson(`/clairveil/privacy/v1/assets/by_denom/${encodeURIComponent(canonicalDenom)}`)
+    );
   }
 
   async fetchAssetByID(assetIdHex) {
     const canonicalAssetID = String(assetIdHex || "").trim();
     if (!canonicalAssetID) throw new Error("asset ID is required");
-    return this.fetchJson(`/clairveil/privacy/v1/assets/by_id/${encodeURIComponent(canonicalAssetID)}`);
+    return this.queryPrivacyStateAdapter(
+      "fetchAssetByID",
+      [canonicalAssetID],
+      () => this.fetchJson(`/clairveil/privacy/v1/assets/by_id/${encodeURIComponent(canonicalAssetID)}`)
+    );
   }
 
   /** Fetch and fail-closed validate an AssetRegistryV1 denom lookup. */
@@ -564,11 +704,15 @@ export class ClairveilPublicClient {
   }
 
   async fetchCommitmentPathsAtRoot(options = {}) {
-    return this.fetchMerklePathJson("/clairveil/privacy/v1/commitment_paths_at_root", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: jsonRequestBody(commitmentPathsAtRootRequestBody(options))
-    });
+    return this.queryPrivacyStateAdapter(
+      "fetchCommitmentPathsAtRoot",
+      [options],
+      () => this.fetchMerklePathJson("/clairveil/privacy/v1/commitment_paths_at_root", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: jsonRequestBody(commitmentPathsAtRootRequestBody(options))
+      })
+    );
   }
 
   async queryCommitmentPathsAtRoot(options = {}) {

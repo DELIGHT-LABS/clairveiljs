@@ -14,7 +14,7 @@ TypeScript에서는 `BrowserWalletProfile`, `ClairveilWebClientConfig`, `Clairve
 
 Production에서는 개별 endpoint를 생성자에 흩어 넣기보다, 완전한 profile을 먼저 검증한 뒤 그 `activeProfile`로 client를 만드는 방식을 권장한다.
 
-> **Release 상태:** 이 SDK가 지원하는 Clairveil v0.3.1 release는
+> **Release 상태:** 이 SDK가 지원하는 Clairveil v0.3.1 SDK handoff snapshot은
 > `PUBLICATION_READY_EXPERIMENTAL`이며 `PRODUCTION_RELEASE_READY`가 아니다.
 > 아래 production 설정은 안전한 downstream 통합 기준이지 formal trusted
 > setup, 외부 security/circuit audit, signed production artifact 또는 실제
@@ -175,7 +175,7 @@ const evmProfile = {
   evmRpc: "https://evm-rpc.example.com",
   evmChainId: "0x539",
   evmChainName: "Clairveil EVM",
-  evmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b",
+  evmPrivacyPrecompileAddress: targetChainPrivacyContractAddress,
   evmDepositMode: "payable-exact-value",
   evmNativeDenom: "uclair",
   evmAuthorizationProfile: {
@@ -195,8 +195,9 @@ Profile 밖에서 조절하는 주요 `ClairveilBrowserClientOptions`는 다음�
 
 | 옵션 | 기본값 | 운영 기준 |
 | --- | --- | --- |
-| `queryTimeoutMs` | 30,000ms | REST/RPC 조회 timeout. `fetchTimeoutMs`는 호환 alias이며 존재하면 우선한다. |
-| `queryRetry` | 2회, 250~1,500ms jitter | 기본 retry status는 408, 429, 502, 503, 504. `false`면 retry하지 않는다. |
+| `queryTimeoutMs` | 30,000ms | REST/RPC 및 `PrivacyStateAdapter` read timeout. `fetchTimeoutMs`는 호환 alias이며 존재하면 우선한다. |
+| `queryRetry` | 2회, 250~1,500ms jitter | 기본 retry status는 408, 429, 502, 503, 504. Adapter retry는 동일 adapter만 다시 호출하며 다른 provider로 전환하지 않는다. `false`면 retry하지 않는다. |
+| `evmFinalityPolicy` | 없음 | EVM confirmation에는 명시적으로 필요하다. Chain 기준에 맞춰 confirmation depth, `safe`, `finalized`, `custom` 중 하나를 사용한다. `receipt`는 mined block identity만 확인하는 명시적 low-finality opt-in이다. |
 | `nullifierFailover` | `false` | 켜면 같은 nullifier를 여러 REST provider에 노출할 수 있다. 제품의 privacy 결정이 있어야 한다. |
 | `merklePathFailover` | `false` | 켜면 spend commitment와 exact snapshot 요청이 여러 provider에 노출될 수 있다. |
 | `proverAdapter` | 없음 | local/WASM, 사내 인증 또는 async job prover를 주입한다. 있으면 기본 HTTP adapter보다 우선한다. |

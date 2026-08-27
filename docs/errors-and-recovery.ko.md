@@ -224,7 +224,7 @@ Evidence가 부족하면 spent input을 재사용하지 못하게 유지하면�
 
 Operator는 저장된 payload/proof hash, transaction identity, relay handoff, chain height, nullifier와 output evidence를 확인한다. 단순 TTL 만료, 로컬 취소 또는 “오래 기다렸다”는 이유만으로 note를 release하지 않는다.
 
-유일한 자동 예외는 SDK 자체의 `batch_checkpointed_artifact_requires_recovery` quarantine을 `finalizePreparedBatchTransfer(...)`가 복구하는 경우다. 저장된 payload hash와 원래 reservation claim token이 일치하고 broadcast·relay handoff 이력이 없으며 모든 input nullifier를 체인에서 미사용으로 다시 확인해야 한다. 저수준 `recoverCheckpointedProofReady(...)`를 직접 호출할 때도 `nullifierUnspentConfirmed: true` evidence를 명시해야 하며, 이 조건을 충족한 전체 batch만 `ProofReady`로 원자적으로 돌아간다.
+`ManualReview`에서 `ProofReady`로 직접 돌아가는 자동 복구 전이는 없다. Checkpoint 이후 격리된 batch도 운영자가 evidence를 검토해 `Released`, `ReplanRequired`, `Failed` 중 하나로 해결해야 하며, 계속 실행하려면 그 결과에 맞춰 새 plan과 proof를 만든다.
 
 ## 안전한 로그와 사용자 메시지
 

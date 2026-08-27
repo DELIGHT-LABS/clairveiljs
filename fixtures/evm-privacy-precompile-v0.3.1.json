@@ -1,7 +1,6 @@
 {
   "schema_version": "clairveil-evm-privacy-contract-v1",
   "contract_version": "0.3.1",
-  "precompile_address": "0x100000000000000000000000000000000000000b",
   "canonical_abi_sha256": "ee29aa6ab3e0ddca3c43e6457a51d05b15f405bbf192a6076d01894aecfcb31b",
   "source": {
     "solidity": {

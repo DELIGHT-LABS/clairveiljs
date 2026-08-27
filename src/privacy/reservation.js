@@ -22,8 +22,12 @@ import {
   activeCircuitSetIdV1,
   privacyFixedV1
 } from "./protocol-v1.js";
+import { parseNullifierUsage } from "./scan.js";
 
-/** Persistent-reservation identity for the incompatible privacy-note-v1 fresh-genesis boundary. */
+/**
+ * Current on-disk reservation envelope for the privacy-note-v1 circuit set.
+ * The identifier is part of the current storage and circuit contract.
+ */
 export const privacyReservationStateVersionV1 = "privacy-note-v1-reservation-v1";
 export const privacyReservationStateIdentityV1 = Object.freeze({
   circuit_set_id: activeCircuitSetIdV1,
@@ -66,6 +70,192 @@ export const activeReservationStatuses = Object.freeze([
   reservationStatuses.Unknown,
   reservationStatuses.ManualReview
 ]);
+
+/**
+ * Read the exact reservation set used at a broadcast boundary.  Transports
+ * must never trust the caller's stale reservation snapshot for proof or
+ * nullifier validation.
+ */
+export async function getBroadcastReservationRecords(context) {
+  if (!context) return [];
+  if (typeof context.reservationManager?.getReservation !== "function") {
+    throw new Error("reservationManager.getReservation is required for reserved-note broadcast validation");
+  }
+  const records = await Promise.all(
+    context.reservationIDs.map(id => context.reservationManager.getReservation(id))
+  );
+  for (const [index, reservationID] of context.reservationIDs.entries()) {
+    if (!records[index] || String(records[index].reservation_id || "") !== String(reservationID)) {
+      throw new Error(`reserved-note broadcast reservation ${reservationID} is missing or has the wrong identity`);
+    }
+  }
+  return records;
+}
+
+function normalizedReservationNullifier(value, label) {
+  const normalized = String(value ?? "").trim().replace(/^0x/i, "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error(`${label} must be exactly 32 bytes of hex`);
+  }
+  return normalized;
+}
+
+function normalizedReservationNullifiers(values, label) {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new Error(`${label} must contain at least one nullifier`);
+  }
+  const normalized = values.map((value, index) =>
+    normalizedReservationNullifier(value, `${label} at index ${index}`)
+  );
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error(`${label} contains duplicate nullifiers`);
+  }
+  return normalized;
+}
+
+function normalizedNullifierStatusMap(result) {
+  const statuses = new Map();
+  const invalid = new Set();
+  const add = (rawNullifier, value) => {
+    let nullifier;
+    try {
+      nullifier = normalizedReservationNullifier(rawNullifier, "nullifier status key");
+    } catch {
+      return;
+    }
+    if (invalid.has(nullifier)) return;
+    const used = parseNullifierUsage(value);
+    if (used === null || (statuses.has(nullifier) && statuses.get(nullifier) !== used)) {
+      statuses.delete(nullifier);
+      invalid.add(nullifier);
+      return;
+    }
+    statuses.set(nullifier, used);
+  };
+  if (result instanceof Map) {
+    for (const [nullifier, value] of result) add(nullifier, value);
+  } else if (Array.isArray(result?.statuses) || Array.isArray(result?.Statuses)) {
+    for (const status of [
+      ...(Array.isArray(result.statuses) ? result.statuses : []),
+      ...(Array.isArray(result.Statuses) ? result.Statuses : [])
+    ]) {
+      const canonical = status?.nullifier;
+      const alias = status?.Nullifier;
+      if (canonical != null && alias != null) {
+        let canonicalNullifier = "";
+        let aliasNullifier = "";
+        try {
+          canonicalNullifier = normalizedReservationNullifier(canonical, "nullifier status key");
+          aliasNullifier = normalizedReservationNullifier(alias, "nullifier status key");
+        } catch {
+          add(canonical, null);
+          add(alias, null);
+          continue;
+        }
+        if (canonicalNullifier !== aliasNullifier) {
+          add(canonical, null);
+          add(alias, null);
+          continue;
+        }
+      }
+      add(canonical ?? alias, status);
+    }
+  } else if (result && typeof result === "object" && !Array.isArray(result)) {
+    for (const [nullifier, value] of Object.entries(result)) add(nullifier, value);
+  }
+  return statuses;
+}
+
+/** Fail closed unless every reserved spend input is explicitly unspent. */
+export function assertReservedInputNullifiersUnspent(statuses, nullifiers) {
+  const normalizedNullifiers = normalizedReservationNullifiers(
+    [...nullifiers],
+    "reserved spend input nullifiers"
+  );
+  const normalizedStatuses = normalizedNullifierStatusMap(statuses);
+  for (const [index, nullifier] of normalizedNullifiers.entries()) {
+    if (normalizedStatuses.get(nullifier) !== false) {
+      throw new Error(`reserved spend input nullifier at index ${index} is spent, missing, or has an invalid status`);
+    }
+  }
+}
+
+/** Backward-compatible name for callers that already used the batch helper. */
+export function assertBatchTransferNullifiersUnspent(statuses, nullifiers) {
+  return assertReservedInputNullifiersUnspent(statuses, nullifiers);
+}
+
+function inputNullifiersFromReservationRecords(records) {
+  if (!records.length) return [];
+  const normalized = records.map(record => {
+    const candidates = [
+      record?.metadata?.input_nullifier_hexes,
+      record?.metadata?.inputNullifierHexes,
+      record?.metadata?.batch_transfer_nullifier_hexes,
+      record?.metadata?.batchTransferNullifierHexes
+    ].filter(value => value != null);
+    if (!candidates.length || candidates.some(value => !Array.isArray(value))) {
+      throw new Error("reserved spend is missing its persisted input nullifiers");
+    }
+    const aliases = candidates.map(value => normalizedReservationNullifiers(
+      value,
+      "reserved spend persisted input nullifiers"
+    ));
+    if (aliases.some(value =>
+      value.length !== aliases[0].length ||
+      value.some((nullifier, index) => nullifier !== aliases[0][index])
+    )) {
+      throw new Error("reserved spend input nullifier metadata aliases conflict");
+    }
+    return aliases[0];
+  });
+  if (normalized.some(value =>
+    value.length !== normalized[0].length ||
+    value.some((nullifier, index) => nullifier !== normalized[0][index])
+  )) {
+    throw new Error("reserved spend reservations disagree on their persisted input nullifiers");
+  }
+  return normalized[0];
+}
+
+/**
+ * Re-read a prepared spend's persisted inputs immediately before crossing the
+ * wallet/broadcast boundary. Relayers without a local reservation use the
+ * nullifier bound by the canonical relay payload.
+ */
+export async function recheckReservedInputNullifiers(
+  context,
+  checkNullifiers,
+  fallbackNullifiers = []
+) {
+  const persisted = context
+    ? inputNullifiersFromReservationRecords(await getBroadcastReservationRecords(context))
+    : [];
+  const fallback = fallbackNullifiers.length
+    ? normalizedReservationNullifiers([...fallbackNullifiers], "relay payload input nullifiers")
+    : [];
+  if (persisted.length && fallback.length && (
+    persisted.length !== fallback.length ||
+    persisted.some((nullifier, index) => nullifier !== fallback[index])
+  )) {
+    throw new Error("relay payload input nullifiers do not match the reserved spend");
+  }
+  const nullifiers = persisted.length ? persisted : fallback;
+  if (!nullifiers.length) return [];
+  if (typeof checkNullifiers !== "function") {
+    throw new Error("reserved spend broadcast requires checkNullifiers before submission");
+  }
+  assertReservedInputNullifiersUnspent(await checkNullifiers([...nullifiers]), nullifiers);
+  return Object.freeze([...nullifiers]);
+}
+
+/** Backward-compatible name for the previous batch-only broadcast helper. */
+export async function recheckReservedBatchTransferNullifiers(context, checkNullifiers) {
+  return recheckReservedInputNullifiers(
+    context,
+    checkNullifiers
+  );
+}
 
 const activeReservationStatusSet = new Set(activeReservationStatuses);
 const reservationStatusSet = new Set(Object.values(reservationStatuses));
@@ -140,7 +330,6 @@ const allowedReservationTransitions = new Set([
   "Unknown\x00Failed",
   "Unknown\x00ReplanRequired",
   "Unknown\x00ManualReview",
-  "ManualReview\x00ProofReady",
   "ManualReview\x00ConfirmedSpent",
   "ManualReview\x00Failed",
   "ManualReview\x00Released",
@@ -161,8 +350,7 @@ const leaseRequiredTransitions = new Set([
   "ProofReady\x00Submitted",
   "ProofReady\x00Unknown",
   "ProofReady\x00ReplanRequired",
-  "ProofReady\x00ManualReview",
-  "ManualReview\x00ProofReady"
+  "ProofReady\x00ManualReview"
 ]);
 
 const expiredLeaseRecoveryTransitions = new Set([
@@ -637,6 +825,19 @@ function reservationExecutionTransport(reservation = {}) {
 
 function normalizeReservationMetadata(value) {
   const metadata = cloneReservationMetadata(value);
+  // Provider/RPC prose belongs only on the transient thrown error. Older
+  // callers and persisted records may still contain one of these aliases;
+  // drop them at the reservation serialization boundary.
+  for (const field of [
+    "provider_rejection_log",
+    "providerRejectionLog",
+    "provider_log",
+    "providerLog",
+    "raw_log",
+    "rawLog"
+  ]) {
+    delete metadata[field];
+  }
   const evidenceRequired = operationSuccessEvidenceRequiredMetadataState(metadata);
   if (evidenceRequired.present) {
     metadata.operation_success_evidence_required = evidenceRequired.value;
@@ -837,9 +1038,10 @@ function isCurrentReservationState(state) {
 }
 
 /**
- * There is deliberately no migration path from pre-v0.2 reservation records:
- * an old active lease can otherwise lock or contaminate a fresh privacy-note-v1
- * operation.  Treat known legacy/current-but-incompatible envelopes as empty.
+ * There is deliberately no migration path from older reservation records: an
+ * old active lease can otherwise lock or contaminate a fresh privacy-note-v1
+ * operation. Numeric v1 and incomplete envelopes are recognized only so they
+ * can be discarded atomically; no legacy reservation is decoded or reused.
  */
 function isFreshGenesisIncompatibleReservationState(state) {
   const version = state?.version;
@@ -967,10 +1169,7 @@ function assertLeaseTransitionAllowed(current, to, patch, now) {
   if (!requiresReservationLeaseToken(current.status, to)) return;
   const startsProving = current.status === reservationStatuses.Reserved &&
     to === reservationStatuses.Proving;
-  const recoversCheckpoint = current.status === reservationStatuses.ManualReview &&
-    to === reservationStatuses.ProofReady &&
-    patch[managedReservationEvidenceMutation] === "checkpoint_recovery";
-  if ((startsProving || recoversCheckpoint) && !current.lease_token) {
+  if (startsProving && !current.lease_token) {
     const token = patchLeaseToken(patch);
     const owner = String(patch.lease_owner || patch.leaseOwner || "");
     const until = Date.parse(patch.lease_until || patch.leaseUntil || "");
@@ -1124,14 +1323,16 @@ const managedLifecycleMetadataAliases = new Map([
   ["executionTransport", "execution_transport"],
   ["manualReviewResolutionReason", "manual_review_resolution_reason"],
   ["walletRejectedBeforeBroadcast", "wallet_rejected_before_broadcast"],
-  ["providerRejectionCode", "provider_rejection_code"]
+  ["providerRejectionCode", "provider_rejection_code"],
+  ["providerRejectionCodespace", "provider_rejection_codespace"]
 ]);
 
 const managedLifecycleMetadataFields = new Set([
   reservationClaimTokenHashField,
   ...initialLifecycleMetadataFields,
   "wallet_rejected_before_broadcast",
-  "provider_rejection_code"
+  "provider_rejection_code",
+  "provider_rejection_codespace"
 ].filter(field => !managedLifecycleMetadataAliases.has(field)));
 
 function metadataFieldChanged(currentMetadata, nextMetadata, field) {
@@ -1160,13 +1361,6 @@ function assertManagedLifecycleMetadataMutation(current, to, patch = {}, {
     allowed.add("no_broadcast_attempt");
     allowed.add("operation_success_evidence_required");
     allowed.add("execution_transport");
-  }
-  if (managedCheckpointRecovery) {
-    allowed.add("no_broadcast_attempt");
-    allowed.add("operation_success_evidence_required");
-    allowed.add("execution_transport");
-    allowed.add("batch_checkpoint_recovered");
-    allowed.add("batch_checkpoint_recovery_reason");
   }
   if (managedRelayHandoff) {
     allowed.add("relay_handed_off");
@@ -1352,10 +1546,6 @@ function assertOperationSuccessPredicateImmutable(current, to, patch = {}) {
   const initializing = (
     current.status === reservationStatuses.Proving &&
     to === reservationStatuses.ProofReady
-  ) || (
-    current.status === reservationStatuses.ManualReview &&
-    to === reservationStatuses.ProofReady &&
-    patch[managedReservationEvidenceMutation] === "checkpoint_recovery"
   );
   for (const aliases of operationSuccessPredicateFields) {
     if (!patchHasAnyOwnProperty(patch, aliases)) continue;
@@ -1431,7 +1621,6 @@ function allowedReservationPatchFields(current, to, {
   managedRelayHandoff = false,
   managedRelayEvidence = false,
   managedBroadcastAttempt = false,
-  managedCheckpointRecovery = false,
   managedOperationReconcile = false
 } = {}) {
   if (managedRelayEvidence) {
@@ -1444,9 +1633,7 @@ function allowedReservationPatchFields(current, to, {
     ]);
   }
   const allowed = new Set(commonReservationPatchFields);
-  if (to === reservationStatuses.ProofReady && (
-    current.status === reservationStatuses.Proving || managedCheckpointRecovery
-  )) {
+  if (to === reservationStatuses.ProofReady && current.status === reservationStatuses.Proving) {
     for (const aliases of operationSuccessPredicateFields) {
       for (const alias of aliases) allowed.add(alias);
     }
@@ -1457,9 +1644,6 @@ function allowedReservationPatchFields(current, to, {
     allowed.add("tx_bytes_hash");
     allowed.add("txBytesHash");
   }
-  if (managedCheckpointRecovery) {
-    for (const field of reconciliationReservationPatchFields) allowed.add(field);
-  }
   if (managedRelayHandoff) {
     allowed.add("payload_hash");
     allowed.add("payloadHash");
@@ -1467,6 +1651,10 @@ function allowedReservationPatchFields(current, to, {
     allowed.add("txBytesHash");
     allowed.add("sign_doc_hash");
     allowed.add("signDocHash");
+  }
+  if (managedRelaySubmission) {
+    allowed.add("payload_hash");
+    allowed.add("payloadHash");
   }
   if (managedBroadcastAttempt) {
     for (const field of broadcastReservationPatchFields) allowed.add(field);
@@ -1544,6 +1732,49 @@ function isManagedRelayHandoffMutation(current, to, patch = {}) {
     to === reservationStatuses.ProofReady;
 }
 
+function isManagedRelaySubmissionMutation(current, to, patch = {}) {
+  return patch[managedReservationEvidenceMutation] === "relay_submission" &&
+    current.status === reservationStatuses.ProofReady &&
+    to === reservationStatuses.Submitted;
+}
+
+function assertManagedRelaySubmissionMutation(current, to, patch, now) {
+  const tagged = patch[managedReservationEvidenceMutation] === "relay_submission";
+  if (!tagged) return false;
+  if (!isManagedRelaySubmissionMutation(current, to, patch)) {
+    throw new Error("relay submission evidence is only valid for ProofReady -> Submitted");
+  }
+  if (!booleanEvidence(
+    current.metadata?.relay_handed_off ?? current.metadata?.relayHandedOff
+  )) {
+    throw new Error("relay submission requires a previously recorded relay handoff");
+  }
+  if (current.broadcast_in_flight || Number(current.broadcast_attempt_count || 0) > 0) {
+    throw new Error("relay submission cannot replace a local broadcast attempt");
+  }
+  const payloadHash = String(patch.payload_hash || patch.payloadHash || "").trim();
+  if (!payloadHash || !current.payload_hash || payloadHash !== current.payload_hash) {
+    throw new Error("relay submission payload hash must match the handed-off reservation");
+  }
+  const txHash = String(
+    patch.submitted_tx_hash || patch.submittedTxHash || patch.txHashSubmitted || ""
+  ).trim();
+  if (!txHash) {
+    throw new Error("relay submission requires the network tx hash");
+  }
+  if (patch.metadata?.no_broadcast_attempt !== false) {
+    throw new Error("relay submission must record the external broadcast boundary");
+  }
+  if (
+    Number(patch.broadcast_attempt_count) !==
+    Number(current.broadcast_attempt_count || 0) + 1
+  ) {
+    throw new Error("relay submission must increase broadcast_attempt_count exactly once");
+  }
+  assertCurrentLeaseToken(current, patchLeaseToken(patch), patchLeaseOwner(patch), now);
+  return true;
+}
+
 function isManagedBroadcastAttemptMutation(current, to, patch = {}) {
   return patch[managedReservationEvidenceMutation] === "broadcast_attempt" &&
     current.status === reservationStatuses.ProofReady &&
@@ -1568,51 +1799,6 @@ function assertManagedBroadcastAttemptMutation(current, to, patch, now) {
     throw new Error("broadcast attempt must clear no_broadcast_attempt evidence");
   }
   assertCurrentLeaseToken(current, patchLeaseToken(patch), patchLeaseOwner(patch), now);
-  return true;
-}
-
-function isManagedCheckpointRecoveryMutation(current, to, patch = {}) {
-  return patch[managedReservationEvidenceMutation] === "checkpoint_recovery" &&
-    current.status === reservationStatuses.ManualReview &&
-    to === reservationStatuses.ProofReady;
-}
-
-function assertManagedCheckpointRecoveryMutation(current, to, patch = {}) {
-  const managed = isManagedCheckpointRecoveryMutation(current, to, patch);
-  if (current.status === reservationStatuses.ManualReview &&
-      to === reservationStatuses.ProofReady && !managed) {
-    throw new Error("ManualReview -> ProofReady requires managed checkpoint recovery");
-  }
-  if (!managed) {
-    if (patch[managedReservationEvidenceMutation] === "checkpoint_recovery") {
-      throw new Error("checkpoint recovery is only valid for ManualReview -> ProofReady");
-    }
-    return false;
-  }
-  const reason = "batch_checkpointed_artifact_requires_recovery";
-  if (String(current.metadata?.reconcile_reason || "") !== reason ||
-      String(current.last_broadcast_error || "") !== reason) {
-    throw new Error("checkpoint recovery requires the original batch checkpoint quarantine evidence");
-  }
-  if (current.metadata?.batch_payload_checkpoint_started !== true) {
-    throw new Error("checkpoint recovery requires a started batch payload checkpoint");
-  }
-  const payloadHash = String(patch.payload_hash || patch.payloadHash || "").trim();
-  if (!payloadHash ||
-      String(current.metadata?.batch_transfer_payload_hash || "").trim() !== payloadHash) {
-    throw new Error("checkpoint recovery payload hash does not match the quarantined batch");
-  }
-  if (current.submitted_tx_hash || current.broadcast_in_flight ||
-      Number(current.broadcast_attempt_count || 0) > 0 ||
-      current.metadata?.relay_handed_off === true) {
-    throw new Error("checkpoint recovery is forbidden after a broadcast or relay handoff");
-  }
-  if (patch.metadata?.no_broadcast_attempt !== true ||
-      patch.metadata?.batch_checkpoint_recovered !== true ||
-      patch.metadata?.batch_checkpoint_recovery_reason !== reason ||
-      !booleanEvidence(patch.nullifier_unspent_confirmed ?? patch.nullifierUnspentConfirmed)) {
-    throw new Error("checkpoint recovery requires no-broadcast and unspent-nullifier evidence");
-  }
   return true;
 }
 
@@ -1965,10 +2151,13 @@ function assertCoreTransitionEvidence(from, to, patch = {}) {
   }
 }
 
-function assertStoreTransitionEvidence(current, to, patch = {}) {
+function assertStoreTransitionEvidence(current, to, patch = {}, {
+  managedRelaySubmission = false
+} = {}) {
   if (
     current.status === reservationStatuses.ProofReady &&
     [reservationStatuses.Submitted, reservationStatuses.Unknown].includes(to) &&
+    !managedRelaySubmission &&
     (!current.broadcast_in_flight || Number(current.broadcast_attempt_count || 0) < 1)
   ) {
     throw new Error("durable broadcast attempt is required before terminal bookkeeping");
@@ -2050,9 +2239,9 @@ function assertInactiveTransitionEvidence(current, to, metadata = {}) {
   if (
     (from === reservationStatuses.Submitted || from === reservationStatuses.Unknown) &&
     (to === reservationStatuses.ReplanRequired || to === reservationStatuses.Failed) &&
-    !hasPostBroadcastReplanEvidence(metadata)
+    !hasExactPostBroadcastFailureEvidence(current, metadata)
   ) {
-    throw new Error(`${from} -> ${to} requires nullifier_unspent_confirmed and tx_absent_or_failed_confirmed reconcile evidence`);
+    throw new Error(`${from} -> ${to} requires exact tx_hash_checked, positive checked_height, nullifier_unspent_confirmed, and tx_absent_or_failed_confirmed reconcile evidence`);
   }
   if (from === reservationStatuses.ProofReady && to === reservationStatuses.ReplanRequired) {
     if (hasStoredBroadcastEvidence(current)) {
@@ -2079,6 +2268,278 @@ function reconciledSpentPatch(patch = {}, { operationReconcile = false } = {}) {
     Object.defineProperty(authorized, managedOperationReconciliation, { value: true });
   }
   return authorized;
+}
+
+const mergedOperationSuccessEvidence = Symbol("clairveil.merged-operation-success-evidence");
+
+function hasExplicitOperationEvidence(input = {}) {
+  return operationSuccessEvidence(input).provided;
+}
+
+function duplicateOperationEvidence(input = {}) {
+  const evidence = operationSuccessEvidence(input);
+  return evidence.provided ? evidence : null;
+}
+
+function sameNormalizedIdentitySet(left = [], right = []) {
+  const leftValues = normalizedIdentityValues(left).sort();
+  const rightValues = normalizedIdentityValues(right).sort();
+  return leftValues.length === rightValues.length &&
+    leftValues.every((value, index) => value === rightValues[index]);
+}
+
+function duplicateOperationEvidenceLinkValues(evidence) {
+  if (!evidence) return new Set();
+  const values = [];
+  for (const [kind, identities] of [
+    ["tx_hash", evidence.txHashes],
+    ["tx_bytes_hash", evidence.txBytesHashes],
+    ["sign_doc_hash", evidence.signDocHashes]
+  ]) {
+    values.push(...normalizedIdentityValues(identities || []).map(value => `${kind}:${value}`));
+  }
+  const operationEvidenceHash = normalizedTxIdentity(evidence.operationEvidenceHash);
+  if (operationEvidenceHash) {
+    values.push(`operation_evidence_hash:${operationEvidenceHash}`);
+  }
+  return new Set(values);
+}
+
+function duplicateOperationEvidenceLinkConflicts(reservations, evidences = []) {
+  const present = evidences.filter(Boolean);
+  if (present.length < 2) return [];
+  let shared = duplicateOperationEvidenceLinkValues(present[0]);
+  for (const evidence of present.slice(1)) {
+    const links = duplicateOperationEvidenceLinkValues(evidence);
+    shared = new Set([...shared].filter(value => links.has(value)));
+  }
+  if (shared.size) return [];
+  return reservations.map(reservation => operationEvidenceConflict(
+    reservation,
+    "tx_hash_or_tx_bytes",
+    "duplicate_unlinked",
+    {
+      expected: "a shared transaction identity on every evidence fragment",
+      actual: "missing or disjoint transaction identities"
+    }
+  ));
+}
+
+function duplicateOperationEvidenceConflicts(reservations, leftInput, rightInput) {
+  const left = duplicateOperationEvidence(leftInput);
+  const right = duplicateOperationEvidence(rightInput);
+  if (!left || !right) return [];
+  const differing = [];
+  const compareIdentities = (sourceField, leftValues, rightValues) => {
+    if (!leftValues.length || !rightValues.length) return;
+    if (!sameNormalizedIdentitySet(leftValues, rightValues)) {
+      differing.push({
+        sourceField,
+        expected: normalizedIdentityValues(leftValues).join(","),
+        actual: normalizedIdentityValues(rightValues).join(",")
+      });
+    }
+  };
+  const compare = (sourceField, leftValue, rightValue, options = {}) => {
+    if (leftValue === "" || leftValue == null || rightValue === "" || rightValue == null) return;
+    if (!operationEvidenceValuesEqual(leftValue, rightValue, options)) {
+      differing.push({
+        sourceField,
+        expected: String(leftValue),
+        actual: String(rightValue)
+      });
+    }
+  };
+  const compareVerification = (
+    sourceField,
+    leftProvided,
+    leftVerified,
+    rightProvided,
+    rightVerified
+  ) => {
+    if (!leftProvided || !rightProvided || leftVerified === rightVerified) return;
+    differing.push({
+      sourceField,
+      expected: String(leftVerified),
+      actual: String(rightVerified)
+    });
+  };
+  for (const aliasError of new Set([...left.aliasErrors, ...right.aliasErrors])) {
+    differing.push({
+      sourceField: aliasError.split(" ")[0] || "operation_input",
+      expected: "consistent aliases",
+      actual: aliasError
+    });
+  }
+  compareIdentities("tx_hash", left.txHashes, right.txHashes);
+  compareIdentities("tx_bytes_hash", left.txBytesHashes, right.txBytesHashes);
+  compareIdentities("sign_doc_hash", left.signDocHashes, right.signDocHashes);
+  const leftOutcomes = executionOutcomeValues(left.txResults);
+  const rightOutcomes = executionOutcomeValues(right.txResults);
+  if (leftOutcomes.length && rightOutcomes.length &&
+      !sameNormalizedIdentitySet(leftOutcomes, rightOutcomes)) {
+    differing.push({
+      sourceField: "transaction_outcome",
+      expected: leftOutcomes.join(","),
+      actual: rightOutcomes.join(",")
+    });
+  }
+  compare("expected_operation_evidence_hash", left.operationEvidenceHash, right.operationEvidenceHash, { caseInsensitive: true });
+  compare("expected_output_commitment", left.outputCommitment, right.outputCommitment, { caseInsensitive: true });
+  compare("expected_disclosure_digest", left.disclosureDigest, right.disclosureDigest, { caseInsensitive: true });
+  compare("expected_recipient_hash", left.recipientHash, right.recipientHash, { caseInsensitive: true });
+  compare("expected_amount", left.amount, right.amount);
+  compare("expected_amount_hash", left.amountHash, right.amountHash, { caseInsensitive: true });
+  compare("expected_denom", left.denom, right.denom);
+  if (left.batchItemIndexProvided && right.batchItemIndexProvided) {
+    compare("batch_item_index", left.batchItemIndex, right.batchItemIndex);
+  }
+  compareVerification(
+    "evm_transaction_verification",
+    left.evmTransactionVerificationProvided,
+    left.evmTransactionVerified,
+    right.evmTransactionVerificationProvided,
+    right.evmTransactionVerified
+  );
+  compareVerification(
+    "evm_privacy_receipt_verification",
+    left.evmPrivacyReceiptVerificationProvided,
+    left.evmPrivacyReceiptVerified,
+    right.evmPrivacyReceiptVerificationProvided,
+    right.evmPrivacyReceiptVerified
+  );
+  compareVerification(
+    "evm_finality_verification",
+    left.evmFinalityVerificationProvided,
+    left.evmFinalityVerified,
+    right.evmFinalityVerificationProvided,
+    right.evmFinalityVerified
+  );
+  if (left.batchItemIndexKnownProvided && right.batchItemIndexKnownProvided) {
+    compare(
+      "batch_item_index_known",
+      left.batchItemIndexKnown,
+      right.batchItemIndexKnown
+    );
+  }
+  return reservations.flatMap(reservation => differing.map(({ sourceField, expected, actual }) =>
+    operationEvidenceConflict(reservation, sourceField, "duplicate_conflict", { expected, actual })
+  ));
+}
+
+function mergedDuplicateOperationEvidence(evidences = []) {
+  const present = evidences.filter(Boolean);
+  if (!present.length) return null;
+  const firstValue = field => present.find(evidence => evidence[field] !== "")?.[field] ?? "";
+  const identityValues = field => uniqueIdentityValues(present.flatMap(evidence => evidence[field]));
+  const txHashes = identityValues("txHashes");
+  const txBytesHashes = identityValues("txBytesHashes");
+  const signDocHashes = identityValues("signDocHashes");
+  const txResults = [...new Set(present.flatMap(evidence => evidence.txResults))];
+  const verification = prefix => {
+    const providedField = `${prefix}Provided`;
+    const verifiedField = prefix.replace(/Verification$/, "Verified");
+    const provided = present.some(evidence => evidence[providedField]);
+    return {
+      [providedField]: provided,
+      [verifiedField]: provided && present.some(evidence =>
+        evidence[providedField] && evidence[verifiedField]
+      )
+    };
+  };
+  const itemIndexEvidence = present.find(evidence => evidence.batchItemIndexProvided) ?? present[0];
+  const itemIndexKnownEvidence = present.find(evidence => evidence.batchItemIndexKnownProvided);
+  return {
+    provided: true,
+    txHash: txHashes[0] || "",
+    txHashes,
+    txBytesHash: txBytesHashes[0] || "",
+    txBytesHashes,
+    signDocHash: signDocHashes[0] || "",
+    signDocHashes,
+    txResult: txResults[0] || null,
+    txResults,
+    operationEvidenceHash: firstValue("operationEvidenceHash"),
+    outputCommitment: firstValue("outputCommitment"),
+    disclosureDigest: firstValue("disclosureDigest"),
+    recipientHash: firstValue("recipientHash"),
+    amount: firstValue("amount"),
+    amountHash: firstValue("amountHash"),
+    denom: firstValue("denom"),
+    ...verification("evmTransactionVerification"),
+    ...verification("evmPrivacyReceiptVerification"),
+    ...verification("evmFinalityVerification"),
+    aliasErrors: [...new Set(present.flatMap(evidence => evidence.aliasErrors))],
+    batchItemIndexRaw: itemIndexEvidence.batchItemIndexRaw,
+    batchItemIndex: itemIndexEvidence.batchItemIndex,
+    batchItemIndexValid: present.every(evidence => evidence.batchItemIndexValid),
+    batchItemIndexProvided: present.some(evidence => evidence.batchItemIndexProvided),
+    batchItemIndexKnownProvided: Boolean(itemIndexKnownEvidence),
+    batchItemIndexKnown: itemIndexKnownEvidence
+      ? itemIndexKnownEvidence.batchItemIndexKnown
+      : itemIndexEvidence.batchItemIndexKnown
+  };
+}
+
+function coalesceSpentNotesByLookupKey(spentNotes = [], reservationsForLookupKey = () => []) {
+  const grouped = new Map();
+  for (const entry of spentNotes) {
+    if (!grouped.has(entry.lookupKey)) grouped.set(entry.lookupKey, []);
+    grouped.get(entry.lookupKey).push(entry.note);
+  }
+  const coalesced = [];
+  for (const [lookupKey, notes] of grouped) {
+    const reservations = reservationsForLookupKey(lookupKey);
+    const parsed = notes.map(duplicateOperationEvidence);
+    const envelopeConflicts = parsed.flatMap(evidence =>
+      (evidence?.aliasErrors || [])
+        .filter(error => error.startsWith("operation_evidence_envelope "))
+        .map(error => ({ sourceField: "operation_evidence_envelope", error }))
+    );
+    if (envelopeConflicts.length) {
+      throw evidenceConflictError(
+        reservations,
+        reservations.flatMap(reservation => envelopeConflicts.map(({ sourceField, error }) =>
+          operationEvidenceConflict(reservation, sourceField, "alias_conflict", {
+            expected: "consistent aliases",
+            actual: error
+          })
+        )),
+        "operation success evidence envelope aliases conflict"
+      );
+    }
+    const compared = [notes[0]];
+    for (const note of notes.slice(1)) {
+      const conflicts = compared.flatMap(previous =>
+        duplicateOperationEvidenceConflicts(reservations, previous, note)
+      );
+      if (conflicts.length) {
+        throw evidenceConflictError(
+          reservations,
+          conflicts,
+          "duplicate spent evidence conflicts for one reservation input"
+        );
+      }
+      compared.push(note);
+    }
+    const linkConflicts = duplicateOperationEvidenceLinkConflicts(reservations, parsed);
+    if (linkConflicts.length) {
+      throw evidenceConflictError(
+        reservations,
+        linkConflicts,
+        "duplicate spent evidence fragments are not linked to one transaction"
+      );
+    }
+    const selected = { ...notes[0] };
+    const mergedEvidence = mergedDuplicateOperationEvidence(parsed);
+    if (mergedEvidence) {
+      Object.defineProperty(selected, mergedOperationSuccessEvidence, {
+        value: mergedEvidence
+      });
+    }
+    coalesced.push({ lookupKey, note: selected });
+  }
+  return coalesced;
 }
 
 function operationReconciliationOutcome(reservations, spentNotesByLookupKey) {
@@ -2153,34 +2614,11 @@ function operationReconciliationTransitions(reservations, spentNotesByLookupKey,
         "retry found mixed reservation state after a succeeded operation reconciliation"
       );
     }
-    const explicitEvidenceKeys = [
-      "operationSuccessEvidence", "operation_success_evidence", "successEvidence",
-      "success_evidence", "evidence", "txResult", "tx_result", "transactionResult",
-      "transaction_result", "broadcastResult", "broadcast_result", "outputCommitment",
-      "output_commitment", "outputCommitmentHex", "output_commitment_hex",
-      "commitmentHex", "commitment_hex", "auditDisclosureDigest",
-      "audit_disclosure_digest", "auditDisclosureDigestHex",
-      "audit_disclosure_digest_hex", "disclosureDigest", "disclosure_digest",
-      "recipientHash", "recipient_hash", "recipientHashHex", "recipient_hash_hex",
-      "amountHash", "amount_hash", "amountHashHex", "amount_hash_hex",
-      "expectedOutputCommitment", "expected_output_commitment",
-      "expectedDisclosureDigest", "expected_disclosure_digest",
-      "expectedRecipientHash", "expected_recipient_hash", "expectedAmount",
-      "expected_amount", "operationAmount", "operation_amount", "actualAmount",
-      "actual_amount", "expectedAmountHash", "expected_amount_hash",
-      "expectedDenom", "expected_denom", "operationDenom", "operation_denom",
-      "actualDenom", "actual_denom", "batchItemIndex", "batch_item_index",
-      "itemIndex", "item_index", "batchItemIndexKnown", "batch_item_index_known",
-      "itemIndexKnown", "item_index_known"
-    ];
     const conflicts = [];
     for (const reservation of reservations) {
       const note = spentNotesByLookupKey.get(reservation.nullifier_lookup_key);
       if (!note) continue;
-      const hasExplicitEvidence = explicitEvidenceKeys.some(key =>
-        Object.prototype.hasOwnProperty.call(note, key) && note[key] != null
-      );
-      if (!hasExplicitEvidence) continue;
+      if (!hasExplicitOperationEvidence(note)) continue;
       const evidence = evaluateOperationSuccessEvidence(reservation, note);
       if (!evidence.evaluated || !evidence.matches) {
         conflicts.push(...(evidence.conflicts.length
@@ -2269,6 +2707,18 @@ function aliasedStringValue(input = {}, canonicalKey, aliasKey, label) {
   return String(firstDefined(canonical, alias, ""));
 }
 
+function aliasedStringValueForKeys(input = {}, keys = [], label) {
+  const values = keys
+    .filter(key => Object.prototype.hasOwnProperty.call(input, key))
+    .map(key => input[key])
+    .filter(value => value !== undefined && value !== null)
+    .map(String);
+  if (values.some(value => value !== values[0])) {
+    throw new Error(`${label} aliases conflict`);
+  }
+  return values[0] || "";
+}
+
 function aliasedStringArray(input = {}, canonicalKey, aliasKey, label) {
   const canonical = input?.[canonicalKey];
   const alias = input?.[aliasKey];
@@ -2338,20 +2788,30 @@ function operationEvidenceEnvelopesEqual(left, right, seen = new WeakMap()) {
       operationEvidenceEnvelopesEqual(left[key], right[key], seen));
 }
 
-function nestedOperationEvidence(input = {}) {
+function nestedOperationEvidenceState(input = {}) {
   const candidates = [];
   for (const key of ["operationSuccessEvidence", "operation_success_evidence", "successEvidence", "success_evidence", "evidence"]) {
     const candidate = input?.[key];
     if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
-      candidates.push(candidate);
+      candidates.push({ key, value: candidate });
     }
   }
-  if (candidates.length > 1 && candidates.slice(1).some(candidate =>
-    !operationEvidenceEnvelopesEqual(candidates[0], candidate)
-  )) {
-    throw new Error("operation success evidence envelope aliases conflict");
-  }
-  return candidates[0] || null;
+  const conflictingKeys = candidates.length > 1
+    ? candidates.slice(1)
+      .filter(candidate => !operationEvidenceEnvelopesEqual(candidates[0].value, candidate.value))
+      .map(candidate => candidate.key)
+    : [];
+  return {
+    evidence: candidates[0]?.value || null,
+    provided: candidates.length > 0,
+    conflict: conflictingKeys.length > 0,
+    keys: candidates.map(candidate => candidate.key),
+    conflictingKeys
+  };
+}
+
+function nestedOperationEvidence(input = {}) {
+  return nestedOperationEvidenceState(input).evidence;
 }
 
 function txResultObjects(input = {}) {
@@ -2483,7 +2943,11 @@ function operationVerificationEvidence(sources = [], directKeys = [], nestedKeys
 }
 
 function operationSuccessEvidence(input = {}) {
-  const nested = nestedOperationEvidence(input);
+  if (input?.[mergedOperationSuccessEvidence]) {
+    return input[mergedOperationSuccessEvidence];
+  }
+  const nestedState = nestedOperationEvidenceState(input);
+  const nested = nestedState.evidence;
   const evidenceSource = nested || input;
   const source = evidenceSource;
   const aliasSources = [evidenceSource];
@@ -2509,6 +2973,14 @@ function operationSuccessEvidence(input = {}) {
       "privacyReceiptVerified", "privacy_receipt_verified"
     ],
     ["privacyReceipt", "privacy_receipt"]
+  );
+  const evmFinalityVerification = operationVerificationEvidence(
+    verificationSources,
+    [
+      "evmFinalityVerified", "evm_finality_verified",
+      "finalityVerified", "finality_verified"
+    ],
+    ["finality", "evmFinality", "evm_finality"]
   );
   const txHashKeys = [
     "txHash", "tx_hash", "txhash", "hash", "submittedTxHash",
@@ -2573,11 +3045,19 @@ function operationSuccessEvidence(input = {}) {
     "assetDenom", "asset_denom"
   ];
   const aliasErrors = [];
+  if (nestedState.conflict) {
+    aliasErrors.push(
+      `operation_evidence_envelope evidence aliases conflict: ${nestedState.keys.join(", ")}`
+    );
+  }
   if (evmTransactionVerification.conflict) {
     aliasErrors.push("evm_transaction_verification evidence aliases conflict");
   }
   if (evmPrivacyReceiptVerification.conflict) {
     aliasErrors.push("evm_privacy_receipt_verification evidence aliases conflict");
+  }
+  if (evmFinalityVerification.conflict) {
+    aliasErrors.push("evm_finality_verification evidence aliases conflict");
   }
   for (const [field, keys, options] of [
     ["expected_operation_evidence_hash", operationEvidenceHashKeys, { caseInsensitive: true }],
@@ -2595,7 +3075,28 @@ function operationSuccessEvidence(input = {}) {
     }
   }
   const aliasValue = keys => String(firstDefined(...keys.map(key => source[key]), ""));
+  const unambiguousOperationEvidenceValues = [
+    ...txBytesHashes,
+    ...signDocHashes,
+    aliasValue(operationEvidenceHashKeys),
+    aliasValue(outputCommitmentKeys),
+    aliasValue(disclosureDigestKeys),
+    aliasValue(recipientHashKeys),
+    aliasValue(amountHashKeys)
+  ];
+  const unambiguousOperationEvidenceProvided =
+    txResults.length > 0 ||
+    unambiguousOperationEvidenceValues.some(value => value !== "" && value != null) ||
+    evmTransactionVerification.provided ||
+    evmPrivacyReceiptVerification.provided ||
+    evmFinalityVerification.provided ||
+    normalizedItemIndex.provided ||
+    batchItemIndexKnown !== undefined && batchItemIndexKnown !== null ||
+    aliasErrors.length > 0;
   return {
+    provided: nestedState.provided ||
+      unambiguousOperationEvidenceProvided ||
+      (txHashes.length > 0 && (!input?.note || unambiguousOperationEvidenceProvided)),
     txHash: txHashes[0] || "",
     txHashes,
     txBytesHash: txBytesHashes[0] || "",
@@ -2611,15 +3112,21 @@ function operationSuccessEvidence(input = {}) {
     amount: aliasValue(amountKeys),
     amountHash: aliasValue(amountHashKeys),
     denom: aliasValue(denomKeys),
+    evmTransactionVerificationProvided: evmTransactionVerification.provided,
     evmTransactionVerified: evmTransactionVerification.provided &&
       evmTransactionVerification.verified,
+    evmPrivacyReceiptVerificationProvided: evmPrivacyReceiptVerification.provided,
     evmPrivacyReceiptVerified: evmPrivacyReceiptVerification.provided &&
       evmPrivacyReceiptVerification.verified,
+    evmFinalityVerificationProvided: evmFinalityVerification.provided,
+    evmFinalityVerified: evmFinalityVerification.provided &&
+      evmFinalityVerification.verified,
     aliasErrors,
     batchItemIndexRaw: batchItemIndex,
     batchItemIndex: normalizedItemIndex.value,
     batchItemIndexValid: normalizedItemIndex.valid,
     batchItemIndexProvided: normalizedItemIndex.provided,
+    batchItemIndexKnownProvided: batchItemIndexKnown !== undefined && batchItemIndexKnown !== null,
     batchItemIndexKnown: batchItemIndexKnown !== undefined && batchItemIndexKnown !== null
       ? booleanEvidence(batchItemIndexKnown)
       : batchItemIndex !== undefined && batchItemIndex !== null
@@ -2675,6 +3182,14 @@ function normalizedIdentityValues(values = []) {
   return [...new Set(values.map(normalizedTxIdentity).filter(Boolean))];
 }
 
+function reservationNetworkTransactionIdentities(reservation = {}) {
+  return normalizedIdentityValues(
+    reservationExecutionTransport(reservation) === "evm"
+      ? [reservation.submitted_tx_hash]
+      : [reservation.submitted_tx_hash, reservation.tx_bytes_hash]
+  );
+}
+
 function operationEvidenceConflictField(sourceField) {
   if (["submitted_tx_hash", "tx_hash", "tx_bytes_hash", "sign_doc_hash", "tx_hash_or_tx_bytes"].includes(sourceField)) {
     return "tx_hash";
@@ -2685,8 +3200,11 @@ function operationEvidenceConflictField(sourceField) {
   if (sourceField === "expected_recipient_hash") return "recipient_hash";
   if (sourceField === "expected_denom") return "denom";
   if (sourceField === "batch_item_index") return "batch_item_index";
+  if (sourceField === "batch_item_index_known") return "batch_item_index";
+  if (sourceField === "operation_evidence_envelope") return "operation_evidence";
   if (sourceField === "evm_transaction_verification") return "tx_hash";
   if (sourceField === "evm_privacy_receipt_verification") return "transaction_outcome";
+  if (sourceField === "evm_finality_verification") return "transaction_outcome";
   if (sourceField === "transaction_outcome") return "transaction_outcome";
   return sourceField || "operation_input";
 }
@@ -2914,6 +3432,35 @@ function evmReceiptStatusSucceeded(receiptStatus) {
     /^0x0*1$/.test(normalized);
 }
 
+function executionOutcomeValues(txResults = []) {
+  const values = [];
+  for (const txResult of txResults) {
+    for (const container of executionResultContainers(txResult)) {
+      if (Object.prototype.hasOwnProperty.call(container, "code") &&
+          container.code !== undefined && container.code !== null &&
+          String(container.code).trim() !== "") {
+        const rawCode = String(container.code).trim();
+        const normalizedCode = /^(0|[1-9][0-9]*)$/.test(rawCode)
+          ? String(Number(rawCode))
+          : `invalid:${rawCode.toLowerCase()}`;
+        values.push(`cosmos-code:${normalizedCode}`);
+      }
+      for (const status of [
+        container.receiptStatus,
+        container.receipt_status,
+        container.status
+      ]) {
+        if (status === undefined || status === null || String(status).trim() === "") continue;
+        values.push(evmReceiptStatusSucceeded(status)
+          ? "evm-status:success"
+          : `evm-status:failure:${String(status).trim().toLowerCase()}`
+        );
+      }
+    }
+  }
+  return [...new Set(values)].sort();
+}
+
 function executionOutcomeErrors(txResult) {
   if (!txResult || typeof txResult !== "object") return [];
   const errors = [];
@@ -3016,6 +3563,15 @@ function evaluateOperationSuccessEvidence(reservation = {}, actualInput = {}) {
       conflicts.push(operationEvidenceConflict(
         reservation,
         "evm_privacy_receipt_verification",
+        "missing",
+        { expected: true, actual: false }
+      ));
+    }
+    if (!actual.evmFinalityVerified) {
+      errors.push("EVM finality verification missing");
+      conflicts.push(operationEvidenceConflict(
+        reservation,
+        "evm_finality_verification",
         "missing",
         { expected: true, actual: false }
       ));
@@ -3612,6 +4168,12 @@ export class MemoryReservationStore {
         throw new Error(`reservation compare-and-set failed: expected ${transition.from}, got ${current.status}`);
       }
       const managedRelayHandoff = assertManagedRelayHandoffMutation(current, transition.to, transition.patch, now);
+      const managedRelaySubmission = assertManagedRelaySubmissionMutation(
+        current,
+        transition.to,
+        transition.patch,
+        now
+      );
       const managedBroadcastAttempt = assertManagedBroadcastAttemptMutation(current, transition.to, transition.patch, now);
       const managedBroadcastRejection = assertManagedBroadcastRejectionMutation(current, transition.to, transition.patch, now);
       const managedBroadcastFailure = assertManagedAuthoritativeBroadcastFailureMutation(
@@ -3649,7 +4211,6 @@ export class MemoryReservationStore {
         managedRelayHandoff,
         managedRelayEvidence,
         managedBroadcastAttempt,
-        managedCheckpointRecovery,
         managedOperationReconcile
       });
       if (!managedBroadcastRejection && !managedRelayEvidence) {
@@ -3796,10 +4357,19 @@ export class MemoryReservationStore {
         throw new Error("spent reconciliation requires literal spent evidence");
       }
     }
-    const spentNotesByLookupKey = new Map(spentNotes.map(({ lookupKey, note }) => [lookupKey, note]));
+    const coalescedSpentNotes = coalesceSpentNotesByLookupKey(
+      spentNotes,
+      lookupKey => this.state.reservations.filter(reservation =>
+        reservation.owner_key_id === ownerKeyId &&
+        reservation.nullifier_lookup_key === lookupKey
+      )
+    );
+    const spentNotesByLookupKey = new Map(
+      coalescedSpentNotes.map(({ lookupKey, note }) => [lookupKey, note])
+    );
     const transitions = [];
     const affectedGroups = new Map();
-    for (const { lookupKey } of spentNotes) {
+    for (const { lookupKey } of coalescedSpentNotes) {
       for (const reservation of this.state.reservations) {
         if (reservation.owner_key_id !== ownerKeyId || reservation.nullifier_lookup_key !== lookupKey) continue;
         const key = reservation.operation_id
@@ -4311,7 +4881,6 @@ export class NoteReservationManager {
       }
       for (const reservationID of reservationIDs || []) {
         const current = currentByID.get(reservationID);
-        assertManagedCheckpointRecoveryMutation(current, to, transitionPatch);
         assertLeaseTransitionAllowed(current, to, transitionPatch, now);
         assertReplanTransitionEvidence(current.status, to, patch);
         assertInactiveTransitionEvidence(current, to, patch);
@@ -4545,6 +5114,199 @@ export class NoteReservationManager {
     return this.store.compareAndSetReservationStatusBatch(transitions);
   }
 
+  async recordRelaySubmission(reservationIDs = [], metadata = {}) {
+    const now = this.timestamp();
+    const leaseToken = metadata.leaseToken || metadata.lease_token || "";
+    const payloadHash = aliasedStringValueForKeys(
+      metadata,
+      ["payloadHash", "payload_hash"],
+      "relay submission payload hash"
+    ).trim();
+    const attempt = {
+      txHash: aliasedStringValueForKeys(
+        metadata,
+        ["txHash", "tx_hash", "submittedTxHash", "submitted_tx_hash", "txHashSubmitted"],
+        "relay submission network tx hash"
+      ),
+      txBytesHash: aliasedStringValueForKeys(
+        metadata,
+        ["txBytesHash", "tx_bytes_hash"],
+        "relay submission tx bytes hash"
+      ),
+      signDocHash: aliasedStringValueForKeys(
+        metadata,
+        ["signDocHash", "sign_doc_hash"],
+        "relay submission sign doc hash"
+      )
+    };
+    if (!payloadHash) {
+      throw new Error("relay submission requires the handed-off payload hash");
+    }
+    if (!attempt.txHash) {
+      throw new Error("relay submission requires the network tx hash");
+    }
+    const transitions = [];
+    const currentByID = await this._ownedReservationsByID(reservationIDs);
+    for (const reservationID of reservationIDs || []) {
+      const current = currentByID.get(reservationID);
+      if (current.status !== reservationStatuses.ProofReady) {
+        throw new Error(`relay submission requires ProofReady reservation: ${current.status}`);
+      }
+      if (!booleanEvidence(
+        current.metadata?.relay_handed_off ?? current.metadata?.relayHandedOff
+      )) {
+        throw new Error("relay submission requires a previously recorded relay handoff");
+      }
+      if (current.broadcast_in_flight || Number(current.broadcast_attempt_count || 0) > 0) {
+        throw new Error("relay submission cannot replace a local broadcast attempt");
+      }
+      assertCurrentLeaseToken(current, leaseToken, this.leaseOwner, now);
+      if (!current.payload_hash || current.payload_hash !== payloadHash) {
+        throw new Error("relay submission payload hash must match the handed-off reservation");
+      }
+      const patch = {
+        lease_owner: this.leaseOwner,
+        lease_token: leaseToken,
+        payload_hash: payloadHash,
+        submitted_tx_hash: attempt.txHash,
+        broadcast_in_flight: false,
+        broadcast_attempt_count: Number(current.broadcast_attempt_count || 0) + 1,
+        metadata: {
+          ...(current.metadata || {}),
+          ...(metadata.metadata || {}),
+          no_broadcast_attempt: false
+        }
+      };
+      patchIfPresent(patch, "tx_bytes_hash", attempt.txBytesHash);
+      patchIfPresent(patch, "sign_doc_hash", attempt.signDocHash);
+      Object.defineProperty(patch, managedReservationEvidenceMutation, {
+        value: "relay_submission",
+        enumerable: true
+      });
+      transitions.push({
+        reservationID,
+        from: reservationStatuses.ProofReady,
+        to: reservationStatuses.Submitted,
+        patch
+      });
+    }
+    if (!transitions.length) return [];
+    if (typeof this.store.compareAndSetReservationStatusBatch !== "function") {
+      throw new Error("reservation store atomic batch compare-and-set is required");
+    }
+    return this.store.compareAndSetReservationStatusBatch(transitions);
+  }
+
+  /**
+   * Bind a relay transaction only after an authoritative chain lookup proves
+   * inclusion of the exact payload. This supports an unattempted external
+   * handoff and a durably marked same-origin local-relay attempt.
+   */
+  async recordRelayTransactionEvidence(input = {}) {
+    const evidence = externalRelayTransactionEvidence(input);
+    const linked = (await this.store.listReservations({ ownerKeyId: this.ownerKeyId }))
+      .filter(reservation => reservation.operation_id === evidence.operationID);
+    if (!linked.length) {
+      throw new Error(`relay transaction evidence operation not found: ${evidence.operationID}`);
+    }
+    const statuses = new Set(linked.map(reservation => reservation.status));
+    const idempotent = statuses.size === 1 && statuses.has(reservationStatuses.Submitted);
+    if (idempotent) {
+      for (const reservation of linked) {
+        assertPersistedRelayTransactionEvidence(reservation, evidence);
+      }
+    } else if (statuses.size !== 1 || !statuses.has(reservationStatuses.ProofReady)) {
+      throw mixedOperationStateError(
+        linked,
+        "relay transaction evidence requires one exact ProofReady operation"
+      );
+    }
+    const relaySources = new Set(linked.map(current => {
+      if (current.metadata?.relay_handed_off === true) return "external";
+      const local = idempotent
+        ? isPersistedSameOriginLocalRelayEvidence(current)
+        : isDurableSameOriginLocalRelayAttempt(current);
+      return local ? "local" : "";
+    }));
+    if (!relaySources.has("") && relaySources.size !== 1) {
+      throw new Error("relay transaction evidence requires one consistent relay source for the exact operation");
+    }
+    const transitions = linked.map(current => {
+      if (idempotent) {
+        const patch = {
+          payload_hash: evidence.payloadHash,
+          submitted_tx_hash: evidence.txHash,
+          broadcast_attempt_count: Number(current.broadcast_attempt_count),
+          broadcast_in_flight: false,
+          updated_at: this.timestamp(),
+          metadata: { ...(current.metadata || {}) }
+        };
+        Object.defineProperty(patch, managedRelayTransactionEvidence, {
+          value: true,
+          enumerable: true
+        });
+        return {
+          reservationID: current.reservation_id,
+          from: reservationStatuses.Submitted,
+          to: reservationStatuses.Submitted,
+          patch
+        };
+      }
+      const externalHandoff = current.metadata?.relay_handed_off === true;
+      const localRelayAttempt = isDurableSameOriginLocalRelayAttempt(current);
+      if (!externalHandoff && !localRelayAttempt) {
+        throw new Error("relay transaction evidence requires a recorded relay handoff or durable local relay attempt");
+      }
+      if (current.payload_hash !== evidence.payloadHash) {
+        throw new Error(externalHandoff
+          ? "external relay transaction evidence payload hash does not match the handed-off payload"
+          : "local relay transaction evidence payload hash does not match the ProofReady payload");
+      }
+      if (externalHandoff &&
+          (current.broadcast_in_flight || Number(current.broadcast_attempt_count || 0) !== 0)) {
+        throw new Error("external relay transaction evidence requires an unattempted handed-off ProofReady operation");
+      }
+      const conflictingIdentity = reservationNetworkTransactionIdentities(current)
+        .find(identity => identity !== evidence.txHash);
+      if (conflictingIdentity) {
+        throw new Error("relay transaction evidence conflicts with persisted transaction identity");
+      }
+      const patch = {
+        payload_hash: evidence.payloadHash,
+        submitted_tx_hash: evidence.txHash,
+        broadcast_attempt_count: localRelayAttempt
+          ? Number(current.broadcast_attempt_count)
+          : 1,
+        broadcast_in_flight: false,
+        updated_at: this.timestamp(),
+        metadata: {
+          ...(current.metadata || {}),
+          transaction_included_confirmed: true,
+          payload_hash_matched: true,
+          relay_evidence_checked_height: evidence.checkedHeight,
+          relay_evidence_tx_hash: evidence.txHash,
+          checked_height: evidence.checkedHeight,
+          tx_hash_checked: evidence.txHash,
+          no_broadcast_attempt: false
+        }
+      };
+      Object.defineProperty(patch, managedRelayTransactionEvidence, {
+        value: true,
+        enumerable: true
+      });
+      return {
+        reservationID: current.reservation_id,
+        from: reservationStatuses.ProofReady,
+        to: reservationStatuses.Submitted,
+        patch
+      };
+    });
+    if (typeof this.store.compareAndSetReservationStatusBatch !== "function") {
+      throw new Error("reservation store atomic batch compare-and-set is required");
+    }
+    return this.store.compareAndSetReservationStatusBatch(transitions);
+  }
+
   async heartbeatLease(reservationIDs = [], metadata = {}) {
     return this.renewLease(reservationIDs, metadata);
   }
@@ -4553,41 +5315,6 @@ export class NoteReservationManager {
     return this.transitionBatch(reservationIDs, reservationStatuses.Reserved, reservationStatuses.Proving, {
       lease_token: metadata.leaseToken || metadata.lease_token || ""
     });
-  }
-
-  async recoverCheckpointedProofReady(reservationIDs = [], metadata = {}) {
-    const reason = "batch_checkpointed_artifact_requires_recovery";
-    const nullifierUnspentConfirmed = consistentMetadataAliasValue(
-      metadata,
-      ["nullifierUnspentConfirmed", "nullifier_unspent_confirmed"],
-      "checkpoint recovery nullifier unspent evidence",
-      { boolean: true }
-    );
-    if (nullifierUnspentConfirmed !== true) {
-      throw new Error("checkpoint recovery requires explicit unspent-nullifier evidence");
-    }
-    const patch = {
-      ...proofReadyTransitionPatch({
-        ...metadata,
-        metadata: {
-          ...(metadata.metadata || {}),
-          no_broadcast_attempt: true,
-          batch_checkpoint_recovered: true,
-          batch_checkpoint_recovery_reason: reason
-        }
-      }),
-      nullifier_unspent_confirmed: nullifierUnspentConfirmed
-    };
-    Object.defineProperty(patch, managedReservationEvidenceMutation, {
-      value: "checkpoint_recovery",
-      enumerable: true
-    });
-    return this.transitionBatch(
-      reservationIDs,
-      reservationStatuses.ManualReview,
-      reservationStatuses.ProofReady,
-      patch
-    );
   }
 
   async markProofReady(reservationIDs = [], metadata = {}) {
@@ -5160,22 +5887,26 @@ export class NoteReservationManager {
   }
 
   async reconcileSpentNotes(notes = []) {
-    const seenLookupKeys = new Set();
     const spentNotes = [];
     for (const note of notes || []) {
       if (!hasLiteralSpentEvidence(note)) continue;
       const lookupKey = await this.lookupKeyForNote(note);
-      if (seenLookupKeys.has(lookupKey)) continue;
-      seenLookupKeys.add(lookupKey);
       spentNotes.push({ lookupKey, note });
     }
     if (!spentNotes.length) return [];
     if (typeof this.store.reconcileSpentByLookupKeys !== "function") {
       throw new Error("reservation store atomic spent reconciliation is required");
     }
+    const reservations = await this.store.listReservations({ ownerKeyId: this.ownerKeyId });
+    const coalescedSpentNotes = coalesceSpentNotesByLookupKey(
+      spentNotes,
+      lookupKey => reservations.filter(reservation =>
+        reservation.nullifier_lookup_key === lookupKey
+      )
+    );
     return this.store.reconcileSpentByLookupKeys(
       this.ownerKeyId,
-      spentNotes,
+      coalescedSpentNotes,
       { now: this.timestamp() }
     );
   }

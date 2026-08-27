@@ -7,6 +7,7 @@ import sha3 from "js-sha3";
 import {
   createClairveilEvmClient,
   createEvmAuthorizationProfile,
+  createEvmContractAdapter,
   encodeAbiParameters,
   encodeEvmPrivacyBatchTransfer,
   encodeEvmPrivacyBatchTransferWithAuthorization,
@@ -18,6 +19,7 @@ import {
   evmPrivacyPrecompileAbi,
   evmPrivacyPrecompileAddress,
   functionSelector,
+  defaultEvmPrivacyPrecompileAddress,
   defaultEncodeEvmTransfer
 } from "clairveiljs/evm";
 
@@ -29,6 +31,40 @@ const fixture = JSON.parse(await readFile(
 
 const sender = "0x1111111111111111111111111111111111111111";
 const executor = "0x2222222222222222222222222222222222222222";
+const testPrivacyContractAddress = "0x0000000000000000000000000000000000000900";
+
+test("generic ABI encoding supports canonical boolean words", () => {
+  assert.equal(
+    encodeAbiParameters(["bool", "bool"], [false, true]),
+    `${"00".repeat(32)}${"00".repeat(31)}01`
+  );
+  assert.throws(
+    () => encodeAbiParameters(["bool"], [1]),
+    /bool ABI value must be a boolean/
+  );
+});
+
+test("generic EVM clients require the target chain privacy contract address", () => {
+  assert.equal(defaultEvmPrivacyPrecompileAddress, evmPrivacyPrecompileAddress);
+  assert.throws(
+    () => createClairveilEvmClient(),
+    /requires contractAddress or contractAdapter\.contractAddress/
+  );
+  assert.throws(
+    () => createEvmContractAdapter(),
+    /requires contractAddress/
+  );
+  assert.throws(
+    () => createClairveilEvmClient({
+      contractAdapter: {
+        buildDepositTransaction() {},
+        buildTransferTransaction() {},
+        buildWithdrawTransaction() {}
+      }
+    }),
+    /contractAdapter\.contractAddress is required/
+  );
+});
 
 function bytes(length, fill) {
   return new Uint8Array(length).fill(fill);
@@ -128,9 +164,8 @@ function canonicalAbiDigest(abi) {
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
-test("canonical EVM privacy precompile ABI selectors and event surface are represented exactly", () => {
+test("default ClairveilJS EVM adapter selectors and event surface are represented exactly", () => {
   assert.equal(fixture.schema_version, "clairveil-evm-privacy-contract-v1");
-  assert.equal(evmPrivacyPrecompileAddress, fixture.precompile_address);
   const signatures = {
     deposit: "deposit((bytes,bytes,bytes))",
     transfer: "transfer((bytes,bytes,bytes[],bytes[],bytes[],bytes[],uint32,bytes,uint8,bytes,bytes,bytes,bytes,bytes,bytes,bytes,uint64))",
@@ -199,7 +234,7 @@ test("EVM authorization encoders accept every ABI-valid kind and target profiles
     /authorization kind must be a uint8/
   );
   assert.equal(
-    createClairveilEvmClient().buildTransferWithAuthorizationTransaction({
+    createClairveilEvmClient({ contractAddress: testPrivacyContractAddress }).buildTransferWithAuthorizationTransaction({
       message: transfer,
       authorization: { ...authorization(), authorizationKind: 42 }
     }).status,
@@ -208,7 +243,10 @@ test("EVM authorization encoders accept every ABI-valid kind and target profiles
   const profile = createEvmAuthorizationProfile({
     supportedAuthorizationKinds: [1, 2, 3]
   });
-  const client = createClairveilEvmClient({ authorizationProfile: profile });
+  const client = createClairveilEvmClient({
+    contractAddress: testPrivacyContractAddress,
+    authorizationProfile: profile
+  });
   for (const authorizationKind of [1, 2, 3]) {
     assert.equal(
       client.buildTransferWithAuthorizationTransaction({
@@ -229,12 +267,46 @@ test("EVM authorization encoders accept every ABI-valid kind and target profiles
     supportedAuthorizationKinds: [42]
   });
   assert.equal(
-    createClairveilEvmClient({ authorizationProfile: extendedProfile })
+    createClairveilEvmClient({
+      contractAddress: testPrivacyContractAddress,
+      authorizationProfile: extendedProfile
+    })
       .buildTransferWithAuthorizationTransaction({
         message: transfer,
         authorization: { ...authorization(), authorizationKind: 42 }
       }).status,
     "ready"
+  );
+});
+
+test("equivalent independently-created authorization profiles compose with custom EVM adapters", () => {
+  const options = {
+    supportedAuthorizationKinds: [3, 1, 2],
+    typedDataDomain: { name: "Generic EVM Privacy", version: "1" }
+  };
+  const adapterProfile = createEvmAuthorizationProfile(options);
+  const clientProfile = createEvmAuthorizationProfile({
+    ...options,
+    supportedAuthorizationKinds: [1, 2, 3]
+  });
+  const adapter = createEvmContractAdapter({
+    contractAddress: testPrivacyContractAddress,
+    authorizationProfile: adapterProfile
+  });
+
+  assert.doesNotThrow(() => createClairveilEvmClient({
+    contractAdapter: adapter,
+    authorizationProfile: clientProfile
+  }));
+  assert.throws(
+    () => createClairveilEvmClient({
+      contractAdapter: adapter,
+      authorizationProfile: createEvmAuthorizationProfile({
+        ...options,
+        supportedAuthorizationKinds: [1, 2]
+      })
+    }),
+    /authorizationProfile conflicts/
   );
 });
 
@@ -252,19 +324,22 @@ test("EVM authorization typed data binds the configured domain and exact envelop
     batchItemIndex: 3
   };
   assert.throws(
-    () => createClairveilEvmClient().buildAuthorizationTypedData(typedDataRequest),
+    () => createClairveilEvmClient({ contractAddress: testPrivacyContractAddress }).buildAuthorizationTypedData(typedDataRequest),
     /configured EVM authorization profile does not provide buildTypedData/
   );
   const profile = createEvmAuthorizationProfile({
     supportedAuthorizationKinds: [1, 2, 3],
     typedDataDomain: { name: "Example EVM Privacy", version: "2" }
   });
-  const typed = profile.buildTypedData(typedDataRequest);
+  const typed = profile.buildTypedData({
+    ...typedDataRequest,
+    contractAddress: testPrivacyContractAddress
+  });
   assert.equal(typed.primaryType, "PrivacyActionAuthorization");
   assert.equal(typed.domain.name, "Example EVM Privacy");
   assert.equal(typed.domain.version, "2");
   assert.equal(typed.domain.chainId, "262144");
-  assert.equal(typed.domain.verifyingContract, evmPrivacyPrecompileAddress);
+  assert.equal(typed.domain.verifyingContract, testPrivacyContractAddress);
   assert.equal(typed.message.authorizationEnvelopeSelector, `0x${fixture.selectors.batchTransferWithAuthorization}`);
   assert.equal(typed.message.authorizationActionSelector, `0x${fixture.selectors.transfer}`);
   assert.equal(typed.message.cosmosChainIdHash, `0x${keccak256("evm-privacy-local-1")}`);
@@ -284,6 +359,7 @@ test("EVM authorization typed data binds the configured domain and exact envelop
   assert.equal(
     extendedProfile.buildTypedData({
       ...typedDataRequest,
+      contractAddress: testPrivacyContractAddress,
       authorization: { ...unsignedAuthorization, authorizationKind: 42 }
     }).message.authorizationKind,
     "42"
@@ -294,7 +370,7 @@ test("EVM receipt verification requires the exact PrivacyDeposit event, not only
   const client = createClairveilEvmClient({
     defaultDenom: "aokrw",
     nativeDenom: "aokrw",
-    contractAddress: evmPrivacyPrecompileAddress
+    contractAddress: testPrivacyContractAddress
   });
   const prepared = client.buildDepositTransaction({ message: {
     amount: "3aokrw",
@@ -309,7 +385,7 @@ test("EVM receipt verification requires the exact PrivacyDeposit event, not only
   const receipt = {
     status: "0x1",
     logs: [{
-      address: evmPrivacyPrecompileAddress,
+      address: testPrivacyContractAddress,
       topics: [
         eventTopic(fixture.events.PrivacyDeposit),
         addressTopic(sender),
@@ -336,7 +412,7 @@ test("EVM receipt verification requires the exact PrivacyDeposit event, not only
 
 test("EVM transaction identity verification binds hash, sender, call, value, and network", async () => {
   const client = createClairveilEvmClient({
-    contractAddress: evmPrivacyPrecompileAddress,
+    contractAddress: testPrivacyContractAddress,
     evmChainId: "0x539"
   });
   const built = await client.buildTransferTransaction({ message: transferMessage() });
@@ -389,14 +465,14 @@ test("EVM receipt verification binds direct, authorized, and batch event evidenc
     nativeDenom: "aokrw",
     chainId: "evm-privacy-local-1",
     accountPrefix: "evm",
-    contractAddress: evmPrivacyPrecompileAddress
+    contractAddress: testPrivacyContractAddress
   });
   const transfer = transferMessage();
   const transferBuilt = await client.buildTransferTransaction({ message: transfer });
   const transferReceipt = {
     status: "0x1",
     logs: [{
-      address: evmPrivacyPrecompileAddress,
+      address: testPrivacyContractAddress,
       topics: [eventTopic(fixture.events.PrivacyTransfer), addressTopic(sender), addressTopic(sender)],
       data: `0x${encodeAbiParameters(["bytes"], [transfer.root])}`
     }]
@@ -412,7 +488,7 @@ test("EVM receipt verification binds direct, authorized, and batch event evidenc
     receipt: {
       status: "0x1",
       logs: [{
-        address: evmPrivacyPrecompileAddress,
+        address: testPrivacyContractAddress,
         topics: [eventTopic(fixture.events.PrivacyTransfer), addressTopic(sender), addressTopic(executor)],
         data: `0x${encodeAbiParameters(["bytes"], [transfer.root])}`
       }]
@@ -429,7 +505,7 @@ test("EVM receipt verification binds direct, authorized, and batch event evidenc
     receipt: {
       status: "0x1",
       logs: [{
-        address: evmPrivacyPrecompileAddress,
+        address: testPrivacyContractAddress,
         topics: [eventTopic(fixture.events.PrivacyWithdraw), addressTopic(sender), addressTopic(sender), addressTopic(sender)],
         data: `0x${encodeAbiParameters(["string"], ["4aokrw"])}`
       }]
@@ -444,7 +520,7 @@ test("EVM receipt verification binds direct, authorized, and batch event evidenc
     receipt: {
       status: "0x1",
       logs: [{
-        address: evmPrivacyPrecompileAddress,
+        address: testPrivacyContractAddress,
         topics: [
           eventTopic(fixture.events.PrivacyBatchTransferItem),
           addressTopic(sender),
@@ -468,7 +544,7 @@ test("EVM receipt verification binds direct, authorized, and batch event evidenc
     receipt: {
       status: "0x1",
       logs: [{
-        address: evmPrivacyPrecompileAddress,
+        address: testPrivacyContractAddress,
         topics: [
           eventTopic(fixture.events.PrivacySingleProofBatchTransfer),
           addressTopic(sender),
@@ -487,11 +563,11 @@ test("receipt verification refuses a custom adapter calldata mismatch even with 
   const canonical = defaultEncodeEvmTransfer(transfer);
   const altered = `${canonical.slice(0, -2)}ff`;
   const client = createClairveilEvmClient({
-    contractAddress: evmPrivacyPrecompileAddress,
+    contractAddress: testPrivacyContractAddress,
     contractAdapter: {
-      contractAddress: evmPrivacyPrecompileAddress,
+      contractAddress: testPrivacyContractAddress,
       buildTransferTransaction: () => ({
-        to: evmPrivacyPrecompileAddress,
+        to: testPrivacyContractAddress,
         data: altered,
         value: "0x0"
       })
@@ -499,6 +575,21 @@ test("receipt verification refuses a custom adapter calldata mismatch even with 
   });
   const prepared = await client.buildTransferTransaction({ message: transfer });
   assert.equal(prepared.transaction.__clairveilEvmTransaction.receiptExpectation, null);
+  const txHash = `0x${"ab".repeat(32)}`;
+  assert.equal(client.verifyTransactionIdentity({
+    transaction: prepared.transaction,
+    rpcTransaction: {
+      hash: txHash,
+      from: sender,
+      to: prepared.transaction.to,
+      input: prepared.transaction.data,
+      value: prepared.transaction.value
+    },
+    txHash,
+    sender,
+    expectedChainId: "0x539",
+    actualChainId: "0x539"
+  }).verified, true);
   assert.throws(
     () => client.verifyPrivacyReceipt({
       transaction: prepared.transaction,
@@ -506,5 +597,70 @@ test("receipt verification refuses a custom adapter calldata mismatch even with 
       receipt: { status: "0x1", logs: [] }
     }),
     /requires an SDK-prepared transaction/
+  );
+});
+
+test("custom EVM adapters can provide fail-closed receipt evidence for custom calldata", async () => {
+  const transfer = transferMessage();
+  const altered = `${defaultEncodeEvmTransfer(transfer).slice(0, -2)}ff`;
+  let verifierInput = null;
+  const client = createClairveilEvmClient({
+    contractAddress: testPrivacyContractAddress,
+    contractAdapter: {
+      contractAddress: testPrivacyContractAddress,
+      buildTransferTransaction: () => ({
+        to: testPrivacyContractAddress,
+        data: altered,
+        value: "0x0"
+      }),
+      verifyPrivacyReceipt(input) {
+        verifierInput = input;
+        return {
+          verified: true,
+          operation: input.operation,
+          event: "CustomPrivacyTransfer"
+        };
+      }
+    }
+  });
+  const prepared = await client.buildTransferTransaction({ message: transfer });
+  const verified = client.verifyPrivacyReceipt({
+    transaction: prepared.transaction,
+    sender,
+    receipt: { status: "0x1", logs: [] }
+  });
+
+  assert.deepEqual(verified, {
+    verified: true,
+    operation: "transfer",
+    event: "CustomPrivacyTransfer"
+  });
+  assert.equal(verifierInput.operation, "transfer");
+  assert.equal(verifierInput.transaction, prepared.transaction);
+  assert.throws(
+    () => client.verifyPrivacyReceipt({
+      transaction: prepared.transaction,
+      sender,
+      receipt: { status: "0x0", logs: [] }
+    }),
+    /explicit successful status/
+  );
+  assert.throws(
+    () => createClairveilEvmClient({
+      contractAddress: testPrivacyContractAddress,
+      contractAdapter: {
+        ...client.contract,
+        verifyPrivacyReceipt: () => ({
+          verified: true,
+          operation: "withdraw",
+          event: "CustomPrivacyTransfer"
+        })
+      }
+    }).verifyPrivacyReceipt({
+      transaction: prepared.transaction,
+      sender,
+      receipt: { status: "0x1", logs: [] }
+    }),
+    /operation does not match/
   );
 });

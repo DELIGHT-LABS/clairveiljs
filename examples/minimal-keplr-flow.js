@@ -7,7 +7,7 @@ import {
 
 export async function runMinimalClairveilFlow({
   keplr = window.keplr,
-  chainId = "clairveil-local-3",
+  chainId = "clairveil-local-1",
   rest = "http://127.0.0.1:1317",
   rpc = "tcp://127.0.0.1:26657",
   proverUrl = "http://127.0.0.1:8080",

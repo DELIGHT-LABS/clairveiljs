@@ -6,6 +6,7 @@ import {
 } from "../transport/cosmos-client.js";
 import {
   createEvmAuthorizationProfile,
+  createEvmFinalityPolicy,
   createClairveilEvmClient,
   defaultEvmDepositMode,
   evmDepositModePayableExactValue,
@@ -15,7 +16,8 @@ import {
   isEvmAddress,
   markEvmTransactionReservationRequired,
   normalizeEvmDepositMode,
-  normalizeEvmAddress
+  normalizeEvmAddress,
+  waitForEvmFinality
 } from "../transport/evm.js";
 import {
   resolveCosmosFeeAmount as resolveBrowserCosmosFeeAmount,
@@ -112,7 +114,7 @@ function normalizeRpcEndpoint(value) {
   return trimTrailingSlash(String(value || "").replace(/^tcp:\/\//, "http://"));
 }
 
-function normalizeRestEndpoints(primary, restEndpoints = []) {
+function normalizeRestEndpoints(primary, restEndpoints = [], { allowEmpty = false } = {}) {
   const endpoints = [];
   for (const endpoint of [primary, ...(Array.isArray(restEndpoints) ? restEndpoints : [])]) {
     const normalized = trimTrailingSlash(endpoint);
@@ -120,7 +122,7 @@ function normalizeRestEndpoints(primary, restEndpoints = []) {
       endpoints.push(normalized);
     }
   }
-  if (!endpoints.length) {
+  if (!endpoints.length && !allowEmpty) {
     throw new Error("rest endpoint is required");
   }
   return endpoints;
@@ -417,11 +419,9 @@ function assertProfileKeplrCompatibility(profile) {
   }
 }
 
-/**
- * Fail-closed runtime validator for the BrowserWalletProfile contract,
- * including the transport-specific wallet and endpoint requirements.
- */
-export function validateBrowserWalletProfile(profile) {
+function validateBrowserWalletProfileContract(profile, {
+  allowMissingEvmCosmosEndpoints = false
+} = {}) {
   if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
     throw new Error("profile must be an object");
   }
@@ -432,8 +432,9 @@ export function validateBrowserWalletProfile(profile) {
   const transport = walletTypeFromBody({}, profile.transport);
   const wallet = requiredProfileString(profile, "wallet");
   requiredProfileString(profile, "chainId", { maxLength: 128 });
-  optionalProfileUrl(profile, "rpc", { required: true });
-  optionalProfileUrl(profile, "rest", { required: true });
+  const requireCosmosEndpoints = transport !== "evm" || !allowMissingEvmCosmosEndpoints;
+  optionalProfileUrl(profile, "rpc", { required: requireCosmosEndpoints });
+  optionalProfileUrl(profile, "rest", { required: requireCosmosEndpoints });
   optionalProfileUrl(profile, "proverUrl", { required: true });
   optionalProfileUrl(profile, "depositProofUrl");
   requiredProfileString(profile, "accountPrefix", { maxLength: 32, pattern: /^[a-z][a-z0-9]*$/u });
@@ -504,6 +505,14 @@ export function validateBrowserWalletProfile(profile) {
     ...profile,
     ...(profile.restEndpoints ? { restEndpoints: Object.freeze([...profile.restEndpoints]) } : {})
   });
+}
+
+/**
+ * Fail-closed validator for the serializable BrowserWalletProfile contract,
+ * including the transport-specific wallet and endpoint requirements.
+ */
+export function validateBrowserWalletProfile(profile) {
+  return validateBrowserWalletProfileContract(profile);
 }
 
 /**
@@ -700,14 +709,17 @@ function auditTargetBindingFromBody(body = {}) {
 }
 
 function browserAliasedInputValue(body, camelName, snakeName, label, normalize = value => value) {
-  const camelValue = body?.[camelName];
-  const snakeValue = body?.[snakeName];
-  const hasCamel = camelValue !== undefined && camelValue !== null;
-  const hasSnake = snakeValue !== undefined && snakeValue !== null;
-  if (hasCamel && hasSnake && normalize(camelValue) !== normalize(snakeValue)) {
+  return browserAliasedInputValues(body, [camelName, snakeName], label, normalize);
+}
+
+function browserAliasedInputValues(body, names, label, normalize = value => value) {
+  const values = names
+    .map(name => body?.[name])
+    .filter(value => value !== undefined && value !== null);
+  if (values.length > 1 && values.some(value => normalize(value) !== normalize(values[0]))) {
     throw new Error(`${label} aliases conflict`);
   }
-  return hasCamel ? camelValue : hasSnake ? snakeValue : undefined;
+  return values[0];
 }
 
 function canonicalBrowserAliasScalar(value) {
@@ -731,6 +743,14 @@ function canonicalBrowserAliasBoolean(value) {
 
 function canonicalBrowserAliasReference(value) {
   return value;
+}
+
+function canonicalBrowserAliasFeeAmount(value) {
+  if (!Array.isArray(value)) return JSON.stringify(value);
+  return JSON.stringify(value.map(coin => ({
+    denom: String(coin?.denom ?? "").trim(),
+    amount: String(coin?.amount ?? "").trim()
+  })).sort((left, right) => left.denom.localeCompare(right.denom)));
 }
 
 function hasEvmAuthorizationSignature(authorization) {
@@ -1111,6 +1131,8 @@ function asBytesBase64(bytes) {
 export class ClairveilBrowserClient {
   constructor({
     profile,
+    transport,
+    walletType,
     rpc,
     rest,
     restEndpoints,
@@ -1131,6 +1153,7 @@ export class ClairveilBrowserClient {
     queryRetry,
     nullifierFailover,
     merklePathFailover,
+    privacyStateAdapter,
     enableExperimentalBatchTransfer = false,
     enable_experimental_batch_transfer,
     evmRpc,
@@ -1139,15 +1162,22 @@ export class ClairveilBrowserClient {
     evmDepositMode = defaultEvmDepositMode,
     evmNativeDenom,
     evmAuthorizationProfile,
+    evmContractAdapter,
+    evmFinalityPolicy,
     evmGasLimit = "0x989680",
     evmSendGasLimit = "0x5208"
   } = {}) {
     const hasProfile = profile !== undefined && profile !== null;
-    const resolved = hasProfile ? validateBrowserWalletProfile(profile) : {};
+    const resolved = hasProfile
+      ? validateBrowserWalletProfileContract(profile, {
+          allowMissingEvmCosmosEndpoints: privacyStateAdapter != null
+        })
+      : {};
     this.profile = resolved;
+    const directTransport = transport ?? walletType ?? null;
     this.profileTransport = hasProfile
       ? walletTypeFromBody({}, resolved.transport)
-      : null;
+      : directTransport == null ? null : walletTypeFromBody({}, directTransport);
     this.defaultWalletType = this.profileTransport || walletTypeFromBody({}, "cosmos");
     // A validated profile is the sole source of chain transport and endpoint
     // values. Keeping top-level fallbacks here would let a caller silently
@@ -1155,9 +1185,10 @@ export class ClairveilBrowserClient {
     this.rpc = normalizeRpcEndpoint(hasProfile ? resolved.rpc : rpc);
     this.restEndpoints = normalizeRestEndpoints(
       hasProfile ? resolved.rest : rest,
-      hasProfile ? resolved.restEndpoints : restEndpoints
+      hasProfile ? resolved.restEndpoints : restEndpoints,
+      { allowEmpty: privacyStateAdapter != null }
     );
-    this.rest = this.restEndpoints[0];
+    this.rest = this.restEndpoints[0] || "";
     this.chainId = hasProfile ? resolved.chainId : chainId;
     this.accountPrefix = (hasProfile ? resolved.accountPrefix : accountPrefix) || "clair";
     this.shieldedPrefix = (hasProfile ? resolved.shieldedPrefix : shieldedPrefix) || `${this.accountPrefix}s`;
@@ -1191,6 +1222,9 @@ export class ClairveilBrowserClient {
     this.evmAuthorizationProfile = configuredEvmAuthorizationProfile == null
       ? null
       : createEvmAuthorizationProfile(configuredEvmAuthorizationProfile);
+    this.evmFinalityPolicy = evmFinalityPolicy == null
+      ? null
+      : createEvmFinalityPolicy(evmFinalityPolicy);
     if (this.evmDepositMode === evmDepositModePayableExactValue &&
         this.evmNativeDenom !== this.denom) {
       throw new Error("evmNativeDenom must match denom for payable EVM deposits");
@@ -1209,6 +1243,7 @@ export class ClairveilBrowserClient {
       queryRetry,
       nullifierFailover,
       merklePathFailover,
+      privacyStateAdapter,
       // This is an explicit caller opt-in, not a chain endpoint or identity
       // field. It must remain usable with a strict active profile; product
       // code still decides whether to pass it after validating its
@@ -1216,24 +1251,41 @@ export class ClairveilBrowserClient {
       enableExperimentalBatchTransfer: enable_experimental_batch_transfer
         ?? enableExperimentalBatchTransfer
     });
-    this.evm = createClairveilEvmClient({
-      contractAddress: hasProfile ? resolved.evmPrivacyPrecompileAddress : evmPrivacyPrecompileAddress,
-      chainId: this.chainId,
-      evmChainId: this.evmChainId,
-      accountPrefix: this.accountPrefix,
-      shieldedPrefix: this.shieldedPrefix,
-      defaultDenom: this.denom,
-      depositMode: this.evmDepositMode,
-      nativeDenom: this.evmNativeDenom,
-      authorizationProfile: this.evmAuthorizationProfile
-    });
+    const configuredEvmContractAddress = hasProfile
+      ? resolved.evmPrivacyPrecompileAddress
+      : evmPrivacyPrecompileAddress;
+    const hasEvmContract = Boolean(
+      String(configuredEvmContractAddress ?? "").trim() || evmContractAdapter
+    );
+    if (this.profileTransport === "evm" && !hasEvmContract) {
+      throw new Error(
+        "EVM browser client requires evmPrivacyPrecompileAddress or evmContractAdapter.contractAddress"
+      );
+    }
+    this.evm = hasEvmContract
+      ? createClairveilEvmClient({
+          contractAddress: configuredEvmContractAddress,
+          chainId: this.chainId,
+          evmChainId: this.evmChainId,
+          accountPrefix: this.accountPrefix,
+          shieldedPrefix: this.shieldedPrefix,
+          defaultDenom: this.denom,
+          depositMode: this.evmDepositMode,
+          nativeDenom: this.evmNativeDenom,
+          authorizationProfile: this.evmAuthorizationProfile,
+          contractAdapter: evmContractAdapter
+        })
+      : null;
+    this.privacyStateAdapter = this.cosmos.privacyStateAdapter;
   }
 
   restUrl(path) {
+    if (!this.rest) throw new Error("rest endpoint is not configured; use PrivacyStateAdapter-backed privacy queries");
     return `${this.rest}${path.startsWith("/") ? path : `/${path}`}`;
   }
 
   rpcUrl(path) {
+    if (!this.rpc) throw new Error("rpc endpoint is not configured for Cosmos queries");
     return `${this.rpc}${path.startsWith("/") ? path : `/${path}`}`;
   }
 
@@ -1276,12 +1328,20 @@ export class ClairveilBrowserClient {
   async health({ allowUninitializedTree = false } = {}) {
     try {
       const [status, tree, audit] = await Promise.all([
-        this.fetchJson(this.rpcUrl("/status")),
+        this.rpc
+          ? this.fetchJson(this.rpcUrl("/status")).then(value => validateHealthStatus(value, this.chainId))
+          : this.profileTransport === "evm"
+            ? this.assertEvmNetwork().then(evmChainId => Object.freeze({
+                transport: "evm",
+                chainId: this.chainId,
+                evmChainId
+              }))
+            : Promise.reject(new Error("Cosmos RPC endpoint is required for browser health")),
         this.cosmos.fetchTreeState(),
         this.cosmos.queryAuditConfig()
       ]);
       return {
-        status: validateHealthStatus(status, this.chainId),
+        status,
         tree: validateHealthTreeState(tree, { allowUninitializedTree }),
         audit,
         errors: []
@@ -1584,6 +1644,9 @@ export class ClairveilBrowserClient {
   }
 
   async assertEvmPreparationNetwork(body = {}) {
+    if (!this.evm) {
+      throw new Error("EVM privacy contract is not configured");
+    }
     await Promise.all([
       this.assertEvmNetwork(),
       this.assertEvmWalletNetwork(this.evmWalletFromBody(body))
@@ -1594,8 +1657,12 @@ export class ClairveilBrowserClient {
     privacyTransaction,
     sender,
     attempts,
-    intervalMs
+    intervalMs,
+    finalityPolicy
   } = {}) {
+    if (!this.evm) {
+      throw new Error("EVM privacy contract is not configured");
+    }
     if (!privacyTransaction) {
       throw new Error("waitForEvmTransaction requires the original SDK-prepared privacyTransaction");
     }
@@ -1619,8 +1686,10 @@ export class ClairveilBrowserClient {
         tx: null,
         transactionVerification: null,
         privacyReceipt: null,
+        finality: null,
         evmTransactionVerified: false,
         evmPrivacyReceiptVerified: false,
+        evmFinalityVerified: false,
         ok: false,
         error,
         errors: [error]
@@ -1676,12 +1745,35 @@ export class ClairveilBrowserClient {
         errors.push(String(error?.message || error || "privacy receipt evidence mismatch"));
       }
     }
+    let finality = null;
+    if (receiptSucceeded) {
+      const resolvedFinalityPolicy = finalityPolicy ?? this.evmFinalityPolicy;
+      if (resolvedFinalityPolicy == null) {
+        errors.push(
+          "EVM finality policy is required; configure confirmations, safe, finalized, custom, or explicitly opt into low-finality receipt mode"
+        );
+      } else {
+        finality = await waitForEvmFinality({
+          txHash: evmTxHash,
+          receipt,
+          rpc: (method, params) => this.evmJsonRpc(method, params),
+          policy: resolvedFinalityPolicy,
+          ...(attempts == null ? {} : { attempts }),
+          ...(intervalMs == null ? {} : { intervalMs })
+        });
+        if (finality.verified !== true) {
+          errors.push(finality.error || "EVM finality policy did not verify the transaction");
+        }
+      }
+    }
     const uniqueErrors = [...new Set(errors)];
     const evmTransactionVerified = transactionVerification?.verified === true;
     const evmPrivacyReceiptVerified = privacyReceipt?.verified === true;
+    const evmFinalityVerified = finality?.verified === true;
     const ok = receiptSucceeded &&
       evmTransactionVerified &&
       evmPrivacyReceiptVerified &&
+      evmFinalityVerified &&
       uniqueErrors.length === 0;
     return {
       executionTransport: "evm",
@@ -1692,8 +1784,10 @@ export class ClairveilBrowserClient {
       tx,
       transactionVerification,
       privacyReceipt,
+      finality,
       evmTransactionVerified,
       evmPrivacyReceiptVerified,
+      evmFinalityVerified,
       ok,
       error: uniqueErrors[0] || "",
       errors: uniqueErrors
@@ -1750,6 +1844,12 @@ export class ClairveilBrowserClient {
       delete reservationOptions.expected_evm_chain_id;
     }
     await this.assertEvmPreparationNetwork({ evmWallet: wallet });
+    if (reservationOptions.reservationManager || reservationOptions.reservation_manager || relayPayload) {
+      // The browser client owns the active privacy-state source. Do not let a
+      // caller replace the final spend-nullifier read with a stale callback.
+      delete reservationOptions.check_nullifiers;
+      reservationOptions.checkNullifiers = nullifiers => this.cosmos.checkNullifiers(nullifiers);
+    }
     return this.evm.sendTransaction(wallet, transaction, reservationOptions);
   }
 
@@ -1963,9 +2063,16 @@ export class ClairveilBrowserClient {
       expected_recipient_hash: body.expected_recipient_hash,
       expectedAmountHash: body.expectedAmountHash,
       expected_amount_hash: body.expected_amount_hash,
+      expiresAtUnix: body.expiresAtUnix,
+      expires_at_unix: body.expires_at_unix,
+      chainNowUnix: body.chainNowUnix,
+      chain_now_unix: body.chain_now_unix,
       allowPlanStep,
       scan: scanOptions,
-      gasLimit: 8000000,
+      gasLimit: body.gasLimit,
+      gas_limit: body.gas_limit,
+      feeAmount: body.feeAmount,
+      fee_amount: body.fee_amount,
       reservationManager,
       ...(walletType === "evm" ? {
         executionBuilder: this.evmDirectExecutionBuilder("transfer")
@@ -2313,6 +2420,8 @@ export class ClairveilBrowserClient {
       chainNowUnix,
       rootHex,
       snapshotHeight,
+      inputCommitmentHexes: body.inputCommitmentHexes,
+      input_commitment_hexes: body.input_commitment_hexes,
       disableSelfViewDisclosure,
       selfViewDisclosureTargetPubKeyHex,
       reservationManager: body.reservationManager,
@@ -2340,6 +2449,13 @@ export class ClairveilBrowserClient {
       prepared: {
         ...prepared.prepared,
         shieldedAddress: prepared.privacyAccount.shielded_address,
+        // Keep the operation evidence on the browser result as promised by
+        // PreparedTransferBatchSummary.  The Cosmos core returns these fields
+        // beside `prepared`; dropping them here made an EVM caller unable to
+        // reconcile the aggregate one-proof operation without reaching into
+        // reservation-store internals.
+        operationEvidence: prepared.operationEvidence,
+        operationEvidenceHash: prepared.operationEvidenceHash,
         ...(prepared.prepared?.payments?.every(payment => payment.privacyPolicy === prepared.prepared.payments[0].privacyPolicy)
           ? { privacyPolicy: prepared.prepared.payments[0].privacyPolicy }
           : {}),
@@ -2352,8 +2468,6 @@ export class ClairveilBrowserClient {
         payload: prepared.payload,
         proof: prepared.proof,
         message: prepared.message,
-        operationEvidence: prepared.operationEvidence,
-        operationEvidenceHash: prepared.operationEvidenceHash,
         inputCount: prepared.prepared?.inputCount,
         outputCount: prepared.prepared?.outputCount
       },
@@ -2516,6 +2630,20 @@ export class ClairveilBrowserClient {
   }
 
   async prepareWithdraw(body) {
+    const expiresAtUnix = browserAliasedInputValue(
+      body,
+      "expiresAtUnix",
+      "expires_at_unix",
+      "expiresAtUnix",
+      canonicalBrowserAliasScalar
+    );
+    const chainNowUnix = browserAliasedInputValue(
+      body,
+      "chainNowUnix",
+      "chain_now_unix",
+      "chainNowUnix",
+      canonicalBrowserAliasScalar
+    );
     const walletType = this.walletTypeFromBody(body);
     if (walletType === "evm") await this.assertEvmPreparationNetwork(body);
     const material = this.privacyMaterial(body, walletType);
@@ -2535,10 +2663,13 @@ export class ClairveilBrowserClient {
       amount,
       recipient,
       assetDenom: this.denom,
-      scan: scanOptionsFromBody(body),
-      expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
-      chainNowUnix: body.chainNowUnix ?? body.chain_now_unix,
-      gasLimit: 5000000,
+      scan: typedWalletScanOptionsFromBody(body),
+      expiresAtUnix,
+      chainNowUnix,
+      gasLimit: body.gasLimit,
+      gas_limit: body.gas_limit,
+      feeAmount: body.feeAmount,
+      fee_amount: body.fee_amount,
       reservationManager,
       ...(walletType === "evm" ? {
         executionBuilder: this.evmDirectExecutionBuilder("withdraw", { evmRecipient })
@@ -2664,6 +2795,14 @@ export class ClairveilBrowserClient {
   }
 
   async prepareRelayWithdraw(body) {
+    const expiresAtUnix = browserAliasedInputValue(
+      body,
+      "expiresAtUnix",
+      "expires_at_unix",
+      "expiresAtUnix",
+      canonicalBrowserAliasScalar
+    );
+    const chainNowUnix = relayChainNowUnixFromBody(body);
     const walletType = this.walletTypeFromBody(body);
     if (walletType === "evm") await this.assertEvmPreparationNetwork(body);
     const material = this.privacyMaterial(body, walletType);
@@ -2673,6 +2812,13 @@ export class ClairveilBrowserClient {
     const recipient = evmRecipient ? evmAddressToBech32(evmRecipient, this.accountPrefix) : rawRecipient;
     const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
     const suppliedProverAdapter = body.proverAdapter ?? body.prover_adapter;
+    const transactionOptions = browserAliasedInputValue(
+      body,
+      "transactionOptions",
+      "transaction_options",
+      "transactionOptions",
+      canonicalBrowserAliasReference
+    );
     const prepared = await this.cosmos.prepareRelayWithdraw({
       proverAdapter: suppliedProverAdapter ?? deferredProverAdapter(
         () => this.proverAdapter(),
@@ -2689,38 +2835,19 @@ export class ClairveilBrowserClient {
     });
     if (prepared.status !== "ready") throw plannerError(prepared);
     if (walletType === "evm") {
-      let built;
-      try {
-        built = await this.evm.buildWithdrawTransaction({
-          payload: prepared.payload,
-          proof: prepared.proof,
-          proverPayload: prepared.proverPayload,
-          selectedNote: prepared.selectedNote,
-          evmRecipient: evmRecipient || undefined,
-          chainNowUnix: relayChainNowUnixFromBody(body),
-          transactionOptions: body.transactionOptions ?? body.transaction_options
-        });
-      } catch (error) {
-        await replanProofReadyReservationPreservingError(
-          reservationManager,
-          prepared.reservation,
-          error,
-          "evm_relay_transaction_build_failed_before_handoff"
-        );
-        throw error;
+      const transaction = prepared.execution?.transaction;
+      const txBytesHash = String(
+        prepared.execution?.txBytesHash ?? prepared.execution?.tx_bytes_hash ?? ""
+      ).trim();
+      if (!transaction || !txBytesHash) {
+        throw new Error("EVM relay withdraw preparation did not produce a transaction and binding hash");
       }
-      let transaction = profileBoundEvmTransaction(
-        built.transaction,
-        this.evmChainId,
-        this.evmGasLimit
-      );
-      if (prepared.reservation) {
-        transaction = markEvmTransactionReservationRequired(transaction);
-      }
+      const message = prepared.execution?.message;
       return {
         ...reservationReconciliationFields(prepared),
         payload: prepared.payload,
         transaction,
+        txBytesHash,
         reservation: prepared.reservation || null,
         prepared: {
           shieldedAddress: prepared.privacyAccount.shielded_address,
@@ -2731,7 +2858,7 @@ export class ClairveilBrowserClient {
           expiresAtUnix: prepared.payload.expires_at_unix,
           payload: prepared.payload,
           proof: prepared.proof,
-          message: built.message,
+          message,
           reservation: prepared.reservation || null
         },
         plan: prepared.plan
@@ -2820,6 +2947,7 @@ export class ClairveilBrowserClient {
       note_store,
       includeFoundNotes = false
     } = body || {};
+    const scanOptions = typedWalletScanOptionsFromBody(body);
     return this.cosmos.scanWalletNotes({
       material,
       after,
@@ -2872,6 +3000,9 @@ export class ClairveilBrowserClient {
     addIfPresent(request, "scanSource", body.scanSource ?? body.scan_source);
     addIfPresent(request, "assetDenom", body.assetDenom);
     addIfPresent(request, "asset_denom", body.asset_denom);
+    addIfPresent(request, "disclosureScalar", body.disclosureScalar ?? body.disclosure_scalar);
+    addIfPresent(request, "disclosureScalarHex", body.disclosureScalarHex ?? body.disclosure_scalar_hex);
+    addIfPresent(request, "disclosurePubKeyHex", body.disclosurePubKeyHex ?? body.disclosure_pubkey_hex);
     if (body.address && (body.pubKeyHex || body.pub_key_hex) && (body.signatureBase64 || body.signature_base64)) {
       const walletType = this.walletTypeFromBody(body);
       Object.assign(request, walletType === "evm"

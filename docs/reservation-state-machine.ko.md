@@ -70,7 +70,6 @@
 | `transitionBatch(...)` | 허용된 일반 전이를 여러 reservation에 원자적으로 적용 | 전용 helper가 없는 전이에만 사용하는 저수준 CAS API. 허용 전이, lease, source 상태별 evidence 규칙을 그대로 검증한다. |
 | `releaseReservedOrProving(...)` | `Reserved → Released` | 호환용 이름이며 `Proving`은 release하지 않고 거부 |
 | `markManualReview(...)` | 허용된 상태에서 `ManualReview` | lease가 필요한 source 상태에서는 현재 lease 필요 |
-| `recoverCheckpointedProofReady(...)` | `ManualReview → ProofReady` | SDK checkpoint quarantine 사유, 일치하는 payload hash와 원래 claim token, broadcast/relay handoff 부재, 모든 nullifier의 명시적 미사용 확인 |
 | `resolveManualReview(...)` | `ManualReview → Released/ReplanRequired/Failed` | `operatorId`, `approvalReference`; `reason` 기록 권장 |
 | `reconcileSpentNotes(...)` | 허용된 상태에서 `ConfirmedSpent`, operation evidence에 따라 quarantine/성공 판정 | literal spent evidence와 필요한 output evidence. EVM tag는 network `txHash` + artifact `txBytesHash` + successful receipt + RPC call identity + privacy event 검증을 모두 요구 |
 
@@ -81,7 +80,7 @@
 3. `ProofReady`에서 wallet이 거절하거나 proof를 폐기했다면, proof가 실제로 폐기됐음을 증명할 수 있을 때만 `ReplanRequired`로 이동한다. 그렇지 않으면 `ManualReview`로 격리한다.
 4. `Submitted`/`Unknown`을 `ReplanRequired`/`Failed`로 바꾸려면 input nullifier 미사용과 기록된 transaction 부재/실패를 모두 확인한다. Live `ProofReady`는 active submitter의 input을 풀지 않도록 현재 manager 소유의 일치하는 미만료 lease도 요구한다.
 5. Relay payload를 relayer에 전달한 뒤에는 TTL 만료나 로컬 취소만으로 note를 release하지 않는다. relayer가 제출했을 가능성을 포함해 온체인 evidence로 reconcile한다.
-6. 일반적인 `ManualReview` 해제에는 `operatorId`와 `approvalReference`가 필수이며 `reason`도 운영 감사용으로 기록하는 것이 좋다. 유일한 자동 예외는 SDK 자체의 정확한 checkpoint quarantine을 원래 claim token, 일치하는 payload hash, broadcast/relay handoff 부재, 모든 nullifier의 미사용 evidence로 검증해 `ProofReady`로 복구하는 경로다.
+6. `ManualReview` 해제에는 `operatorId`와 `approvalReference`가 필수이며 `reason`도 운영 감사용으로 기록하는 것이 좋다. 허용 결과는 `Released`, `ReplanRequired`, `Failed`이며 `ProofReady`로 직접 돌아가는 전이는 없다.
 7. `ConfirmedSpent`와 operation `Succeeded`를 같은 의미로 사용하지 않는다. 다중 input operation은 모든 linked reservation과 output evidence를 한 번에 reconcile한다.
 8. 준비 실패 시 `rollbackPlanReservation(...)`은 `Reserved`만 release한다. 유효한 lease가 있으면 `Proving`/`ProofReady`를 `ManualReview`로 격리하고, 아니면 reconcile 전까지 잠근다.
 

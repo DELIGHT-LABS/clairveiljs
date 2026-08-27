@@ -10,6 +10,7 @@ import type {
   ValidatedReserveResponseV1
 } from "../privacy/network-config.js";
 import type { ValidatedCircuitConfigV1 } from "../privacy/circuit-config.js";
+import type { PrivacyStateAdapter } from "../transport/privacy-state.js";
 import type {
   PrivacyScanValidationStateV2,
   ValidatedPrivacyScanPageV2
@@ -67,6 +68,8 @@ export interface ClairveilPublicClientOptions {
   nullifierFailover?: boolean;
   /** Allow Merkle witness and exact-snapshot queries to fail over across REST endpoints. */
   merklePathFailover?: boolean;
+  /** Contract-getter, indexer, or REST replacement for privacy-state reads. */
+  privacyStateAdapter?: PrivacyStateAdapter;
 }
 
 export interface QueryRetryOptions {
@@ -94,6 +97,7 @@ export class ClairveilPublicClient {
   rest: string;
   restEndpoints: string[];
   activeRestEndpoint: string;
+  privacyStateAdapter: Readonly<PrivacyStateAdapter> | null;
   restUrl(path: string, endpoint?: string): string;
   fetchJson<T = object>(pathOrUrl: string, options?: {
     method?: string;
@@ -120,7 +124,7 @@ export class ClairveilPublicClient {
   fetchTreeState(): Promise<object>;
   fetchCommitmentInfo(commitmentHex: string): Promise<object>;
   lookupMerklePath(commitmentHex: string): Promise<object>;
-  checkNullifier(nullifierHex: string): Promise<object & { used?: boolean; Used?: boolean }>;
+  checkNullifier(nullifierHex: string): Promise<{ nullifier: string; used: boolean }>;
   checkNullifiers(nullifierHexes: readonly string[]): Promise<Map<string, boolean>>;
   fetchAuditableTransfers(options?: PrivacyEventsQuery): Promise<object & { events: object[] }>;
   fetchAuditableBatchTransfers(options?: TypedPrivacyScanQuery): Promise<ValidatedPrivacyScanPageV2>;

@@ -85,6 +85,8 @@ import {
   planWithdrawNotes
 } from "../privacy/planner.js";
 import {
+  assertBatchTransferNullifiersUnspent,
+  getBroadcastReservationRecords,
   hashAmount,
   hashRecipient,
   hashTransparentRecipient,
@@ -137,6 +139,12 @@ import {
   hexFromBytes,
   sha256Hex
 } from "../core/browser-crypto.js";
+import {
+  checkPrivacyStateAdapterNullifiers,
+  createPrivacyStateAdapter,
+  invokePrivacyStateAdapter,
+  normalizePrivacyNullifierStatuses
+} from "./privacy-state.js";
 
 export * from "../core/crypto.js";
 export * from "../core/disclosure.js";
@@ -154,6 +162,7 @@ export * from "../privacy/merkle-path.js";
 export * from "../privacy/note-store.js";
 export * from "../core/schemas.js";
 export * from "../wallet/adapter.js";
+export * from "./privacy-state.js";
 export {
   userDisclosureModeFromJSON,
   userDisclosureModeToJSON
@@ -164,6 +173,10 @@ export const msgBatchTransferTypeUrl = GeneratedMsgBatchTransfer.typeUrl;
 export const msgTransferTypeUrl = GeneratedMsgTransfer.typeUrl;
 export const msgWithdrawTypeUrl = GeneratedMsgWithdraw.typeUrl;
 const defaultPrepareScanMaxPages = 1000;
+// A typed scan event contains at most 32 outputs. A caller page budget may
+// stop at an event prefix, but spendable notes must never escape until the
+// remaining pages prove the complete event framing.
+const maxPrivacyScanEventCompletionPages = 32;
 const cosmosSignDocMetadataField = "__clairveilCosmosSignDoc";
 const cosmosReservationRequiredMemoMarker = "[clairveil-reservation-required:v1]";
 const maxBatchTransferMessageBytesV1 = 128 << 10;
@@ -291,6 +304,36 @@ function normalizeBatchTransferOutputMode(value) {
 
 function comparableBatchHex(value) {
   return String(value ?? "").trim().toLowerCase().replace(/^0x/, "");
+}
+
+function normalizeBatchTransferInputCommitments(inputCommitmentHexes, input_commitment_hexes) {
+  const normalize = (value, label) => {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 16) {
+      throw new Error(`${label} must contain 1..16 input commitments`);
+    }
+    const commitments = value.map((item, index) => {
+      const commitment = comparableBatchHex(item);
+      if (!/^[0-9a-f]{64}$/.test(commitment) || BigInt(`0x${commitment}`) >= FIELD_MODULUS) {
+        throw new Error(`${label}[${index}] must be a canonical BN254 field commitment`);
+      }
+      return commitment;
+    });
+    if (new Set(commitments).size !== commitments.length) {
+      throw new Error(`${label} must not contain duplicate commitments`);
+    }
+    return commitments;
+  };
+  const camel = inputCommitmentHexes == null
+    ? null
+    : normalize(inputCommitmentHexes, "inputCommitmentHexes");
+  const snake = input_commitment_hexes == null
+    ? null
+    : normalize(input_commitment_hexes, "input_commitment_hexes");
+  if (camel && snake &&
+      (camel.length !== snake.length || camel.some((value, index) => value !== snake[index]))) {
+    throw new Error("inputCommitmentHexes aliases conflict");
+  }
+  return camel ?? snake;
 }
 
 function batchPaymentValue(payment, names, fallback) {
@@ -555,17 +598,6 @@ function assertPreparedBatchTransferMatchesActiveConfig(payload, transferProtoco
   }
 }
 
-function batchTransferNullifiersUnspent(statuses, nullifiers) {
-  const statusFor = nullifier => statuses instanceof Map
-    ? statuses.get(nullifier) ?? statuses.get(`0x${nullifier}`)
-    : statuses?.[nullifier] ?? statuses?.[`0x${nullifier}`];
-  for (const [index, nullifier] of nullifiers.entries()) {
-    if (statusFor(nullifier) !== false) {
-      throw new Error(`batch transfer input nullifier at index ${index} is spent, missing, or has an invalid status`);
-    }
-  }
-}
-
 export function assertTransferDisclosureCapabilities(disclosureConfig, {
   userPrivacyPolicy,
   userDisclosureMode
@@ -716,7 +748,7 @@ function isRetryableFetchError(error, retry) {
   return true;
 }
 
-function normalizeRestEndpoints(primary, restEndpoints = []) {
+function normalizeRestEndpoints(primary, restEndpoints = [], { allowEmpty = false } = {}) {
   const endpoints = [];
   for (const endpoint of [primary, ...(Array.isArray(restEndpoints) ? restEndpoints : [])]) {
     const normalized = normalizeRestEndpoint(String(endpoint || ""));
@@ -724,7 +756,7 @@ function normalizeRestEndpoints(primary, restEndpoints = []) {
       endpoints.push(normalized);
     }
   }
-  if (!endpoints.length) {
+  if (!endpoints.length && !allowEmpty) {
     throw new Error("rest endpoint is required");
   }
   return endpoints;
@@ -763,7 +795,7 @@ export function createClairveilRegistry(extraTypes = []) {
 }
 
 export function normalizeRpcEndpoint(rpc) {
-  return rpc.replace(/^tcp:\/\//, "http://").replace(/\/$/, "");
+  return String(rpc || "").replace(/^tcp:\/\//, "http://").replace(/\/$/, "");
 }
 
 export function normalizeRestEndpoint(rest) {
@@ -1136,10 +1168,21 @@ async function fetchJson(url, {
   }
 }
 
-async function fetchJsonWithRetry(urlForEndpoint, endpoints, { timeoutMs, retry, fetchImpl, method, body, headers } = {}) {
+async function fetchJsonWithRetry(urlForEndpoint, endpoints, {
+  timeoutMs,
+  retry,
+  fetchImpl,
+  method,
+  body,
+  headers,
+  failoverStatuses = []
+} = {}) {
   const normalizedRetry = normalizeQueryRetry(retry);
+  const normalizedFailoverStatuses = new Set(failoverStatuses || []);
   let lastError = null;
-  for (const endpoint of endpoints) {
+  let lastNonCapabilityError = null;
+  for (let endpointIndex = 0; endpointIndex < endpoints.length; endpointIndex += 1) {
+    const endpoint = endpoints[endpointIndex];
     for (let attempt = 0; attempt <= normalizedRetry.retries; attempt += 1) {
       try {
         return {
@@ -1148,17 +1191,22 @@ async function fetchJsonWithRetry(urlForEndpoint, endpoints, { timeoutMs, retry,
         };
       } catch (error) {
         lastError = error;
+        if (normalizedFailoverStatuses.has(Number(error?.status))) {
+          if (endpointIndex < endpoints.length - 1) break;
+          throw lastNonCapabilityError || error;
+        }
         const retryable = isRetryableFetchError(error, normalizedRetry);
         if (!retryable) {
           throw error;
         }
+        lastNonCapabilityError = error;
         const canRetry = attempt < normalizedRetry.retries && retryable;
         if (!canRetry) break;
         await sleep(retryDelayMs(attempt + 1, normalizedRetry));
       }
     }
   }
-  throw lastError;
+  throw lastNonCapabilityError || lastError;
 }
 
 function unwrapBaseAccount(value) {
@@ -1299,6 +1347,16 @@ function commitmentPathsAtRootRequestBody({
   };
 }
 
+function comparableCosmosTxHash(value) {
+  return String(value ?? "").trim().replace(/^0x/i, "").toUpperCase();
+}
+
+function normalizedCosmosTxHash(value, label = "txHash") {
+  const normalized = comparableCosmosTxHash(value);
+  if (!normalized) throw new Error(`${label} is required`);
+  return normalized;
+}
+
 function privacyEventsCursor(data, request = {}) {
   const events = data?.events || [];
   let latestHeight = 0;
@@ -1372,6 +1430,126 @@ function assertScanEventsVersions(data) {
   }
 }
 
+function requiredScanEventsField(value, field, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !(field in value)) {
+    throw new Error(`${label}.${field} is required`);
+  }
+  return value[field];
+}
+
+function scanEventsHex(value, label, length) {
+  if (typeof value !== "string" || !/^[0-9a-fA-F]+$/.test(value) ||
+      (length != null && value.length !== length)) {
+    throw new Error(`${label} must be ${length == null ? "a non-empty hex string" : `${length} hex characters`}`);
+  }
+  return value;
+}
+
+function scanEventsNonNegativeInteger(value, label) {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
+  if (typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value)) return value;
+  throw new Error(`${label} must be a non-negative integer`);
+}
+
+function compareScanEventsPosition(leftHeight, leftSequence, rightHeight, rightSequence) {
+  const heightComparison = compareUint64Cursor(leftHeight, rightHeight, "scan events height");
+  return heightComparison === 0
+    ? compareUint64Cursor(leftSequence, rightSequence, "scan events sequence")
+    : heightComparison;
+}
+
+function validateScanEventsResponse(data, request = {}) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("scan_events response must be an object");
+  }
+  assertScanEventsVersions(data);
+  const events = requiredScanEventsField(data, "events", "scan_events response");
+  if (!Array.isArray(events)) throw new Error("scan_events response.events must be an array");
+  const nextHeight = scanEventsNonNegativeInteger(
+    requiredScanEventsField(data, "next_height", "scan_events response"),
+    "scan_events response.next_height"
+  );
+  const nextSequence = scanEventsNonNegativeInteger(
+    requiredScanEventsField(data, "next_sequence", "scan_events response"),
+    "scan_events response.next_sequence"
+  );
+  const responseLimit = scanEventsNonNegativeInteger(
+    requiredScanEventsField(data, "limit", "scan_events response"),
+    "scan_events response.limit"
+  );
+  if (compareUint64Cursor(responseLimit, 0, "scan_events response limit") <= 0) {
+    throw new Error("scan_events response.limit must be a positive integer");
+  }
+  const hasMore = requiredScanEventsField(data, "has_more", "scan_events response");
+  if (typeof hasMore !== "boolean") throw new Error("scan_events response.has_more must be a boolean");
+
+  const afterHeight = scanEventsNonNegativeInteger(
+    request.afterHeight ?? request.after_height ?? 0,
+    "scan_events request.after_height"
+  );
+  const afterSequence = scanEventsNonNegativeInteger(
+    request.afterSequence ?? request.after_sequence ?? 0,
+    "scan_events request.after_sequence"
+  );
+  const requestedEventTypes = new Set((request.eventTypes ?? request.event_types ?? [])
+    .map(value => String(value || "").trim())
+    .filter(Boolean));
+  let previousHeight = afterHeight;
+  let previousSequence = afterSequence;
+  for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
+    const event = events[eventIndex];
+    const label = `scan_events response.events[${eventIndex}]`;
+    const height = scanEventsNonNegativeInteger(requiredScanEventsField(event, "height", label), `${label}.height`);
+    const sequence = scanEventsNonNegativeInteger(requiredScanEventsField(event, "sequence", label), `${label}.sequence`);
+    if (compareScanEventsPosition(height, sequence, previousHeight, previousSequence) <= 0) {
+      throw new Error(`${label} is not strictly after the preceding scan cursor`);
+    }
+    previousHeight = height;
+    previousSequence = sequence;
+    scanEventsHex(requiredScanEventsField(event, "tx_hash_hex", label), `${label}.tx_hash_hex`);
+    const eventType = requiredScanEventsField(event, "event_type", label);
+    if (typeof eventType !== "string" || !eventType.trim()) throw new Error(`${label}.event_type must be a non-empty string`);
+    if (requestedEventTypes.size && !requestedEventTypes.has(eventType)) {
+      throw new Error(`${label}.event_type was not requested`);
+    }
+    const nullifiers = requiredScanEventsField(event, "nullifier_hexes", label);
+    if (!Array.isArray(nullifiers)) throw new Error(`${label}.nullifier_hexes must be an array`);
+    nullifiers.forEach((nullifier, index) => scanEventsHex(nullifier, `${label}.nullifier_hexes[${index}]`, 64));
+    const outputs = requiredScanEventsField(event, "outputs", label);
+    if (!Array.isArray(outputs)) throw new Error(`${label}.outputs must be an array`);
+    if (eventType === "deposit" && outputs.length !== 1) throw new Error(`${label}.outputs must contain exactly one deposit output`);
+    if (eventType === "shielded_transfer" && outputs.length !== 2) throw new Error(`${label}.outputs must contain exactly two transfer outputs`);
+    const outputIndexes = new Set();
+    for (let outputIndex = 0; outputIndex < outputs.length; outputIndex += 1) {
+      const output = outputs[outputIndex];
+      const outputLabel = `${label}.outputs[${outputIndex}]`;
+      const index = requiredScanEventsField(output, "output_index", outputLabel);
+      if (!Number.isSafeInteger(index) || index < 0) throw new Error(`${outputLabel}.output_index must be a non-negative integer`);
+      if (outputIndexes.has(index)) throw new Error(`${label}.outputs contains duplicate output_index ${index}`);
+      outputIndexes.add(index);
+      if (eventType === "deposit") {
+        scanEventsHex(requiredScanEventsField(output, "commitment_hex", outputLabel), `${outputLabel}.commitment_hex`, 64);
+        scanEventsHex(requiredScanEventsField(output, "encrypted_note_hex", outputLabel), `${outputLabel}.encrypted_note_hex`);
+      } else if (eventType === "shielded_transfer") {
+        scanEventsHex(requiredScanEventsField(output, "commitment_hex", outputLabel), `${outputLabel}.commitment_hex`, 64);
+        scanEventsHex(requiredScanEventsField(output, "cipher_text_hex", outputLabel), `${outputLabel}.cipher_text_hex`);
+        scanEventsHex(requiredScanEventsField(output, "view_tag_hex", outputLabel), `${outputLabel}.view_tag_hex`, 4);
+      }
+      if ("leaf_index_found" in output && typeof output.leaf_index_found !== "boolean") {
+        throw new Error(`${outputLabel}.leaf_index_found must be a boolean`);
+      }
+      if ("leaf_index" in output) scanEventsNonNegativeInteger(output.leaf_index, `${outputLabel}.leaf_index`);
+    }
+  }
+  if (compareScanEventsPosition(nextHeight, nextSequence, previousHeight, previousSequence) < 0) {
+    throw new Error("scan_events next cursor precedes the final event");
+  }
+  if (hasMore && compareScanEventsPosition(nextHeight, nextSequence, afterHeight, afterSequence) <= 0) {
+    throw new Error("scan_events next cursor did not advance");
+  }
+  return data;
+}
+
 export function nextPrivacyScanOptions(scanOrCursor = {}, defaults = {}) {
   const cursor = scanOrCursor?.scanCursor || scanOrCursor || {};
   if (cursor.source === "privacy_scan" || cursor.next_cursor != null || cursor.nextCursor != null) {
@@ -1411,7 +1589,7 @@ export function nextPrivacyScanOptions(scanOrCursor = {}, defaults = {}) {
         restorePrivacyScanValidationStateV2(validationState)
       );
     }
-    const maxPages = defaults.maxPages ?? defaults.max_pages;
+    const maxPages = resolveScanMaxPagesAlias(defaults.maxPages, defaults.max_pages);
     if (maxPages != null) next.maxPages = maxPages;
     const includeFoundNotes = defaults.includeFoundNotes ?? defaults.include_found_notes;
     if (includeFoundNotes != null) next.includeFoundNotes = Boolean(includeFoundNotes);
@@ -1438,7 +1616,7 @@ export function nextPrivacyScanOptions(scanOrCursor = {}, defaults = {}) {
       completed: !hasMore
     };
     next.scanSource = "scan_events";
-    const maxPages = defaults.maxPages ?? defaults.max_pages;
+    const maxPages = resolveScanMaxPagesAlias(defaults.maxPages, defaults.max_pages);
     if (maxPages != null) next.maxPages = maxPages;
     const includeFoundNotes = defaults.includeFoundNotes ?? defaults.include_found_notes;
     if (includeFoundNotes != null) next.includeFoundNotes = Boolean(includeFoundNotes);
@@ -1460,13 +1638,32 @@ export function nextPrivacyScanOptions(scanOrCursor = {}, defaults = {}) {
     eventTypes: cursor.event_types ?? cursor.eventTypes ?? defaults.eventTypes ?? defaults.event_types ?? [],
     scanSource: cursor.source === "privacy_events" ? "privacy_events" : defaults.scanSource ?? defaults.scan_source ?? "privacy_events"
   };
-  const maxPages = defaults.maxPages ?? defaults.max_pages;
+  const maxPages = resolveScanMaxPagesAlias(defaults.maxPages, defaults.max_pages);
   if (maxPages != null) next.maxPages = maxPages;
   const includeFoundNotes = defaults.includeFoundNotes ?? defaults.include_found_notes;
   if (includeFoundNotes != null) next.includeFoundNotes = Boolean(includeFoundNotes);
   next.hasMore = hasMore;
   next.completed = !hasMore;
   return next;
+}
+
+function normalizeScanMaxPages(value, label) {
+  const normalized = Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized <= 0) {
+    throw new Error(`${label} must be a positive safe integer`);
+  }
+  return normalized;
+}
+
+function resolveScanMaxPagesAlias(maxPages, max_pages) {
+  const camelProvided = maxPages !== undefined && maxPages !== null;
+  const snakeProvided = max_pages !== undefined && max_pages !== null;
+  const camel = camelProvided ? normalizeScanMaxPages(maxPages, "maxPages") : null;
+  const snake = snakeProvided ? normalizeScanMaxPages(max_pages, "max_pages") : null;
+  if (camel !== null && snake !== null && camel !== snake) {
+    throw new Error("maxPages aliases conflict");
+  }
+  return camel ?? snake;
 }
 
 function resolveScanOptions({
@@ -1844,7 +2041,7 @@ async function validateRelayBroadcastContext(options, {
   signDocHash
 } = {}) {
   const payload = options?.relayPayload ?? options?.relay_payload ?? null;
-  const reservationRecords = await authoritativeReservationRecords(reservationContext);
+  const reservationRecords = await getBroadcastReservationRecords(reservationContext);
   assertReservationSignDocMatches(reservationRecords, signDocHash, { allowPayloadBinding: Boolean(payload) });
   const withdrawMessage = signedWithdrawMessage(signedTx);
   if (options?.chainNowUnix != null || options?.chain_now_unix != null) {
@@ -2026,6 +2223,13 @@ async function markSigningReservationRejected(context, error) {
 
 function resolveDisclosureAssetDenom(assetDenom, asset_denom, defaultDenom) {
   return resolveOperationEvidenceAlias(assetDenom, asset_denom, "assetDenom") || defaultDenom;
+}
+
+function resolveDisclosureOutputAlias(output, scanOutput, label) {
+  if (output != null && scanOutput != null && output !== scanOutput) {
+    throw new Error(`${label} aliases conflict`);
+  }
+  return output ?? scanOutput;
 }
 
 function resolveOperationEvidenceArrayAlias(camelValue, snakeValue, name) {
@@ -2328,13 +2532,22 @@ export class ClairveilJS {
     queryRetry,
     nullifierFailover = false,
     merklePathFailover = false,
+    privacyStateAdapter,
     expectedCircuitIdentity,
     enableExperimentalBatchTransfer = false,
     enable_experimental_batch_transfer
   } = {}) {
+    this.privacyStateAdapter = privacyStateAdapter == null
+      ? null
+      : createPrivacyStateAdapter(privacyStateAdapter);
     this.rpc = normalizeRpcEndpoint(rpc);
-    this.restEndpoints = normalizeRestEndpoints(rest, restEndpoints);
-    this.rest = this.restEndpoints[0];
+    if (!this.rpc && !this.privacyStateAdapter) {
+      throw new Error("rpc endpoint is required unless privacyStateAdapter is configured");
+    }
+    this.restEndpoints = normalizeRestEndpoints(rest, restEndpoints, {
+      allowEmpty: Boolean(this.privacyStateAdapter)
+    });
+    this.rest = this.restEndpoints[0] || "";
     this.activeRestEndpoint = this.rest;
     this.chainId = chainId;
     this.accountPrefix = normalizeBech32Prefix(accountPrefix ?? bech32Prefix ?? defaultAccountPrefix, "accountPrefix");
@@ -2356,6 +2569,9 @@ export class ClairveilJS {
   }
 
   async connect() {
+    if (!this.rpc) {
+      throw new Error("rpc endpoint is required for Cosmos transaction and balance queries");
+    }
     if (!this.clientPromise) {
       this.clientPromise = StargateClient.connect(this.rpc);
     }
@@ -2370,7 +2586,24 @@ export class ClairveilJS {
   }
 
   restUrl(path, endpoint = this.activeRestEndpoint) {
+    if (!endpoint) {
+      throw new Error("rest endpoint is required for this query; implement the corresponding PrivacyStateAdapter method");
+    }
     return `${endpoint}${path}`;
+  }
+
+  async queryPrivacyStateAdapter(method, args, restQuery) {
+    const adapterMethod = this.privacyStateAdapter?.[method];
+    if (typeof adapterMethod === "function") {
+      return invokePrivacyStateAdapter(this.privacyStateAdapter, method, args, {
+        timeoutMs: this.queryTimeoutMs,
+        retry: this.queryRetry
+      });
+    }
+    if (!this.restEndpoints.length) {
+      throw new Error(`PrivacyStateAdapter.${method} is required because no REST endpoint is configured`);
+    }
+    return restQuery();
   }
 
   async fetchJson(pathOrUrl, {
@@ -2380,7 +2613,8 @@ export class ClairveilJS {
     body,
     headers,
     endpoint,
-    updateActiveEndpoint = endpoint == null
+    updateActiveEndpoint = endpoint == null,
+    failoverStatuses
   } = {}) {
     const text = String(pathOrUrl || "");
     const isAbsolute = /^https?:\/\//i.test(text);
@@ -2393,13 +2627,17 @@ export class ClairveilJS {
           retry,
           method,
           body,
-          headers
+          headers,
+          failoverStatuses
         }
       );
       return result.data;
     }
     const path = text;
     const initialEndpoint = endpoint || this.activeRestEndpoint;
+    if (!initialEndpoint) {
+      throw new Error("rest endpoint is required for this query");
+    }
     const endpoints = failover
       ? [initialEndpoint, ...this.restEndpoints.filter(candidate => candidate !== initialEndpoint)]
       : [initialEndpoint];
@@ -2411,7 +2649,8 @@ export class ClairveilJS {
         retry,
         method,
         body,
-        headers
+        headers,
+        failoverStatuses
       }
     );
     if (updateActiveEndpoint) this.activeRestEndpoint = result.endpoint;
@@ -2481,22 +2720,34 @@ export class ClairveilJS {
   }
 
   async fetchPrivacyEvents(options = {}) {
-    return this.fetchJson(`/clairveil/privacy/v1/events${privacyEventsQuery(options)}`, { failover: true });
+    return this.queryPrivacyStateAdapter(
+      "fetchPrivacyEvents",
+      [options],
+      () => this.fetchJson(`/clairveil/privacy/v1/events${privacyEventsQuery(options)}`, { failover: true })
+    );
   }
 
   async fetchScanEvents(options = {}) {
-    const data = await this.fetchJson(`/clairveil/privacy/v1/scan_events${scanEventsQuery(options)}`, { failover: true });
-    assertScanEventsVersions(data);
-    return data;
+    const data = await this.queryPrivacyStateAdapter(
+      "fetchScanEvents",
+      [options],
+      () => this.fetchJson(`/clairveil/privacy/v1/scan_events${scanEventsQuery(options)}`, { failover: true })
+    );
+    return validateScanEventsResponse(data, options);
   }
 
   async fetchPrivacyScan(options = {}) {
-    return this.fetchJson("/clairveil/privacy/v1/privacy_scan", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: jsonRequestBody(privacyScanRequestBody(options)),
-      failover: true
-    });
+    return this.queryPrivacyStateAdapter(
+      "fetchPrivacyScan",
+      [options],
+      () => this.fetchJson("/clairveil/privacy/v1/privacy_scan", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: jsonRequestBody(privacyScanRequestBody(options)),
+        failover: true,
+        failoverStatuses: [404, 405, 501]
+      })
+    );
   }
 
   /** Fetch a typed privacy-scan-v2 page and fail closed before it is consumed. */
@@ -2518,23 +2769,43 @@ export class ClairveilJS {
   }
 
   async fetchTreeState() {
-    return this.fetchJson("/clairveil/privacy/v1/tree_state", { failover: true });
+    return this.queryPrivacyStateAdapter(
+      "fetchTreeState",
+      [],
+      () => this.fetchJson("/clairveil/privacy/v1/tree_state", { failover: true })
+    );
   }
 
   async fetchCommitmentInfo(commitmentHex) {
-    return this.fetchJson(`/clairveil/privacy/v1/commitment/${commitmentHex}`, { failover: true });
+    return this.queryPrivacyStateAdapter(
+      "fetchCommitmentInfo",
+      [commitmentHex],
+      () => this.fetchJson(`/clairveil/privacy/v1/commitment/${commitmentHex}`, { failover: true })
+    );
   }
 
   async lookupMerklePath(commitmentHex) {
-    return this.fetchMerklePathJson(`/clairveil/privacy/v1/merkle_path/${commitmentHex}`);
+    return this.queryPrivacyStateAdapter(
+      "lookupMerklePath",
+      [commitmentHex],
+      () => this.fetchMerklePathJson(`/clairveil/privacy/v1/merkle_path/${commitmentHex}`)
+    );
   }
 
   async fetchAuditConfig() {
-    return this.fetchJson("/clairveil/privacy/v1/audit_config", { failover: true });
+    return this.queryPrivacyStateAdapter(
+      "fetchAuditConfig",
+      [],
+      () => this.fetchJson("/clairveil/privacy/v1/audit_config", { failover: true })
+    );
   }
 
   async fetchDisclosureConfig() {
-    return this.fetchJson("/clairveil/privacy/v1/disclosure_config", { failover: true });
+    return this.queryPrivacyStateAdapter(
+      "fetchDisclosureConfig",
+      [],
+      () => this.fetchJson("/clairveil/privacy/v1/disclosure_config", { failover: true })
+    );
   }
 
   /** Fetch and fail-closed validate the active audit recipient identity. */
@@ -2549,7 +2820,11 @@ export class ClairveilJS {
 
   async fetchCircuitConfig({ expectedCircuitIdentity } = {}) {
     return validateCircuitConfigV1(
-      await this.fetchJson("/clairveil/privacy/v1/circuit_config", { failover: true }),
+      await this.queryPrivacyStateAdapter(
+        "fetchCircuitConfig",
+        [],
+        () => this.fetchJson("/clairveil/privacy/v1/circuit_config", { failover: true })
+      ),
       { expectedCircuitIdentity: expectedCircuitIdentity ?? this.expectedCircuitIdentity ?? undefined }
     );
   }
@@ -2564,7 +2839,11 @@ export class ClairveilJS {
     if (!normalizedDenom) {
       throw new Error("reserve denom is required");
     }
-    return this.fetchJson(`/clairveil/privacy/v1/reserve/${encodeURIComponent(normalizedDenom)}`, { failover: true });
+    return this.queryPrivacyStateAdapter(
+      "fetchReserve",
+      [normalizedDenom],
+      () => this.fetchJson(`/clairveil/privacy/v1/reserve/${encodeURIComponent(normalizedDenom)}`, { failover: true })
+    );
   }
 
   /** Fetch and independently check reserve accounting before relying on it. */
@@ -2576,18 +2855,26 @@ export class ClairveilJS {
   async fetchAssetByDenom(denom) {
     const canonicalDenom = String(denom || "").trim();
     if (!canonicalDenom) throw new Error("asset denom is required");
-    return this.fetchJson(
-      `/clairveil/privacy/v1/assets/by_denom/${encodeURIComponent(canonicalDenom)}`,
-      { failover: true }
+    return this.queryPrivacyStateAdapter(
+      "fetchAssetByDenom",
+      [canonicalDenom],
+      () => this.fetchJson(
+        `/clairveil/privacy/v1/assets/by_denom/${encodeURIComponent(canonicalDenom)}`,
+        { failover: true }
+      )
     );
   }
 
   async fetchAssetByID(assetIdHex) {
     const canonicalAssetID = String(assetIdHex || "").trim();
     if (!canonicalAssetID) throw new Error("asset ID is required");
-    return this.fetchJson(
-      `/clairveil/privacy/v1/assets/by_id/${encodeURIComponent(canonicalAssetID)}`,
-      { failover: true }
+    return this.queryPrivacyStateAdapter(
+      "fetchAssetByID",
+      [canonicalAssetID],
+      () => this.fetchJson(
+        `/clairveil/privacy/v1/assets/by_id/${encodeURIComponent(canonicalAssetID)}`,
+        { failover: true }
+      )
     );
   }
 
@@ -2660,11 +2947,15 @@ export class ClairveilJS {
   }
 
   async fetchCommitmentPathsAtRoot(options = {}) {
-    return this.fetchMerklePathJson("/clairveil/privacy/v1/commitment_paths_at_root", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: jsonRequestBody(commitmentPathsAtRootRequestBody(options))
-    });
+    return this.queryPrivacyStateAdapter(
+      "fetchCommitmentPathsAtRoot",
+      [options],
+      () => this.fetchMerklePathJson("/clairveil/privacy/v1/commitment_paths_at_root", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: jsonRequestBody(commitmentPathsAtRootRequestBody(options))
+      })
+    );
   }
 
   /** Fetch, validate, and root-recompute a single exact-root, optionally height-pinned Merkle snapshot. */
@@ -2694,11 +2985,52 @@ export class ClairveilJS {
   }
 
   async checkNullifier(nullifierHex) {
-    return this.fetchNullifierJson(`/clairveil/privacy/v1/nullifier/${nullifierHex}`);
+    const normalized = String(nullifierHex || "").trim().toLowerCase();
+    if (this.privacyStateAdapter) {
+      if (typeof this.privacyStateAdapter.checkNullifier === "function") {
+        const result = await invokePrivacyStateAdapter(
+          this.privacyStateAdapter,
+          "checkNullifier",
+          [normalized],
+          { timeoutMs: this.queryTimeoutMs, retry: this.queryRetry }
+        );
+        const used = parseNullifierUsage(result);
+        if (used === null) {
+          throw new Error("privacyStateAdapter.checkNullifier returned an ambiguous status");
+        }
+        return { nullifier: normalized, used };
+      }
+      const statuses = normalizePrivacyNullifierStatuses(
+        await invokePrivacyStateAdapter(
+          this.privacyStateAdapter,
+          "checkNullifiers",
+          [[normalized]],
+          { timeoutMs: this.queryTimeoutMs, retry: this.queryRetry }
+        ),
+        [normalized]
+      );
+      return { nullifier: normalized, used: statuses.get(normalized) };
+    }
+    const result = await this.fetchNullifierJson(
+      `/clairveil/privacy/v1/nullifier/${encodeURIComponent(normalized)}`
+    );
+    const used = parseNullifierUsage(result);
+    if (used === null) {
+      throw new Error("nullifier response returned an ambiguous status");
+    }
+    return { nullifier: normalized, used };
   }
 
   async checkNullifiers(nullifierHexes = []) {
     const normalized = [...new Set((nullifierHexes || []).map(value => String(value || "").trim().toLowerCase()).filter(Boolean))];
+    if (normalized.length === 0) return new Map();
+    if (this.privacyStateAdapter) {
+      return checkPrivacyStateAdapterNullifiers(
+        this.privacyStateAdapter,
+        normalized,
+        { timeoutMs: this.queryTimeoutMs, retry: this.queryRetry }
+      );
+    }
     const usedByNullifier = new Map();
     const invalidNullifiers = new Set();
     const addStatus = (nullifier, value) => {
@@ -2719,7 +3051,10 @@ export class ClairveilJS {
         method: "POST",
         body: JSON.stringify({ nullifiers: chunk })
       });
-      for (const status of response?.statuses || response?.Statuses || []) {
+      for (const status of [
+        ...(Array.isArray(response?.statuses) ? response.statuses : []),
+        ...(Array.isArray(response?.Statuses) ? response.Statuses : [])
+      ]) {
         const canonical = status?.nullifier;
         const alias = status?.Nullifier;
         if (canonical != null && alias != null &&
@@ -2749,7 +3084,8 @@ export class ClairveilJS {
     after_sequence,
     page = 1,
     limit = 200,
-    maxPages = 1,
+    maxPages,
+    max_pages,
     outputLimit,
     output_limit,
     eventLimit,
@@ -2766,10 +3102,24 @@ export class ClairveilJS {
     strictPrivacyScan = false,
     strict_privacy_scan
   } = {}) {
+    for (const [value, label] of [
+      [strictPrivacyScan, "strictPrivacyScan"],
+      [strict_privacy_scan, "strict_privacy_scan"]
+    ]) {
+      if (value != null && typeof value !== "boolean") {
+        throw new Error(`${label} must be a boolean`);
+      }
+    }
+    if (strictPrivacyScan != null && strict_privacy_scan != null &&
+        strictPrivacyScan !== strict_privacy_scan) {
+      throw new Error("strictPrivacyScan aliases conflict");
+    }
+    const strictTypedScan = Boolean(strictPrivacyScan ?? strict_privacy_scan ?? false);
+    const resolvedMaxPages = resolveScanMaxPagesAlias(maxPages, max_pages) ?? 1;
     const requestedEventTypes = event_types ?? eventTypes;
     const resolvedEventTypes = requestedEventTypes ?? ["deposit", "shielded_transfer"];
     const pageLimit = Math.max(1, Number(limit || 200));
-    const pageBudget = Math.max(1, Number(maxPages || 1));
+    const pageBudget = resolvedMaxPages;
     // `privacy_scan` intentionally rejects event filters so its cursor proves
     // progress across zero-output events. Legacy sources remain available only
     // when a low-level diagnostic caller selects one explicitly.
@@ -2810,10 +3160,28 @@ export class ClairveilJS {
         ? createPrivacyScanValidationStateV2()
         : restorePrivacyScanValidationStateV2(requestedValidationState);
       try {
-        for (; pagesScanned < pageBudget;) {
+        let eventCompletionPages = 0;
+        for (;;) {
+          const pendingEntries = [...validationState.pending_summary_by_event.values()];
+          if (pendingEntries.length > 1) {
+            throw new Error("privacy scan validation state contains multiple partial events");
+          }
+          const pendingSummary = pendingEntries[0];
+          if (pagesScanned >= pageBudget && !pendingSummary) break;
+          if (pagesScanned >= pageBudget && eventCompletionPages >= maxPrivacyScanEventCompletionPages) {
+            throw new Error("privacy scan could not complete the current event within the bounded continuation budget");
+          }
+          const configuredOutputLimit = Number(outputLimit ?? output_limit ?? pageLimit);
+          const remainingEventOutputs = pendingSummary
+            ? pendingSummary.output_count - pendingSummary.last_output_index - 1
+            : 0;
           const request = {
             after: currentAfter,
-            outputLimit: outputLimit ?? output_limit ?? pageLimit,
+            outputLimit: pendingSummary
+              ? configuredOutputLimit > 0
+                ? Math.min(configuredOutputLimit, remainingEventOutputs)
+                : remainingEventOutputs
+              : configuredOutputLimit,
             eventLimit: eventLimit ?? event_limit,
             maxEncodedBytes: maxEncodedBytes ?? max_encoded_bytes,
             // Deliberately request every event: zero-output summaries prove
@@ -2829,6 +3197,7 @@ export class ClairveilJS {
           };
           scannedEvents += pageResult.scanned_event_count;
           pagesScanned += 1;
+          if (pendingSummary && pagesScanned > pageBudget) eventCompletionPages += 1;
           hasMore = pageResult.has_more;
           if (!hasMore) break;
         }
@@ -2838,13 +3207,42 @@ export class ClairveilJS {
         if (Boolean(strict_privacy_scan ?? strictPrivacyScan) || this.enableExperimentalBatchTransfer) {
           throw new Error("typed privacy-scan-v2 is required; legacy scan fallback is disabled", { cause: error });
         }
-        // Only an absent typed endpoint may fall back. A malformed or failed
-        // privacy-scan-v2 response is terminal because it may contain batch
-        // ciphertexts unavailable from a legacy feed.
+      } catch (error) {
+        const endpointIsAbsent = pagesScanned === 0 && (
+          error?.status === 404 || error?.status === 405 || error?.status === 501
+        );
+        if (!endpointIsAbsent) throw error;
+        if (requireTypedScan) throw error;
+        if (this.enableExperimentalBatchTransfer) {
+          throw new Error(
+            "typed privacy-scan-v2 is required while one-proof batch transfer support is enabled",
+            { cause: error }
+          );
+        }
+        // Wallet/spend scans are otherwise strict, but the contract permits a
+        // one-time capability downgrade before any typed cursor state exists.
+        // Never translate a persisted typed cursor or validation snapshot.
+        const hasTypedResumeState = after != null || requestedValidationState != null;
+        if (strictTypedScan && (!allowInitialPrivacyScanFallback || hasTypedResumeState)) {
+          throw error;
+        }
+        // A typed cursor may point inside an event's output list, while the
+        // compatibility endpoint only has an event-level cursor. Rewind one
+        // height only when translating an actual typed cursor. If the caller
+        // supplied a legacy (height, sequence) cursor, preserve it exactly:
+        // the typed probe already rewound it and a missing typed endpoint must
+        // not make repeated compatibility syncs walk backwards.
+        const fallbackFromLegacyCursor = after == null && legacyHeight != null;
+        const fallbackAfterHeight = fallbackFromLegacyCursor
+          ? uint64CursorValue(legacyHeight, "unified scan legacy fallback height")
+          : decrementUint64Cursor(initialAfter.height ?? 0, "unified scan fallback height");
+        const fallbackAfterSequence = fallbackFromLegacyCursor
+          ? uint64CursorValue(afterSequence ?? after_sequence ?? 0, "unified scan legacy fallback sequence")
+          : 0;
         return this.scanNotes({
           rootSeed,
-          afterHeight: decrementUint64Cursor(initialAfter.height ?? 0, "unified scan fallback height"),
-          afterSequence: 0,
+          afterHeight: fallbackAfterHeight,
+          afterSequence: fallbackAfterSequence,
           page: 1,
           limit: pageLimit,
           maxPages: pageBudget,
@@ -2919,7 +3317,7 @@ export class ClairveilJS {
             limit: pageLimit,
             eventTypes: resolvedEventTypes
           };
-          const data = await this.fetchScanEvents(request);
+          const data = validateScanEventsResponse(await this.fetchScanEvents(request), request);
           lastData = data;
           events.push(...(data.events || []));
           pagesScanned += 1;
@@ -2982,7 +3380,9 @@ export class ClairveilJS {
           })
         };
       } catch (error) {
-        const canFallback = error?.status === 404 || error?.status === 501 || error?.status === 503 || error?.code === "UNSUPPORTED_SCAN_EVENTS_VERSION";
+        const canFallback = pagesScanned === 0 && (
+          error?.status === 404 || error?.status === 405 || error?.status === 501
+        );
         if (!canFallback) throw error;
         // The legacy endpoint begins at after_height + 1 and has no sequence
         // cursor. Rewind one block so a mid-block scan_events cursor cannot
@@ -3072,13 +3472,21 @@ export class ClairveilJS {
     )) {
       throw new Error("auditable batch transfer query only accepts the batch_transfer event type");
     }
-    const request = { ...options, eventTypes: ["batch_transfer"] };
+    const {
+      validationState,
+      validation_state,
+      ...transportOptions
+    } = options || {};
+    const request = { ...transportOptions, eventTypes: ["batch_transfer"] };
     delete request.event_types;
-    // Preserve the existing auditable query request shape, including the
-    // caller-owned validation state used by downstream pagination adapters.
     const page = validatePrivacyScanPageV2(
       await this.fetchPrivacyScan(request),
-      request
+      {
+        ...request,
+        ...(validationState ?? validation_state
+          ? { validationState: validationState ?? validation_state }
+          : {})
+      }
     );
     if (page.summaries.some(summary => summary.event_type !== "batch_transfer") ||
         page.outputs.some(output => output.event_type !== "batch_transfer")) {
@@ -3094,18 +3502,15 @@ export class ClairveilJS {
     after_sequence,
     page = 1,
     limit = 200,
-    maxPages = defaultPrepareScanMaxPages,
+    maxPages,
     max_pages,
     eventTypes = ["shielded_transfer"],
     event_types,
     scanSource,
     scan_source
   } = {}) {
-    const normalizedTxHash = String(txHash || "").trim().toUpperCase();
-    if (!normalizedTxHash) {
-      throw new Error("txHash is required");
-    }
-    const pageBudget = Math.max(1, Number(max_pages ?? maxPages ?? defaultPrepareScanMaxPages));
+    const normalizedTxHash = normalizedCosmosTxHash(txHash);
+    const pageBudget = resolveScanMaxPagesAlias(maxPages, max_pages) ?? defaultPrepareScanMaxPages;
     const pageLimit = Math.max(1, Number(limit || 200));
     const resolvedEventTypes = event_types ?? eventTypes;
     const source = scan_source ?? scanSource ?? "privacy_events";
@@ -3113,14 +3518,15 @@ export class ClairveilJS {
       let currentAfterHeight = uint64CursorValue(afterHeight ?? after_height ?? 0, "event lookup after height");
       let currentAfterSequence = uint64CursorValue(afterSequence ?? after_sequence ?? 0, "event lookup after sequence");
       for (let pagesScanned = 0; pagesScanned < pageBudget; pagesScanned += 1) {
-        const data = await this.fetchScanEvents({
+        const request = {
           afterHeight: currentAfterHeight,
           afterSequence: currentAfterSequence,
           limit: pageLimit,
           eventTypes: resolvedEventTypes
-        });
+        };
+        const data = validateScanEventsResponse(await this.fetchScanEvents(request), request);
         const event = (data.events || []).find(item =>
-          String(item.tx_hash_hex || "").toUpperCase() === normalizedTxHash
+          comparableCosmosTxHash(item.tx_hash_hex ?? item.txHashHex) === normalizedTxHash
         );
         if (event) return event;
         if (!Boolean(data.has_more ?? data.hasMore)) break;
@@ -3147,7 +3553,9 @@ export class ClairveilJS {
         limit: pageLimit,
         eventTypes: resolvedEventTypes
       });
-      const event = (data.events || []).find(item => String(item.tx_hash_hex || "").toUpperCase() === normalizedTxHash);
+      const event = (data.events || []).find(item =>
+        comparableCosmosTxHash(item.tx_hash_hex ?? item.txHashHex) === normalizedTxHash
+      );
       if (event) {
         return event;
       }
@@ -3218,7 +3626,7 @@ export class ClairveilJS {
     material,
     after,
     limit = 200,
-    maxPages = 1,
+    maxPages,
     max_pages,
     noteStore,
     includeFoundNotes = false,
@@ -3312,7 +3720,7 @@ export class ClairveilJS {
       rootSeed: privacy.rootSeed,
       after: resolvedAfter,
       limit,
-      maxPages: max_pages ?? maxPages,
+      maxPages: resolvedMaxPages,
       afterHeight: resolvedAfterHeight,
       afterSequence: resolvedAfterSequence,
       page: resolvedPage,
@@ -3503,8 +3911,7 @@ export class ClairveilJS {
     attempts,
     intervalMs
   } = {}) {
-    const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
-    if (!normalizedTxHash) throw new Error("txHash is required");
+    const normalizedTxHash = normalizedCosmosTxHash(txHash ?? tx_hash);
     const expected = depositExpectedMaterial({
       prepared,
       material,
@@ -3582,7 +3989,7 @@ export class ClairveilJS {
     after_sequence,
     page,
     limit = 200,
-    maxPages = defaultPrepareScanMaxPages,
+    maxPages,
     max_pages,
     eventTypes,
     event_types,
@@ -3607,6 +4014,18 @@ export class ClairveilJS {
     if (executionBuilder != null && typeof executionBuilder !== "function") {
       throw new Error("executionBuilder must be a function");
     }
+    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 8000000);
+    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
+    const resolvedExpiresAtUnix = resolveOperationEvidenceAlias(
+      expiresAtUnix,
+      expires_at_unix,
+      "expiresAtUnix"
+    );
+    const resolvedChainNowUnix = resolveOperationEvidenceAlias(
+      chainNowUnix,
+      chain_now_unix,
+      "chainNowUnix"
+    );
     for (const [value, label] of [
       [disableSelfViewDisclosure, "disableSelfViewDisclosure"],
       [disable_self_view_disclosure, "disable_self_view_disclosure"]
@@ -3668,8 +4087,17 @@ export class ClairveilJS {
       expectedAmountHash,
       expected_amount_hash
     });
+    // Validate and bind the caller's final intent before planning can prepare
+    // an intermediate self-merge. Only final transfers persist these hashes.
+    const finalOperationEvidence = buildDirectOperationEvidenceHashes({
+      assertions: operationEvidenceAssertions,
+      recipient,
+      amount,
+      denom: denom ?? this.defaultDenom,
+      shieldedPrefix: this.shieldedPrefix
+    });
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
-    const scanOptions = resolveScanOptions({
+    const scanOptions = resolveWalletScanOptions({
       scan,
       after,
       afterHeight,
@@ -3701,6 +4129,7 @@ export class ClairveilJS {
       ...scanOptions,
       limit: scanOptions.limit ?? 200,
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
+      allowInitialPrivacyScanFallback: true,
       includeFoundNotes: true
     });
     const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
@@ -3747,6 +4176,15 @@ export class ClairveilJS {
     const auditPubKeyHex = transferProtocolConfig.audit_config.audit_master_pubkey_hex;
     const stepRecipient = isFinal ? recipient : privacy.shieldedAddress;
     const stepAmount = isFinal ? amount : plan.nextAmount;
+    const operationEvidence = isFinal
+      ? finalOperationEvidence
+      : buildDirectOperationEvidenceHashes({
+          assertions: {},
+          recipient: stepRecipient,
+          amount: stepAmount,
+          denom: denom ?? this.defaultDenom,
+          shieldedPrefix: this.shieldedPrefix
+        });
     let reservationBatch = null;
     try {
       reservationBatch = await preparePlanReservation(resolvedReservationManager, {
@@ -3881,7 +4319,7 @@ export class ClairveilJS {
     after_sequence,
     page,
     limit = 200,
-    maxPages = defaultPrepareScanMaxPages,
+    maxPages,
     max_pages,
     eventTypes,
     event_types,
@@ -3907,6 +4345,8 @@ export class ClairveilJS {
     root_hex,
     snapshotHeight,
     snapshot_height,
+    inputCommitmentHexes,
+    input_commitment_hexes,
     disableSelfViewDisclosure,
     disable_self_view_disclosure,
     selfViewDisclosureTargetPubKeyHex,
@@ -3951,6 +4391,10 @@ export class ClairveilJS {
     if (hasPinnedRoot !== hasPinnedSnapshotHeight) {
       throw new Error("rootHex and snapshotHeight must be supplied together for an exact Merkle snapshot");
     }
+    const resolvedInputCommitments = normalizeBatchTransferInputCommitments(
+      inputCommitmentHexes,
+      input_commitment_hexes
+    );
     for (const [value, label] of [
       [disableSelfViewDisclosure, "disableSelfViewDisclosure"],
       [disable_self_view_disclosure, "disable_self_view_disclosure"]
@@ -4038,7 +4482,7 @@ export class ClairveilJS {
       throw new Error("one-proof batch transfer requires onPreparedProof to durably persist the private proof before signing");
     }
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
-    const scanOptions = resolveScanOptions({
+    const scanOptions = resolveWalletScanOptions({
       scan,
       after,
       afterHeight,
@@ -4072,14 +4516,29 @@ export class ClairveilJS {
       scanSource: "privacy_scan",
       limit: scanOptions.limit ?? 200,
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
+      requireTypedScan: true,
       includeFoundNotes: true
     });
     if (scanResult.scanCursor?.source !== "privacy_scan") {
       throw new Error("one-proof batch transfer requires the typed privacy-scan-v2 source; legacy scan fallback cannot recover batch outputs safely");
     }
     const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
-    const plan = planTransferBatchNotes({
-      notes: availableFoundNotes,
+    let planNotes = availableFoundNotes;
+    if (resolvedInputCommitments) {
+      const availableByCommitment = new Map(availableFoundNotes.map(found => [
+        fieldHexV1(computeNoteCommitmentV1(found.note)),
+        found
+      ]));
+      const missingIndex = resolvedInputCommitments.findIndex(
+        commitment => !availableByCommitment.has(commitment)
+      );
+      if (missingIndex !== -1) {
+        throw new Error(`inputCommitmentHexes[${missingIndex}] is unavailable or unverified`);
+      }
+      planNotes = resolvedInputCommitments.map(commitment => availableByCommitment.get(commitment));
+    }
+    let plan = planTransferBatchNotes({
+      notes: planNotes,
       amounts: normalizedAmounts,
       denom: denom ?? this.defaultDenom
     });
@@ -4092,6 +4551,38 @@ export class ClairveilJS {
       };
     }
     assertPlanCanBuildTx(plan);
+    const batchDenom = denom ?? this.defaultDenom;
+    if (resolvedInputCommitments) {
+      const selectedTotal = planNotes.reduce((sum, found) => sum + found.note.amount, 0n);
+      const requestedTotal = BigInt(plan.facts.requestedAmountValue);
+      const change = selectedTotal - requestedTotal;
+      const outputCount = normalizedAmounts.length + (change > 0n ? 1 : 0);
+      if (change < 0n) {
+        throw new Error("inputCommitmentHexes total is insufficient for the requested payments");
+      }
+      if (change > maxUint64) {
+        throw new Error("inputCommitmentHexes would create change above the uint64 NoteV1 range");
+      }
+      if (outputCount > 32) {
+        throw new Error("inputCommitmentHexes would exceed the 32-output batch capacity");
+      }
+      const selection = Object.freeze({
+        inputs: Object.freeze([...planNotes]),
+        total: selectedTotal,
+        isFinal: true,
+        needsZeroDummy: false
+      });
+      plan = {
+        ...plan,
+        facts: {
+          ...plan.facts,
+          selectedInputTotal: `${selectedTotal}${batchDenom}`,
+          selectedInputTotalValue: selectedTotal.toString()
+        },
+        selection,
+        selections: [selection]
+      };
+    }
     const transferProtocolConfig = await this.assertTransferProtocolConfig(denom ?? this.defaultDenom);
     const paymentPolicies = resolvedPayments.map((payment, index) => {
       const capabilities = assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
@@ -4109,7 +4600,6 @@ export class ClairveilJS {
     if (!proverAdapter || typeof proverAdapter.proveBatchTransfer !== "function") {
       throw new Error("prepareTransferBatch requires a proverAdapter with proveBatchTransfer(payload)");
     }
-    const batchDenom = denom ?? this.defaultDenom;
     const resolvedDisableSelfViewDisclosure = disableSelfViewDisclosure ?? disable_self_view_disclosure ?? false;
     const coins = paymentPolicies.map((payment, index) => {
       const coin = parseCoin(payment.amount, batchDenom);
@@ -4359,6 +4849,7 @@ export class ClairveilJS {
             signer: privacy.address,
             pubKeyHex: privacy.pubKeyHex,
             gasLimit,
+            feeAmount: resolvedFeeAmount,
             messages: [{
               typeUrl: msgBatchTransferTypeUrl,
               value: MsgBatchTransfer.fromPartial(message)
@@ -4381,6 +4872,7 @@ export class ClairveilJS {
               batch_transfer_input_count: selectedInputs.length,
               batch_transfer_output_count: payload.outputs.length,
               batch_transfer_output_mode: resolvedOutputMode,
+              input_nullifier_hexes: effects.nullifier_hexes,
               batch_transfer_nullifier_hexes: effects.nullifier_hexes,
               batch_transfer_output_commitment_hexes: effects.output_commitment_hexes,
               batch_transfer_operation_evidence: operationEvidence.evidence,
@@ -4551,7 +5043,7 @@ export class ClairveilJS {
     const transferProtocolConfig = await this.assertTransferProtocolConfig(resolvedDenom);
     assertPreparedBatchTransferMatchesActiveConfig(payload, transferProtocolConfig, resolvedDenom);
     const effects = preparedBatchTransferEffectHex(payload);
-    batchTransferNullifiersUnspent(
+    assertBatchTransferNullifiersUnspent(
       await this.checkNullifiers(effects.nullifier_hexes),
       effects.nullifier_hexes
     );
@@ -4570,7 +5062,7 @@ export class ClairveilJS {
       operationId: resolvedOperationID,
       reservation: resolvedReservation
     });
-    batchTransferNullifiersUnspent(
+    assertBatchTransferNullifiersUnspent(
       await this.checkNullifiers(effects.nullifier_hexes),
       effects.nullifier_hexes
     );
@@ -4665,6 +5157,12 @@ export class ClairveilJS {
     ).trim();
     if (reservationOperationID && reservationOperationID !== resolvedOperationID) {
       throw new Error("prepared batch transfer operationId does not match the reservation batch");
+    }
+    const currentReservations = typeof resolvedReservationManager.getReservations === "function"
+      ? await resolvedReservationManager.getReservations(resolvedReservation.reservation_ids)
+      : resolvedReservation.reservations || [];
+    if (currentReservations.some(item => item.status === reservationStatuses.ManualReview)) {
+      throw new Error("ManualReview reservations require operator resolution before a new batch proof can be finalized");
     }
     const resolvedSigner = String(signer || "").trim();
     if (!resolvedSigner) {
@@ -4794,6 +5292,7 @@ export class ClairveilJS {
         signer: resolvedSigner,
         pubKeyHex,
         gasLimit,
+        feeAmount: resolvedFeeAmount,
         message,
         memo,
         expectedCircuitIdentity:
@@ -4815,6 +5314,7 @@ export class ClairveilJS {
         batch_transfer_input_count: effects.nullifier_hexes.length,
         batch_transfer_output_count: payload.outputs.length,
         batch_transfer_output_mode: persistedOutputMode,
+        input_nullifier_hexes: effects.nullifier_hexes,
         batch_transfer_nullifier_hexes: effects.nullifier_hexes,
         batch_transfer_output_commitment_hexes: effects.output_commitment_hexes,
         batch_transfer_operation_evidence: operationEvidence.evidence,
@@ -4850,7 +5350,7 @@ export class ClairveilJS {
     after_sequence,
     page,
     limit = 200,
-    maxPages = defaultPrepareScanMaxPages,
+    maxPages,
     max_pages,
     eventTypes,
     event_types,
@@ -4865,6 +5365,7 @@ export class ClairveilJS {
     strictPrivacyScan,
     strict_privacy_scan,
     expiresAtUnix,
+    expires_at_unix,
     chainNowUnix,
     chain_now_unix,
     gasLimit,
@@ -4878,11 +5379,23 @@ export class ClairveilJS {
     if (executionBuilder != null && typeof executionBuilder !== "function") {
       throw new Error("executionBuilder must be a function");
     }
+    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 5000000);
+    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
+    const resolvedExpiresAtUnix = resolveUnixTimestampAlias(
+      expiresAtUnix,
+      expires_at_unix,
+      "expiresAtUnix"
+    );
+    const resolvedChainNowUnix = resolveUnixTimestampAlias(
+      chainNowUnix,
+      chain_now_unix,
+      "chainNowUnix"
+    );
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
     const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 5000000);
     const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
-    const scanOptions = resolveScanOptions({
+    const scanOptions = resolveWalletScanOptions({
       scan,
       after,
       afterHeight,
@@ -4911,6 +5424,7 @@ export class ClairveilJS {
       ...scanOptions,
       limit: scanOptions.limit ?? 200,
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
+      allowInitialPrivacyScanFallback: true,
       includeFoundNotes: true
     });
     const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
@@ -4950,8 +5464,8 @@ export class ClairveilJS {
           recipient,
           rootSeed: privacy.rootSeed,
           chainId: this.chainId,
-          expiresAtUnix,
-          chainNowUnix: chainNowUnix ?? chain_now_unix,
+          expiresAtUnix: resolvedExpiresAtUnix,
+          chainNowUnix: resolvedChainNowUnix,
           signal
         });
         assertHeartbeatHealthy();
@@ -5031,7 +5545,7 @@ export class ClairveilJS {
     after_sequence,
     page,
     limit = 200,
-    maxPages = defaultPrepareScanMaxPages,
+    maxPages,
     max_pages,
     eventTypes,
     event_types,
@@ -5046,14 +5560,26 @@ export class ClairveilJS {
     strictPrivacyScan,
     strict_privacy_scan,
     expiresAtUnix,
+    expires_at_unix,
     chainNowUnix,
     chain_now_unix,
     reservationManager,
-    reservation_manager
+    reservation_manager,
+    executionBuilder
   } = {}) {
+    const resolvedExpiresAtUnix = resolveUnixTimestampAlias(
+      expiresAtUnix,
+      expires_at_unix,
+      "expiresAtUnix"
+    );
+    const resolvedChainNowUnix = resolveUnixTimestampAlias(
+      chainNowUnix,
+      chain_now_unix,
+      "chainNowUnix"
+    );
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
-    const scanOptions = resolveScanOptions({
+    const scanOptions = resolveWalletScanOptions({
       scan,
       after,
       afterHeight,
@@ -5082,6 +5608,7 @@ export class ClairveilJS {
       ...scanOptions,
       limit: scanOptions.limit ?? 200,
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
+      allowInitialPrivacyScanFallback: true,
       includeFoundNotes: true
     });
     const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
@@ -5116,11 +5643,31 @@ export class ClairveilJS {
           recipient,
           rootSeed: privacy.rootSeed,
           chainId: this.chainId,
-          expiresAtUnix,
-          chainNowUnix: chainNowUnix ?? chain_now_unix,
+          expiresAtUnix: resolvedExpiresAtUnix,
+          chainNowUnix: resolvedChainNowUnix,
           signal
         });
         assertHeartbeatHealthy();
+        let artifact = null;
+        if (executionBuilder) {
+          artifact = await buildPreparedExecutionArtifact({
+            executionBuilder,
+            executionInput: {
+              payload: built.payload,
+              proof: built.proof,
+              proverPayload: built.proverPayload,
+              selectedNote: built.selectedNote,
+              plan,
+              reservation: reservationBatchSummary(reservationBatch)
+            },
+            // A relayed Cosmos withdrawal remains a payload handoff until the
+            // relayer is known. This callback is unreachable when the optional
+            // execution builder is present and documents that boundary.
+            buildSignDoc: () => {
+              throw new Error("relay withdraw execution preparation requires executionBuilder");
+            }
+          });
+        }
         await heartbeatNow();
         await markReservationProofReady(
           resolvedReservationManager,
@@ -5132,7 +5679,7 @@ export class ClairveilJS {
         );
         return { built };
       });
-      const { built } = heartbeatResult;
+      const { built, execution } = heartbeatResult;
 
       return {
         ...reservationReconciliationFields(heartbeatResult),
@@ -5143,6 +5690,7 @@ export class ClairveilJS {
         proof: built.proof,
         payload: built.payload,
         selectedNote: built.selectedNote,
+        ...(execution ? { execution } : {}),
         reservation: reservationBatchSummary(reservationBatch),
         privacyAccount: publicPrivacyAccount(privacy)
       };
@@ -5157,18 +5705,26 @@ export class ClairveilJS {
   }
 
   async createTransferSignDoc(input) {
+    if (input?.executionBuilder != null) {
+      throw new Error("createTransferSignDoc does not accept executionBuilder");
+    }
     const result = await this.prepareTransfer(input);
     if (result.status !== "ready") {
       throw new Error(result.plan?.message || `transfer is not ready: ${result.status}`);
     }
+    if (!result.signDoc) throw new Error("transfer preparation did not produce a Cosmos sign doc");
     return result;
   }
 
   async createTransferBatchSignDoc(input) {
+    if (input?.executionBuilder != null) {
+      throw new Error("createTransferBatchSignDoc does not accept executionBuilder");
+    }
     const result = await this.prepareTransferBatch(input);
     if (result.status !== "ready") {
       throw new Error(result.plan?.message || `transfer batch is not ready: ${result.status}`);
     }
+    if (!result.signDoc) throw new Error("transfer batch preparation did not produce a Cosmos sign doc");
     return result;
   }
 
@@ -5193,6 +5749,7 @@ export class ClairveilJS {
     if (!message || typeof message !== "object") {
       throw new Error("MsgBatchTransfer message is required");
     }
+    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
     if (chainNowUnix != null && chain_now_unix != null &&
         Number(chainNowUnix) !== Number(chain_now_unix)) {
       throw new Error("batch transfer chainNowUnix aliases conflict");
@@ -5232,10 +5789,14 @@ export class ClairveilJS {
   }
 
   async createWithdrawSignDoc(input) {
+    if (input?.executionBuilder != null) {
+      throw new Error("createWithdrawSignDoc does not accept executionBuilder");
+    }
     const result = await this.prepareWithdraw(input);
     if (result.status !== "ready") {
       throw new Error(result.plan?.message || `withdraw is not ready: ${result.status}`);
     }
+    if (!result.signDoc) throw new Error("withdraw preparation did not produce a Cosmos sign doc");
     return result;
   }
 
@@ -5395,6 +5956,12 @@ export class ClairveilJS {
     signature_base64,
     skipSignerPubKeyCheck,
     skip_signer_pubkey_check,
+    disclosureScalar,
+    disclosure_scalar,
+    disclosureScalarHex,
+    disclosure_scalar_hex,
+    disclosurePubKeyHex,
+    disclosure_pubkey_hex,
     assetDenom,
     asset_denom,
     ...eventQuery
@@ -5467,6 +6034,18 @@ export class ClairveilJS {
     const disclosureAssetDenom = resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom);
     const directScalar = disclosureScalar ?? disclosure_scalar;
     const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
+    const selectedOutput = resolveDisclosureOutputAlias(output, scanOutput, "disclosure output");
+    const normalizedTxHash = selectedOutput && txHash == null && tx_hash == null
+      ? undefined
+      : normalizedCosmosTxHash(txHash ?? tx_hash);
+    if (selectedOutput && (directScalar != null || directScalarHex != null)) {
+      return decodeSelfViewDisclosureFromScanOutput(selectedOutput, {
+        disclosureScalar: directScalar != null ? directScalar : disclosureScalarFromHex(directScalarHex),
+        txHash: normalizedTxHash,
+        shieldedPrefix: this.shieldedPrefix,
+        assetDenom: disclosureAssetDenom
+      });
+    }
     if (directScalar != null || directScalarHex != null) {
       const decode = selectedOutput ? decodeSelfViewDisclosureFromScanOutput : decodeSelfViewDisclosureFromEvent;
       return decode(
@@ -5549,7 +6128,7 @@ export class ClairveilJS {
     assetDenom,
     asset_denom
   } = {}) {
-    const selectedOutput = output ?? scanOutput;
+    const selectedOutput = resolveDisclosureOutputAlias(output, scanOutput, "batch disclosure output");
     if (!selectedOutput) throw new Error("Batch user disclosure requires a PrivacyScanOutputV2 output");
     const mode = selectedOutput.userDisclosureMode ?? selectedOutput.user_disclosure_mode;
     const isPublic = mode === 1 || mode === "1" || mode === "USER_DISCLOSURE_MODE_PUBLIC";
@@ -5606,7 +6185,7 @@ export class ClairveilJS {
     assetDenom,
     asset_denom
   } = {}) {
-    const selectedOutput = output ?? scanOutput;
+    const selectedOutput = resolveDisclosureOutputAlias(output, scanOutput, "batch disclosure output");
     if (!selectedOutput) throw new Error("Batch self-view disclosure requires a PrivacyScanOutputV2 output");
     const common = {
       txHash: txHash ?? tx_hash,
@@ -5651,7 +6230,7 @@ export class ClairveilJS {
     assetDenom,
     asset_denom
   } = {}) {
-    const selectedOutput = output ?? scanOutput;
+    const selectedOutput = resolveDisclosureOutputAlias(output, scanOutput, "batch disclosure output");
     if (!selectedOutput) throw new Error("Batch audit disclosure requires a PrivacyScanOutputV2 output");
     const directScalar = disclosureScalar ?? disclosure_scalar;
     const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;

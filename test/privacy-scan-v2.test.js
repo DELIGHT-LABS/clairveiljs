@@ -18,6 +18,7 @@ import {
 } from "clairveiljs/protocol-v1";
 import {
   createPrivacyScanValidationStateV2,
+  isValidatedPrivacyScanOutputV2,
   processPrivacyScanOutputV2,
   processPrivacyScanPageV2,
   restorePrivacyScanValidationStateV2,
@@ -260,6 +261,42 @@ test("typed privacy scan decryptors only accept validator-issued outputs and pag
   const page = validatePrivacyScanPageV2(rawPage);
   assert.equal(processPrivacyScanOutputV2(page.outputs[0], { rootSeed })?.note.amount, 5n);
   assert.equal(processPrivacyScanPageV2(page, { rootSeed }).length, 1);
+
+  const inheritedOutput = Object.create(page.outputs[0]);
+  Object.defineProperty(inheritedOutput, "tx_hash", {
+    value: new Uint8Array(32).fill(0xff),
+    enumerable: true
+  });
+  assert.equal(isValidatedPrivacyScanOutputV2(inheritedOutput), false);
+  assert.throws(
+    () => processPrivacyScanOutputV2(inheritedOutput, { rootSeed }),
+    /must be issued by validatePrivacyScanPageV2/
+  );
+
+  const inheritedPage = Object.create(page);
+  Object.defineProperty(inheritedPage, "outputs", {
+    value: Object.freeze([]),
+    enumerable: true
+  });
+  assert.throws(
+    () => processPrivacyScanPageV2(inheritedPage, { rootSeed }),
+    /must be issued by validatePrivacyScanPageV2/
+  );
+
+  const mutatedOutputPage = validatePrivacyScanPageV2(validDepositPage());
+  mutatedOutputPage.outputs[0].commitment[0] ^= 0xff;
+  assert.equal(isValidatedPrivacyScanOutputV2(mutatedOutputPage.outputs[0]), false);
+  assert.throws(
+    () => processPrivacyScanPageV2(mutatedOutputPage, { rootSeed }),
+    /must be issued by validatePrivacyScanPageV2/
+  );
+
+  const mutatedSummaryPage = validatePrivacyScanPageV2(validDepositPage());
+  mutatedSummaryPage.summaries[0].tx_hash[0] ^= 0xff;
+  assert.throws(
+    () => processPrivacyScanPageV2(mutatedSummaryPage, { rootSeed }),
+    /must be issued by validatePrivacyScanPageV2/
+  );
 });
 
 test("direct typed scan transfer decryption derives missing root-seed scalars", () => {
@@ -499,7 +536,7 @@ test("Cosmos queryPrivacyScan returns only validator-issued typed pages", async 
   );
 });
 
-test("durable privacy scan cursors retain partial batch validation across a restart", async () => {
+test("Cosmos typed scan rejects a tampered continuation before exposing a partial event", async () => {
   const batch = validBatchPage();
   const firstPage = partialBatchPage(batch);
   const finalPage = typedScanResponse(batch, {
@@ -538,7 +575,54 @@ test("durable privacy scan cursors retain partial batch validation across a rest
   const resumed = JSON.parse(JSON.stringify(first.nextScanOptions));
   client.fetchPrivacyScan = async () => finalPage;
   await assert.rejects(
-    () => client.scanNotes({ rootSeed: new Uint8Array(32).fill(9), ...resumed }),
+    () => client.scanNotes({ rootSeed: new Uint8Array(32).fill(9), maxPages: 1 }),
     /self-view disclosure must be all-or-none/
   );
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].outputLimit, 1);
+});
+
+test("Cosmos typed scan completes the current event beyond maxPages before returning notes", async () => {
+  const rootSeed = new Uint8Array(32).fill(23);
+  const spend = deriveSpendKeys(rootSeed).pubKey;
+  const view = deriveViewKeys(rootSeed).pubKey;
+  const owned = {
+    ...noteForScan(7),
+    receiverSpendPubKeyX: spend.x,
+    receiverSpendPubKeyY: spend.y,
+    receiverViewPubKeyX: view.x,
+    receiverViewPubKeyY: view.y
+  };
+  const batch = validBatchPage({ notes: [owned, noteForScan(8)] });
+  const pages = [{
+    ...batch,
+    outputs: [batch.outputs[0]],
+    nextCursor: { height: 10, globalSequence: 4, outputIndex: 0 },
+    hasMore: true
+  }, {
+    ...batch,
+    outputs: [batch.outputs[1]],
+    hasMore: false
+  }];
+  const requests = [];
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-test-1"
+  });
+  client.fetchPrivacyScan = async request => {
+    requests.push(request);
+    return pages.shift();
+  };
+  client.checkNullifiers = async nullifiers => new Map(nullifiers.map(value => [value, false]));
+
+  const result = await client.scanNotes({ rootSeed, maxPages: 1, includeFoundNotes: true });
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].outputLimit, 1);
+  assert.equal(result.diagnostics.pages_scanned, 2);
+  assert.equal(result.foundNotes.length, 1);
+  assert.equal(result.foundNotes[0].note.amount, owned.amount);
+  assert.equal("validation_state" in result.scanCursor, false);
+  assert.equal(result.scanCursor.completed, true);
 });

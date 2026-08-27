@@ -170,6 +170,7 @@ export function verifyVendoredClairveilContractSnapshot({
     );
   }
 
+  const files = [];
   for (const expected of expectedFiles) {
     const entry = filesByLocalPath.get(expected.local_path);
     if (!entry) {
