@@ -415,7 +415,10 @@ test("EVM transaction identity verification binds hash, sender, call, value, and
     contractAddress: testPrivacyContractAddress,
     evmChainId: "0x539"
   });
-  const built = await client.buildTransferTransaction({ message: transferMessage() });
+  const built = await client.buildTransferTransaction({
+    message: transferMessage(),
+    chainNowUnix: 1_800_000_000
+  });
   const transaction = { ...built.transaction, chainId: "0x539" };
   const txHash = `0x${"ab".repeat(32)}`;
   const rpcTransaction = {
@@ -468,7 +471,10 @@ test("EVM receipt verification binds direct, authorized, and batch event evidenc
     contractAddress: testPrivacyContractAddress
   });
   const transfer = transferMessage();
-  const transferBuilt = await client.buildTransferTransaction({ message: transfer });
+  const transferBuilt = await client.buildTransferTransaction({
+    message: transfer,
+    chainNowUnix: 1_800_000_000
+  });
   const transferReceipt = {
     status: "0x1",
     logs: [{
@@ -573,7 +579,10 @@ test("receipt verification refuses a custom adapter calldata mismatch even with 
       })
     }
   });
-  const prepared = await client.buildTransferTransaction({ message: transfer });
+  const prepared = await client.buildTransferTransaction({
+    message: transfer,
+    chainNowUnix: 1_800_000_000
+  });
   assert.equal(prepared.transaction.__clairveilEvmTransaction.receiptExpectation, null);
   const txHash = `0x${"ab".repeat(32)}`;
   assert.equal(client.verifyTransactionIdentity({
@@ -623,7 +632,10 @@ test("custom EVM adapters can provide fail-closed receipt evidence for custom ca
       }
     }
   });
-  const prepared = await client.buildTransferTransaction({ message: transfer });
+  const prepared = await client.buildTransferTransaction({
+    message: transfer,
+    chainNowUnix: 1_800_000_000
+  });
   const verified = client.verifyPrivacyReceipt({
     transaction: prepared.transaction,
     sender,

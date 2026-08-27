@@ -7,7 +7,6 @@ import type {
   PrivacyEventsQuery,
   PrivacyEventsCursor,
   PrivacyScanOptions,
-  WalletPrivacyScanOptions,
   PrivacyScanResumeOptions,
   TypedWalletScanOptions,
   QueryRetryOptions,
@@ -544,12 +543,17 @@ export type PrepareCosmosTransferInput = PrepareTransferBaseInput & {
   wallet_type?: "cosmos";
 };
 
-export type PrepareEvmTransferInput = PrepareTransferBaseInput & EvmNetworkWalletBinding & (
+type EvmDirectTransactionOptionsInput = {
+  transactionOptions?: EvmPrivacyTransactionOptions;
+  transaction_options?: EvmPrivacyTransactionOptions;
+};
+
+export type PrepareEvmTransferInput = PrepareTransferBaseInput & EvmNetworkWalletBinding & EvmDirectTransactionOptionsInput & (
   | { walletType: "evm"; wallet_type?: "evm" }
   | { walletType?: "evm"; wallet_type: "evm" }
 );
 
-export type PrepareDefaultEvmProfileTransferInput = PrepareTransferBaseInput & EvmNetworkWalletBinding & {
+export type PrepareDefaultEvmProfileTransferInput = PrepareTransferBaseInput & EvmNetworkWalletBinding & EvmDirectTransactionOptionsInput & {
   walletType?: undefined;
   wallet_type?: undefined;
 };
@@ -860,12 +864,12 @@ export type PrepareCosmosWithdrawInput = PrepareWithdrawBaseInput & {
   wallet_type?: "cosmos";
 };
 
-export type PrepareEvmWithdrawInput = PrepareWithdrawBaseInput & EvmNetworkWalletBinding & (
+export type PrepareEvmWithdrawInput = PrepareWithdrawBaseInput & EvmNetworkWalletBinding & EvmDirectTransactionOptionsInput & (
   | { walletType: "evm"; wallet_type?: "evm" }
   | { walletType?: "evm"; wallet_type: "evm" }
 );
 
-export type PrepareDefaultEvmProfileWithdrawInput = PrepareWithdrawBaseInput & EvmNetworkWalletBinding & {
+export type PrepareDefaultEvmProfileWithdrawInput = PrepareWithdrawBaseInput & EvmNetworkWalletBinding & EvmDirectTransactionOptionsInput & {
   walletType?: undefined;
   wallet_type?: undefined;
 };
@@ -1020,8 +1024,8 @@ export type ScanWalletNotesResult = ScanResult & {
 
 export interface DecodeUserDisclosureInput extends Partial<BrowserWalletIdentityInput>, PrivacyScanOptions {
   /** Validator-issued shielded-transfer recipient output; avoids raw event lookup. */
-  output?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
-  scanOutput?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
+  output?: ValidatedPrivacyScanOutputV2;
+  scanOutput?: ValidatedPrivacyScanOutputV2;
   txHash?: Hex;
   tx_hash?: Hex;
   assetDenom?: string;
@@ -1045,8 +1049,8 @@ export interface DecodeSelfViewDisclosureInput extends DecodeUserDisclosureInput
 
 export interface DecodeAuditDisclosureInput extends PrivacyScanOptions {
   /** Validator-issued shielded-transfer recipient output; avoids raw event lookup. */
-  output?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
-  scanOutput?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
+  output?: ValidatedPrivacyScanOutputV2;
+  scanOutput?: ValidatedPrivacyScanOutputV2;
   txHash?: Hex;
   tx_hash?: Hex;
   assetDenom?: string;

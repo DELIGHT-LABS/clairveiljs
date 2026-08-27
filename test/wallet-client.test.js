@@ -294,7 +294,10 @@ test("waitForEvmTransaction accepts custom calldata only through its adapter rec
     }
   });
   const client = browserClient({ profile, evmContractAdapter: adapter });
-  const prepared = await client.evm.buildTransferTransaction({ message: {} });
+  const prepared = await client.evm.buildTransferTransaction({
+    message: { expiresAtUnix: 4_102_448_400n },
+    chainNowUnix: 4_102_444_800
+  });
   const rpcTransaction = {
     hash: txHash,
     from: sender,

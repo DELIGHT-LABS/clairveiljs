@@ -1289,6 +1289,28 @@ evidence matrix is in the [state machine](./docs/reservation-state-machine.md).
   retry authority. `ProofReady` requires the artifact's current lease.
 - Persist `recordRelayHandoff(...)` before exposing a relay payload. After
   handoff, reconcile chain evidence instead of releasing by TTL or cancellation.
+
+```js
+await reservationManager.recordRelayHandoff(
+  prepared.reservation.reservation_ids,
+  {
+    leaseToken: prepared.reservation.lease_token,
+    payloadHash: prepared.payload.payload_hash
+  }
+);
+
+const relayResponse = await sendToExternalRelayer(prepared.payload);
+const inclusion = await findIncludedRelayTransaction(relayResponse.txHash);
+await reservationManager.recordRelayTransactionEvidence({
+  operationId: prepared.reservation.reservations[0].operation_id,
+  payloadHash: prepared.payload.payload_hash,
+  txHash: inclusion.txHash,
+  checkedHeight: inclusion.height,
+  transactionIncludedConfirmed: true,
+  payloadHashMatched: true
+});
+```
+
 - Only `Reserved` may be released automatically. `Proving`/`ProofReady` failures
   are quarantined in `ManualReview`; expired `ProofReady` recovery requires the
   dedicated exact-transaction/all-input-unspent procedure, not mere tx absence.

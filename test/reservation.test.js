@@ -5031,23 +5031,7 @@ test("reservation creation accepts only clean Reserved records and relay handoff
     operationId: "relay-op",
     payloadHash: "relay-payload-a"
   });
-  await assert.rejects(
-    () => manager.recordRelaySubmission(batch.reservation_ids, {
-      leaseToken: batch.lease_token,
-      payloadHash: "relay-payload-a",
-      payload_hash: "relay-payload-b",
-      txHash: "RELAY-TX-BEFORE-HANDOFF"
-    }),
-    /relay submission payload hash aliases conflict/
-  );
-  await assert.rejects(
-    () => manager.recordRelaySubmission(batch.reservation_ids, {
-      leaseToken: batch.lease_token,
-      payloadHash: "relay-payload-a",
-      txHash: "RELAY-TX-BEFORE-HANDOFF"
-    }),
-    /requires a previously recorded relay handoff/
-  );
+  assert.equal(typeof manager.recordRelaySubmission, "undefined");
   await assert.rejects(
     () => manager.recordRelayHandoff(batch.reservation_ids, {
       leaseToken: batch.lease_token,
@@ -5075,33 +5059,6 @@ test("reservation creation accepts only clean Reserved records and relay handoff
     }),
     /durable broadcast attempt is required/
   );
-  await assert.rejects(
-    () => manager.recordRelaySubmission(batch.reservation_ids, {
-      leaseToken: batch.lease_token,
-      payloadHash: "relay-payload-b",
-      txHash: "RELAY-TX"
-    }),
-    /payload hash must match/
-  );
-  await assert.rejects(
-    () => manager.recordRelaySubmission(batch.reservation_ids, {
-      leaseToken: batch.lease_token,
-      payloadHash: "relay-payload-a",
-      txHash: "RELAY-TX",
-      submitted_tx_hash: "OTHER-RELAY-TX"
-    }),
-    /relay submission network tx hash aliases conflict/
-  );
-  const relaySubmitted = await manager.recordRelaySubmission(batch.reservation_ids, {
-    leaseToken: batch.lease_token,
-    payloadHash: "relay-payload-a",
-    txHash: "RELAY-TX"
-  });
-  assert.equal(relaySubmitted[0].status, reservationStatuses.Submitted);
-  assert.equal(relaySubmitted[0].submitted_tx_hash, "RELAY-TX");
-  assert.equal(relaySubmitted[0].broadcast_attempt_count, 1);
-  assert.equal(relaySubmitted[0].metadata.relay_handed_off, true);
-  assert.equal(relaySubmitted[0].metadata.no_broadcast_attempt, false);
 
   const attemptedNotes = [
     noteFixture({ nullifier: "f4".repeat(32), sequence: 404 }),

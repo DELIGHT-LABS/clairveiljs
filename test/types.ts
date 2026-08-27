@@ -75,7 +75,9 @@ import {
 } from "clairveiljs/scan";
 import type { PreparedBatchTransferPayload } from "clairveiljs/batch-transfer";
 import {
+  clairveilConformanceBundleVersion,
   noteReservationContractVersionV3,
+  supportedClairveilRelease,
   validateNoteReservationContractV3,
   runClairveilConformanceFixtures,
   type NoteReservationContractV3
@@ -156,6 +158,9 @@ import {
 } from "clairveiljs/prover";
 
 const rootSeed = new Uint8Array(32);
+const testPrivacyContractAddress = "0x0000000000000000000000000000000000000900";
+const legacyConformanceBundleLabel: typeof clairveilConformanceBundleVersion = supportedClairveilRelease;
+void legacyConformanceBundleLabel;
 const decodedCosmosWithdraw = MsgWithdraw.decode(new Uint8Array());
 const decodedCosmosWithdrawRecipient: string = decodedCosmosWithdraw.recipient;
 const clairveilRegistry = createClairveilRegistry();
@@ -871,17 +876,6 @@ const submittedAliasReservations = reservationManager.markSubmitted([], {
   leaseToken: "lease",
   submitted_tx_hash: "TX-ALIAS"
 });
-const relaySubmittedReservations = reservationManager.recordRelaySubmission([], {
-  leaseToken: "lease",
-  payloadHash: "relay-payload",
-  txHash: "RELAY-TX"
-});
-// @ts-expect-error relay submission requires a network tx hash, not only a prepared transaction hash.
-reservationManager.recordRelaySubmission([], {
-  leaseToken: "lease",
-  payloadHash: "relay-payload",
-  txBytesHash: "prepared-transaction"
-});
 // @ts-expect-error markSubmitted requires txHash or txBytesHash; signDocHash alone can exist before broadcast.
 reservationManager.markSubmitted([], {
   leaseToken: "lease",
@@ -936,8 +930,8 @@ const browserBankSendSignDoc: Promise<SignDocBase64> = dappClient.buildBankSendS
   pubKeyHex: "02".repeat(33),
   to: "demo1recipient",
   amount: "1udemo",
-  gasLimit: 200000n,
-  gas_limit: 200000n,
+  gasLimit: 200000,
+  gas_limit: 200000,
   feeAmount: [{ denom: "udemo", amount: "5" }],
   fee_amount: [{ denom: "udemo", amount: "5" }]
 });
@@ -978,6 +972,7 @@ const invalidEvmTransferEvidence: PrepareEvmTransferInput = {
   evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demos1recipient",
+  chainNowUnix: 4102444800,
   expectedAmountHash: "amount-hash"
 };
 const invalidDefaultEvmTransferEvidence: PrepareDefaultEvmProfileTransferInput = {
@@ -985,6 +980,7 @@ const invalidDefaultEvmTransferEvidence: PrepareDefaultEvmProfileTransferInput =
   evmWallet: evmPreparationWallet,
   amount: "1udemo",
   recipient: "demos1recipient",
+  chainNowUnix: 4102444800,
   expectedRecipientHash: "recipient-hash"
 };
 const withdrawInput: PrepareCosmosWithdrawInput = {
@@ -1339,7 +1335,6 @@ const cosmosPreparedTransferBatch = cosmos.prepareTransferBatch({
   inputCommitmentHexes: ["01".repeat(32)],
   expectedRecipientHash: "recipient-hash",
   expectedAmountHashes: ["amount-hash-0", "amount-hash-1"],
-  fee_amount: [{ denom: "udemo", amount: "250000" }],
   reservationManager,
   onPreparedPayload() {},
   onPreparedProof() {}
@@ -1356,6 +1351,7 @@ const finalizedCosmosBatch = cosmos.finalizePreparedBatchTransfer({
   proof: undefined as never,
   signer: "demo1sender",
   pubKeyHex: "02".repeat(33),
+  gasLimit: 25000000n,
   gas_limit: 25000000n,
   fee_amount: [{ denom: "udemo", amount: "250000" }],
   amounts: ["1udemo"],

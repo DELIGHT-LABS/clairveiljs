@@ -1652,10 +1652,6 @@ function allowedReservationPatchFields(current, to, {
     allowed.add("sign_doc_hash");
     allowed.add("signDocHash");
   }
-  if (managedRelaySubmission) {
-    allowed.add("payload_hash");
-    allowed.add("payloadHash");
-  }
   if (managedBroadcastAttempt) {
     for (const field of broadcastReservationPatchFields) allowed.add(field);
   }
@@ -1730,49 +1726,6 @@ function isManagedRelayHandoffMutation(current, to, patch = {}) {
   return patch[managedReservationEvidenceMutation] === "relay_handoff" &&
     current.status === reservationStatuses.ProofReady &&
     to === reservationStatuses.ProofReady;
-}
-
-function isManagedRelaySubmissionMutation(current, to, patch = {}) {
-  return patch[managedReservationEvidenceMutation] === "relay_submission" &&
-    current.status === reservationStatuses.ProofReady &&
-    to === reservationStatuses.Submitted;
-}
-
-function assertManagedRelaySubmissionMutation(current, to, patch, now) {
-  const tagged = patch[managedReservationEvidenceMutation] === "relay_submission";
-  if (!tagged) return false;
-  if (!isManagedRelaySubmissionMutation(current, to, patch)) {
-    throw new Error("relay submission evidence is only valid for ProofReady -> Submitted");
-  }
-  if (!booleanEvidence(
-    current.metadata?.relay_handed_off ?? current.metadata?.relayHandedOff
-  )) {
-    throw new Error("relay submission requires a previously recorded relay handoff");
-  }
-  if (current.broadcast_in_flight || Number(current.broadcast_attempt_count || 0) > 0) {
-    throw new Error("relay submission cannot replace a local broadcast attempt");
-  }
-  const payloadHash = String(patch.payload_hash || patch.payloadHash || "").trim();
-  if (!payloadHash || !current.payload_hash || payloadHash !== current.payload_hash) {
-    throw new Error("relay submission payload hash must match the handed-off reservation");
-  }
-  const txHash = String(
-    patch.submitted_tx_hash || patch.submittedTxHash || patch.txHashSubmitted || ""
-  ).trim();
-  if (!txHash) {
-    throw new Error("relay submission requires the network tx hash");
-  }
-  if (patch.metadata?.no_broadcast_attempt !== false) {
-    throw new Error("relay submission must record the external broadcast boundary");
-  }
-  if (
-    Number(patch.broadcast_attempt_count) !==
-    Number(current.broadcast_attempt_count || 0) + 1
-  ) {
-    throw new Error("relay submission must increase broadcast_attempt_count exactly once");
-  }
-  assertCurrentLeaseToken(current, patchLeaseToken(patch), patchLeaseOwner(patch), now);
-  return true;
 }
 
 function isManagedBroadcastAttemptMutation(current, to, patch = {}) {
@@ -1986,10 +1939,8 @@ function assertManagedRelayTransactionEvidenceMutation(current, to, patch) {
     throw new Error("relay transaction evidence conflicts with the submitted transaction hash");
   }
   const normalizedTxHash = normalizedTxIdentity(txHash);
-  const conflictingIdentity = normalizedIdentityValues([
-    current.submitted_tx_hash,
-    current.tx_bytes_hash
-  ]).find(identity => identity !== normalizedTxHash);
+  const conflictingIdentity = reservationNetworkTransactionIdentities(current)
+    .find(identity => identity !== normalizedTxHash);
   if (conflictingIdentity) {
     throw new Error("relay transaction evidence conflicts with persisted transaction identity");
   }
@@ -2151,13 +2102,10 @@ function assertCoreTransitionEvidence(from, to, patch = {}) {
   }
 }
 
-function assertStoreTransitionEvidence(current, to, patch = {}, {
-  managedRelaySubmission = false
-} = {}) {
+function assertStoreTransitionEvidence(current, to, patch = {}) {
   if (
     current.status === reservationStatuses.ProofReady &&
     [reservationStatuses.Submitted, reservationStatuses.Unknown].includes(to) &&
-    !managedRelaySubmission &&
     (!current.broadcast_in_flight || Number(current.broadcast_attempt_count || 0) < 1)
   ) {
     throw new Error("durable broadcast attempt is required before terminal bookkeeping");
@@ -3605,10 +3553,14 @@ function evaluateOperationSuccessEvidence(reservation = {}, actualInput = {}) {
   if (expected.operationEvidenceHash) {
     check("expected_operation_evidence_hash", expected.operationEvidenceHash, actual.operationEvidenceHash, { caseInsensitive: true });
   } else {
-    // Transfers bind their created output and disclosure digest. A direct
-    // withdraw has no shielded output, so its success predicate instead binds
-    // the transparent recipient plus amount/denom below.
-    if (expected.outputCommitment || expected.disclosureDigest) {
+    // Only withdraw operations omit a created shielded output. Every transfer
+    // kind must bind both its output commitment and disclosure digest even if
+    // malformed persisted metadata omitted both fields; presence-based
+    // branching would silently downgrade that transfer into a withdraw
+    // predicate.
+    const withdrawPredicate = new Set(["withdraw", "relay_withdraw"])
+      .has(String(reservation.kind || ""));
+    if (!withdrawPredicate) {
       check("expected_output_commitment", expected.outputCommitment, actual.outputCommitment, { caseInsensitive: true });
       check("expected_disclosure_digest", expected.disclosureDigest, actual.disclosureDigest, { caseInsensitive: true });
     }
@@ -3740,10 +3692,8 @@ function assertPersistedRelayTransactionEvidence(reservation, evidence) {
       reservation.lease_owner || reservation.lease_token || reservation.lease_until || reservation.last_heartbeat_at) {
     throw new Error("relay transaction evidence conflicts with the persisted Submitted operation");
   }
-  const conflictingIdentity = normalizedIdentityValues([
-    reservation.submitted_tx_hash,
-    reservation.tx_bytes_hash
-  ]).find(identity => identity !== normalizedTxIdentity(evidence.txHash));
+  const conflictingIdentity = reservationNetworkTransactionIdentities(reservation)
+    .find(identity => identity !== normalizedTxIdentity(evidence.txHash));
   const metadata = reservation.metadata || {};
   if (conflictingIdentity ||
       metadata.transaction_included_confirmed !== true ||
@@ -3761,10 +3711,7 @@ function hasExactPostBroadcastFailureEvidence(reservation = {}, metadata = {}) {
   const evidence = postBroadcastReplanEvidence(metadata);
   if (!positiveCheckedHeight(evidence.checkedHeight)) return false;
   const checked = normalizedTxIdentity(evidence.txHashChecked);
-  const stored = normalizedIdentityValues([
-    reservation.submitted_tx_hash,
-    reservation.tx_bytes_hash
-  ]);
+  const stored = reservationNetworkTransactionIdentities(reservation);
   return Boolean(checked && stored.length && stored.includes(checked));
 }
 
@@ -4168,12 +4115,6 @@ export class MemoryReservationStore {
         throw new Error(`reservation compare-and-set failed: expected ${transition.from}, got ${current.status}`);
       }
       const managedRelayHandoff = assertManagedRelayHandoffMutation(current, transition.to, transition.patch, now);
-      const managedRelaySubmission = assertManagedRelaySubmissionMutation(
-        current,
-        transition.to,
-        transition.patch,
-        now
-      );
       const managedBroadcastAttempt = assertManagedBroadcastAttemptMutation(current, transition.to, transition.patch, now);
       const managedBroadcastRejection = assertManagedBroadcastRejectionMutation(current, transition.to, transition.patch, now);
       const managedBroadcastFailure = assertManagedAuthoritativeBroadcastFailureMutation(
@@ -5074,10 +5015,8 @@ export class NoteReservationManager {
           (current.broadcast_in_flight || Number(current.broadcast_attempt_count || 0) !== 0)) {
         throw new Error("external relay transaction evidence requires an unattempted handed-off ProofReady operation");
       }
-      const conflictingIdentity = normalizedIdentityValues([
-        current.submitted_tx_hash,
-        current.tx_bytes_hash
-      ]).find(identity => identity !== normalizedTxIdentity(evidence.txHash));
+      const conflictingIdentity = reservationNetworkTransactionIdentities(current)
+        .find(identity => identity !== normalizedTxIdentity(evidence.txHash));
       if (conflictingIdentity) {
         throw new Error("relay transaction evidence conflicts with persisted transaction identity");
       }
@@ -5101,199 +5040,6 @@ export class NoteReservationManager {
         }
       };
       markManagedPatch(patch, managedRelayTransactionEvidence, true);
-      return {
-        reservationID: current.reservation_id,
-        from: reservationStatuses.ProofReady,
-        to: reservationStatuses.Submitted,
-        patch
-      };
-    });
-    if (typeof this.store.compareAndSetReservationStatusBatch !== "function") {
-      throw new Error("reservation store atomic batch compare-and-set is required");
-    }
-    return this.store.compareAndSetReservationStatusBatch(transitions);
-  }
-
-  async recordRelaySubmission(reservationIDs = [], metadata = {}) {
-    const now = this.timestamp();
-    const leaseToken = metadata.leaseToken || metadata.lease_token || "";
-    const payloadHash = aliasedStringValueForKeys(
-      metadata,
-      ["payloadHash", "payload_hash"],
-      "relay submission payload hash"
-    ).trim();
-    const attempt = {
-      txHash: aliasedStringValueForKeys(
-        metadata,
-        ["txHash", "tx_hash", "submittedTxHash", "submitted_tx_hash", "txHashSubmitted"],
-        "relay submission network tx hash"
-      ),
-      txBytesHash: aliasedStringValueForKeys(
-        metadata,
-        ["txBytesHash", "tx_bytes_hash"],
-        "relay submission tx bytes hash"
-      ),
-      signDocHash: aliasedStringValueForKeys(
-        metadata,
-        ["signDocHash", "sign_doc_hash"],
-        "relay submission sign doc hash"
-      )
-    };
-    if (!payloadHash) {
-      throw new Error("relay submission requires the handed-off payload hash");
-    }
-    if (!attempt.txHash) {
-      throw new Error("relay submission requires the network tx hash");
-    }
-    const transitions = [];
-    const currentByID = await this._ownedReservationsByID(reservationIDs);
-    for (const reservationID of reservationIDs || []) {
-      const current = currentByID.get(reservationID);
-      if (current.status !== reservationStatuses.ProofReady) {
-        throw new Error(`relay submission requires ProofReady reservation: ${current.status}`);
-      }
-      if (!booleanEvidence(
-        current.metadata?.relay_handed_off ?? current.metadata?.relayHandedOff
-      )) {
-        throw new Error("relay submission requires a previously recorded relay handoff");
-      }
-      if (current.broadcast_in_flight || Number(current.broadcast_attempt_count || 0) > 0) {
-        throw new Error("relay submission cannot replace a local broadcast attempt");
-      }
-      assertCurrentLeaseToken(current, leaseToken, this.leaseOwner, now);
-      if (!current.payload_hash || current.payload_hash !== payloadHash) {
-        throw new Error("relay submission payload hash must match the handed-off reservation");
-      }
-      const patch = {
-        lease_owner: this.leaseOwner,
-        lease_token: leaseToken,
-        payload_hash: payloadHash,
-        submitted_tx_hash: attempt.txHash,
-        broadcast_in_flight: false,
-        broadcast_attempt_count: Number(current.broadcast_attempt_count || 0) + 1,
-        metadata: {
-          ...(current.metadata || {}),
-          ...(metadata.metadata || {}),
-          no_broadcast_attempt: false
-        }
-      };
-      patchIfPresent(patch, "tx_bytes_hash", attempt.txBytesHash);
-      patchIfPresent(patch, "sign_doc_hash", attempt.signDocHash);
-      Object.defineProperty(patch, managedReservationEvidenceMutation, {
-        value: "relay_submission",
-        enumerable: true
-      });
-      transitions.push({
-        reservationID,
-        from: reservationStatuses.ProofReady,
-        to: reservationStatuses.Submitted,
-        patch
-      });
-    }
-    if (!transitions.length) return [];
-    if (typeof this.store.compareAndSetReservationStatusBatch !== "function") {
-      throw new Error("reservation store atomic batch compare-and-set is required");
-    }
-    return this.store.compareAndSetReservationStatusBatch(transitions);
-  }
-
-  /**
-   * Bind a relay transaction only after an authoritative chain lookup proves
-   * inclusion of the exact payload. This supports an unattempted external
-   * handoff and a durably marked same-origin local-relay attempt.
-   */
-  async recordRelayTransactionEvidence(input = {}) {
-    const evidence = externalRelayTransactionEvidence(input);
-    const linked = (await this.store.listReservations({ ownerKeyId: this.ownerKeyId }))
-      .filter(reservation => reservation.operation_id === evidence.operationID);
-    if (!linked.length) {
-      throw new Error(`relay transaction evidence operation not found: ${evidence.operationID}`);
-    }
-    const statuses = new Set(linked.map(reservation => reservation.status));
-    const idempotent = statuses.size === 1 && statuses.has(reservationStatuses.Submitted);
-    if (idempotent) {
-      for (const reservation of linked) {
-        assertPersistedRelayTransactionEvidence(reservation, evidence);
-      }
-    } else if (statuses.size !== 1 || !statuses.has(reservationStatuses.ProofReady)) {
-      throw mixedOperationStateError(
-        linked,
-        "relay transaction evidence requires one exact ProofReady operation"
-      );
-    }
-    const relaySources = new Set(linked.map(current => {
-      if (current.metadata?.relay_handed_off === true) return "external";
-      const local = idempotent
-        ? isPersistedSameOriginLocalRelayEvidence(current)
-        : isDurableSameOriginLocalRelayAttempt(current);
-      return local ? "local" : "";
-    }));
-    if (!relaySources.has("") && relaySources.size !== 1) {
-      throw new Error("relay transaction evidence requires one consistent relay source for the exact operation");
-    }
-    const transitions = linked.map(current => {
-      if (idempotent) {
-        const patch = {
-          payload_hash: evidence.payloadHash,
-          submitted_tx_hash: evidence.txHash,
-          broadcast_attempt_count: Number(current.broadcast_attempt_count),
-          broadcast_in_flight: false,
-          updated_at: this.timestamp(),
-          metadata: { ...(current.metadata || {}) }
-        };
-        Object.defineProperty(patch, managedRelayTransactionEvidence, {
-          value: true,
-          enumerable: true
-        });
-        return {
-          reservationID: current.reservation_id,
-          from: reservationStatuses.Submitted,
-          to: reservationStatuses.Submitted,
-          patch
-        };
-      }
-      const externalHandoff = current.metadata?.relay_handed_off === true;
-      const localRelayAttempt = isDurableSameOriginLocalRelayAttempt(current);
-      if (!externalHandoff && !localRelayAttempt) {
-        throw new Error("relay transaction evidence requires a recorded relay handoff or durable local relay attempt");
-      }
-      if (current.payload_hash !== evidence.payloadHash) {
-        throw new Error(externalHandoff
-          ? "external relay transaction evidence payload hash does not match the handed-off payload"
-          : "local relay transaction evidence payload hash does not match the ProofReady payload");
-      }
-      if (externalHandoff &&
-          (current.broadcast_in_flight || Number(current.broadcast_attempt_count || 0) !== 0)) {
-        throw new Error("external relay transaction evidence requires an unattempted handed-off ProofReady operation");
-      }
-      const conflictingIdentity = reservationNetworkTransactionIdentities(current)
-        .find(identity => identity !== evidence.txHash);
-      if (conflictingIdentity) {
-        throw new Error("relay transaction evidence conflicts with persisted transaction identity");
-      }
-      const patch = {
-        payload_hash: evidence.payloadHash,
-        submitted_tx_hash: evidence.txHash,
-        broadcast_attempt_count: localRelayAttempt
-          ? Number(current.broadcast_attempt_count)
-          : 1,
-        broadcast_in_flight: false,
-        updated_at: this.timestamp(),
-        metadata: {
-          ...(current.metadata || {}),
-          transaction_included_confirmed: true,
-          payload_hash_matched: true,
-          relay_evidence_checked_height: evidence.checkedHeight,
-          relay_evidence_tx_hash: evidence.txHash,
-          checked_height: evidence.checkedHeight,
-          tx_hash_checked: evidence.txHash,
-          no_broadcast_attempt: false
-        }
-      };
-      Object.defineProperty(patch, managedRelayTransactionEvidence, {
-        value: true,
-        enumerable: true
-      });
       return {
         reservationID: current.reservation_id,
         from: reservationStatuses.ProofReady,

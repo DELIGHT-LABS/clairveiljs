@@ -878,13 +878,20 @@ function validatePendingPrivacyScanSummaries(request, page, state) {
   }) === 0
     ? page.summaries.find(value => scanEventKey(value) === scanEventKey(lastOutput))
     : null;
+  const requestEventKey = scanEventKey(request.after);
+  const resumedSummary = page.summaries.find(value => scanEventKey(value) === requestEventKey);
+  // Core repeats an event summary only when `after` is inside that event's
+  // output prefix. Without the prior identity, cross-page completeness and
+  // batch self-view all-or-none cannot be validated safely.
+  if (resumedSummary && !pendingByEvent.has(requestEventKey)) {
+    throw new Error("privacy scan mid-event resume requires pending summary validation state");
+  }
   if (!state) {
     if (partialSummary && lastOutput.output_index < partialSummary.output_count - 1) {
       throw new Error("privacy scan partial page requires validation state");
     }
     return pendingByEvent;
   }
-  const requestEventKey = scanEventKey(request.after);
   for (const [key, expected] of pendingByEvent) {
     if (key !== requestEventKey || request.after.output_index !== expected.last_output_index) {
       throw new Error("privacy scan pending summary does not match the request cursor");
@@ -1078,6 +1085,7 @@ export function validatePrivacyScanPageV2(response, request = {}) {
   validatePrivacyScanValidationStateMaps(nextBatchSelfViewState, nextPendingSummaryState);
   commitBatchSelfViewValidationState(validationState, nextBatchSelfViewState);
   commitPendingPrivacyScanSummaryState(validationState, nextPendingSummaryState);
+  validatedPrivacyScanPageIntegrityV2.set(page, scanIntegrityFingerprint(page));
   return page;
 }
 

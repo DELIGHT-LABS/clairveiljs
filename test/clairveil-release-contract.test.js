@@ -7,15 +7,31 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  verifyBundledClairveilContractSnapshot,
   verifyVendoredClairveilContractSnapshot
 } from "../tools/verify-clairveil-source.js";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const releaseSourceTestsEnabled = process.env.CLAIRVEIL_RELEASE_SOURCE_TESTS === "1";
 const clairveilSourceRoot = resolve(
   process.env.CLAIRVEIL_SOURCE_DIR || resolve(packageRoot, "..", "clairveil")
 );
 
-test("vendored Clairveil handoff contracts match the claimed core commit object", () => {
+test("bundled Clairveil handoff contracts validate without a core checkout", () => {
+  const result = verifyBundledClairveilContractSnapshot({ packageRoot });
+
+  assert.equal(result.bundleVersion, "v0.3.1");
+  assert.equal(result.sourceKind, "commit_snapshot");
+  assert.equal(result.commit, "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b");
+  assert.equal(result.protobufCount, 4);
+  assert.equal(result.fixtureCount, 12);
+  assert.equal(result.schemaCount, 1);
+  assert.equal(result.fileCount, 17);
+});
+
+test("vendored Clairveil handoff contracts match the configured core commit object", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
   const result = verifyVendoredClairveilContractSnapshot({ packageRoot, clairveilSourceRoot });
 
   assert.equal(result.bundleVersion, "v0.3.1");
@@ -28,7 +44,9 @@ test("vendored Clairveil handoff contracts match the claimed core commit object"
   assert.equal(result.clairveilSourceRoot, clairveilSourceRoot);
 });
 
-test("release verifier CLI checks the configured Clairveil source checkout", () => {
+test("release verifier CLI checks the configured Clairveil source checkout", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
   const result = spawnSync(
     process.execPath,
     [join(packageRoot, "tools/verify-clairveil-source.js")],
@@ -87,7 +105,7 @@ test("release verifier rejects a modified vendored fixture", () => {
     );
 
     assert.throws(
-      () => verifyVendoredClairveilContractSnapshot({ packageRoot: temporaryRoot, clairveilSourceRoot }),
+      () => verifyBundledClairveilContractSnapshot({ packageRoot: temporaryRoot }),
       /privacy_wallet_golden_vectors\.json SHA-256 is/
     );
   } finally {
@@ -95,7 +113,9 @@ test("release verifier rejects a modified vendored fixture", () => {
   }
 });
 
-test("release verifier rejects a self-consistent manifest that diverges from the claimed commit", () => {
+test("release verifier rejects a self-consistent manifest that diverges from the claimed commit", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
   const temporaryRoot = mkdtempSync(join(tmpdir(), "clairveiljs-upstream-contract-"));
 
   try {
@@ -148,7 +168,7 @@ test("release verifier rejects labeling a commit snapshot as a release tag", () 
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
     assert.throws(
-      () => verifyVendoredClairveilContractSnapshot({ packageRoot: temporaryRoot, clairveilSourceRoot }),
+      () => verifyBundledClairveilContractSnapshot({ packageRoot: temporaryRoot }),
       /source must identify only an exact commit snapshot/
     );
   } finally {
@@ -156,27 +176,29 @@ test("release verifier rejects labeling a commit snapshot as a release tag", () 
   }
 });
 
-test("required conformance refuses an external fixture override", () => {
-  const fixtureDirectory = join(packageRoot, "external-fixtures");
-  const result = spawnSync(
-    process.execPath,
-    [
-      "--import",
-      join(packageRoot, "tools/require-conformance-fixtures.js"),
-      "--eval",
-      "process.stdout.write('unreachable')"
-    ],
-    {
-      cwd: packageRoot,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        CLAIRVEIL_CONFORMANCE_FIXTURE_DIR: fixtureDirectory
+test("required conformance refuses external fixture and schema overrides", () => {
+  for (const name of ["CLAIRVEIL_CONFORMANCE_FIXTURE_DIR", "CLAIRVEIL_WALLET_CONTRACT_SCHEMA"]) {
+    const env = { ...process.env };
+    delete env.CLAIRVEIL_CONFORMANCE_FIXTURE_DIR;
+    delete env.CLAIRVEIL_WALLET_CONTRACT_SCHEMA;
+    env[name] = join(packageRoot, "external-contract");
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        join(packageRoot, "tools/require-conformance-fixtures.js"),
+        "--eval",
+        "process.stdout.write('unreachable')"
+      ],
+      {
+        cwd: packageRoot,
+        encoding: "utf8",
+        env
       }
-    }
-  );
+    );
 
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /bundled fixtures/);
-  assert.equal(result.stdout, "");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(name));
+    assert.equal(result.stdout, "");
+  }
 });

@@ -1,8 +1,14 @@
-if (process.env.CLAIRVEIL_CONFORMANCE_FIXTURE_DIR) {
-  throw new Error(
-    "test:conformance:required uses ClairveilJS bundled fixtures; " +
-    "use test:conformance for an explicit diagnostic fixture directory"
-  );
+const forbiddenReleaseOverrides = [
+  "CLAIRVEIL_CONFORMANCE_FIXTURE_DIR",
+  "CLAIRVEIL_WALLET_CONTRACT_SCHEMA"
+];
+
+for (const name of forbiddenReleaseOverrides) {
+  if (String(process.env[name] ?? "").trim()) {
+    throw new Error(
+      `${name} cannot override the ClairveilJS bundled fixtures in the required release gate`
+    );
+  }
 }
 
 process.env.CLAIRVEIL_CONFORMANCE_REQUIRED = "1";

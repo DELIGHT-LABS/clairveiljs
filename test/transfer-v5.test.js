@@ -137,36 +137,60 @@ test("transfer v5 rejects stale or tampered prepared effects before MsgTransfer 
   const message = buildTransferV5MsgFromPayloadAndProof(payload, proof, { nowUnix: 1_700_000_000 });
   assert.equal(message.expiresAtUnix, 4102448400n);
   assert.equal(message.viewTags.length, 2);
-  const replacementCreator = buildTransferV5MsgFromPayloadAndProof(payload, proof, {
-    nowUnix: 1_700_000_000,
-    creator: "clair1replacement"
-  });
-  assert.equal(replacementCreator.creator, "clair1replacement");
-  assert.deepEqual(
-    { ...replacementCreator, creator: message.creator },
-    message,
-    "creator replacement must not change the proof-bound transfer effect"
-  );
   assert.throws(() => validatePreparedTransferV5PayloadAt(payload, payload.expires_at_unix));
   assert.throws(() => validatePreparedTransferV5PayloadMetadata({ ...payload, creator: "clair1altered" }));
 });
 
-test("transfer v5 creator replacement remains replay-safe across chain domains", () => {
+test("direct transfer message allows creator replacement while rejecting cross-chain replay", () => {
   const payload = validPayload();
   const proof = {
     version: "v2",
     payload_hash: payload.payload_hash,
     proof_hex: `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}`
   };
-  const replay = structuredClone(payload);
-  replay.chain_id = "clairveil-other-chain";
-  replay.payload_hash = computePreparedTransferV5PayloadHash(replay);
+  const original = buildTransferV5MsgFromPayloadAndProof(payload, proof, {
+    nowUnix: 1_700_000_000,
+    expectedChainId: "clairveil-test-1"
+  });
+  const replacement = buildTransferV5MsgFromPayloadAndProof(payload, proof, {
+    nowUnix: 1_700_000_000,
+    creator: "clair1replacement",
+    expectedChainId: "clairveil-test-1"
+  });
 
-  assert.notEqual(replay.payload_hash, payload.payload_hash);
+  assert.equal(replacement.creator, "clair1replacement");
+  assert.deepEqual({ ...replacement, creator: original.creator }, original);
+  assert.equal(payload.creator, "clair1creator");
+  const publicAliasReplacement = buildTransferMsgFromPayloadAndProof(payload, proof, {
+    nowUnix: 1_700_000_000,
+    creator: "clair1publicalias",
+    expectedChainId: "clairveil-test-1",
+    expected_chain_id: "clairveil-test-1"
+  });
+  assert.equal(publicAliasReplacement.creator, "clair1publicalias");
+  assert.deepEqual({ ...publicAliasReplacement, creator: original.creator }, original);
+  assert.throws(
+    () => buildTransferV5MsgFromPayloadAndProof(payload, proof, {
+      nowUnix: 1_700_000_000,
+      expectedChainId: "other-chain-1"
+    }),
+    /prepared transfer chain ID mismatch/
+  );
+  assert.throws(
+    () => buildTransferMsgFromPayloadAndProof(payload, proof, {
+      nowUnix: 1_700_000_000,
+      expectedChainId: "clairveil-test-1",
+      expected_chain_id: "other-chain-1"
+    }),
+    /chain ID aliases conflict/
+  );
+
+  const replay = { ...payload, chain_id: "other-chain-1" };
+  replay.payload_hash = computePreparedTransferV5PayloadHash(replay);
   assert.throws(
     () => buildTransferV5MsgFromPayloadAndProof(replay, proof, {
       nowUnix: 1_700_000_000,
-      creator: "clair1replacement"
+      expectedChainId: "other-chain-1"
     }),
     /proof payload hash mismatch/
   );

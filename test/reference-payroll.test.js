@@ -490,7 +490,16 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
       }))
     })
   );
-  const payrollSignDocHash = "ab".repeat(32);
+  const markerSignDoc = payrollCosmosSignDoc(execution.message);
+  const markerSignedTxBytes = signedPayrollTxRaw(markerSignDoc);
+  const markerArtifact = payrollArtifact({
+    prepared,
+    execution,
+    reservationBatch: reservation,
+    signDoc: markerSignDoc,
+    signedTxBytes: markerSignedTxBytes
+  });
+  const payrollSignDocHash = markerArtifact.sign_doc_hash;
   const proofReadyReservations = await markOneProofPayrollReservationProofReady(
     reservationManager,
     reservation,
@@ -501,15 +510,6 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   assert.equal(proofReadyReservations[0].sign_doc_hash, payrollSignDocHash);
   assert.equal(proofReadyReservations[0].metadata.operation_success_evidence_required, true);
   assert.equal(proofReadyReservations[0].expected_operation_evidence_hash, oneProofPayrollOperationEvidenceHash(execution.operation_evidence));
-  const markerSignDoc = payrollCosmosSignDoc(execution.message);
-  const markerSignedTxBytes = signedPayrollTxRaw(markerSignDoc);
-  const markerArtifact = payrollArtifact({
-    prepared,
-    execution,
-    reservationBatch: reservation,
-    signDoc: markerSignDoc,
-    signedTxBytes: markerSignedTxBytes
-  });
   const payrollSuccessTxHash = markerArtifact.tx_hash;
   const payrollOtherSignDoc = payrollCosmosSignDoc(execution.message, { memo: "another exact payroll transaction" });
   const payrollOtherArtifact = payrollArtifact({
@@ -1171,6 +1171,8 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
     prepared,
     operationEvidence: execution.operation_evidence,
     txFailed: true,
+    checkedHeight: 123,
+    txHashChecked: failedReservation.txHash,
     checkNullifiers: checkNullifiersAs(false)
   });
   assert.equal(failedReconciliation.reservation_action, "ReplanRequired");

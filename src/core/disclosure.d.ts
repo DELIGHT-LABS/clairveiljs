@@ -79,16 +79,15 @@ export interface DisclosureReport {
 }
 
 /** An opaque output returned by `validatePrivacyScanPageV2`; raw protobuf records are rejected. */
-export type BatchPrivacyScanDisclosureOutputV2 = ValidatedPrivacyScanOutputV2;
-/** A validator-issued `shielded_transfer` recipient output. */
-export type TransferPrivacyScanDisclosureOutputV2 = ValidatedPrivacyScanOutputV2;
+export type PrivacyScanDisclosureOutputV2 = ValidatedPrivacyScanOutputV2;
+export type BatchPrivacyScanDisclosureOutputV2 = PrivacyScanDisclosureOutputV2;
 
 export interface BatchDisclosureDecodeOptions extends DisclosureDecodeOptions {
   /** Required for recipient-encrypted, audit, and self-view envelopes. */
   disclosureScalar?: bigint | string | number;
   /** Required with `disclosureScalar` for recipient-encrypted user disclosure. */
   disclosurePubKeyHex?: Hex;
-  /** Optional assertion that must match the transaction hash carried by the typed scan output. */
+  /** Asserts the typed scan's chain transaction hash; on Cosmos-EVM this is not the Ethereum receipt hash. */
   txHash?: Hex;
   /** Optional display-only denom; the field element remains independently bound. */
   assetDenom?: string;
@@ -110,9 +109,9 @@ export function disclosureTargetPubKeyFromEvent(event: object, plane?: string): 
 export function decodeUserDisclosureFromEvent(event: object, disclosureScalar: bigint | string | number, disclosurePubKeyHex: Hex, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
 export function decodeSelfViewDisclosureFromEvent(event: object, disclosureScalar: bigint | string | number, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
 export function decodeAuditDisclosureFromEvent(event: object, disclosureScalar: bigint | string | number, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
-export function decodeUserDisclosureFromScanOutput(output: TransferPrivacyScanDisclosureOutputV2, disclosureScalar: bigint | string | number, disclosurePubKeyHex: Hex, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
-export function decodeSelfViewDisclosureFromScanOutput(output: TransferPrivacyScanDisclosureOutputV2, disclosureScalar: bigint | string | number, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
-export function decodeAuditDisclosureFromScanOutput(output: TransferPrivacyScanDisclosureOutputV2, disclosureScalar: bigint | string | number, txHash?: Hex, options?: DisclosureDecodeOptions): DisclosureReport;
+export function decodeUserDisclosureFromScanOutput(output: PrivacyScanDisclosureOutputV2, options?: BatchDisclosureDecodeOptions): DisclosureReport;
+export function decodeSelfViewDisclosureFromScanOutput(output: PrivacyScanDisclosureOutputV2, options?: BatchDisclosureDecodeOptions): DisclosureReport;
+export function decodeAuditDisclosureFromScanOutput(output: PrivacyScanDisclosureOutputV2, options?: BatchDisclosureDecodeOptions): DisclosureReport;
 export function decodeBatchUserDisclosureFromScanOutput(output: BatchPrivacyScanDisclosureOutputV2, options?: BatchDisclosureDecodeOptions): DisclosureReport;
 export function decodeBatchSelfViewDisclosureFromScanOutput(output: BatchPrivacyScanDisclosureOutputV2, options?: BatchDisclosureDecodeOptions): DisclosureReport;
 export function decodeBatchAuditDisclosureFromScanOutput(output: BatchPrivacyScanDisclosureOutputV2, options?: BatchDisclosureDecodeOptions): DisclosureReport;

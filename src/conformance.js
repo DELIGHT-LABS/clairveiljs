@@ -11,6 +11,8 @@ export const conformanceFixtureRelativePath = "x/privacy/client/sdk/conformance/
 // The directory is versioned with ClairveilJS. The core contract itself is an
 // exact commit snapshot, not the unrelated immutable Clairveil v0.3.1 tag.
 export const clairveilConformanceBundleVersion = "v0.3.1";
+/** @deprecated Use clairveilConformanceBundleVersion for the SDK bundle identity. */
+export const supportedClairveilRelease = clairveilConformanceBundleVersion;
 export const supportedClairveilSourceKind = "commit_snapshot";
 export const supportedClairveilCommit = "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b";
 export const defaultConformanceFixtureDir = `fixtures/clairveil-${clairveilConformanceBundleVersion}/${conformanceFixtureRelativePath}`;

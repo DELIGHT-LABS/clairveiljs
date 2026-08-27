@@ -9,10 +9,15 @@ import {
   verifiedSdkVersion
 } from "./verify-evm-integration.js";
 
-export const payableEvmEvidenceSchema = "clairveil-payable-evm-e2e-v1";
-export const verifiedClairveilRelease = "v0.3.1";
-export const verifiedClairveilCommit = "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b";
-export const verifiedSdkVersion = "0.3.1";
+// Deprecated compatibility entrypoint. The payable deposit gate now delegates
+// to the complete EVM privacy-flow contract and therefore requires full evidence.
+export const payableEvmEvidenceSchema = evmEvidenceSchema;
+export const validatePayableEvmIntegrationEvidence = validateEvmIntegrationEvidence;
+export {
+  verifiedClairveilCommit,
+  verifiedClairveilRelease,
+  verifiedSdkVersion
+};
 
 export function runPayableEvmIntegrationVerification(options = {}) {
   return runEvmIntegrationVerification({

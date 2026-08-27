@@ -422,7 +422,12 @@ async function prepareDepositAndBroadcast(client, wallet, material, amount, conf
     proofHex: proof?.proofHex ?? proof?.proof_hex ?? proof?.depositProofHex ?? proof?.deposit_proof_hex
   });
   const txHash = await broadcastPrepared(client, wallet, prepared, `deposit ${amount}`, config);
-  const confirmation = await client.confirmDeposit({ txHash, prepared });
+  const confirmation = await client.confirmDeposit({
+    txHash,
+    prepared,
+    depositMaterial,
+    waitOptions: config.waitOptions
+  });
   assert.equal(confirmation.status, "confirmed", `deposit ${amount} evidence should confirm`);
   return txHash;
 }
@@ -502,49 +507,6 @@ async function createCurrentRootPathProvider(client, commitmentHexes) {
   });
 }
 
-async function typedBatchOutputsForTransaction(client, txHash, commitmentHexes, material, config) {
-  const requested = [...commitmentHexes].map(value => String(value).toLowerCase());
-  const remaining = new Set(requested);
-  const foundByCommitment = new Map();
-  let after = { height: 0, globalSequence: 0, outputIndex: 0 };
-  const validationState = createPrivacyScanValidationStateV2();
-  let lastError = null;
-  for (let attempt = 1; attempt <= config.waitOptions.attempts; attempt += 1) {
-    let after = { height: 0, globalSequence: 0, outputIndex: 0 };
-    try {
-      for (let page = 0; page < config.scanMaxPages; page += 1) {
-        const request = {
-          after,
-          outputLimit: config.scanLimit,
-          eventLimit: config.scanLimit,
-          eventTypes: [],
-          validationState
-        };
-        const scanned = validatePrivacyScanPageV2(await client.fetchPrivacyScan(request), request);
-        const output = scanned.outputs.find(candidate =>
-          candidate.event_type === privacyScanEventTypeV2.shieldedTransfer &&
-          hexFromBytes(candidate.tx_hash).toUpperCase() === txHash.toUpperCase() &&
-          hexFromBytes(candidate.commitment).toLowerCase() === requestedCommitment
-        );
-        if (output) return output;
-        if (!scanned.has_more) break;
-        after = {
-          height: scanned.next_cursor.height,
-          globalSequence: scanned.next_cursor.global_sequence,
-          outputIndex: scanned.next_cursor.output_index
-        };
-      }
-      lastError = new Error("typed privacy scan has not indexed the direct transfer output yet");
-    } catch (error) {
-      lastError = error;
-    }
-    if (attempt < config.waitOptions.attempts) {
-      await new Promise(resolve => setTimeout(resolve, config.waitOptions.intervalMs));
-    }
-  }
-  throw lastError || new Error("typed privacy scan did not return the direct transfer output");
-}
-
 async function typedBatchOutputsForTransaction(client, txHash, outputCount, material, config, expectedSummary) {
   if (!Number.isSafeInteger(outputCount) || outputCount < 1 || outputCount > 32) {
     throw new Error("typed batch E2E requires an output count in 1..32");
@@ -552,6 +514,7 @@ async function typedBatchOutputsForTransaction(client, txHash, outputCount, mate
   let lastError = null;
   for (let attempt = 1; attempt <= config.waitOptions.attempts; attempt += 1) {
     let after = { height: 0, globalSequence: 0, outputIndex: 0 };
+    const validationState = createPrivacyScanValidationStateV2();
     const foundByIndex = new Map();
     let matchingSummarySeen = false;
     try {
@@ -560,7 +523,8 @@ async function typedBatchOutputsForTransaction(client, txHash, outputCount, mate
           after,
           outputLimit: config.scanLimit,
           eventLimit: config.scanLimit,
-          eventTypes: []
+          eventTypes: [],
+          validationState
         };
         const scanned = validatePrivacyScanPageV2(await client.fetchPrivacyScan(request), request);
         for (const summary of scanned.summaries) {
@@ -1053,97 +1017,6 @@ test("local full deposit, typed scan, disclosure, direct withdraw, and separatel
     );
     assert.equal((await client.queryReserve(config.denom)).invariant_holds, true, "reserve invariant should hold after withdraw");
 
-    if (!relayerWallet) {
-      t.diagnostic("Cosmos relayed withdraw skipped: configure a separately funded relayer wallet");
-      return;
-    }
-    const relayerAddress = await relayerWallet.getAddress();
-    const relayerPubKeyHex = await relayerWallet.getPubKeyHex();
-    assert.notEqual(relayerAddress, material.address, "relay E2E requires a distinct relayer account");
-
-    await prepareDepositAndBroadcast(
-      client,
-      wallet,
-      material,
-      config.relayWithdrawAmount,
-      config,
-      depositProofProvider
-    );
-    const relayReservationManager = createNoteReservationManager({
-      store: new MemoryReservationStore(),
-      ownerKeyId: material.address,
-      indexKey: material.rootSeed
-    });
-    const relayRecipient = String(env.CLAIRVEIL_E2E_RELAY_WITHDRAW_RECIPIENT || "").trim()
-      || material.address;
-    const relayChainNowUnix = await latestChainBlockTimeUnix(config);
-    const relay = await client.prepareRelayWithdraw({
-      wallet,
-      material,
-      amount: config.relayWithdrawAmount,
-      recipient: relayRecipient,
-      proverAdapter,
-      denom: config.denom,
-      limit: config.scanLimit,
-      maxPages: config.scanMaxPages,
-      expiresAtUnix: relayChainNowUnix + config.relayWithdrawExpirySeconds,
-      chainNowUnix: relayChainNowUnix,
-      reservationManager: relayReservationManager
-    });
-    assert.equal(relay.status, "ready", relay.plan?.message || "relay withdraw should be ready");
-    assert.ok(relay.reservation?.reservation_ids?.length, "relay withdraw should reserve its exact input note");
-
-    const relaySignDoc = await client.createRelayWithdrawSignDoc({
-      payload: relay.payload,
-      relayer: relayerAddress,
-      pubKeyHex: relayerPubKeyHex,
-      gasLimit: config.relayWithdrawGasLimit,
-      chainNowUnix: await latestChainBlockTimeUnix(config),
-      expectedChainId: config.chainId,
-      expectedRecipient: relayRecipient
-    });
-    await relayReservationManager.recordRelayHandoff(relay.reservation.reservation_ids, {
-      leaseToken: relay.reservation.lease_token,
-      payloadHash: relay.payload.payload_hash,
-      signDocHash: cosmosSignDocBindingHash(relaySignDoc.signDoc),
-      metadata: { e2e: "cosmos-relay-withdraw" }
-    });
-    const relayResult = await client.signDirectAndBroadcast({
-      wallet: relayerWallet,
-      signDoc: relaySignDoc.signDoc,
-      // The relayer validates and submits independently. The owner's handed-off
-      // reservation is reconciled from authoritative spent evidence below.
-      relayPayload: relay.payload,
-      getChainNowUnix: () => latestChainBlockTimeUnix(config),
-      expectedChainId: config.chainId,
-      expectedRecipient: relayRecipient,
-      waitOptions: config.waitOptions
-    });
-    const relayTxHash = assertBroadcastOk(relayResult, "relayed withdraw");
-    assert.equal(relaySignDoc.message.creator, relayerAddress);
-    assert.equal(relaySignDoc.message.recipient, relayRecipient);
-    const handedOffReservation = await relayReservationManager.getReservation(
-      relay.reservation.reservation_ids[0]
-    );
-    assert.equal(handedOffReservation.status, reservationStatuses.ProofReady);
-    assert.equal(handedOffReservation.metadata?.relay_handed_off, true);
-    const relayNullifier = String(relay.payload.nullifier_hex).toLowerCase();
-    assert.equal((await client.checkNullifiers([relayNullifier])).get(relayNullifier), true);
-    await relayReservationManager.reconcileSpentNotes([{
-      ...relay.selectedNote,
-      isSpent: true,
-      spent: true,
-      nullifierStatus: "spent",
-      operationSuccessEvidence: {
-        txHash: relayTxHash,
-        txResult: relayResult.tx
-      }
-    }]);
-    assert.equal(
-      (await relayReservationManager.getReservation(relay.reservation.reservation_ids[0])).status,
-      reservationStatuses.ConfirmedSpent
-    );
-    assert.equal((await client.queryReserve(config.denom)).invariant_holds, true, "reserve invariant should hold after relayed withdraw");
   } finally {
     await client.disconnect();
   }

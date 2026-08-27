@@ -21,9 +21,7 @@ import {
 } from "../transport/evm.js";
 import {
   resolveCosmosFeeAmount as resolveBrowserCosmosFeeAmount,
-  resolveCosmosGasLimit as resolveBrowserCosmosGasLimit,
-  resolveDirectOperationEvidenceHashes,
-  transferProofReadyMetadata
+  resolveCosmosGasLimit as resolveBrowserCosmosGasLimit
 } from "../transport/cosmos-options.js";
 import {
   derivePrivacyMaterial,
@@ -38,22 +36,8 @@ import {
   parseCoin
 } from "../core/note.js";
 import {
-  assertPlanCanBuildTx,
-  planTransferNotes,
-  planWithdrawNotes
-} from "../privacy/planner.js";
-import {
-  preparePlanReservation,
-  rollbackPlanReservation,
-  rollbackPlanReservationPreservingError
-} from "../privacy/reservation.js";
-import {
   appendReservationCleanupErrors,
-  markReservationProofReady,
-  reservationAvailableNotes,
-  reservationBatchSummary,
-  reservationReconciliationFields,
-  withReservationHeartbeat
+  reservationReconciliationFields
 } from "../privacy/reservation-workflow.js";
 import {
   createHttpDepositProofProvider,
@@ -990,25 +974,12 @@ function typedWalletScanOptionsFromBody(body = {}) {
 }
 
 function relayChainNowUnixFromBody(body = {}) {
-  return body.chainNowUnix
-    ?? body.chain_now_unix
-    ?? body.nowUnix
-    ?? body.now_unix;
-}
-
-function withdrawProofReadyMetadata(built, context = {}) {
-  const expiresAtUnix = String(
-    built?.payload?.expires_at_unix ||
-    built?.payload?.expiresAtUnix ||
-    built?.proverPayload?.expires_at_unix ||
-    built?.proverPayload?.expiresAtUnix ||
-    ""
+  return browserAliasedInputValues(
+    body,
+    ["chainNowUnix", "chain_now_unix", "nowUnix", "now_unix"],
+    "chainNowUnix",
+    canonicalBrowserTransferUnix
   );
-  return {
-    payloadHash: built?.payload?.payload_hash || built?.proverPayload?.payload_hash || "",
-    txBytesHash: context.txBytesHash ?? context.tx_bytes_hash ?? "",
-    metadata: expiresAtUnix ? { payload_expires_at_unix: expiresAtUnix } : {}
-  };
 }
 
 async function markReservationReplanRequired(reservationManager, reservation, error, reason) {
@@ -2042,6 +2013,15 @@ export class ClairveilBrowserClient {
     const scanOptions = typedWalletScanOptionsFromBody(body);
     const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
     const suppliedProverAdapter = body.proverAdapter ?? body.prover_adapter;
+    const gasLimit = resolveBrowserCosmosGasLimit(body.gasLimit, body.gas_limit, 8000000);
+    const feeAmount = resolveBrowserCosmosFeeAmount(body.feeAmount, body.fee_amount);
+    const transactionOptions = browserAliasedInputValue(
+      body,
+      "transactionOptions",
+      "transaction_options",
+      "transactionOptions",
+      canonicalBrowserAliasReference
+    );
     const prepared = await this.cosmos.prepareTransfer({
       proverAdapter: suppliedProverAdapter ?? deferredProverAdapter(
         () => this.proverAdapter(),
@@ -2063,19 +2043,19 @@ export class ClairveilBrowserClient {
       expected_recipient_hash: body.expected_recipient_hash,
       expectedAmountHash: body.expectedAmountHash,
       expected_amount_hash: body.expected_amount_hash,
-      expiresAtUnix: body.expiresAtUnix,
-      expires_at_unix: body.expires_at_unix,
-      chainNowUnix: body.chainNowUnix,
-      chain_now_unix: body.chain_now_unix,
+      expiresAtUnix,
+      chainNowUnix,
       allowPlanStep,
       scan: scanOptions,
-      gasLimit: body.gasLimit,
-      gas_limit: body.gas_limit,
-      feeAmount: body.feeAmount,
-      fee_amount: body.fee_amount,
+      gasLimit,
+      feeAmount,
       reservationManager,
       ...(walletType === "evm" ? {
-        executionBuilder: this.evmDirectExecutionBuilder("transfer")
+        executionBuilder: this.evmDirectExecutionBuilder("transfer", {
+          expiresAtUnix,
+          chainNowUnix,
+          transactionOptions
+        })
       } : {})
     });
     if (prepared.status !== "ready") throw plannerError(prepared);
@@ -2099,52 +2079,7 @@ export class ClairveilBrowserClient {
       plan: prepared.plan
     };
     if (walletType !== "evm") {
-      const gasLimit = resolveBrowserCosmosGasLimit(body.gasLimit, body.gas_limit, 8000000);
-      const feeAmount = resolveBrowserCosmosFeeAmount(body.feeAmount, body.fee_amount);
-      const prepared = await this.cosmos.prepareTransfer({
-        proverAdapter: body.proverAdapter ?? body.prover_adapter ?? this.proverAdapter(),
-        material,
-        signal: body.signal,
-        recipient,
-        amount,
-        userPrivacyPolicy,
-        userDisclosureMode,
-        userDisclosureTargetPubKeyHex,
-        disableSelfViewDisclosure,
-        selfViewDisclosureTargetPubKeyHex,
-        auditDisclosureTargetPubKeyHex,
-        ...(operationEvidence.provided ? {
-          expectedRecipientHash: operationEvidence.expectedRecipientHash,
-          expectedAmountHash: operationEvidence.expectedAmountHash
-        } : {}),
-        expiresAtUnix,
-        chainNowUnix,
-        allowPlanStep,
-        scan: scanOptions,
-        gasLimit,
-        feeAmount,
-        reservationManager
-      });
-      if (prepared.status !== "ready") throw plannerError(prepared);
-      return {
-        ...reservationReconciliationFields(prepared),
-        signDoc: prepared.signDoc,
-        reservation: prepared.reservation || null,
-        prepared: {
-          ...prepared.prepared,
-          shieldedAddress: prepared.privacyAccount.shielded_address,
-          finalAmount: amount,
-          finalRecipient: recipient,
-          privacyPolicy: userPrivacyPolicy,
-          disclosureMode: userDisclosureMode,
-          planStatus: prepared.plan?.status || "",
-          planAction: prepared.prepared?.planAction || prepared.plan?.action || "",
-          payload: prepared.payload,
-          proof: prepared.proof,
-          message: prepared.message
-        },
-        plan: prepared.plan
-      };
+      return { ...common, signDoc: prepared.signDoc };
     }
     const transaction = prepared.execution?.transaction;
     const txBytesHash = String(
@@ -2156,94 +2091,46 @@ export class ClairveilBrowserClient {
     return { ...common, transaction, txBytesHash };
   }
 
-    const isFinal = plan.status === "final_transfer_ready";
-    assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
-      userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
-      userDisclosureMode: isFinal ? userDisclosureMode : "none"
-    });
-    const auditPubKeyHex = transferProtocolConfig.audit_config.audit_master_pubkey_hex;
-    const stepRecipient = isFinal ? recipient : material.shieldedAddress;
-    const stepAmount = isFinal ? amount : plan.nextAmount;
-    let reservationBatch = null;
-    try {
-      reservationBatch = await preparePlanReservation(reservationManager, {
-        plan,
-        kind: isFinal ? "transfer" : "self_merge",
-        metadata: {
-          amount: stepAmount,
-          recipient: stepRecipient,
-          finalAmount: amount,
-          finalRecipient: recipient
-        }
-      });
-      const heartbeatResult = await withReservationHeartbeat(reservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
-        const built = await this.cosmos.buildTransferMessage({
-          proverAdapter: body.proverAdapter ?? body.prover_adapter ?? this.proverAdapter(),
-          signal: body.signal,
-          creator: material.address,
-          inputs: plan.selection.inputs,
-          recipient: stepRecipient,
-          amount: stepAmount,
-          transferDenom: this.denom,
-          rootSeed: material.rootSeed,
-          shieldedPrefix: this.shieldedPrefix,
-          userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
-          userDisclosureMode: isFinal ? userDisclosureMode : "none",
-          userDisclosureTargetPubKeyHex: isFinal ? userDisclosureTargetPubKeyHex : "",
-          auditDisclosureTargetPubKeyHex: auditPubKeyHex,
-          disableSelfViewDisclosure,
-          selfViewDisclosureTargetPubKeyHex,
-          expiresAtUnix,
-          chainNowUnix
-        });
-        assertHeartbeatHealthy();
-        const evmBuilt = await this.evm.buildTransferTransaction({
-          message: built.message,
-          payload: built.payload,
-          proof: built.proof,
-          expiresAtUnix: built.payload.expires_at_unix,
-          chainNowUnix
-        });
-        let transaction = {
-          chainId: this.evmChainId,
-          gas: this.evmGasLimit,
-          ...evmBuilt.transaction
-        };
-        if (reservationBatch) transaction = markEvmTransactionReservationRequired(transaction);
-        const txBytesHash = reservationBatch ? evmTransactionBindingHash(transaction) : "";
-        await heartbeatNow();
-        await markReservationProofReady(reservationManager, reservationBatch, transferProofReadyMetadata(built, {
-          amount: stepAmount,
-          denom: this.denom,
-          expectedRecipientHash: isFinal ? operationEvidence.expectedRecipientHash : "",
-          expectedAmountHash: isFinal ? operationEvidence.expectedAmountHash : "",
-          txBytesHash
-        }, "txBytesHash"));
-        return { built, transaction };
-      });
-      const { built, transaction } = heartbeatResult;
+  evmDirectExecutionBuilder(operation, {
+    evmRecipient = "",
+    expiresAtUnix,
+    chainNowUnix,
+    transactionOptions
+  } = {}) {
+    if (!new Set(["transfer", "withdraw"]).has(operation)) {
+      throw new Error("unsupported direct EVM execution operation");
+    }
+    return async ({ message, payload, proof, proverPayload, selectedNote, reservation }) => {
+      const built = operation === "transfer"
+        ? await this.evm.buildTransferTransaction({
+            message,
+            payload,
+            proof,
+            expiresAtUnix,
+            chainNowUnix,
+            transactionOptions
+          })
+        : await this.evm.buildWithdrawTransaction({
+            message,
+            payload,
+            proof,
+            proverPayload,
+            selectedNote,
+            evmRecipient: evmRecipient || undefined,
+            chainNowUnix,
+            transactionOptions
+          });
+      let transaction = profileBoundEvmTransaction(
+        built.transaction,
+        this.evmChainId,
+        this.evmGasLimit
+      );
+      if (reservation) transaction = markEvmTransactionReservationRequired(transaction);
       return {
         executionTransport: "evm",
         transaction,
-        reservation: reservationBatchSummary(reservationBatch),
-        prepared: {
-          ...built,
-          planAction: isFinal ? "final_transfer" : "self_merge",
-          isFinal,
-          amount: stepAmount,
-          recipient: stepRecipient,
-          finalAmount: amount,
-          finalRecipient: recipient,
-          selectedInputTotal: plan.selection.total.toString(),
-          shieldedAddress: material.shieldedAddress,
-          privacyPolicy: userPrivacyPolicy,
-          disclosureMode: userDisclosureMode,
-          planStatus: plan.status,
-          expiresAtUnix: built.payload.expires_at_unix,
-          chainNowUnix,
-          reservation: reservationBatchSummary(reservationBatch)
-        },
-        plan
+        txBytesHash: evmTransactionBindingHash(transaction),
+        message: built.message || message
       };
     };
   }
@@ -2386,6 +2273,26 @@ export class ClairveilBrowserClient {
     const amounts = body.amounts;
     const recipient = body.recipient;
     const scanOptions = typedWalletScanOptionsFromBody(body);
+    const authorization = browserAliasedInputValue(
+      body,
+      "authorization",
+      "privacy_authorization",
+      "authorization",
+      canonicalBrowserAliasReference
+    );
+    const authorizationSigner = browserAliasedInputValue(
+      body,
+      "authorizationSigner",
+      "authorization_signer",
+      "authorizationSigner",
+      canonicalBrowserAliasReference
+    );
+    if (walletType !== "evm" && (authorization != null || authorizationSigner != null)) {
+      throw new Error("batch authorization is only supported for EVM wallet profiles");
+    }
+    const executionBuilder = walletType === "evm"
+      ? this.evmBatchTransferExecutionBuilder(body, { authorization, authorizationSigner })
+      : undefined;
     const prepared = await this.cosmos.prepareTransferBatch({
       proverAdapter: suppliedProverAdapter ?? this.proverAdapter(),
       material,
@@ -2653,6 +2560,15 @@ export class ClairveilBrowserClient {
     const recipient = evmRecipient ? evmAddressToBech32(evmRecipient, this.accountPrefix) : rawRecipient;
     const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
     const suppliedProverAdapter = body.proverAdapter ?? body.prover_adapter;
+    const transactionOptions = browserAliasedInputValue(
+      body,
+      "transactionOptions",
+      "transaction_options",
+      "transactionOptions",
+      canonicalBrowserAliasReference
+    );
+    const gasLimit = resolveBrowserCosmosGasLimit(body.gasLimit, body.gas_limit, 5000000);
+    const feeAmount = resolveBrowserCosmosFeeAmount(body.feeAmount, body.fee_amount);
     const prepared = await this.cosmos.prepareWithdraw({
       proverAdapter: suppliedProverAdapter ?? deferredProverAdapter(
         () => this.proverAdapter(),
@@ -2666,116 +2582,35 @@ export class ClairveilBrowserClient {
       scan: typedWalletScanOptionsFromBody(body),
       expiresAtUnix,
       chainNowUnix,
-      gasLimit: body.gasLimit,
-      gas_limit: body.gas_limit,
-      feeAmount: body.feeAmount,
-      fee_amount: body.fee_amount,
+      gasLimit,
+      feeAmount,
       reservationManager,
       ...(walletType === "evm" ? {
-        executionBuilder: this.evmDirectExecutionBuilder("withdraw", { evmRecipient })
+        executionBuilder: this.evmDirectExecutionBuilder("withdraw", {
+          evmRecipient,
+          expiresAtUnix,
+          chainNowUnix,
+          transactionOptions
+        })
       } : {})
     });
     if (prepared.status !== "ready") throw plannerError(prepared);
-
-    if (walletType !== "evm") {
-      const gasLimit = resolveBrowserCosmosGasLimit(body.gasLimit, body.gas_limit, 5000000);
-      const feeAmount = resolveBrowserCosmosFeeAmount(body.feeAmount, body.fee_amount);
-      const prepared = await this.cosmos.prepareWithdraw({
-        proverAdapter: body.proverAdapter ?? body.prover_adapter ?? this.proverAdapter(),
-        material,
-        signal: body.signal,
-        amount,
-        recipient,
-        scan: typedWalletScanOptionsFromBody(body),
-        expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
-        chainNowUnix: body.chainNowUnix ?? body.chain_now_unix,
-        gasLimit,
-        feeAmount,
-        reservationManager
-      });
-      if (prepared.status !== "ready") throw plannerError(prepared);
-      return {
-        ...reservationReconciliationFields(prepared),
-        signDoc: prepared.signDoc,
+    const message = prepared.execution?.message || prepared.message;
+    const common = {
+      ...reservationReconciliationFields(prepared),
+      payload: prepared.payload,
+      proof: prepared.proof,
+      message,
+      reservation: prepared.reservation || null,
+      prepared: {
+        shieldedAddress: prepared.privacyAccount.shielded_address,
+        amount: prepared.payload.amount,
+        recipient: prepared.payload.recipient,
+        ...(walletType === "evm" ? { evmRecipient } : {}),
+        selectedNoteNullifier: prepared.selectedNote?.nullifier || prepared.payload.nullifier_hex,
+        expiresAtUnix: prepared.payload.expires_at_unix,
         payload: prepared.payload,
         proof: prepared.proof,
-        message: prepared.message,
-        reservation: prepared.reservation || null,
-        prepared: {
-          shieldedAddress: prepared.privacyAccount.shielded_address,
-          amount: prepared.payload.amount,
-          recipient: prepared.payload.recipient,
-          selectedNoteNullifier: prepared.selectedNote?.nullifier || prepared.payload.nullifier_hex,
-          expiresAtUnix: prepared.payload.expires_at_unix,
-          payload: prepared.payload,
-          proof: prepared.proof,
-          message: prepared.message,
-          reservation: prepared.reservation || null
-        },
-        plan: prepared.plan
-      };
-    }
-
-    const scanOptions = typedWalletScanOptionsFromBody(body);
-    const scan = await this.cosmos.scanNotes({
-      rootSeed: material.rootSeed,
-      ...scanOptions,
-      limit: scanOptions.limit ?? 200,
-      maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
-      includeFoundNotes: true
-    });
-    const availableFoundNotes = await reservationAvailableNotes(reservationManager, scan.foundNotes);
-    const plan = planWithdrawNotes({ notes: availableFoundNotes, amount, denom: this.denom });
-    if (!plan.canBuildTx) throw plannerError({ status: plan.status, plan, scan });
-    assertPlanCanBuildTx(plan);
-    let reservationBatch = null;
-    try {
-      reservationBatch = await preparePlanReservation(reservationManager, {
-        plan,
-        kind: "withdraw",
-        metadata: {
-          amount,
-          recipient
-        }
-      });
-      const heartbeatResult = await withReservationHeartbeat(reservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
-        const built = await this.cosmos.buildWithdrawMessage({
-          proverAdapter: body.proverAdapter ?? body.prover_adapter ?? this.proverAdapter(),
-          signal: body.signal,
-          creator: material.address,
-          notes: [plan.selectedNote],
-          amount,
-          assetDenom: this.denom,
-          recipient,
-          rootSeed: material.rootSeed,
-          chainId: this.chainId,
-          expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
-          chainNowUnix: body.chainNowUnix ?? body.chain_now_unix
-        });
-        assertHeartbeatHealthy();
-        const message = evmRecipient ? { ...built.message, evmRecipient } : built.message;
-        const evmBuilt = await this.evm.buildWithdrawTransaction({
-          message,
-          payload: built.payload,
-          proof: built.proof
-        });
-        let transaction = {
-          chainId: this.evmChainId,
-          gas: this.evmGasLimit,
-          ...evmBuilt.transaction
-        };
-        if (reservationBatch) transaction = markEvmTransactionReservationRequired(transaction);
-        const txBytesHash = reservationBatch ? evmTransactionBindingHash(transaction) : "";
-        await heartbeatNow();
-        await markReservationProofReady(reservationManager, reservationBatch, withdrawProofReadyMetadata(built, { txBytesHash }));
-        return { built, transaction, message };
-      });
-      const { built, transaction, message } = heartbeatResult;
-      return {
-        ...reservationReconciliationFields(heartbeatResult),
-        transaction,
-        payload: built.payload,
-        proof: built.proof,
         message,
         reservation: prepared.reservation || null
       },
@@ -2829,9 +2664,16 @@ export class ClairveilBrowserClient {
       amount,
       recipient,
       scan: typedWalletScanOptionsFromBody(body),
-      expiresAtUnix: body.expiresAtUnix ?? body.expires_at_unix,
-      chainNowUnix: relayChainNowUnixFromBody(body),
-      reservationManager
+      expiresAtUnix,
+      chainNowUnix,
+      reservationManager,
+      ...(walletType === "evm" ? {
+        executionBuilder: this.evmDirectExecutionBuilder("withdraw", {
+          evmRecipient,
+          chainNowUnix,
+          transactionOptions
+        })
+      } : {})
     });
     if (prepared.status !== "ready") throw plannerError(prepared);
     if (walletType === "evm") {
@@ -2920,29 +2762,6 @@ export class ClairveilBrowserClient {
   async scanWalletNotes(body) {
     const material = this.privacyMaterial(body);
     const {
-      after,
-      afterHeight,
-      after_height,
-      afterSequence,
-      after_sequence,
-      page,
-      limit,
-      maxPages,
-      max_pages,
-      eventTypes,
-      event_types,
-      outputLimit,
-      output_limit,
-      eventLimit,
-      event_limit,
-      maxEncodedBytes,
-      max_encoded_bytes,
-      validationStateSnapshot,
-      validation_state_snapshot,
-      scanSource,
-      scan_source,
-      strictPrivacyScan,
-      strict_privacy_scan,
       noteStore,
       note_store,
       includeFoundNotes = false
@@ -2950,29 +2769,7 @@ export class ClairveilBrowserClient {
     const scanOptions = typedWalletScanOptionsFromBody(body);
     return this.cosmos.scanWalletNotes({
       material,
-      after,
-      afterHeight,
-      after_height,
-      afterSequence,
-      after_sequence,
-      page,
-      limit,
-      maxPages,
-      max_pages,
-      eventTypes,
-      event_types,
-      outputLimit,
-      output_limit,
-      eventLimit,
-      event_limit,
-      maxEncodedBytes,
-      max_encoded_bytes,
-      validationStateSnapshot,
-      validation_state_snapshot,
-      scanSource,
-      scan_source,
-      strictPrivacyScan,
-      strict_privacy_scan,
+      ...scanOptions,
       noteStore: noteStore ?? note_store,
       includeFoundNotes
     });

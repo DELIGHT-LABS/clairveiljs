@@ -981,14 +981,27 @@ export function validatePreparedTransferV5Proof(payload, proof, { nowUnix } = {}
   return true;
 }
 
-export function buildTransferV5MsgFromPayloadAndProof(payload, proof, { nowUnix, creator } = {}) {
+export function buildTransferV5MsgFromPayloadAndProof(payload, proof, {
+  nowUnix,
+  creator,
+  expectedChainId,
+  expected_chain_id
+} = {}) {
   validatePreparedTransferV5Proof(payload, proof, { nowUnix });
-  const messageCreator = String(creator ?? payload.creator ?? "").trim();
-  if (!messageCreator) throw new Error("transfer message creator is required");
+  if (expectedChainId != null && expected_chain_id != null &&
+      String(expectedChainId) !== String(expected_chain_id)) {
+    throw new Error("expected transfer chain ID aliases conflict");
+  }
+  const expectedChain = String(expectedChainId ?? expected_chain_id ?? "").trim();
+  if (expectedChain && payload.chain_id !== expectedChain) {
+    throw new Error(`prepared transfer chain ID mismatch: expected ${expectedChain}, got ${payload.chain_id}`);
+  }
+  const sender = String(creator ?? payload.creator ?? "").trim();
+  if (!sender) throw new Error("transfer creator is required");
   return {
-    // Creator is deliberately outside the canonical proof effect. A relayer
-    // may replace it without rebuilding the payload or proof.
-    creator: messageCreator,
+    // The proof binds owner intent, chain, expiry, outputs, and disclosures;
+    // creator is deliberately replaceable as the Cosmos fee payer/relayer.
+    creator: sender,
     proof: bytesFromHex(proof.proof_hex, "transfer v5 proof"),
     root: bytesFromHex(payload.root_hex, "transfer v5 root"),
     nullifiers: payload.inputs.map((input, index) => bytesFromHex(input.nullifier_hex, `transfer v5 nullifier ${index}`)),

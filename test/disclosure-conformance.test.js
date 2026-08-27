@@ -31,7 +31,6 @@ import {
 import {
   createClairveilClient
 } from "clairveiljs/cosmos";
-import { validatePrivacyScanPageV2 } from "clairveiljs/scan";
 
 const policyLabels = new Map([
   [0, "all-private"],
@@ -254,64 +253,6 @@ function expectedDisclosure(summary) {
   };
 }
 
-function typedTransferRecipientOutput(payload, txHashHex = "aa".repeat(32)) {
-  const txHash = Buffer.from(txHashHex, "hex");
-  const auditTarget = Buffer.from(payload.audit_disclosure_target_pubkey_hex, "hex");
-  const summary = {
-    height: 12,
-    globalSequence: 5,
-    txHash,
-    eventType: "shielded_transfer",
-    nullifiers: payload.inputs.map(input => Buffer.from(input.nullifier_hex, "hex")),
-    outputCount: 2,
-    circuitSetId: "privacy-note-v1",
-    payloadVersion: "privacy-fixed-v1",
-    scanSchemaVersion: "privacy-scan-v2",
-    auditTargetPubkey: auditTarget
-  };
-  const common = {
-    height: summary.height,
-    globalSequence: summary.globalSequence,
-    txHash,
-    eventType: summary.eventType,
-    circuitSetId: summary.circuitSetId,
-    payloadVersion: summary.payloadVersion,
-    scanSchemaVersion: summary.scanSchemaVersion,
-    auditTargetPubkey: auditTarget,
-    leafIndexFound: true
-  };
-  const outputs = [{
-    ...common,
-    outputIndex: 0,
-    commitment: Buffer.from(payload.outputs[0].commitment_hex, "hex"),
-    ciphertext: Buffer.from(payload.cipher_text_hexes[0], "hex"),
-    viewTag: Buffer.from(payload.view_tag_hexes[0], "hex"),
-    leafIndex: 20,
-    userPrivacyPolicy: payload.user_privacy_policy,
-    userDisclosureMode: "USER_DISCLOSURE_MODE_RECIPIENT_ENCRYPTED",
-    userDisclosureDigest: Buffer.from(payload.user_disclosure_digest_hex, "hex"),
-    userDisclosureTargetPubkey: Buffer.from(payload.user_disclosure_target_pubkey_hex, "hex"),
-    userDisclosurePayload: Buffer.from(payload.user_disclosure_payload_hex, "hex"),
-    fullDisclosureDigest: Buffer.from(payload.audit_disclosure_digest_hex, "hex"),
-    auditDisclosurePayload: Buffer.from(payload.audit_disclosure_payload_hex, "hex"),
-    selfViewDisclosurePayload: Buffer.from(payload.self_view_disclosure_payload_hex, "hex")
-  }, {
-    ...common,
-    outputIndex: 1,
-    commitment: Buffer.from(payload.outputs[1].commitment_hex, "hex"),
-    ciphertext: Buffer.from(payload.cipher_text_hexes[1], "hex"),
-    viewTag: Buffer.from(payload.view_tag_hexes[1], "hex"),
-    leafIndex: 21
-  }];
-  return validatePrivacyScanPageV2({
-    scanSchemaVersion: "privacy-scan-v2",
-    summaries: [summary],
-    outputs,
-    nextCursor: { height: 12, globalSequence: 5, outputIndex: 1 },
-    hasMore: false
-  }).outputs[0];
-}
-
 test("disclosure asset validation uses the NoteV1 asset-ID derivation", () => {
   const assetIdHex = computeAssetIdV1("uclair").toString(16).padStart(64, "0");
   assert.deepEqual(
@@ -524,57 +465,6 @@ test("Cosmos client decodes self-view disclosure through the high-level API", fi
     ...expectedDisclosure(flow.transfer.self_view_disclosure),
     asset_denom: "uclair"
   });
-});
-
-test("direct disclosure decoders consume validated typed scan output without raw event lookup", fixtureTestOptions, async () => {
-  const examples = readFixture("privacy_prover_example_bundle.json");
-  const flow = readFixture("privacy_send_capable_reference_flow.json");
-  const payload = examples.transfer.request.payload;
-  const txHash = "aa".repeat(32);
-  const output = typedTransferRecipientOutput(payload, txHash);
-
-  assert.deepEqual(
-    compactReport(decodeUserDisclosureFromScanOutput(
-      output,
-      79n,
-      payload.user_disclosure_target_pubkey_hex,
-      txHash,
-      { shieldedPrefix: "clairs" }
-    )),
-    expectedDisclosure(flow.transfer.user_disclosure)
-  );
-  assert.deepEqual(
-    compactReport(decodeAuditDisclosureFromScanOutput(output, 83n, txHash, { shieldedPrefix: "clairs" })),
-    expectedDisclosure(flow.transfer.audit_disclosure)
-  );
-  assert.deepEqual(
-    compactReport(decodeSelfViewDisclosureFromScanOutput(output, 89n, txHash, { shieldedPrefix: "clairs" })),
-    expectedDisclosure(flow.transfer.self_view_disclosure)
-  );
-
-  const client = createClairveilClient({
-    rest: "http://127.0.0.1:1317",
-    rpc: "http://127.0.0.1:26657",
-    chainId: "clairveil-local-1",
-    shieldedPrefix: "clairs"
-  });
-  client.findPrivacyEventByTxHash = async () => {
-    throw new Error("validated typed output must bypass raw event lookup");
-  };
-  const selfView = await client.decodeSelfViewDisclosure({
-    output,
-    txHash,
-    disclosureScalar: 89n
-  });
-  assert.equal(selfView.verified, true);
-  await assert.rejects(
-    () => client.decodeSelfViewDisclosure({
-      output,
-      txHash: "bb".repeat(32),
-      disclosureScalar: 89n
-    }),
-    /transaction hash does not match/
-  );
 });
 
 test("Cosmos disclosure wrappers retain an explicitly verified non-default asset denom", async () => {

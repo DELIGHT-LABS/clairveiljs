@@ -71,6 +71,7 @@ import {
   noteReservationContractVersionV3,
   readClairveilConformanceFixture,
   runClairveilConformanceFixtures,
+  supportedClairveilRelease,
   supportedClairveilCommit,
   supportedClairveilSourceKind,
   suggestClairveilConformanceFixtureDirs,
@@ -578,6 +579,7 @@ test("conformance helper defaults use the bundled commit fixture snapshot", () =
     `fixtures/clairveil-v0.3.1/${conformanceFixtureRelativePath}`
   );
   assert.equal(clairveilConformanceBundleVersion, "v0.3.1");
+  assert.equal(supportedClairveilRelease, clairveilConformanceBundleVersion);
   assert.equal(supportedClairveilSourceKind, "commit_snapshot");
   assert.equal(supportedClairveilCommit, "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b");
   assert.ok(

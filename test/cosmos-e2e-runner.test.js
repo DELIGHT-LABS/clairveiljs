@@ -61,7 +61,7 @@ test("Cosmos release E2E exercises final privacy broadcast fences", () => {
   );
   assert.match(
     e2eSource,
-    /signDirectAndBroadcast\(\{[\s\S]*?signDoc: signDoc\.sign_doc,[\s\S]*?reservationManager,[\s\S]*?reservation: reservationBatch,[\s\S]*?getChainNowUnix:/
+    /retransmitOneProofPayrollArtifact\(signedArtifact,\s*\{[\s\S]*?reservationManager,[\s\S]*?retryDecision:[\s\S]*?broadcastSignedTx:\s*bytes\s*=>\s*client\.broadcastTxRawBytes\(bytes,\s*\{[\s\S]*?reservationManager,[\s\S]*?reservation:\s*reservationBatch,[\s\S]*?getChainNowUnix:/
   );
   assert.doesNotMatch(e2eSource, /markOneProofPayrollReservationBroadcastAttempting/);
   assert.doesNotMatch(e2eSource, /markOneProofPayrollReservationSubmitted/);

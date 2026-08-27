@@ -707,6 +707,28 @@ reconcile API만 노출합니다. Exact 전이·evidence 표는
   현재 lease가 필요합니다.
 - Relay payload를 노출하기 전 `recordRelayHandoff(...)`를 영속화하세요.
   Handoff 후에는 TTL이나 cancel로 release하지 말고 chain evidence를 reconcile합니다.
+
+```js
+await reservationManager.recordRelayHandoff(
+  prepared.reservation.reservation_ids,
+  {
+    leaseToken: prepared.reservation.lease_token,
+    payloadHash: prepared.payload.payload_hash
+  }
+);
+
+const relayResponse = await sendToExternalRelayer(prepared.payload);
+const inclusion = await findIncludedRelayTransaction(relayResponse.txHash);
+await reservationManager.recordRelayTransactionEvidence({
+  operationId: prepared.reservation.reservations[0].operation_id,
+  payloadHash: prepared.payload.payload_hash,
+  txHash: inclusion.txHash,
+  checkedHeight: inclusion.height,
+  transactionIncludedConfirmed: true,
+  payloadHashMatched: true
+});
+```
+
 - `Reserved`만 자동 release할 수 있습니다. `Proving`/`ProofReady` 실패는
   `ManualReview`로 격리하고, 만료된 `ProofReady`는 단순 tx 부재가 아니라
   exact transaction 실패와 모든 input unspent를 증명하는 전용 복구만

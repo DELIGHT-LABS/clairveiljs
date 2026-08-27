@@ -103,13 +103,10 @@ function readManifest(manifestPath) {
   }
 }
 
-export function verifyVendoredClairveilContractSnapshot({
-  packageRoot = defaultPackageRoot,
-  clairveilSourceRoot = process.env.CLAIRVEIL_SOURCE_DIR || defaultClairveilSourceRoot
+function inspectBundledClairveilContractSnapshot({
+  packageRoot = defaultPackageRoot
 } = {}) {
   const resolvedPackageRoot = resolve(packageRoot);
-  const resolvedClairveilSourceRoot = resolve(clairveilSourceRoot);
-  verifyClairveilCommitObject(resolvedClairveilSourceRoot);
   const manifestPath = join(
     resolvedPackageRoot,
     clairveilContractManifestRelativePath
@@ -197,6 +194,37 @@ export function verifyVendoredClairveilContractSnapshot({
         `${entry.local_path} SHA-256 is ${actualSha256}; expected ${entry.sha256}`
       );
     }
+    files.push({ entry, localFilePath });
+  }
+
+  return {
+    result: {
+      bundleVersion: clairveilConformanceBundleVersion,
+      sourceKind: supportedClairveilSourceKind,
+      commit: supportedClairveilCommit,
+      manifestPath,
+      fileCount: expectedFiles.length,
+      protobufCount: clairveilProtoContractRelativePaths.length,
+      fixtureCount: defaultConformanceFixtureNames.length,
+      schemaCount: 1
+    },
+    files
+  };
+}
+
+export function verifyBundledClairveilContractSnapshot(options = {}) {
+  return inspectBundledClairveilContractSnapshot(options).result;
+}
+
+export function verifyVendoredClairveilContractSnapshot({
+  packageRoot = defaultPackageRoot,
+  clairveilSourceRoot = process.env.CLAIRVEIL_SOURCE_DIR || defaultClairveilSourceRoot
+} = {}) {
+  const { result, files } = inspectBundledClairveilContractSnapshot({ packageRoot });
+  const resolvedClairveilSourceRoot = resolve(clairveilSourceRoot);
+  verifyClairveilCommitObject(resolvedClairveilSourceRoot);
+
+  for (const { entry, localFilePath } of files) {
     const localBytes = readFileSync(localFilePath);
     const upstreamBytes = clairveilCommitFile(
       resolvedClairveilSourceRoot,
@@ -211,15 +239,8 @@ export function verifyVendoredClairveilContractSnapshot({
   }
 
   return {
-    bundleVersion: clairveilConformanceBundleVersion,
-    sourceKind: supportedClairveilSourceKind,
-    commit: supportedClairveilCommit,
-    clairveilSourceRoot: resolvedClairveilSourceRoot,
-    manifestPath,
-    fileCount: expectedFiles.length,
-    protobufCount: clairveilProtoContractRelativePaths.length,
-    fixtureCount: defaultConformanceFixtureNames.length,
-    schemaCount: 1
+    ...result,
+    clairveilSourceRoot: resolvedClairveilSourceRoot
   };
 }
 

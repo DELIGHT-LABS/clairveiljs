@@ -409,6 +409,54 @@ test("typed privacy scan rejects a resumed summary that shrinks its original out
   assert.equal(state.pending_summary_by_event.get("10/4").output_count, 2);
 });
 
+test("typed privacy scan rejects a mid-event resume with missing or empty validation state", async () => {
+  const changed = validBatchPage({ selfViewEnabled: false });
+  const changedEffectId = canonicalFieldBytes(61n);
+  const changedTxHash = new Uint8Array(32).fill(8);
+  const summary = {
+    ...changed.summaries[0],
+    effectId: changedEffectId,
+    txHash: changedTxHash
+  };
+  const resumedPage = {
+    ...changed,
+    summaries: [summary],
+    outputs: [{
+      ...changed.outputs[1],
+      effectId: changedEffectId,
+      txHash: changedTxHash
+    }]
+  };
+  const after = { height: 10, globalSequence: 4, outputIndex: 0 };
+
+  assert.throws(
+    () => validatePrivacyScanPageV2(resumedPage, { after }),
+    /mid-event resume requires pending summary validation state/
+  );
+  assert.throws(
+    () => validatePrivacyScanPageV2(resumedPage, {
+      after,
+      validationState: createPrivacyScanValidationStateV2()
+    }),
+    /mid-event resume requires pending summary validation state/
+  );
+
+  const client = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-test-1"
+  });
+  client.fetchPrivacyScan = async () => resumedPage;
+  await assert.rejects(
+    () => client.scanNotes({
+      rootSeed: new Uint8Array(32).fill(9),
+      after,
+      maxPages: 1
+    }),
+    /mid-event resume requires pending summary validation state/
+  );
+});
+
 test("typed privacy scan preserves pending summary identity across serialization and restart", () => {
   const { batch, firstPage, state } = pendingBatchFixture();
   const restored = roundTripValidationState(state);
@@ -548,32 +596,12 @@ test("Cosmos typed scan rejects a tampered continuation before exposing a partia
     rest: "http://127.0.0.1:1317",
     chainId: "clairveil-test-1"
   });
-  client.fetchPrivacyScan = async () => firstPage;
-  const first = await client.scanNotes({ rootSeed: new Uint8Array(32).fill(9), maxPages: 1 });
-  assert.deepEqual(first.scanCursor.validation_state, {
-    version: "privacy-scan-validation-v2",
-    batch_self_view_by_event: [{ event_key: "10/4", self_view_enabled: true }],
-    pending_summary_by_event: [{
-      event_key: "10/4",
-      tx_hash: "07".repeat(32),
-      event_type: "batch_transfer",
-      last_output_index: 0,
-      nullifiers: ["00".repeat(31) + "35"],
-      output_count: 2,
-      circuit_set_id: "privacy-note-v1",
-      payload_version: "privacy-fixed-v1",
-      scan_schema_version: "privacy-scan-v2",
-      audit_key_id: "audit-key-1",
-      audit_key_epoch: "1",
-      audit_target_pubkey: Buffer.from(batch.summaries[0].auditTargetPubkey).toString("hex"),
-      effect_id: "00".repeat(31) + "3b"
-    }]
-  });
-  assert.deepEqual(first.nextScanOptions.validationStateSnapshot, first.scanCursor.validation_state);
-
-  // JSON round-tripping is what a NoteStore/process restart does to the cursor.
-  const resumed = JSON.parse(JSON.stringify(first.nextScanOptions));
-  client.fetchPrivacyScan = async () => finalPage;
+  const requests = [];
+  const pages = [firstPage, finalPage];
+  client.fetchPrivacyScan = async request => {
+    requests.push(request);
+    return pages.shift();
+  };
   await assert.rejects(
     () => client.scanNotes({ rootSeed: new Uint8Array(32).fill(9), maxPages: 1 }),
     /self-view disclosure must be all-or-none/

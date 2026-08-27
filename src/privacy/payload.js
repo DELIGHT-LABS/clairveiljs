@@ -556,7 +556,10 @@ export async function buildTransferMessage({ proverAdapter, ...input } = {}) {
   return {
     payload,
     proof,
-    message: buildTransferMsgFromPayloadAndProof(payload, proof, { nowUnix: chainNowUnix })
+    message: buildTransferMsgFromPayloadAndProof(payload, proof, {
+      nowUnix: chainNowUnix,
+      expectedChainId: input.chainId
+    })
   };
 }
 

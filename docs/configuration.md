@@ -148,12 +148,12 @@ An EVM profile additionally requires the following values alongside the Clairvei
 | `evmPrivacyPrecompileAddress` | 20-byte `IPrivacy` precompile address provided by the target/downstream chain |
 | `evmGasLimit` | Hex quantity for privacy transactions |
 | `evmSendGasLimit` | Hex quantity for native sends |
-| `evmDepositMode` | `nonpayable` by default, or explicit `payable-exact-value` |
+| `evmDepositMode` | Browser EVM profiles require the canonical `payable-exact-value` mode |
 | `evmNativeDenom` | Required for payable deposits and must exactly equal `denom` |
 
 The common `chainId` is the Clairveil payload domain and `evmChainId` is the EVM network ID; they are not interchangeable. Before preparing a proof or transaction, the SDK verifies that both configured `evmRpc` and the connected signing wallet match `evmChainId`.
 
-Use `payable-exact-value` only when the downstream chain provides the Clairveil v0.3.1 exact-value deposit ABI and accounting. The SDK binds the minimal-unit amount exactly to `msg.value` and rejects client creation when `evmNativeDenom !== denom`.
+Browser EVM profiles target the Clairveil v0.3.1 exact-value deposit ABI and therefore require `payable-exact-value`. The SDK binds the minimal-unit amount exactly to `msg.value` and rejects client creation when `evmNativeDenom !== denom`. A generic EVM client may explicitly select `nonpayable` only as a compatibility setting for a legacy downstream deployment.
 
 ```js
 const evmProfile = {

@@ -648,7 +648,11 @@ export function createOneProofPayrollBatchSignDoc(execution: ProvenOneProofPayro
   memo?: string;
   nowUnix?: number;
 }): Promise<{ operation_evidence: OneProofPayrollOperationEvidence; message: object; sign_doc: SignDocBase64 }>;
-export function markOneProofPayrollReservationProofReady(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, options?: { metadata?: ReservationMetadata }): Promise<readonly NoteReservationRecord[]>;
+export function markOneProofPayrollReservationProofReady(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, options?: {
+  signDocHash?: string;
+  sign_doc_hash?: string;
+  metadata?: ReservationMetadata;
+}): Promise<readonly NoteReservationRecord[]>;
 export function markOneProofPayrollReservationBroadcastAttempting(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, input: OneProofPayrollBroadcastAttempt): Promise<readonly NoteReservationRecord[]>;
 export function markOneProofPayrollReservationSubmitted(reservationManager: NoteReservationManager, reservationBatch: OneProofPayrollReservationBatch, execution: ProvenOneProofPayrollOperation, input: OneProofPayrollSubmittedBroadcast): Promise<readonly NoteReservationRecord[]>;
 export function reconcileOneProofPayrollOperationEvidence(input: {

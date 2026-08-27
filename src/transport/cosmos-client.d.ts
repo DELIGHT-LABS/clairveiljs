@@ -1045,26 +1045,24 @@ type FinalizePreparedBatchTransferExecutionInput =
       executionBuilder: PreparedBatchTransferExecutionBuilder;
       pubKeyHex?: Hex;
       gasLimit?: number | bigint;
+      gas_limit?: number | bigint;
     }
-  | {
+  | ({
       executionBuilder?: never;
       pubKeyHex: Hex;
-      gasLimit: number | bigint;
-    };
+    } & (
+      | { gasLimit: number | bigint; gas_limit?: number | bigint }
+      | { gasLimit?: number | bigint; gas_limit: number | bigint }
+    ));
 
 export type FinalizePreparedBatchTransferInput = {
   payload: PreparedBatchTransferPayload;
   proof: PreparedBatchTransferProof;
   signer: ClairAddress | string;
-  pubKeyHex: Hex;
-  gasLimit?: number | bigint;
-  gas_limit?: number | bigint;
   /** Exact profile/caller-selected fee coins embedded in the recovered ProofReady sign doc. */
   feeAmount?: readonly CosmosFeeCoin[];
   fee_amount?: readonly CosmosFeeCoin[];
   memo?: string;
-  feeAmount?: readonly CosmosFeeCoin[];
-  fee_amount?: readonly CosmosFeeCoin[];
   userPrivacyPolicy?: string | number;
   userDisclosureMode?: string | number;
   userDisclosureTargetPubKeyHex?: Hex;
@@ -1408,8 +1406,8 @@ export class ClairveilJS {
   } & CosmosRelayWithdrawRelayOptions): Promise<PreparedRelayWithdrawSignDoc>;
   decodeUserDisclosure(input: {
     /** Validator-issued shielded-transfer recipient output; avoids raw event lookup. */
-    output?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
-    scanOutput?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
+    output?: import("../core/disclosure.js").PrivacyScanDisclosureOutputV2;
+    scanOutput?: import("../core/disclosure.js").PrivacyScanDisclosureOutputV2;
     txHash?: Hex;
     tx_hash?: Hex;
     address?: ClairAddress;
@@ -1432,8 +1430,8 @@ export class ClairveilJS {
   } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
   decodeSelfViewDisclosure(input: {
     /** Validator-issued shielded-transfer recipient output; avoids raw event lookup. */
-    output?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
-    scanOutput?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
+    output?: import("../core/disclosure.js").PrivacyScanDisclosureOutputV2;
+    scanOutput?: import("../core/disclosure.js").PrivacyScanDisclosureOutputV2;
     txHash?: Hex;
     tx_hash?: Hex;
     address?: ClairAddress;
@@ -1454,8 +1452,8 @@ export class ClairveilJS {
   } & PrivacyScanOptions): Promise<import("../core/disclosure.js").DisclosureReport>;
   decodeAuditDisclosure(input: {
     /** Validator-issued shielded-transfer recipient output; avoids raw event lookup. */
-    output?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
-    scanOutput?: import("../core/disclosure.js").TransferPrivacyScanDisclosureOutputV2;
+    output?: import("../core/disclosure.js").PrivacyScanDisclosureOutputV2;
+    scanOutput?: import("../core/disclosure.js").PrivacyScanDisclosureOutputV2;
     txHash?: Hex;
     tx_hash?: Hex;
     disclosurePrivKeyHex?: Hex;

@@ -64,8 +64,8 @@
     "test:release-source": "CLAIRVEIL_RELEASE_SOURCE_TESTS=1 node --test test/clairveil-release-contract.test.js",
     "verify:clairveil-source": "node tools/verify-clairveil-source.js",
     "verify:package": "npm run check && npm run typecheck && npm test",
-    "verify:release": "npm run verify:package && npm run check:proto-freshness && npm run verify:clairveil-source && npm run test:conformance:required",
-    "verify:release:integration": "npm run verify:release && npm run test:e2e:local:one-proof-all && CLAIRVEIL_EVM_PAYABLE_E2E_REQUIRED=1 npm run test:e2e:evm-payable",
+    "verify:release": "npm run verify:package && npm run check:proto-freshness && npm run verify:clairveil-source && npm run test:release-source && npm run test:conformance:required",
+    "verify:release:integration": "npm run verify:release && npm run test:e2e:local:one-proof-all && npm run test:e2e:cosmos:testnet && npm run test:e2e:evm:one-proof-all && CLAIRVEIL_EVM_PAYABLE_E2E_REQUIRED=1 npm run test:e2e:evm-payable",
     "prepack": "npm run verify:package",
     "prepublishOnly": "npm run verify:release:integration"
   },

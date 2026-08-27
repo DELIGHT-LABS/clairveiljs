@@ -508,6 +508,7 @@ async function markBroadcastReservationRejected(context, error) {
   try {
     await context.reservationManager.markBroadcastRejected(context.reservationIDs, {
       leaseToken: context.leaseToken,
+      error: "wallet_rejected_before_broadcast",
       providerCode: "4001"
     });
   } catch (bookkeepingError) {
@@ -939,6 +940,10 @@ function requiredUint(value, label, bits = 256) {
     throw new Error(`${label} must be a uint${bits}`);
   }
   return parsed;
+}
+
+function requiredUint64(value, label) {
+  return requiredUint(value, label, 64);
 }
 
 function strictTransferUnix(value, label) {

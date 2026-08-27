@@ -145,7 +145,7 @@ export function validatePreparedTransferPayloadMetadata(payload: PreparedTransfe
 export function computePreparedTransferPayloadHash(payload: PreparedTransferPayload): Hex;
 export function buildPreparedTransferPayload(input: PreparedTransferPayloadInput & { chainNowUnix: number }): Promise<PreparedTransferPayload>;
 export function validatePreparedTransferProof(payload: PreparedTransferPayload, proof: PreparedTransferProof, options?: { nowUnix?: number }): true;
-export function buildTransferMsgFromPayloadAndProof(payload: PreparedTransferPayload, proof: PreparedTransferProof, options?: { nowUnix?: number; creator?: string }): TransferMessage;
+export function buildTransferMsgFromPayloadAndProof(payload: PreparedTransferPayload, proof: PreparedTransferProof, options?: TransferMessageBuildOptions): TransferMessage;
 export type NullifierUsage =
   | boolean
   | { used: boolean; Used?: never }

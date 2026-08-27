@@ -18,7 +18,10 @@ All notable changes to ClairveilJS are documented in this file.
 - Aligned the package contract snapshot with Clairveil core commit
   `621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b` without mislabeling that divergent
   snapshot as the immutable Clairveil core `v0.3.1` tag.
-- Kept the default EVM deposit mode nonpayable for existing deployments.
+- Made payable exact-value the default EVM deposit mode; explicit nonpayable mode remains an opt-in compatibility setting.
+- Kept deprecated public aliases for the v0.3.1 bundle label and legacy EVM
+  precompile constants, while requiring every EVM client to use an explicit
+  chain-configured privacy contract address.
 - Reject non-zero EVM value on nonpayable deposits, transfers, and withdrawals.
 - Require downstream payable EVM evidence for publish releases, covering
   successful escrow funding, policy-failure rollback, and zero-value deposits.

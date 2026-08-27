@@ -110,7 +110,7 @@ import {
   resolveCosmosFeeAmount,
   resolveCosmosGasLimit,
   resolveDirectOperationEvidenceHashes,
-  transferProofReadyMetadata
+  transferProofReadyMetadata as baseTransferProofReadyMetadata
 } from "./cosmos-options.js";
 import {
   createPrivacyScanValidationStateV2,
@@ -268,6 +268,23 @@ function normalizedTransferUnix(value, label) {
     throw new Error(`transfer ${label} must be a non-negative safe integer`);
   }
   return unix;
+}
+
+function resolveUnixTimestampAlias(camelValue, snakeValue, name) {
+  const normalize = (value, label) => {
+    const unixTimestamp = Number(value);
+    if (!Number.isSafeInteger(unixTimestamp) || unixTimestamp < 0) {
+      throw new Error(`${label} must be a non-negative safe integer unix timestamp`);
+    }
+    return unixTimestamp;
+  };
+  const camel = camelValue == null ? null : normalize(camelValue, name);
+  const snakeLabel = name.replace(/[A-Z]/g, match => `_${match.toLowerCase()}`);
+  const snake = snakeValue == null ? null : normalize(snakeValue, snakeLabel);
+  if (camel !== null && snake !== null && camel !== snake) {
+    throw new Error(`${name} aliases conflict`);
+  }
+  return camel ?? snake ?? undefined;
 }
 
 function aliasedTransferUnix(camelValue, snakeValue, label) {
@@ -434,6 +451,76 @@ function assertExpectedBatchEvidence(expected, actual, label) {
   if (normalized && normalized !== actual) {
     throw new Error(`${label} does not match the final prepared batch payload`);
   }
+}
+
+function buildDirectOperationEvidenceHashes({
+  assertions,
+  recipient,
+  amount,
+  denom,
+  shieldedPrefix
+}) {
+  const coin = parseCoin(amount, denom);
+  const expectedRecipientHash = hashRecipient(recipient, { shieldedPrefix });
+  const expectedAmountHash = hashAmount(coin.denom, coin.amount);
+  const assertedRecipientHash = canonicalBatchEvidenceDigest(
+    assertions?.expectedRecipientHash,
+    "expectedRecipientHash",
+    { optional: true }
+  );
+  const assertedAmountHash = canonicalBatchEvidenceDigest(
+    assertions?.expectedAmountHash,
+    "expectedAmountHash",
+    { optional: true }
+  );
+  if (assertedRecipientHash && assertedRecipientHash !== expectedRecipientHash) {
+    throw new Error("expectedRecipientHash does not match the transfer recipient");
+  }
+  if (assertedAmountHash && assertedAmountHash !== expectedAmountHash) {
+    throw new Error("expectedAmountHash does not match the transfer amount");
+  }
+  return { expectedRecipientHash, expectedAmountHash, expectedDenom: coin.denom };
+}
+
+function proofReadyInputNullifiers(values, operation) {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new Error(`${operation} ProofReady metadata requires input nullifiers`);
+  }
+  const normalized = values.map((value, index) => {
+    const nullifier = String(value ?? "").trim().replace(/^0x/i, "").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(nullifier)) {
+      throw new Error(`${operation} input nullifier at index ${index} is invalid`);
+    }
+    return nullifier;
+  });
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error(`${operation} ProofReady metadata contains duplicate input nullifiers`);
+  }
+  return normalized;
+}
+
+function transferProofReadyMetadata(built, context = {}, bindingField) {
+  const metadata = baseTransferProofReadyMetadata(built, context, bindingField);
+  const inputNullifiers = proofReadyInputNullifiers(
+    (built?.payload?.inputs || []).map(input => input?.nullifier_hex),
+    "transfer"
+  );
+  const executionTransport = context.executionTransport ?? context.execution_transport;
+  const batchItemIndex = context.batchItemIndex ?? context.batch_item_index;
+  const batchItemIndexKnown = context.batchItemIndexKnown ?? context.batch_item_index_known;
+  return {
+    ...metadata,
+    ...(executionTransport ? { executionTransport } : {}),
+    // A direct transfer has one recipient output, but it is not a batch item.
+    // Batch preparation must opt into item-index evidence explicitly.
+    batchItemIndexKnown: batchItemIndexKnown ?? (
+      batchItemIndex !== undefined && batchItemIndex !== null
+    ),
+    metadata: {
+      ...(metadata.metadata || {}),
+      input_nullifier_hexes: inputNullifiers
+    }
+  };
 }
 
 function batchWireDigest(wire, field, label, { optional = false } = {}) {
@@ -1351,7 +1438,7 @@ function comparableCosmosTxHash(value) {
   return String(value ?? "").trim().replace(/^0x/i, "").toUpperCase();
 }
 
-function normalizedCosmosTxHash(value, label = "txHash") {
+function requiredCosmosTxHash(value, label = "txHash") {
   const normalized = comparableCosmosTxHash(value);
   if (!normalized) throw new Error(`${label} is required`);
   return normalized;
@@ -1705,13 +1792,15 @@ function resolveScanOptions({
   if (resolvedScanSource != null && resolvedScanSource !== "privacy_scan") {
     throw new Error("wallet and spend scans only support the typed privacy_scan source");
   }
+  const nestedMaxPages = resolveScanMaxPagesAlias(scan?.maxPages, scan?.max_pages);
+  const topLevelMaxPages = resolveScanMaxPagesAlias(maxPages, max_pages);
   return {
     after: scan?.after ?? after,
     afterHeight: scan?.afterHeight ?? scan?.after_height ?? afterHeight ?? after_height,
     afterSequence: scan?.afterSequence ?? scan?.after_sequence ?? afterSequence ?? after_sequence,
     page: scan?.page ?? page,
     limit: scan?.limit ?? limit,
-    maxPages: scan?.maxPages ?? scan?.max_pages ?? maxPages ?? max_pages,
+    maxPages: nestedMaxPages ?? topLevelMaxPages,
     eventTypes: [],
     outputLimit: scan?.outputLimit ?? scan?.output_limit ?? outputLimit ?? output_limit,
     eventLimit: scan?.eventLimit ?? scan?.event_limit ?? eventLimit ?? event_limit,
@@ -1721,6 +1810,40 @@ function resolveScanOptions({
     // High-level wallet and spend selection must never turn an unavailable or
     // malformed typed endpoint into a cursor-bearing legacy scan.
     strictPrivacyScan: true
+  };
+}
+
+// Preparation APIs intentionally share the strict, typed wallet-scan policy
+// above; keep the feature-facing name without maintaining a second resolver.
+function resolveWalletScanOptions(options = {}) {
+  const resolved = resolveScanOptions(options);
+  const strictAliases = [
+    options.scan?.strictPrivacyScan,
+    options.scan?.strict_privacy_scan,
+    options.strictPrivacyScan,
+    options.strict_privacy_scan
+  ].filter(value => value !== undefined && value !== null);
+  if (strictAliases.some(value => value !== true)) {
+    throw new Error("wallet and spend scans require strictPrivacyScan=true");
+  }
+  // The preparation facades historically exposed the event-level cursor
+  // aliases. Preserve that caller position when entering the typed scan by
+  // expressing the completed event as its full three-component cursor.
+  const after = resolved.after == null &&
+      resolved.afterHeight != null && resolved.afterSequence != null
+    ? {
+        height: uint64CursorValue(resolved.afterHeight, "wallet scan after height"),
+        globalSequence: uint64CursorValue(resolved.afterSequence, "wallet scan after sequence"),
+        outputIndex: 1
+      }
+    : resolved.after;
+  return {
+    ...resolved,
+    after,
+    ...(after !== resolved.after ? {
+      afterHeight: undefined,
+      afterSequence: undefined
+    } : {})
   };
 }
 
@@ -1744,6 +1867,54 @@ function publicPrivacyAccount(material) {
     shielded_address: material.shieldedAddress,
     disclosure_pubkey_hex: material.disclosurePubKeyHex,
     root_signature_hash: material.rootSignatureHash
+  };
+}
+
+function preparedExecutionTransport(execution = {}) {
+  const camel = execution?.executionTransport;
+  const snake = execution?.execution_transport;
+  if (camel == null && snake == null) {
+    throw new Error("executionBuilder must return an explicit execution transport");
+  }
+  const normalize = value => String(value ?? "").trim().toLowerCase();
+  if (camel != null && snake != null && normalize(camel) !== normalize(snake)) {
+    throw new Error("execution transport aliases conflict");
+  }
+  const transport = normalize(camel ?? snake);
+  if (transport !== "evm" && transport !== "external") {
+    throw new Error("executionBuilder execution transport must be evm or external");
+  }
+  return transport;
+}
+
+async function buildPreparedExecutionArtifact({ executionBuilder, executionInput, buildSignDoc }) {
+  if (executionBuilder) {
+    const execution = await executionBuilder(executionInput);
+    const camelTxBytesHash = execution?.txBytesHash;
+    const snakeTxBytesHash = execution?.tx_bytes_hash;
+    if (camelTxBytesHash != null && snakeTxBytesHash != null &&
+        String(camelTxBytesHash).trim() !== String(snakeTxBytesHash).trim()) {
+      throw new Error("execution transaction binding hash aliases conflict");
+    }
+    const txBytesHash = String(camelTxBytesHash ?? snakeTxBytesHash ?? "").trim();
+    if (!txBytesHash) {
+      throw new Error("executionBuilder must return the prepared transaction binding hash");
+    }
+    return {
+      execution,
+      executionBinding: {
+        txBytesHash,
+        executionTransport: preparedExecutionTransport(execution)
+      }
+    };
+  }
+  const signDoc = await buildSignDoc();
+  return {
+    signDoc,
+    executionBinding: {
+      signDocHash: cosmosSignDocBindingHash(signDoc),
+      executionTransport: "cosmos"
+    }
   };
 }
 
@@ -1958,7 +2129,7 @@ async function recheckReservedBatchTransferNullifiers(context, signedTx, checkNu
   ) {
     throw new Error("batch transfer reservations do not match the signed transaction inputs");
   }
-  batchTransferNullifiersUnspent(await checkNullifiers(signedNullifiers), signedNullifiers);
+  assertBatchTransferNullifiersUnspent(await checkNullifiers(signedNullifiers), signedNullifiers);
   return signed;
 }
 
@@ -2329,6 +2500,10 @@ function withdrawProofReadyMetadata(built, context = {}) {
     payload.expiresAtUnix ||
     ""
   );
+  const executionTransport = context.executionTransport ?? context.execution_transport;
+  const inputNullifiers = proofReadyInputNullifiers([
+    payload.nullifier_hex || payload.nullifierHex || ""
+  ], "withdraw");
   const bindOperationSuccess = context.bindOperationSuccess === true ||
     context.bind_operation_success === true;
   const coin = bindOperationSuccess && payload.amount
@@ -2354,7 +2529,10 @@ function withdrawProofReadyMetadata(built, context = {}) {
     expectedAmountHash: bindOperationSuccess ? hashAmount(denom, amount) : "",
     expectedDenom: denom,
     operationSuccessEvidenceRequired: bindOperationSuccess,
-    metadata: expiresAtUnix ? { payload_expires_at_unix: expiresAtUnix } : {}
+    metadata: {
+      ...(expiresAtUnix ? { payload_expires_at_unix: expiresAtUnix } : {}),
+      input_nullifier_hexes: inputNullifiers
+    }
   };
 }
 
@@ -3099,8 +3277,10 @@ export class ClairveilJS {
     includeFoundNotes = false,
     scanSource,
     scan_source,
-    strictPrivacyScan = false,
-    strict_privacy_scan
+    strictPrivacyScan,
+    strict_privacy_scan,
+    requireTypedScan = false,
+    allowInitialPrivacyScanFallback = false
   } = {}) {
     for (const [value, label] of [
       [strictPrivacyScan, "strictPrivacyScan"],
@@ -3200,12 +3380,6 @@ export class ClairveilJS {
           if (pendingSummary && pagesScanned > pageBudget) eventCompletionPages += 1;
           hasMore = pageResult.has_more;
           if (!hasMore) break;
-        }
-      } catch (error) {
-        const canFallback = error?.status === 404 || error?.status === 405 || error?.status === 501;
-        if (!canFallback) throw error;
-        if (Boolean(strict_privacy_scan ?? strictPrivacyScan) || this.enableExperimentalBatchTransfer) {
-          throw new Error("typed privacy-scan-v2 is required; legacy scan fallback is disabled", { cause: error });
         }
       } catch (error) {
         const endpointIsAbsent = pagesScanned === 0 && (
@@ -3509,7 +3683,7 @@ export class ClairveilJS {
     scanSource,
     scan_source
   } = {}) {
-    const normalizedTxHash = normalizedCosmosTxHash(txHash);
+    const normalizedTxHash = requiredCosmosTxHash(txHash);
     const pageBudget = resolveScanMaxPagesAlias(maxPages, max_pages) ?? defaultPrepareScanMaxPages;
     const pageLimit = Math.max(1, Number(limit || 200));
     const resolvedEventTypes = event_types ?? eventTypes;
@@ -3647,38 +3821,51 @@ export class ClairveilJS {
     validation_state_snapshot,
     scanSource,
     scan_source,
-    strictPrivacyScan = false,
+    strictPrivacyScan,
     strict_privacy_scan
   } = {}) {
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
-    const requestedEventTypes = event_types ?? eventTypes;
-    if (requestedEventTypes != null) {
-      if (!Array.isArray(requestedEventTypes)) {
-        throw new Error("wallet scan eventTypes must be an array");
-      }
-      if (requestedEventTypes.some(value => String(value || "").trim())) {
-        throw new Error("wallet scans must not filter event types; typed privacy_scan summaries are required");
-      }
-    }
-    const requestedScanSource = scan_source ?? scanSource;
-    if (requestedScanSource != null && requestedScanSource !== "privacy_scan") {
-      throw new Error("wallet scans only support the typed privacy_scan source");
-    }
-    let resolvedAfter = after;
-    let resolvedAfterHeight = afterHeight ?? after_height;
-    let resolvedAfterSequence = afterSequence ?? after_sequence;
-    let resolvedPage = page;
+    const walletScanOptions = resolveWalletScanOptions({
+      after,
+      afterHeight,
+      after_height,
+      afterSequence,
+      after_sequence,
+      page,
+      limit,
+      maxPages,
+      max_pages,
+      eventTypes,
+      event_types,
+      outputLimit,
+      output_limit,
+      eventLimit,
+      event_limit,
+      maxEncodedBytes,
+      max_encoded_bytes,
+      validationStateSnapshot,
+      validation_state_snapshot,
+      scanSource,
+      scan_source,
+      strictPrivacyScan,
+      strict_privacy_scan
+    });
+    const resolvedMaxPages = resolveScanMaxPagesAlias(maxPages, max_pages) ?? 1;
+    let resolvedAfter = walletScanOptions.after;
+    let resolvedAfterHeight = walletScanOptions.afterHeight;
+    let resolvedAfterSequence = walletScanOptions.afterSequence;
+    let resolvedPage = walletScanOptions.page;
     let resolvedScanSource = "privacy_scan";
-    let resolvedValidationStateSnapshot = validationStateSnapshot ?? validation_state_snapshot;
+    let resolvedValidationStateSnapshot = walletScanOptions.validationStateSnapshot;
     if (resolvedAfter == null && resolvedAfterHeight == null && noteStore) {
       const cached = await noteStore.load();
       const cachedCursor = cached.scanCursor || {};
       if (cachedCursor.source === "privacy_scan") {
-        const next = nextPrivacyScanOptions(cachedCursor, { limit, maxPages });
+        const next = nextPrivacyScanOptions(cachedCursor, { limit, maxPages: resolvedMaxPages });
         resolvedAfter = next.after;
         resolvedValidationStateSnapshot = resolvedValidationStateSnapshot ?? next.validationStateSnapshot;
       } else if (cachedCursor.source === "scan_events" || cachedCursor.source === "privacy_events") {
-        const next = nextPrivacyScanOptions(cachedCursor, { limit, maxPages });
+        const next = nextPrivacyScanOptions(cachedCursor, { limit, maxPages: resolvedMaxPages });
         // A legacy cursor cannot prove an output position. Migrate by rewinding
         // one height and deduplicating typed outputs locally; never continue to
         // persist a legacy wallet cursor.
@@ -3731,6 +3918,7 @@ export class ClairveilJS {
       maxEncodedBytes: max_encoded_bytes ?? maxEncodedBytes,
       validationStateSnapshot: resolvedValidationStateSnapshot,
       strictPrivacyScan: true,
+      allowInitialPrivacyScanFallback: true,
       includeFoundNotes: true
     });
     if (noteStore) {
@@ -3911,7 +4099,7 @@ export class ClairveilJS {
     attempts,
     intervalMs
   } = {}) {
-    const normalizedTxHash = normalizedCosmosTxHash(txHash ?? tx_hash);
+    const normalizedTxHash = requiredCosmosTxHash(txHash ?? tx_hash);
     const expected = depositExpectedMaterial({
       prepared,
       material,
@@ -4014,36 +4202,6 @@ export class ClairveilJS {
     if (executionBuilder != null && typeof executionBuilder !== "function") {
       throw new Error("executionBuilder must be a function");
     }
-    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 8000000);
-    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
-    const resolvedExpiresAtUnix = resolveOperationEvidenceAlias(
-      expiresAtUnix,
-      expires_at_unix,
-      "expiresAtUnix"
-    );
-    const resolvedChainNowUnix = resolveOperationEvidenceAlias(
-      chainNowUnix,
-      chain_now_unix,
-      "chainNowUnix"
-    );
-    for (const [value, label] of [
-      [disableSelfViewDisclosure, "disableSelfViewDisclosure"],
-      [disable_self_view_disclosure, "disable_self_view_disclosure"]
-    ]) {
-      if (value != null && typeof value !== "boolean") {
-        throw new Error(`${label} must be a boolean`);
-      }
-    }
-    if (disableSelfViewDisclosure != null && disable_self_view_disclosure != null &&
-        disableSelfViewDisclosure !== disable_self_view_disclosure) {
-      throw new Error("disableSelfViewDisclosure aliases conflict");
-    }
-    if (selfViewDisclosureTargetPubKeyHex != null &&
-        self_view_disclosure_target_pubkey != null &&
-        comparableBatchHex(selfViewDisclosureTargetPubKeyHex) !==
-          comparableBatchHex(self_view_disclosure_target_pubkey)) {
-      throw new Error("selfViewDisclosureTargetPubKeyHex aliases conflict");
-    }
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
     const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 8000000);
     // Snapshot and canonicalize fee coins before any scan/prover await. The
@@ -4081,7 +4239,7 @@ export class ClairveilJS {
     const resolvedDisableSelfViewDisclosure = disableSelfViewDisclosure ?? disable_self_view_disclosure ?? false;
     const resolvedSelfViewDisclosureTargetPubKeyHex = selfViewDisclosureTargetPubKeyHex ??
       self_view_disclosure_target_pubkey;
-    const operationEvidence = resolveDirectOperationEvidenceHashes({
+    const operationEvidenceAssertions = resolveDirectOperationEvidenceHashes({
       expectedRecipientHash,
       expected_recipient_hash,
       expectedAmountHash,
@@ -4160,7 +4318,6 @@ export class ClairveilJS {
       requestedChainNowUnix,
       requestedExpiresAtUnix
     );
-    const transferProtocolConfig = await this.assertTransferProtocolConfig(denom ?? this.defaultDenom);
     assertTransferDisclosureCapabilities(transferProtocolConfig.disclosure_config, {
       userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
       userDisclosureMode: isFinal ? userDisclosureMode : "none"
@@ -4218,29 +4375,41 @@ export class ClairveilJS {
           signal
         });
         assertHeartbeatHealthy();
-        const signDoc = await this.buildDirectSignDoc({
-          signer: privacy.address,
-          pubKeyHex: privacy.pubKeyHex,
-          gasLimit: resolvedGasLimit,
-          feeAmount: resolvedFeeAmount,
-          messages: [
-            {
-              typeUrl: msgTransferTypeUrl,
-              value: built.message
-            }
-          ],
-          memo: reservationBatch
-            ? reservationRequiredCosmosMemo("Clairveil veiled transfer")
-            : "Clairveil veiled transfer"
+        const artifact = await buildPreparedExecutionArtifact({
+          executionBuilder,
+          executionInput: {
+            payload: built.payload,
+            proof: built.proof,
+            message: built.message,
+            plan,
+            isFinal,
+            reservation: reservationBatchSummary(reservationBatch)
+          },
+          buildSignDoc: () => this.buildDirectSignDoc({
+            signer: privacy.address,
+            pubKeyHex: privacy.pubKeyHex,
+            gasLimit: resolvedGasLimit,
+            feeAmount: resolvedFeeAmount,
+            messages: [
+              {
+                typeUrl: msgTransferTypeUrl,
+                value: built.message
+              }
+            ],
+            memo: reservationBatch
+              ? reservationRequiredCosmosMemo("Clairveil veiled transfer")
+              : "Clairveil veiled transfer"
+          })
         });
         await heartbeatNow();
+        const bindingField = artifact.signDoc ? "signDocHash" : "txBytesHash";
         await markReservationProofReady(resolvedReservationManager, reservationBatch, transferProofReadyMetadata(built, {
           amount: stepAmount,
-          denom: denom ?? this.defaultDenom,
-          expectedRecipientHash: isFinal ? operationEvidence.expectedRecipientHash : "",
-          expectedAmountHash: isFinal ? operationEvidence.expectedAmountHash : "",
-          signDocHash
-        }, "signDocHash"));
+          denom: operationEvidence.expectedDenom,
+          expectedRecipientHash: operationEvidence.expectedRecipientHash,
+          expectedAmountHash: operationEvidence.expectedAmountHash,
+          ...artifact.executionBinding
+        }, bindingField));
         return {
           built,
           ...(artifact.signDoc ? {
@@ -4357,6 +4526,9 @@ export class ClairveilJS {
   } = {}) {
     if (!this.enableExperimentalBatchTransfer) {
       throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
+    }
+    if (executionBuilder != null && typeof executionBuilder !== "function") {
+      throw new Error("executionBuilder must be a function");
     }
     const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 25000000);
     // Freeze the exact profile fee before scanning, proving, or either durable
@@ -4811,20 +4983,6 @@ export class ClairveilJS {
             : undefined
         });
         assertHeartbeatHealthy();
-        const signDoc = await this.buildDirectSignDoc({
-          signer: privacy.address,
-          pubKeyHex: privacy.pubKeyHex,
-          gasLimit: resolvedGasLimit,
-          feeAmount: resolvedFeeAmount,
-          messages: [{
-            typeUrl: msgBatchTransferTypeUrl,
-            value: MsgBatchTransfer.fromPartial(message)
-          }],
-          memo: reservationBatch
-            ? reservationRequiredCosmosMemo("Clairveil batch veiled transfer")
-            : "Clairveil batch veiled transfer"
-        });
-        const signDocHash = cosmosSignDocBindingHash(signDoc);
         const operationEvidence = buildBatchTransferOperationEvidence({
           payload,
           proof,
@@ -4848,7 +5006,7 @@ export class ClairveilJS {
           buildSignDoc: () => this.buildDirectSignDoc({
             signer: privacy.address,
             pubKeyHex: privacy.pubKeyHex,
-            gasLimit,
+            gasLimit: resolvedGasLimit,
             feeAmount: resolvedFeeAmount,
             messages: [{
               typeUrl: msgBatchTransferTypeUrl,
@@ -5124,6 +5282,9 @@ export class ClairveilJS {
     if (!this.enableExperimentalBatchTransfer) {
       throw new Error("one-proof batch transfer is feature-gated; construct the client with enableExperimentalBatchTransfer: true after completing downstream conformance and localnet validation");
     }
+    if (executionBuilder != null && typeof executionBuilder !== "function") {
+      throw new Error("executionBuilder must be a function");
+    }
     const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 25000000);
     const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
     if (operationId != null && operation_id != null && String(operationId) !== String(operation_id)) {
@@ -5254,17 +5415,6 @@ export class ClairveilJS {
       shieldedPrefix: this.shieldedPrefix,
       nowUnix: resolvedNowUnix
     });
-    const signDoc = await this.createBatchTransferSignDoc({
-      signer: resolvedSigner,
-      pubKeyHex,
-      gasLimit: resolvedGasLimit,
-      feeAmount: resolvedFeeAmount,
-      message,
-      memo,
-      expectedCircuitIdentity:
-        transferProtocolConfig.circuit_config.circuit_set_identity,
-      chainNowUnix: resolvedNowUnix
-    });
     const effects = preparedBatchTransferEffectHex(payload);
     const authoritativeReservation = await authoritativeBatchRecoveryReservation(
       resolvedReservationManager,
@@ -5274,7 +5424,7 @@ export class ClairveilJS {
         nullifierHexes: effects.nullifier_hexes
       }
     );
-    batchTransferNullifiersUnspent(
+    assertBatchTransferNullifiersUnspent(
       await this.checkNullifiers(effects.nullifier_hexes),
       effects.nullifier_hexes
     );
@@ -5291,7 +5441,7 @@ export class ClairveilJS {
       buildSignDoc: () => this.createBatchTransferSignDoc({
         signer: resolvedSigner,
         pubKeyHex,
-        gasLimit,
+        gasLimit: resolvedGasLimit,
         feeAmount: resolvedFeeAmount,
         message,
         memo,
@@ -5328,7 +5478,10 @@ export class ClairveilJS {
       effects,
       operationEvidence: operationEvidence.evidence,
       operationEvidenceHash: operationEvidence.evidenceHash,
-      signDoc: markCosmosSignDocReservationRequired(signDoc, authoritativeReservation),
+      ...(artifact.signDoc ? {
+        signDoc: markCosmosSignDocReservationRequired(artifact.signDoc, authoritativeReservation)
+      } : {}),
+      ...(artifact.execution ? { execution: artifact.execution } : {}),
       reservation: reservationBatchSummary(authoritativeReservation)
     };
   }
@@ -5392,8 +5545,6 @@ export class ClairveilJS {
       "chainNowUnix"
     );
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
-    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 5000000);
-    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
     const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveWalletScanOptions({
       scan,
@@ -5469,27 +5620,39 @@ export class ClairveilJS {
           signal
         });
         assertHeartbeatHealthy();
-        const signDoc = await this.buildDirectSignDoc({
-          signer: privacy.address,
-          pubKeyHex: privacy.pubKeyHex,
-          gasLimit: resolvedGasLimit,
-          feeAmount: resolvedFeeAmount,
-          messages: [
-            {
-              typeUrl: msgWithdrawTypeUrl,
-              value: built.message
-            }
-          ],
-          memo: reservationBatch
-            ? reservationRequiredCosmosMemo("Clairveil veiled withdraw")
-            : "Clairveil veiled withdraw"
+        const artifact = await buildPreparedExecutionArtifact({
+          executionBuilder,
+          executionInput: {
+            payload: built.payload,
+            proof: built.proof,
+            proverPayload: built.proverPayload,
+            selectedNote: built.selectedNote,
+            message: built.message,
+            plan,
+            reservation: reservationBatchSummary(reservationBatch)
+          },
+          buildSignDoc: () => this.buildDirectSignDoc({
+            signer: privacy.address,
+            pubKeyHex: privacy.pubKeyHex,
+            gasLimit: resolvedGasLimit,
+            feeAmount: resolvedFeeAmount,
+            messages: [
+              {
+                typeUrl: msgWithdrawTypeUrl,
+                value: built.message
+              }
+            ],
+            memo: reservationBatch
+              ? reservationRequiredCosmosMemo("Clairveil veiled withdraw")
+              : "Clairveil veiled withdraw"
+          })
         });
         await heartbeatNow();
         await markReservationProofReady(
           resolvedReservationManager,
           reservationBatch,
           withdrawProofReadyMetadata(built, {
-            signDocHash,
+            ...artifact.executionBinding,
             accountPrefix: this.accountPrefix,
             bindOperationSuccess: Boolean(reservationBatch)
           })
@@ -5567,6 +5730,9 @@ export class ClairveilJS {
     reservation_manager,
     executionBuilder
   } = {}) {
+    if (executionBuilder != null && typeof executionBuilder !== "function") {
+      throw new Error("executionBuilder must be a function");
+    }
     const resolvedExpiresAtUnix = resolveUnixTimestampAlias(
       expiresAtUnix,
       expires_at_unix,
@@ -5673,11 +5839,15 @@ export class ClairveilJS {
           resolvedReservationManager,
           reservationBatch,
           withdrawProofReadyMetadata(built, {
+            ...(artifact?.executionBinding || {}),
             accountPrefix: this.accountPrefix,
             bindOperationSuccess: Boolean(reservationBatch)
           })
         );
-        return { built };
+        return {
+          built,
+          ...(artifact?.execution ? { execution: artifact.execution } : {})
+        };
       });
       const { built, execution } = heartbeatResult;
 
@@ -5749,7 +5919,6 @@ export class ClairveilJS {
     if (!message || typeof message !== "object") {
       throw new Error("MsgBatchTransfer message is required");
     }
-    const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
     if (chainNowUnix != null && chain_now_unix != null &&
         Number(chainNowUnix) !== Number(chain_now_unix)) {
       throw new Error("batch transfer chainNowUnix aliases conflict");
@@ -5966,19 +6135,54 @@ export class ClairveilJS {
     asset_denom,
     ...eventQuery
   }) {
-    const selectedOutput = output ?? scanOutput;
-    const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
-    const event = selectedOutput
-      ? null
-      : await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
     const disclosureAssetDenom = resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom);
-    const publicMode = selectedOutput
-      ? (selectedOutput.userDisclosureMode ?? selectedOutput.user_disclosure_mode) === "USER_DISCLOSURE_MODE_PUBLIC"
-      : eventAttribute(event, "user_disclosure_mode") === "USER_DISCLOSURE_MODE_PUBLIC";
-    if (publicMode) {
-      const decode = selectedOutput ? decodeUserDisclosureFromScanOutput : decodeUserDisclosureFromEvent;
-      return decode(
-        selectedOutput ?? event,
+    const selectedOutput = resolveDisclosureOutputAlias(output, scanOutput, "disclosure output");
+    const normalizedTxHash = selectedOutput && txHash == null && tx_hash == null
+      ? undefined
+      : requiredCosmosTxHash(txHash ?? tx_hash);
+    if (selectedOutput) {
+      const mode = selectedOutput.userDisclosureMode ?? selectedOutput.user_disclosure_mode;
+      const isPublic = mode === 1 || mode === "1" || mode === "USER_DISCLOSURE_MODE_PUBLIC";
+      if (isPublic) {
+        return decodeUserDisclosureFromScanOutput(selectedOutput, {
+          txHash: normalizedTxHash,
+          shieldedPrefix: this.shieldedPrefix,
+          assetDenom: disclosureAssetDenom
+        });
+      }
+      const directScalar = disclosureScalar ?? disclosure_scalar;
+      const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
+      const directPubKey = disclosurePubKeyHex ?? disclosure_pubkey_hex;
+      if (directScalar != null || directScalarHex != null || directPubKey != null) {
+        return decodeUserDisclosureFromScanOutput(selectedOutput, {
+          disclosureScalar: directScalar != null ? directScalar : disclosureScalarFromHex(directScalarHex),
+          disclosurePubKeyHex: directPubKey,
+          txHash: normalizedTxHash,
+          shieldedPrefix: this.shieldedPrefix,
+          assetDenom: disclosureAssetDenom
+        });
+      }
+      const signerPubKeyHex = pubKeyHex ?? pub_key_hex;
+      const skipSignerCheck = Boolean(skipSignerPubKeyCheck ?? skip_signer_pubkey_check);
+      if (!skipSignerCheck) assertSignerPubKey(address, signerPubKeyHex, this.bech32Prefix);
+      const material = derivePrivacyMaterial({
+        address,
+        pubKeyHex: signerPubKeyHex,
+        signatureBase64: signatureBase64 ?? signature_base64,
+        shieldedPrefix: this.shieldedPrefix
+      });
+      return decodeUserDisclosureFromScanOutput(selectedOutput, {
+        disclosureScalar: material.disclosureScalar,
+        disclosurePubKeyHex: material.disclosurePubKeyHex,
+        txHash: normalizedTxHash,
+        shieldedPrefix: this.shieldedPrefix,
+        assetDenom: disclosureAssetDenom
+      });
+    }
+    const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+    if (eventAttribute(event, "user_disclosure_mode") === "USER_DISCLOSURE_MODE_PUBLIC") {
+      return decodeUserDisclosureFromEvent(
+        event,
         1n,
         "",
         normalizedTxHash,
@@ -5996,9 +6200,8 @@ export class ClairveilJS {
       signatureBase64: signatureBase64 ?? signature_base64,
       shieldedPrefix: this.shieldedPrefix
     });
-    const decode = selectedOutput ? decodeUserDisclosureFromScanOutput : decodeUserDisclosureFromEvent;
-    return decode(
-      selectedOutput ?? event,
+    return decodeUserDisclosureFromEvent(
+      event,
       material.disclosureScalar,
       material.disclosurePubKeyHex,
       normalizedTxHash,
@@ -6026,18 +6229,13 @@ export class ClairveilJS {
     asset_denom,
     ...eventQuery
   }) {
-    const selectedOutput = output ?? scanOutput;
-    const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
-    const event = selectedOutput
-      ? null
-      : await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
     const disclosureAssetDenom = resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom);
     const directScalar = disclosureScalar ?? disclosure_scalar;
     const directScalarHex = disclosureScalarHex ?? disclosure_scalar_hex;
     const selectedOutput = resolveDisclosureOutputAlias(output, scanOutput, "disclosure output");
     const normalizedTxHash = selectedOutput && txHash == null && tx_hash == null
       ? undefined
-      : normalizedCosmosTxHash(txHash ?? tx_hash);
+      : requiredCosmosTxHash(txHash ?? tx_hash);
     if (selectedOutput && (directScalar != null || directScalarHex != null)) {
       return decodeSelfViewDisclosureFromScanOutput(selectedOutput, {
         disclosureScalar: directScalar != null ? directScalar : disclosureScalarFromHex(directScalarHex),
@@ -6047,9 +6245,9 @@ export class ClairveilJS {
       });
     }
     if (directScalar != null || directScalarHex != null) {
-      const decode = selectedOutput ? decodeSelfViewDisclosureFromScanOutput : decodeSelfViewDisclosureFromEvent;
-      return decode(
-        selectedOutput ?? event,
+      const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+      return decodeSelfViewDisclosureFromEvent(
+        event,
         directScalar != null ? directScalar : disclosureScalarFromHex(directScalarHex),
         normalizedTxHash,
         { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
@@ -6066,9 +6264,17 @@ export class ClairveilJS {
       signatureBase64: signatureBase64 ?? signature_base64,
       shieldedPrefix: this.shieldedPrefix
     });
-    const decode = selectedOutput ? decodeSelfViewDisclosureFromScanOutput : decodeSelfViewDisclosureFromEvent;
-    return decode(
-      selectedOutput ?? event,
+    if (selectedOutput) {
+      return decodeSelfViewDisclosureFromScanOutput(selectedOutput, {
+        disclosureScalar: material.disclosureScalar,
+        txHash: normalizedTxHash,
+        shieldedPrefix: this.shieldedPrefix,
+        assetDenom: disclosureAssetDenom
+      });
+    }
+    const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+    return decodeSelfViewDisclosureFromEvent(
+      event,
       material.disclosureScalar,
       normalizedTxHash,
       { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
@@ -6086,15 +6292,22 @@ export class ClairveilJS {
     asset_denom,
     ...eventQuery
   }) {
-    const selectedOutput = output ?? scanOutput;
-    const normalizedTxHash = String(txHash ?? tx_hash ?? "").trim().toUpperCase();
-    const event = selectedOutput
-      ? null
-      : await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
     const disclosureAssetDenom = resolveDisclosureAssetDenom(assetDenom, asset_denom, this.defaultDenom);
-    const decode = selectedOutput ? decodeAuditDisclosureFromScanOutput : decodeAuditDisclosureFromEvent;
-    return decode(
-      selectedOutput ?? event,
+    const selectedOutput = resolveDisclosureOutputAlias(output, scanOutput, "disclosure output");
+    const normalizedTxHash = selectedOutput && txHash == null && tx_hash == null
+      ? undefined
+      : requiredCosmosTxHash(txHash ?? tx_hash);
+    if (selectedOutput) {
+      return decodeAuditDisclosureFromScanOutput(selectedOutput, {
+        disclosureScalar: disclosureScalarFromHex(disclosurePrivKeyHex ?? disclosure_privkey_hex),
+        txHash: normalizedTxHash,
+        shieldedPrefix: this.shieldedPrefix,
+        assetDenom: disclosureAssetDenom
+      });
+    }
+    const event = await this.findPrivacyEventByTxHash(normalizedTxHash, eventQuery);
+    return decodeAuditDisclosureFromEvent(
+      event,
       disclosureScalarFromHex(disclosurePrivKeyHex ?? disclosure_privkey_hex),
       normalizedTxHash,
       { shieldedPrefix: this.shieldedPrefix, assetDenom: disclosureAssetDenom }
@@ -6245,7 +6458,7 @@ export class ClairveilJS {
   }
 
   async buildDirectSignDoc({ signer, pubKeyHex, messages, memo = "", gasLimit = 200000, feeAmount = [] }) {
-    const resolvedGasLimit = normalizeCosmosGasLimit(gasLimit);
+    const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, undefined, 200000);
     const resolvedFeeAmount = normalizeCosmosFeeCoins(feeAmount);
     assertSignerPubKey(signer, pubKeyHex, this.bech32Prefix);
     const account = await this.getAccountInfo(signer);
