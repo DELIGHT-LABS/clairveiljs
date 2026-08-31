@@ -25,7 +25,7 @@ Regenerate and commit the diagram with `npm run docs:diagram:reservation`; build
 | `Reserved` | The selected note is held by a durable inventory lock | This is the start of the persisted reservation lifecycle. There is no worker lease yet, and cancellation can move it to `Released`. |
 | `Proving` | A batch lease has been acquired for prover execution | This state requires a lease token. An uncertain preparation failure is quarantined in `ManualReview`; it is not automatically released. |
 | `ProofReady` | The proof and prepared payload are ready | Proof disposal before broadcast, wallet rejection, and relay handoff must be recorded and handled safely. |
-| `Submitted` | Submission metadata has been recorded by the manager | The low-level manager does not distinguish transports and requires either `txHash` or `txBytesHash`. `signDocHash` alone is insufficient. |
+| `Submitted` | Submission metadata has been recorded by the manager | A reservation tagged with `execution_transport: "evm"` requires a network `txHash`. Legacy or external records require either `txHash` or `txBytesHash`. `signDocHash` alone is insufficient. |
 | `Unknown` | The transaction may have reached the network, but the result cannot be determined | Reconcile the transaction and nullifier state before retransmitting. |
 | `ConfirmedSpent` | Consumption of the input note has been confirmed by on-chain evidence | This is a terminal state. |
 | `ReplanRequired` | A new transaction plan is required | A new plan starts again at `Reserved`. |
@@ -39,7 +39,7 @@ The graph matches `allowedReservationTransitions`, but new records start at `Res
 
 `ConfirmedSpent` means that the input note's nullifier was used on chain. It does not by itself mean that the payment or payroll item succeeded.
 
-The current generic matcher in `reconcileSpentNotes(...)` does not store or distinguish the transport. If one of the stored `submitted_tx_hash` or `tx_bytes_hash` values matches the same identity in reconciliation evidence, and the expected output commitment, disclosure digest, recipient/amount/denom evidence all match, the operation can be considered successful. Therefore, an EVM `txBytesHash`, which is a pre-signing canonical request binding, is also treated as an identity match inside the manager. The high-level EVM send helper records the network `txHash` returned by the wallet in `Submitted`, but a policy that requires an EVM receipt or RPC identity must be enforced separately by the caller's operation database or reconciliation input validation. If evidence is incomplete, the reservation may remain isolated as spent while the operation is placed in `ManualReview`; an explicit mismatch becomes `ConflictSpent`.
+High-level preparation records `execution_transport` at `ProofReady`. Cosmos retains the sign-doc binding, while EVM retains the prepared request's `tx_bytes_hash`. EVM operation success requires the stored network `submitted_tx_hash` and `tx_bytes_hash` to match their respective reconciliation evidence, plus an explicitly successful receipt, exact RPC transaction-identity verification, action-specific privacy-event verification, finality verification, and matching expected output evidence. An EVM `txBytesHash` alone cannot establish success. Untagged legacy records retain the generic matcher for compatibility. If evidence is incomplete, the reservation may remain isolated as spent while the operation is placed in `ManualReview`; an explicit mismatch becomes `ConflictSpent`.
 
 | Category | Representative state | Meaning |
 | --- | --- | --- |
@@ -61,7 +61,7 @@ The manager API table below covers the persisted reservation lifecycle that star
 | `recordRelayHandoff(...)` | Keeps `ProofReady` and records relay payload handoff evidence | Matching payload hash, before broadcast begins, with a valid lease |
 | `recordRelayTransactionEvidence(...)` | Atomically moves every reservation in one relay operation from `ProofReady` to `Submitted` | Exact payload transaction inclusion and either a recorded external handoff or durable same-origin local-relay attempt. This lease-free API records transaction evidence only; reconciliation decides success/release. |
 | `markBroadcastAttempting(...)` | Keeps `ProofReady` and records `broadcast_in_flight` and the attempt count | Call immediately before crossing the external broadcast boundary, with a valid lease |
-| `markSubmitted(...)` | `ProofReady → Submitted` | A prior `markBroadcastAttempting(...)` record, a valid lease, and either `txHash` or `txBytesHash`. The manager does not distinguish transport or hash meaning. |
+| `markSubmitted(...)` | `ProofReady → Submitted` | A prior `markBroadcastAttempting(...)` record and a valid lease. An EVM-tagged reservation requires a network `txHash`; other records accept `txHash` or `txBytesHash`. |
 | `markUnknown(...)` | `ProofReady/Submitted → Unknown` | A prior broadcast attempt, a valid lease, and either `txHash` or `txBytesHash`. `signDocHash` alone is insufficient. |
 | `markBroadcastRejected(...)` | `ProofReady → ReplanRequired` | The wallet rejected before broadcast and proof disposal can be recorded. |
 | `markBroadcastFailed(...)` | `ProofReady/Submitted/Unknown → ReplanRequired` | Exact failed/absent transaction identity and every input explicitly unspent. Live `ProofReady` also needs the current matching, unexpired manager lease; `Submitted`/`Unknown` are lease-free. |
@@ -71,7 +71,7 @@ The manager API table below covers the persisted reservation lifecycle that star
 | `releaseReservedOrProving(...)` | `Reserved → Released` | Compatibility name retained; `Proving` is rejected rather than released |
 | `markManualReview(...)` | Moves an allowed source state to `ManualReview` | The current lease is required for source states that require a lease. |
 | `resolveManualReview(...)` | `ManualReview → Released/ReplanRequired/Failed` | `operatorId`, `approvalReference`; recording `reason` is recommended |
-| `reconcileSpentNotes(...)` | Moves an allowed state to `ConfirmedSpent`, or quarantines/determines operation success from evidence | Literal spent evidence, a match for one stored `txHash`/`txBytesHash`, and required output evidence. Network identity requirements specific to a transport are not enforced here. |
+| `reconcileSpentNotes(...)` | Moves an allowed state to `ConfirmedSpent`, or quarantines/determines operation success from evidence | Literal spent evidence and required output evidence. An EVM tag requires the network `txHash`, artifact `txBytesHash`, successful receipt, RPC call identity, privacy-event verification, and finality verification. |
 
 ## Safety rules
 
@@ -80,7 +80,7 @@ The manager API table below covers the persisted reservation lifecycle that star
 3. If the wallet rejects at `ProofReady` or the proof is discarded, move to `ReplanRequired` only when disposal of the proof can be evidenced. Otherwise isolate the reservation in `ManualReview`.
 4. Moving `Submitted`/`Unknown` to `ReplanRequired`/`Failed` requires both an unused input nullifier and an absent/failed recorded transaction. Live `ProofReady` also needs the current manager-owned, unexpired lease so inputs cannot be released under an active submitter.
 5. After handing a relay payload to a relayer, do not release the note based only on TTL expiry or local cancellation. Reconcile with on-chain evidence, including the possibility that the relayer submitted it.
-6. Resolving `ManualReview` requires `operatorId` and `approvalReference`; recording `reason` is recommended for the operational audit trail.
+6. Resolving `ManualReview` requires `operatorId` and `approvalReference`; recording `reason` is recommended for the operational audit trail. The allowed outcomes are `Released`, `ReplanRequired`, and `Failed`; there is no direct transition back to `ProofReady`.
 7. Do not use `ConfirmedSpent` and operation `Succeeded` as synonyms. Reconcile every linked reservation and all output evidence for a multi-input operation.
 8. On preparation failure, `rollbackPlanReservation(...)` releases only `Reserved`; with a valid lease it quarantines `Proving`/`ProofReady` in `ManualReview`, otherwise the operation stays locked for reconciliation.
 

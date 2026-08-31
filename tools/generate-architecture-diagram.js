@@ -188,7 +188,7 @@ text(2095, 294, "Chain & Query Endpoints", { size: 27, weight: 800, fill: C.ambe
 rect(485, 125, 520, 105, { fill: C.greenFill, stroke: C.green, strokeWidth: 2, radius: 18, shadow: true });
 proverIcon(535, 177);
 header(755, 157, "원격 Prover 서비스 (선택)", "ZK proof 생성 · 외부 신뢰 경계", C.green);
-text(755, 213, "transfer/withdraw · batch(Cosmos only): proverUrl · deposit: 별도 provider", {
+text(755, 213, "transfer/withdraw/batch: proverUrl · deposit: 별도 provider", {
   size: 11.5,
   weight: 700,
   fill: C.green
@@ -290,10 +290,10 @@ text(2095, 608, "EVM precompile 제공: target/downstream chain", {
   weight: 700,
   fill: C.amber
 });
-text(2095, 628, "One-Proof batch: Cosmos MsgBatchTransfer only", {
+text(2095, 628, "One-Proof batch: Cosmos Msg / EVM precompile", {
   size: 11.5,
   weight: 800,
-  fill: C.red
+  fill: C.amber
 });
 
 // Query endpoint.

@@ -37,7 +37,7 @@ identity.
 | Transfer | prepared payload `v5`; proof/request/response `v2` |
 | Withdraw | prover/final payload and proof/request/response all `v2`; no output-note field |
 | Relay withdraw | handoff/schema `v2`; separates relayer `creator` from the owner-bound recipient |
-| One-Proof batch | payload `batch-transfer-payload-v1`, proof `batch-transfer-proof-v1`, request/response `v1`; Cosmos `MsgBatchTransfer`-only |
+| One-Proof batch | payload `batch-transfer-payload-v1`, proof `batch-transfer-proof-v1`, request/response `v1`; executes as Cosmos `MsgBatchTransfer` or EVM `singleProofBatchTransfer` |
 
 Public inputs are used in the following order without sorting or renaming their names.
 
@@ -54,10 +54,10 @@ Raw ciphertext, legacy JSON plaintext, wrong envelope kind, non-zero reserved by
 
 | User task | Main SDK API | Queries during preparation | Proof contract | Prepared result | Signing/final submission | Completion criterion |
 | --- | --- | --- | --- | --- | --- | --- |
-| Deposit | `prepareDeposit(...)` | Circuit config, asset mapping; Cosmos sign doc also queries account metadata | Local/WASM `depositProofProvider` or exact `depositProofUrl` | Cosmos `MsgDeposit` sign doc or EVM `IPrivacy.deposit` transaction | User Cosmos wallet or EIP-1193 wallet | Cosmos: `confirmDeposit(...)` confirms successful tx and exact commitment/encrypted note. EVM: confirm successful receipt and product-required event/state evidence. |
+| Deposit | `prepareDeposit(...)` | Circuit config, asset mapping; Cosmos sign doc also queries account metadata | Local/WASM `depositProofProvider` or exact `depositProofUrl` | Cosmos `MsgDeposit` sign doc or EVM `IPrivacy.deposit` transaction | User Cosmos wallet or EIP-1193 wallet | Both profiles preserve the exact commitment and `encryptedNoteHex`. Cosmos uses `confirmDeposit(...)`; EVM uses `waitForEvmTransaction(...)` to verify the exact RPC call and `PrivacyDeposit` event. |
 | Note scan | `scanWalletNotes(...)`, `queryPrivacyScan(...)` | Typed privacy scan and nullifier state | None | Verified found note, cursor, and nullifier status | No submission | Malformed pages or ambiguous nullifiers are not treated as spendable. |
 | Native transfer | `prepareTransfer(...)` | Scan, circuit/asset/audit/disclosure config, same-root path, nullifier state | `POST /v1/prover/transfer` | Cosmos `MsgTransfer` sign doc or EVM `IPrivacy.transfer` transaction | User wallet | Reconcile tx identity, input nullifier, and expected output/disclosure evidence. |
-| One-Proof Batch Transfer | `prepareTransferBatch(...)`, `provePreparedBatchTransfer(...)`, `finalizePreparedBatchTransfer(...)` | Typed scan, protocol config, same-root path snapshot, every input nullifier | `POST /v1/proofs/batch-transfer` | Cosmos `MsgBatchTransfer` sign doc | User Cosmos wallet | Atomically reconcile every input nullifier and every typed output evidence for the same operation. |
+| One-Proof Batch Transfer | `prepareTransferBatch(...)`, `provePreparedBatchTransfer(...)`, `finalizePreparedBatchTransfer(...)` | Typed scan, protocol config, same-root path snapshot, every input nullifier | `POST /v1/proofs/batch-transfer` | Cosmos `MsgBatchTransfer` sign doc or EVM `singleProofBatchTransfer` transaction with optional EIP-712 authorization | User Cosmos/EVM wallet | Atomically reconcile every input nullifier, the exact transaction binding, and every typed output evidence for the same operation. |
 | Direct withdraw | `prepareWithdraw(...)` | Scan, circuit/asset config, Merkle path, nullifier state | `POST /v1/prover/withdraw` | Cosmos `MsgWithdraw` sign doc or EVM `IPrivacy.withdraw` transaction | User wallet | Check tx/receipt, nullifier, and withdraw evidence. |
 | Relay withdraw | `prepareRelayWithdraw(...)` | Same as direct withdraw | `POST /v1/prover/withdraw` | Final relay payload; EVM also returns a candidate `IPrivacy.withdraw` transaction | Product Relayer reconstructs/validates a transaction from the payload and submits using its own account | Call `recordRelayHandoff(...)` before handoff, then reconcile with tx/nullifier/evidence. |
 | Disclosure query | `decodeUserDisclosure(...)`, `decodeSelfViewDisclosure(...)`, `decodeAuditDisclosure(...)`, batch decode APIs | Privacy event, scan event, or typed privacy scan | None | Locally verified and decrypted disclosure report | No submission | Commitment, output index, policy, digest, and target key must all match for `verified`. |
@@ -71,7 +71,7 @@ The fact that `prepare*` returned does not mean that the transaction was submitt
 | `createHttpDepositProofProvider({ url })` | `POST <profile.depositProofUrl>` | `{ note_json, note_commitment_hex }` | `version: "v1"`, `proof_hex`, same `note_commitment_hex` | Deposit only. Redirects are not allowed and the URL is not derived from `proverUrl`. |
 | `createHttpProverAdapter(...).proveTransfer(...)` | `POST {proverUrl}/v1/prover/transfer` | request `v2`, prepared transfer payload `v5` | response `v2`, request payload hash and proof binding | Native transfer and self-merge |
 | `createHttpProverAdapter(...).proveWithdraw(...)` | `POST {proverUrl}/v1/prover/withdraw` | request/prover payload `v2` | response/proof `v2`, request payload hash binding | Direct and relay withdraw |
-| `createHttpProverAdapter(...).proveBatchTransfer(...)` | `POST {proverUrl}/v1/proofs/batch-transfer` | request `v1`, payload `batch-transfer-payload-v1` | response `v1`, proof `batch-transfer-proof-v1`, payload/circuit binding | Cosmos One-Proof Batch Transfer |
+| `createHttpProverAdapter(...).proveBatchTransfer(...)` | `POST {proverUrl}/v1/proofs/batch-transfer` | request `v1`, payload `batch-transfer-payload-v1` | response `v1`, proof `batch-transfer-proof-v1`, payload/circuit binding | Cosmos/EVM One-Proof Batch Transfer |
 | `createAsyncJobProverAdapter(...)` | Product-defined | Caller-provided submit function | Caller-provided `getJob` result validated against the proof contract above | Queue/poll remote prover |
 
 If a browser client receives only `proverUrl` without an injected `proverAdapter`, the SDK creates the default HTTP adapter. Inject an adapter directly for a local/WASM prover or an internal authentication/queue contract.
@@ -82,8 +82,8 @@ The routes below are the contracts shared by the HTTP annotations in [Query prot
 
 | SDK method | HTTP | Clairveil REST route | Purpose |
 | --- | --- | --- | --- |
-| `fetchPrivacyEvents(...)` | GET | `/clairveil/privacy/v1/events` | Legacy/general privacy event page |
-| `fetchScanEvents(...)` | GET | `/clairveil/privacy/v1/scan_events` | Legacy wallet-scan projection with sequence cursor |
+| `fetchPrivacyEvents(...)` | GET | `/clairveil/privacy/v1/events` | Raw privacy-event diagnostic page |
+| `fetchScanEvents(...)` | GET | `/clairveil/privacy/v1/scan_events` | Compatibility/debugging sequence-cursor page; wallet sync uses it only when the typed endpoint is unavailable from the first request |
 | `fetchPrivacyScan(...)`, `queryPrivacyScan(...)` | POST | `/clairveil/privacy/v1/privacy_scan` | `privacy-scan-v2` typed summary/output and complete cursor |
 | `fetchTreeState()` | GET | `/clairveil/privacy/v1/tree_state` | Current Merkle root, leaf count, and depth |
 | `fetchCommitmentInfo(...)` | GET | `/clairveil/privacy/v1/commitment/{commitment_hex}` | Commitment existence and leaf position |
@@ -113,10 +113,10 @@ Nullifier and Merkle-path requests can reveal spend linkage to a query provider.
 | `signDirectAndBroadcast(...)`, `broadcastSignedTx(...)` | CosmJS/Comet RPC broadcast and tx lookup | ClairveilJS does not define a separate product REST broadcast route |
 | EVM prepare preflight | Read-only `eth_chainId` | Checks configured `evmRpc` and the connected wallet network separately |
 | `sendEvmTransaction(...)` | Wallet `eth_sendTransaction` | Transaction authority belongs to the EIP-1193 wallet or relayer |
-| `waitForEvmTransaction(...)` | Read-only `eth_getTransactionReceipt` | Uses configured `evmRpc`, not the injected wallet provider, for lookup |
+| `waitForEvmTransaction(...)` | Read-only `eth_getTransactionReceipt`, `eth_getTransactionByHash`, and `eth_chainId`; policy-dependent `eth_blockNumber` and `eth_getBlockByNumber` | Given the prepared request and sender, verifies the receipt, hash/from/to/input/value/network identity, action-specific privacy event, and explicit finality policy. It fails closed without a policy; depth/`safe`/`finalized` policies recheck the canonical inclusion-block hash. |
 | Chain time for relay expiry validation | Caller supplies the latest chain block time | The README latest-block REST helper is an example, not a fixed SDK relayer API |
 
-An EVM profile still uses the configured Clairveil REST endpoint for privacy-module queries such as scan, circuit, asset, Merkle path, and nullifier. `evmRpc` is used for network ID, receipt, and other EVM JSON-RPC queries.
+Privacy scan, circuit, asset, Merkle path, and nullifier queries use the configured Clairveil REST endpoint by default. An EVM chain may inject a complete `PrivacyStateAdapter` to provide the same reads through contract getters or an indexer. Only a runtime EVM profile that receives the adapter in the same constructor call may omit Cosmos `rpc` and `rest`; serialized `BrowserWalletProfile` and `ClairveilWebClientConfig` values remain complete deployment contracts and continue to require both endpoints. Adapter reads use `queryTimeoutMs` and bounded `queryRetry` within the same adapter without silently switching providers. The SDK applies the same typed-scan, circuit, asset, Merkle, and reserve validation behind the adapter boundary. `evmRpc` is used for network identity, receipts, finality, and reorg verification.
 
 ## On-chain execution mapping
 
@@ -124,11 +124,11 @@ An EVM profile still uses the configured Clairveil REST endpoint for privacy-mod
 | --- | --- | --- | --- | --- |
 | Deposit | `/clairveil.privacy.v1.MsgDeposit` | `IPrivacy.deposit(...)` | Sign doc or EVM transaction | User wallet |
 | Native transfer | `/clairveil.privacy.v1.MsgTransfer` | `IPrivacy.transfer(...)` | Sign doc or EVM transaction | User wallet |
-| One-Proof Batch Transfer | `/clairveil.privacy.v1.MsgBatchTransfer` | Not supported | Cosmos sign doc | User Cosmos wallet |
+| One-Proof Batch Transfer | `/clairveil.privacy.v1.MsgBatchTransfer` | `IPrivacy.singleProofBatchTransfer(...)` or authorization variant | Cosmos sign doc or EVM transaction | User wallet |
 | Direct withdraw | `/clairveil.privacy.v1.MsgWithdraw` | `IPrivacy.withdraw(...)` | Sign doc or EVM transaction | User wallet |
 | Relay withdraw | `/clairveil.privacy.v1.MsgWithdraw` | `IPrivacy.withdraw(...)` | Relay payload and optional candidate transaction | Product Relayer |
 
-One-Proof Batch Transfer is currently Cosmos-only. An EVM-profile `prepareTransferBatch(...)` call is rejected, and ClairveilJS does not provide an `IPrivacy.batchTransfer` ABI or EVM batch fallback.
+One-Proof Batch Transfer maps the same frozen payload, proof, and operation evidence to Cosmos and EVM execution artifacts. The EVM path uses the precompile's canonical single-proof selector and exact calldata; it never falls back to multiple independent `transfer` calls.
 
 ## Relay and proxy non-fixed contracts
 
@@ -152,9 +152,9 @@ The DApp proxy is also a product contract. Even a simple CORS proxy must not col
 | EVM `txBytesHash` | Local binding between the prepared EVM transaction request and reservation | Network submission, RPC transaction identity, or chain success. A `txHash` returned by `eth_sendTransaction` is still required. |
 | Successful tx result / receipt | The transaction executed successfully | That it matches the expected payment/output |
 | Input nullifier spent | The input note was consumed | Payment or payroll-item success |
-| Stored `txHash` or `txBytesHash` matches expected output/disclosure evidence | The current generic matcher can mark the operation successful | For EVM, when only the bytes hash matches, network submission and receipt still need to be checked. All linked inputs must also be verified. |
+| EVM network `txHash` + prepared `txBytesHash` + successful receipt + verified RPC call/event + verified finality policy + expected output evidence match | The EVM operation can be considered successful | A state where only some linked inputs have been verified |
 
-Reservation-aware flows must record durable evidence corresponding to `markBroadcastAttempting(...)` immediately before external broadcast, then `markSubmitted(...)` after submission or `markUnknown(...)` when the result is uncertain. The low-level manager does not distinguish transports and accepts either `txHash` or `txBytesHash` as submission identity metadata; `reconcileSpentNotes(...)` treats matching stored and supplied values as an identity match. Therefore, an EVM request binding can satisfy the manager's identity condition and generic operation-success condition. High-level EVM send helpers record the network `txHash` returned by the wallet, but products that require a receipt or RPC transaction identity must add that validation as caller policy. The SDK broadcast helper can manage this lifecycle for the caller.
+Direct submission flows that use the Reservation API must record durable `markBroadcastAttempting(...)` evidence immediately before external broadcast, then call `markSubmitted(...)` after submission or `markUnknown(...)` when the result is uncertain. Do not start a local broadcast for a payload that has already crossed an external boundary through `recordRelayHandoff(...)`. A hash returned by a relayer cannot establish `Submitted` by itself; first confirm inclusion of the exact payload through an authoritative chain lookup, then call `recordRelayTransactionEvidence(...)` with the payload hash, network transaction hash, checked height, and literal inclusion evidence. High-level EVM preparation records `execution_transport: "evm"` and the prepared `txBytesHash` at `ProofReady`. `markSubmitted(...)` and `recordRelayTransactionEvidence(...)` require a network `txHash` for that record, while `reconcileSpentNotes(...)` requires both network and artifact hashes plus the successful receipt, RPC transaction identity, privacy-event, and finality verification returned by `waitForEvmTransaction(...)`. A custom low-level EVM path must set the same transport tag through `markProofReady(...)`. The SDK broadcast helper can manage this lifecycle for the caller.
 
 ## Related package entry points
 

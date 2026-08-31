@@ -14,7 +14,7 @@ In TypeScript, `BrowserWalletProfile`, `ClairveilWebClientConfig`, and `Clairvei
 
 In production, validate a complete profile first and create the client from its `activeProfile`, rather than scattering individual endpoints across the constructor.
 
-> **Release status:** The Clairveil v0.3.1 release supported by this SDK is
+> **Release status:** The Clairveil v0.3.1 SDK handoff snapshot supported by this SDK is
 > `PUBLICATION_READY_EXPERIMENTAL`, not `PRODUCTION_RELEASE_READY`.
 > The production settings below are safe downstream-integration guidance; they do
 > not replace formal trusted setup, external security/circuit audit, signed
@@ -53,7 +53,7 @@ The minimum shape of `ClairveilWebClientConfig` is:
 
 For backward compatibility, top-level flattened `chainId`, `rpc`, `rest`, `proverUrl`, `transport`, denom/prefix, Keplr, and EVM fields are accepted, but if present they must exactly match the selected active profile. Omit these flattened fields in new configurations.
 
-`serverFeatures` is a flag for UI exposure and product policy. For example, `batchTransfer: true` does not automatically enable One-Proof. After checking policy, the caller must explicitly set `enableExperimentalBatchTransfer` on the client; this feature is currently Cosmos-only.
+`serverFeatures` is a flag for UI exposure and product policy. For example, `batchTransfer: true` does not automatically enable One-Proof. After checking policy, the caller must explicitly set `enableExperimentalBatchTransfer` on the Cosmos or EVM client.
 
 ## Common profile fields
 
@@ -146,6 +146,7 @@ An EVM profile additionally requires the following values alongside the Clairvei
 | `evmChainId` | Network ID in EVM quantity format beginning with `0x` |
 | `evmChainName` | Display name for the network |
 | `evmPrivacyPrecompileAddress` | 20-byte `IPrivacy` precompile address provided by the target/downstream chain |
+| `evmAuthorizationProfile` | Optional JSON-safe chain policy defining the `typedDataDomain` and the `supportedAuthorizationKinds` allowed by the target |
 | `evmGasLimit` | Hex quantity for privacy transactions |
 | `evmSendGasLimit` | Hex quantity for native sends |
 | `evmDepositMode` | Browser EVM profiles require the canonical `payable-exact-value` mode |
@@ -174,15 +175,19 @@ const evmProfile = {
   evmRpc: "https://evm-rpc.example.com",
   evmChainId: "0x539",
   evmChainName: "Clairveil EVM",
-  evmPrivacyPrecompileAddress: "0x100000000000000000000000000000000000000b",
+  evmPrivacyPrecompileAddress: targetChainPrivacyContractAddress,
   evmDepositMode: "payable-exact-value",
   evmNativeDenom: "uclair",
+  evmAuthorizationProfile: {
+    typedDataDomain: { name: "Target EVM Privacy", version: "1" },
+    supportedAuthorizationKinds: [1, 2, 3]
+  },
   evmGasLimit: "0x989680",
   evmSendGasLimit: "0x5208"
 };
 ```
 
-Confirm the precompile address and payable support in the target/downstream chain's deployment contract. Do not assume support from the ClairveilJS default or example address alone.
+Confirm the precompile address and payable support in the target/downstream chain's deployment contract. ClairveilJS does not provide a chain-specific default address.
 
 ## Client behavior options
 
@@ -190,8 +195,9 @@ The main `ClairveilBrowserClientOptions` controlled outside the profile are:
 
 | Option | Default | Operational guidance |
 | --- | --- | --- |
-| `queryTimeoutMs` | 30,000ms | REST/RPC query timeout. `fetchTimeoutMs` is a compatibility alias and takes precedence when present. |
-| `queryRetry` | 2 attempts, 250–1,500ms jitter | Default retry statuses are 408, 429, 502, 503, 504. `false` disables retry. |
+| `queryTimeoutMs` | 30,000ms | REST/RPC and `PrivacyStateAdapter` read timeout. `fetchTimeoutMs` is a compatibility alias and takes precedence when present. |
+| `queryRetry` | 2 attempts, 250–1,500ms jitter | Default retry statuses are 408, 429, 502, 503, 504. Adapter retries call only the same adapter and do not switch providers. `false` disables retry. |
+| `evmFinalityPolicy` | None | Required explicitly for EVM confirmation. Select confirmation depth, `safe`, `finalized`, or `custom` according to the chain. `receipt` is an explicit low-finality opt-in that verifies only mined-block identity. |
 | `nullifierFailover` | `false` | When enabled, the same nullifier may be exposed to multiple REST providers. Requires a product privacy decision. |
 | `merklePathFailover` | `false` | When enabled, the spend commitment and exact-snapshot request may be exposed to multiple providers. |
 | `proverAdapter` | None | Injects a local/WASM, internally authenticated, or async-job prover. Takes precedence over the default HTTP adapter. |
@@ -200,7 +206,7 @@ The main `ClairveilBrowserClientOptions` controlled outside the profile are:
 | `depositProofProvider` | None | Local/WASM DepositCircuit provider. Takes precedence over `depositProofUrl`. |
 | `depositProofTimeoutMs` | 120,000ms | Exact deposit-proof HTTP timeout |
 | `depositProofResponseMaxBytes` | 1MiB | Deposit-proof response limit |
-| `enableExperimentalBatchTransfer` | `false` | Explicit opt-in for Cosmos One-Proof batch. Unsupported on EVM. |
+| `enableExperimentalBatchTransfer` | `false` | Explicit opt-in for Cosmos/EVM One-Proof batch. EVM maps it to the canonical single-proof transaction. |
 
 General queries may retry/fail over among configured REST endpoints, but nullifier and Merkle-witness requests have high privacy-linkage risk and stay pinned to the default endpoint. Before enabling either option for availability, review whether the provider operators are truly separate and whether they can correlate the same user.
 

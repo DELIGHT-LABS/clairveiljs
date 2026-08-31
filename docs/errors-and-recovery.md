@@ -157,7 +157,7 @@ route production changes only through validated CAS, lease, and reconciliation
 APIs. See the [reservation state machine](./reservation-state-machine.md) for
 the complete transition guards.
 
-`signDocHash` supports binding a prepared/signed artifact but cannot create `Submitted` by itself. The current low-level `markSubmitted(...)` does not distinguish transports and accepts either `txHash` or `txBytesHash`, so an EVM canonical request binding can technically create `Submitted`. The high-level EVM send helper records the network `txHash` returned by the wallet/provider. Because an EVM `txBytesHash` is not a receipt lookup key, callers using the low-level manager must not interpret a state name alone as proof of network submission.
+`signDocHash` supports binding a prepared/signed artifact but cannot create `Submitted` by itself. For a reservation tagged with `execution_transport: "evm"`, `markSubmitted(...)` requires the network `txHash`; the prepared `txBytesHash` remains a separate request binding and is not a receipt lookup key. Untagged legacy or external reservations retain the generic `txHash`/`txBytesHash` compatibility rule. The high-level EVM send helper records the network `txHash` returned by the wallet/provider, but callers still must not interpret a state name alone as proof of successful execution.
 
 ## Dual evidence for `Failed` and `ReplanRequired`
 
@@ -204,7 +204,7 @@ leaves the operation unchanged.
 
 `ConfirmedSpent` means that the input note's nullifier was consumed on chain. Do not report the payment, payroll item, or transfer as successful until all of the following are verified:
 
-- The stored `txHash` or `txBytesHash` and reconciliation evidence contain the same identity. The current generic matcher does not distinguish transports, so an EVM network `txHash`/receipt requirement must be enforced separately by the caller.
+- For Cosmos or untagged legacy records, the stored transaction identity matches the reconciliation evidence. For an EVM-tagged record, the stored network `txHash` and prepared `txBytesHash` must each match, and successful receipt, RPC transaction identity, privacy-event, and finality verification must all be true.
 - The expected output commitment
 - The recipient, amount, denom, or their binding hash
 - Disclosure digest and policy evidence
@@ -221,6 +221,8 @@ Moving from `ManualReview` to `Released`, `ReplanRequired`, or `Failed` requires
 - `reason` is recommended for the audit log
 
 The operator must verify the stored payload/proof hash, transaction identity, relay handoff, chain height, nullifier, and output evidence. Do not release a note based only on TTL expiry, local cancellation, or “it has been waiting a long time.”
+
+There is no automatic transition directly from `ManualReview` back to `ProofReady`. A quarantined batch checkpoint must be resolved by an operator to `Released`, `ReplanRequired`, or `Failed`; continuing execution requires a new plan and proof that match that outcome.
 
 ## Safe logs and user messages
 
