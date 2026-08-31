@@ -8697,6 +8697,12 @@ test("package metadata is ready for public npm publishing", () => {
   assert.ok(packageJson.files.includes("test/e2e-local.e2e.js"));
   assert.ok(packageJson.dependencies["@cosmjs/stargate"]);
   assert.ok(packageJson.dependencies["cosmjs-types"]);
+  assert.deepEqual(
+    Object.keys(packageJson.dependencies).filter((name) => packageJson.devDependencies[name]),
+    [],
+    "runtime dependencies must not be duplicated as dev-only lockfile entries"
+  );
+  assert.equal(packageJson.packageManager, "npm@10.9.2");
   assert.ok(packageJson.scripts["test:conformance:required"]?.includes("require-conformance-fixtures.js"));
   assert.equal(packageJson.scripts.prepack, "npm run verify:package");
   assert.equal(packageJson.scripts.prepublishOnly, "npm run verify:release:integration");
