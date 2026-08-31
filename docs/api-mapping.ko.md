@@ -25,7 +25,7 @@
 ## Clairveil v0.3.1 고정 계약
 
 이 문서와 SDK의 지원 기준은 현재 Clairveil `v0.3.1` SDK handoff commit
-`621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b`이다. 아래 값은
+`0ff92839872de26b787a60d8e4d5822cc459855b`이다. 아래 값은
 배포 profile이 바꿀 수 있는 설정이 아니라 conformance fixture와 consensus
 identity가 고정한 protocol 계약이다.
 

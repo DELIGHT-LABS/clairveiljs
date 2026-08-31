@@ -581,7 +581,7 @@ test("conformance helper defaults use the bundled commit fixture snapshot", () =
   assert.equal(clairveilConformanceBundleVersion, "v0.3.1");
   assert.equal(supportedClairveilRelease, clairveilConformanceBundleVersion);
   assert.equal(supportedClairveilSourceKind, "commit_snapshot");
-  assert.equal(supportedClairveilCommit, "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b");
+  assert.equal(supportedClairveilCommit, "0ff92839872de26b787a60d8e4d5822cc459855b");
   assert.ok(
     suggestClairveilConformanceFixtureDirs()[0].endsWith(defaultConformanceFixtureDir)
   );

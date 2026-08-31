@@ -13,8 +13,9 @@ import {
   evmOneProofBatchReleaseShapes,
   runEvmIntegrationVerification,
   validateEvmIntegrationEvidence,
+  verifiedClairveilBundleVersion,
   verifiedClairveilCommit,
-  verifiedClairveilRelease,
+  verifiedClairveilSourceKind,
   verifiedSdkVersion
 } from "../tools/verify-evm-integration.js";
 
@@ -294,7 +295,8 @@ function validEvidence() {
   };
   return {
     schemaVersion: evmEvidenceSchema,
-    clairveilRelease: verifiedClairveilRelease,
+    clairveilBundleVersion: verifiedClairveilBundleVersion,
+    clairveilSourceKind: verifiedClairveilSourceKind,
     clairveilCommit: verifiedClairveilCommit,
     sdkVersion: verifiedSdkVersion,
     chainId: "downstream-1",
@@ -841,6 +843,12 @@ test("EVM integration evidence validates every v0.3.1 privacy rail", () => {
 
 test("EVM integration evidence rejects missing or contradictory full-flow semantics", () => {
   const cases = [
+    ["bundle version identity", evidence => {
+      evidence.clairveilBundleVersion = "v0.3.0";
+    }, /clairveilBundleVersion must be v0\.3\.1/],
+    ["Core source identity kind", evidence => {
+      evidence.clairveilSourceKind = "tagged_release";
+    }, /clairveilSourceKind must be commit_snapshot/],
     ["native denom binding", evidence => {
       evidence.nativeDenom = "uother";
     }, /nativeDenom must equal denom/],

@@ -6,7 +6,7 @@
 
 ClairveilJS의 `src/` 디렉터리 계층은 구현 구조를 설명하지만, 이 문서는 실제 서비스 배포와 런타임 상호작용을 다룬다. Cosmos와 Clairveil-compatible EVM 체인을 모두 포함하며, 배포 환경에 따라 선택되는 경로를 구분한다.
 
-지원하는 기준 protocol은 Clairveil v0.3.1 SDK handoff(`621c24a`)의
+지원하는 기준 protocol은 Clairveil v0.3.1 SDK handoff(`0ff9283`)의
 `privacy-note-v1` / `privacy-fixed-v1`이다. 해당 source의 공개 상태는
 `PUBLICATION_READY_EXPERIMENTAL`이며 production 배포 승인이 아니다. Formal
 trusted setup, 외부 security/circuit audit, signed production artifact와 target

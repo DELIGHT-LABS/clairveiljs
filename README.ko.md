@@ -40,7 +40,7 @@ Note reservation 상태 전이: [docs/reservation-state-machine.ko.md](./docs/re
 ## 설치
 
 ```bash
-npm install github:DELIGHT-LABS/clairveiljs
+npm install clairveiljs@0.3.1
 ```
 
 [DELIGHT-LABS/clairveiljs](https://github.com/DELIGHT-LABS/clairveiljs)
@@ -76,9 +76,9 @@ Public consumer는 내부 파일 경로를 직접 import하지 말고 package ex
 
 ## Clairveil 호환성
 
-| ClairveilJS | 검증한 Clairveil handoff snapshot | Public Cosmos wire | Downstream EVM deposit |
+| ClairveilJS | 검증한 Core source identity | Public Cosmos wire | Downstream EVM deposit |
 | --- | --- | --- | --- |
-| `0.3.1` | `v0.3.1` handoff (`621c24a`) | 기존 `MsgDeposit`/query 계약 유지 | opt-in `payable-exact-value` |
+| `0.3.1` | SDK bundle `v0.3.1` / Core `commit_snapshot` (`0ff9283`) | 기존 `MsgDeposit`/query 계약 유지 | opt-in `payable-exact-value` |
 
 `clairveiljs@0.3.1`은 위 표의 고정 SDK handoff를 대상으로 하며 이후 core
 변경까지 자동으로 지원하지 않습니다. Exact commit과 release 검증은
@@ -110,7 +110,7 @@ handoff 이전 형식을 다시 허용하지 않습니다.
 - `AssetRegistryV1`이 denom/asset-ID mapping의 authoritative source이며 audit disclosure는 필수입니다. Transfer의 view tag는 정확히 두 개이고 각각 2 bytes이며, tag mismatch에서도 기본 scan은 full decrypt를 시도합니다.
 - Exact public-input 순서와 Batch schema digest는 [API 매핑 문서](./docs/api-mapping.ko.md#clairveil-v031-고정-계약)를 따릅니다.
 
-Clairveil v0.3.1의 `Keeper.DepositWithFunder`는 trusted in-process Go
+선택한 Core `0ff9283` commit snapshot의 `Keeper.DepositWithFunder`는 trusted in-process Go
 integration API이며 protobuf, gRPC, CLI 또는 client `funder` field가
 아닙니다. 따라서 ClairveilJS의 Cosmos message surface는 바꾸지 않고,
 새 흐름은 대상 체인의 payable privacy precompile에서 사용합니다. Deposit
@@ -766,7 +766,7 @@ Operation 단위 재시도 진단은 구조화되어 있습니다. `OPERATION_ST
 ## Handoff Conformance
 
 ClairveilJS는 Clairveil core commit
-`621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b`의 exact contract snapshot을 포함하며
+`0ff92839872de26b787a60d8e4d5822cc459855b`의 exact contract snapshot을 포함하며
 note reservation 계약은 v3만 허용합니다. 이것은 ClairveilJS `0.3.1` package용
 commit snapshot이고 immutable Clairveil core `v0.3.1` release tag와 같다는
 표시가 아닙니다. npm package에도 fixture와 wallet-contract JSON Schema가 포함되므로
@@ -800,6 +800,13 @@ fixture 12개, JSON Schema 1개를 주장한 git commit과 byte-for-byte로 대�
 `CLAIRVEIL_SOURCE_DIR`로 해당 commit을 가진 Clairveil checkout을 지정할 수 있고,
 없으면 sibling `../clairveil`을 사용합니다. checkout 또는 commit object가 없으면
 fail-closed합니다.
+
+Canonical EVM `IPrivacy` interface는 특정 downstream EVM 구현과 독립적인
+SDK 소유 계약입니다. `npm run verify:evm-contract`는 bundled contract version과
+ABI digest를 확인하고 모든 function selector와 event signature를 다시 계산하며,
+mutability와 SDK adapter의 exact contract 일치를 검사합니다. 이 gate에는
+downstream source checkout이 필요하지 않으며 구현 동작은 별도의 EVM integration
+test에서 검증합니다.
 
 Reservation conformance test는 fixture의 allowed/rejected 전이를
 `canTransitionReservation(...)` 일반 전이 표에 대해 재생합니다. Store release helper도
@@ -871,7 +878,7 @@ CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<auditor-private-scalar-hex> \
 npm run test:e2e:local
 ```
 
-`CLAIRVEIL_E2E_REQUIRED=1`에서는 `CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX`가 필수이며 chain audit public key와 일치해야 합니다. Batch input/payment amount, output role, disclosure mode, self-view 설정은 번들된 Clairveil `621c24a`의 `privacy_batch_transfer_v1_contract.json`에서 직접 읽으며 override할 수 없습니다. Recipient는 typed output evidence를 독립적으로 decrypt·검증할 수 있도록 의도적으로 E2E wallet으로 고정합니다. Batch matrix는 validated typed output에서 public·recipient-encrypted user disclosure, 필수 audit disclosure, 활성화된 sender self-view disclosure를 실제 decode·verify합니다. 기본값에서는 현재 root를 조회하고 `commitment_paths_at_root`가 그 root의 authoritative snapshot height를 반환하게 합니다. 특정 snapshot을 고정하려면 검증된 `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX`와 `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT`를 항상 함께 지정하세요.
+`CLAIRVEIL_E2E_REQUIRED=1`에서는 `CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX`가 필수이며 chain audit public key와 일치해야 합니다. Batch input/payment amount, output role, disclosure mode, self-view 설정은 번들된 Clairveil `0ff9283`의 `privacy_batch_transfer_v1_contract.json`에서 직접 읽으며 override할 수 없습니다. Recipient는 typed output evidence를 독립적으로 decrypt·검증할 수 있도록 의도적으로 E2E wallet으로 고정합니다. Batch matrix는 validated typed output에서 public·recipient-encrypted user disclosure, 필수 audit disclosure, 활성화된 sender self-view disclosure를 실제 decode·verify합니다. 기본값에서는 현재 root를 조회하고 `commitment_paths_at_root`가 그 root의 authoritative snapshot height를 반환하게 합니다. 특정 snapshot을 고정하려면 검증된 `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX`와 `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT`를 항상 함께 지정하세요.
 
 필수 `test:e2e:local:one-proof-all` 릴리스 명령은 deployment, wallet,
 prover, timeout 값을 `CLAIRVEIL_E2E_LOCAL_*` 변수에서 읽습니다. 예를 들어

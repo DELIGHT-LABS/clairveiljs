@@ -12,12 +12,15 @@ All notable changes to ClairveilJS are documented in this file.
   browser profile fields, TypeScript declarations, and submission-time
   transaction binding checks.
 - Added a pinned Clairveil core commit-snapshot source/protobuf verification gate.
+- Added a self-contained gate for the SDK-owned EVM `IPrivacy` ABI, selectors,
+  events, mutability, and adapter surface.
 
 ### Changed
 
-- Aligned the package contract snapshot with Clairveil core commit
-  `621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b` without mislabeling that divergent
-  snapshot as the immutable Clairveil core `v0.3.1` tag.
+- Aligned the package contract snapshot with the first joint Clairveil core commit
+  `0ff92839872de26b787a60d8e4d5822cc459855b` that contains both the v3 reservation
+  contract and hardened trusted deposit funding, without presenting the snapshot as
+  the immutable Clairveil core `v0.3.1` tag.
 - Made payable exact-value the default EVM deposit mode; explicit nonpayable mode remains an opt-in compatibility setting.
 - Kept deprecated public aliases for the v0.3.1 bundle label and legacy EVM
   precompile constants, while requiring every EVM client to use an explicit

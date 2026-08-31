@@ -6,8 +6,9 @@ import { hashAmount, hashRecipient } from "../src/privacy/reservation.js";
 import { verifyVendoredClairveilContractSnapshot } from "./verify-clairveil-source.js";
 
 export const evmEvidenceSchema = "clairveil-evm-e2e-v1";
-export const verifiedClairveilRelease = "v0.3.1";
-export const verifiedClairveilCommit = "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b";
+export const verifiedClairveilBundleVersion = "v0.3.1";
+export const verifiedClairveilSourceKind = "commit_snapshot";
+export const verifiedClairveilCommit = "0ff92839872de26b787a60d8e4d5822cc459855b";
 export const verifiedSdkVersion = "0.3.1";
 export const evmOneProofBatchMatrixSchema = "clairveil-evm-one-proof-batch-matrix-v1";
 export const evmPostCoreRollbackSuccessMarker = `0x${"a5".repeat(32)}`;
@@ -15,7 +16,7 @@ export const evmPostCoreRollbackFailureMarker = `0x${"f1".repeat(32)}`;
 const sdkRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const batchTransferContractFixturePath = resolve(
   sdkRoot,
-  `fixtures/clairveil-${verifiedClairveilRelease}/x/privacy/client/sdk/conformance/testdata/privacy_batch_transfer_v1_contract.json`
+  `fixtures/clairveil-${verifiedClairveilBundleVersion}/x/privacy/client/sdk/conformance/testdata/privacy_batch_transfer_v1_contract.json`
 );
 const fixtureDisclosureModeValues = Object.freeze({
   none: 0,
@@ -1532,7 +1533,8 @@ function validateSafety(flow, context, evidence) {
 export function validateEvmIntegrationEvidence(evidence) {
   requiredObject(evidence, "driver evidence");
   assertEqual(requiredString(evidence.schemaVersion, "schemaVersion"), evmEvidenceSchema, `schemaVersion must be ${evmEvidenceSchema}`);
-  assertEqual(requiredString(evidence.clairveilRelease, "clairveilRelease"), verifiedClairveilRelease, `clairveilRelease must be ${verifiedClairveilRelease}`);
+  assertEqual(requiredString(evidence.clairveilBundleVersion, "clairveilBundleVersion"), verifiedClairveilBundleVersion, `clairveilBundleVersion must be ${verifiedClairveilBundleVersion}`);
+  assertEqual(requiredString(evidence.clairveilSourceKind, "clairveilSourceKind"), verifiedClairveilSourceKind, `clairveilSourceKind must be ${verifiedClairveilSourceKind}`);
   assertEqual(requiredString(evidence.clairveilCommit, "clairveilCommit"), verifiedClairveilCommit, `clairveilCommit must be ${verifiedClairveilCommit}`);
   assertEqual(requiredString(evidence.sdkVersion, "sdkVersion"), verifiedSdkVersion, `sdkVersion must be ${verifiedSdkVersion}`);
 
@@ -1585,7 +1587,8 @@ export async function runEvmIntegrationVerification({
     evidenceSchema: evmEvidenceSchema,
     oneProofBatchMatrixSchema: evmOneProofBatchMatrixSchema,
     oneProofBatchReleaseShapes: evmOneProofBatchReleaseShapes,
-    clairveilRelease: verifiedClairveilRelease,
+    clairveilBundleVersion: verifiedClairveilBundleVersion,
+    clairveilSourceKind: verifiedClairveilSourceKind,
     clairveilCommit: verifiedClairveilCommit,
     sdkVersion: verifiedSdkVersion,
     createPostCoreRollbackHarness: createEvmPostCoreRollbackHarness,

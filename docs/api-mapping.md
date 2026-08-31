@@ -25,7 +25,7 @@ It covers high-level flows that communicate with external systems or create tran
 ## Clairveil v0.3.1 fixed contract
 
 This document and the SDK support the current Clairveil `v0.3.1` SDK handoff,
-commit `621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b`. The values below are not deployment-profile
+commit `0ff92839872de26b787a60d8e4d5822cc459855b`. The values below are not deployment-profile
 settings; they are protocol contracts fixed by the conformance fixtures and consensus
 identity.
 

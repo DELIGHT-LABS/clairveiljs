@@ -2,16 +2,6 @@
   "schema_version": "clairveil-evm-privacy-contract-v1",
   "contract_version": "0.3.1",
   "canonical_abi_sha256": "ee29aa6ab3e0ddca3c43e6457a51d05b15f405bbf192a6076d01894aecfcb31b",
-  "source": {
-    "solidity": {
-      "path": "precompiles/privacy/IPrivacy.sol",
-      "sha256": "43b893c4fee86a078a7afed6d76eaee73d238f1a3a6b6557df507884cf116c0b"
-    },
-    "abi": {
-      "path": "precompiles/privacy/IPrivacy.json",
-      "sha256": "2cf8c3b67c83494cbaec7af035cb7186a6c3baaec3c229d13c9f956aeb154ec2"
-    }
-  },
   "selectors": {
     "deposit": "e6eb7771",
     "transfer": "43fd6967",

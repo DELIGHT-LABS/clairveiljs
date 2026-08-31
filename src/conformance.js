@@ -14,7 +14,7 @@ export const clairveilConformanceBundleVersion = "v0.3.1";
 /** @deprecated Use clairveilConformanceBundleVersion for the SDK bundle identity. */
 export const supportedClairveilRelease = clairveilConformanceBundleVersion;
 export const supportedClairveilSourceKind = "commit_snapshot";
-export const supportedClairveilCommit = "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b";
+export const supportedClairveilCommit = "0ff92839872de26b787a60d8e4d5822cc459855b";
 export const defaultConformanceFixtureDir = `fixtures/clairveil-${clairveilConformanceBundleVersion}/${conformanceFixtureRelativePath}`;
 
 export const batchTransferConformanceFixtureName = "privacy_batch_transfer_v1_contract.json";

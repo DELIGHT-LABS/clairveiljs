@@ -53,7 +53,7 @@ import { createNoteReservationManager } from "clairveiljs/reservation";
 ## Install
 
 ```bash
-npm install github:DELIGHT-LABS/clairveiljs
+npm install clairveiljs@0.3.1
 ```
 
 The root `clairveiljs` entrypoint remains backward-compatible with the current Cosmos-oriented client surface.
@@ -64,9 +64,9 @@ For EVM chains, ClairveilJS calls the chain-provided privacy precompile. The DAp
 
 ## Clairveil Compatibility
 
-| ClairveilJS | Verified Clairveil handoff snapshot | Public Cosmos wire | Downstream EVM deposit |
+| ClairveilJS | Verified Core source identity | Public Cosmos wire | Downstream EVM deposit |
 | --- | --- | --- | --- |
-| `0.3.1` | `v0.3.1` handoff (`621c24a`) | unchanged `MsgDeposit`/query contracts | opt-in `payable-exact-value` |
+| `0.3.1` | SDK bundle `v0.3.1` / Core `commit_snapshot` (`0ff9283`) | unchanged `MsgDeposit`/query contracts | opt-in `payable-exact-value` |
 
 `clairveiljs@0.3.1` targets the pinned SDK handoff shown above; later core
 changes are not implied. See [Handoff Conformance](#handoff-conformance) for the
@@ -100,7 +100,7 @@ The pinned protocol baseline is:
 See the [API mapping](./docs/api-mapping.md#clairveil-v031-fixed-contract)
 for the exact public-input order and Batch schema digest.
 
-Clairveil v0.3.1 adds `Keeper.DepositWithFunder` as a trusted in-process Go
+The selected Core `0ff9283` commit snapshot contains `Keeper.DepositWithFunder` as a trusted in-process Go
 integration surface. It does not add a protobuf, gRPC, CLI, or client `funder`
 field. ClairveilJS therefore keeps the Cosmos message surface unchanged and
 supports the new flow through a target chain's payable privacy precompile. Its
@@ -242,7 +242,7 @@ For audit disclosure key generation in JS, see the repository example at [exampl
 ## Handoff Conformance
 
 ClairveilJS includes the exact Clairveil core contract snapshot at commit
-`621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b`, including the v3-only note-reservation
+`0ff92839872de26b787a60d8e4d5822cc459855b`, including the v3-only note-reservation
 fixture and wallet-contract JSON Schema. This is a commit snapshot for the
 ClairveilJS `0.3.1` package, not a claim that it is the immutable Clairveil core
 `v0.3.1` release tag. The npm package ships this snapshot, so runtime consumers
@@ -281,6 +281,13 @@ compares four protobufs, twelve fixtures, and one JSON Schema byte-for-byte with
 the claimed git commit. Set `CLAIRVEIL_SOURCE_DIR` to a Clairveil checkout that
 contains the commit; otherwise the command uses the sibling `../clairveil`
 checkout and fails closed when the commit object is unavailable.
+
+The canonical EVM `IPrivacy` interface is an SDK-owned contract, independent of
+any downstream EVM implementation. Run `npm run verify:evm-contract` to validate
+the bundled contract version and ABI digest, recompute every function selector
+and event signature, enforce mutability, and require the SDK adapter to match the
+contract exactly. No downstream source checkout is required by this gate;
+implementation behavior is covered separately by the EVM integration tests.
 
 The reservation conformance test replays the fixture's allowed and rejected
 transitions through the generic `canTransitionReservation(...)` table. Store
@@ -362,7 +369,7 @@ CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<auditor-private-scalar-hex> \
 npm run test:e2e:local
 ```
 
-`CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX` is mandatory when `CLAIRVEIL_E2E_REQUIRED=1`; the key must match the chain's configured audit public key. Batch input/payment amounts, output roles, disclosure modes, and self-view settings are loaded directly from the bundled Clairveil `621c24a` `privacy_batch_transfer_v1_contract.json` and cannot be overridden. The recipient is intentionally the E2E wallet so the test can independently decrypt and validate typed output evidence. The batch matrix decodes and verifies public and recipient-encrypted user disclosures, mandatory audit disclosures, and enabled sender self-view disclosures directly from validated typed outputs. By default the test fetches the current root and lets `commitment_paths_at_root` return that root's authoritative snapshot height. To pin a specific snapshot, set the verified pair `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX` and `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT` together.
+`CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX` is mandatory when `CLAIRVEIL_E2E_REQUIRED=1`; the key must match the chain's configured audit public key. Batch input/payment amounts, output roles, disclosure modes, and self-view settings are loaded directly from the bundled Clairveil `0ff9283` `privacy_batch_transfer_v1_contract.json` and cannot be overridden. The recipient is intentionally the E2E wallet so the test can independently decrypt and validate typed output evidence. The batch matrix decodes and verifies public and recipient-encrypted user disclosures, mandatory audit disclosures, and enabled sender self-view disclosures directly from validated typed outputs. By default the test fetches the current root and lets `commitment_paths_at_root` return that root's authoritative snapshot height. To pin a specific snapshot, set the verified pair `CLAIRVEIL_E2E_ONE_PROOF_ROOT_HEX` and `CLAIRVEIL_E2E_ONE_PROOF_SNAPSHOT_HEIGHT` together.
 
 Set `CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE` to run an actual selected localnet shape: `one-input-one-payment` (self-view enabled), `three-input-four-output` (private/public/recipient-encrypted with self-view enabled), `thirty-one-payments-plus-change` (self-view disabled), `exact-thirty-two-payments` (self-view enabled), or `explicit-zero-padding` (self-view disabled). Set it to `all` to run the full five-shape localnet matrix sequentially. The large 16/32 variants make 16 deposits and may need a higher `CLAIRVEIL_E2E_ONE_PROOF_BATCH_TIMEOUT_MS` than the 30-minute default, depending on local prover hardware.
 

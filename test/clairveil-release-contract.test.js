@@ -10,23 +10,33 @@ import {
   verifyBundledClairveilContractSnapshot,
   verifyVendoredClairveilContractSnapshot
 } from "../tools/verify-clairveil-source.js";
+import {
+  supportedEvmCanonicalAbiSha256,
+  verifyBundledEvmContract
+} from "../tools/verify-evm-contract.js";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const releaseSourceTestsEnabled = process.env.CLAIRVEIL_RELEASE_SOURCE_TESTS === "1";
 const clairveilSourceRoot = resolve(
   process.env.CLAIRVEIL_SOURCE_DIR || resolve(packageRoot, "..", "clairveil")
 );
-
 test("bundled Clairveil handoff contracts validate without a core checkout", () => {
   const result = verifyBundledClairveilContractSnapshot({ packageRoot });
 
   assert.equal(result.bundleVersion, "v0.3.1");
   assert.equal(result.sourceKind, "commit_snapshot");
-  assert.equal(result.commit, "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b");
+  assert.equal(result.commit, "0ff92839872de26b787a60d8e4d5822cc459855b");
   assert.equal(result.protobufCount, 4);
   assert.equal(result.fixtureCount, 12);
   assert.equal(result.schemaCount, 1);
   assert.equal(result.fileCount, 17);
+});
+
+test("bundled generic Clairveil EVM contract validates without a downstream checkout", () => {
+  const result = verifyBundledEvmContract({ packageRoot });
+
+  assert.equal(result.contractVersion, "0.3.1");
+  assert.equal(result.abiSha256, supportedEvmCanonicalAbiSha256);
 });
 
 test("vendored Clairveil handoff contracts match the configured core commit object", {
@@ -36,7 +46,7 @@ test("vendored Clairveil handoff contracts match the configured core commit obje
 
   assert.equal(result.bundleVersion, "v0.3.1");
   assert.equal(result.sourceKind, "commit_snapshot");
-  assert.equal(result.commit, "621c24a3ef1118b6ab2b8b780ab00da6fbc00e1b");
+  assert.equal(result.commit, "0ff92839872de26b787a60d8e4d5822cc459855b");
   assert.equal(result.protobufCount, 4);
   assert.equal(result.fixtureCount, 12);
   assert.equal(result.schemaCount, 1);
@@ -61,7 +71,21 @@ test("release verifier CLI checks the configured Clairveil source checkout", {
   );
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /verified bundled Clairveil commit_snapshot 621c24a3/);
+  assert.match(result.stdout, /verified bundled Clairveil commit_snapshot 0ff92839/);
+});
+
+test("EVM contract verifier CLI checks the SDK-owned generic interface", () => {
+  const result = spawnSync(
+    process.execPath,
+    [join(packageRoot, "tools/verify-evm-contract.js")],
+    {
+      cwd: packageRoot,
+      encoding: "utf8"
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /verified Clairveil EVM contract 0\.3\.1/);
 });
 
 test("release verifier fails closed when the Clairveil source checkout is unavailable", () => {
@@ -72,6 +96,29 @@ test("release verifier fails closed when the Clairveil source checkout is unavai
     }),
     /Clairveil source checkout/
   );
+});
+
+test("EVM contract verifier rejects a modified SDK-owned interface fixture", () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "clairveiljs-evm-contract-"));
+
+  try {
+    mkdirSync(join(temporaryRoot, "fixtures"), { recursive: true });
+    cpSync(
+      join(packageRoot, "fixtures", "evm-privacy-precompile-v0.3.1.json"),
+      join(temporaryRoot, "fixtures", "evm-privacy-precompile-v0.3.1.json")
+    );
+    const fixturePath = join(temporaryRoot, "fixtures", "evm-privacy-precompile-v0.3.1.json");
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
+    fixture.selectors.deposit = "00000000";
+    writeFileSync(fixturePath, `${JSON.stringify(fixture, null, 2)}\n`);
+
+    assert.throws(
+      () => verifyBundledEvmContract({ packageRoot: temporaryRoot }),
+      /selector for deposit/
+    );
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 });
 
 test("release verifier rejects a modified vendored fixture", () => {

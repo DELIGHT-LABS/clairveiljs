@@ -4,8 +4,9 @@ import {
   evmEvidenceSchema,
   runEvmIntegrationVerification,
   validateEvmIntegrationEvidence,
+  verifiedClairveilBundleVersion,
   verifiedClairveilCommit,
-  verifiedClairveilRelease,
+  verifiedClairveilSourceKind,
   verifiedSdkVersion
 } from "./verify-evm-integration.js";
 
@@ -14,8 +15,9 @@ import {
 export const payableEvmEvidenceSchema = evmEvidenceSchema;
 export const validatePayableEvmIntegrationEvidence = validateEvmIntegrationEvidence;
 export {
+  verifiedClairveilBundleVersion,
   verifiedClairveilCommit,
-  verifiedClairveilRelease,
+  verifiedClairveilSourceKind,
   verifiedSdkVersion
 };
 
