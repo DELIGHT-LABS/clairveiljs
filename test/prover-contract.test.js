@@ -84,6 +84,7 @@ test("prover adapters reject missing or falsy versions on explicit envelopes", f
     }),
     createHttpProverAdapter({
       baseURL: "http://127.0.0.1",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => {
         httpCalls += 1;
         throw new Error("invalid envelope must not reach the prover");
@@ -133,6 +134,7 @@ test("transfer prover adapters validate proofs against authoritative chain time"
     }),
     createHttpProverAdapter({
       baseURL: "http://127.0.0.1",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => jsonResponse(examples.transfer.response)
     }),
     createAsyncJobProverAdapter({
@@ -166,6 +168,7 @@ test("withdraw prover adapters validate proofs against authoritative chain time"
     }),
     createHttpProverAdapter({
       baseURL: "http://127.0.0.1",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => jsonResponse(examples.withdraw.response)
     }),
     createAsyncJobProverAdapter({
@@ -204,6 +207,7 @@ test("transfer and withdraw requests are validated and reduced to canonical fiel
   const httpCalls = [];
   const httpAdapter = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async (url, init) => {
       httpCalls.push(JSON.parse(init.body));
       return url.pathname.endsWith("/transfer")
@@ -295,6 +299,7 @@ test("common transfer and withdraw routes require exact HTTP 200 success", fixtu
   for (const kind of ["transfer", "withdraw"]) {
     const adapter = createHttpProverAdapter({
       baseURL: "http://127.0.0.1",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => jsonResponse(examples[kind].response, 201)
     });
     await assert.rejects(
@@ -335,6 +340,7 @@ test("common transfer and withdraw routes require exact JSON Content-Type on suc
       ]) {
         const adapter = createHttpProverAdapter({
           baseURL: "http://127.0.0.1",
+          proverTransportRedirectsDisabled: true,
           fetchImpl: async () => jsonResponse(body, status, contentType)
         });
         await assert.rejects(
@@ -374,6 +380,7 @@ test("common prover routes require no-store responses and exact 405 Allow", fixt
     ]) {
       const adapter = createHttpProverAdapter({
         baseURL: "http://127.0.0.1",
+        proverTransportRedirectsDisabled: true,
         fetchImpl
       });
       await assert.rejects(
@@ -403,6 +410,7 @@ test("common prover routes require no-store responses and exact 405 Allow", fixt
   ]) {
     const adapter = createHttpProverAdapter({
       baseURL: "http://127.0.0.1",
+      proverTransportRedirectsDisabled: true,
       fetchImpl
     });
     await assert.rejects(
@@ -415,6 +423,7 @@ test("common prover routes require no-store responses and exact 405 Allow", fixt
 
   const canonical405 = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => jsonResponse(methodNotAllowed, 405)
   });
   await assert.rejects(
@@ -432,6 +441,7 @@ test("HTTP prover adapter follows the Go route and version contract", fixtureTes
   const adapter = createHttpProverAdapter({
     baseURL: "https://prover.example/base/",
     bearerToken: " test-token ",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async (url, init) => {
       const body = JSON.parse(init.body);
       calls.push({
@@ -473,6 +483,7 @@ test("HTTP prover adapter preserves a base URL path prefix with or without a tra
     const paths = [];
     const adapter = createHttpProverAdapter({
       baseURL,
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async url => {
         paths.push(url.pathname);
         return url.pathname.endsWith("/transfer")
@@ -493,6 +504,7 @@ test("HTTP prover adapter rejects proof payload hash mismatch", fixtureTestOptio
   const examples = readFixture("privacy_prover_example_bundle.json");
   const adapter = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async url => {
       if (url.pathname.endsWith("/withdraw")) {
         return jsonResponse({
@@ -552,6 +564,7 @@ test("HTTP prover adapter rejects malformed proof response shapes", fixtureTestO
   ]) {
     const adapter = createHttpProverAdapter({
       baseURL: "http://127.0.0.1",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => jsonResponse(body)
     });
     await assert.rejects(
@@ -567,6 +580,7 @@ test("HTTP prover adapter aborts on timeout", fixtureTestOptions, async () => {
   const adapter = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
     timeoutMs: 5,
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
       init.signal.addEventListener("abort", () => {
         sawAbort = true;
@@ -589,6 +603,7 @@ test("HTTP prover adapter supports caller cancellation separately from timeout",
   const adapter = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
     timeoutMs: 1000,
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
       init.signal.addEventListener("abort", () => {
         sawAbort = true;
@@ -648,6 +663,7 @@ test("HTTP prover adapter supports the canonical v0.4 deposit route", async () =
   const adapter = createHttpProverAdapter({
     baseURL: "https://deposit.example/base",
     bearerToken: " deposit-token ",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async (url, init) => {
       calls.push({
         url: String(url),
@@ -705,6 +721,7 @@ test("generic deposit prover enforces the exact endpoint response policy", async
   };
   const missingContentType = createHttpProverAdapter({
     baseURL: "https://deposit.example/base",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => new Response(JSON.stringify(responseBody), { status: 200 })
   });
   await assert.rejects(
@@ -714,6 +731,7 @@ test("generic deposit prover enforces the exact endpoint response policy", async
 
   const redirected = createHttpProverAdapter({
     baseURL: "https://deposit.example/base",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => {
       const response = jsonResponse(responseBody);
       Object.defineProperties(response, {
@@ -731,10 +749,12 @@ test("generic deposit prover enforces the exact endpoint response policy", async
   for (const status of [201, 202, 206]) {
     const adapter = createHttpProverAdapter({
       baseURL: "https://deposit.example/base",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => jsonResponse(responseBody, status)
     });
     const pinned = createHttpDepositProofProviderV1({
       url: "https://deposit.example/v1/prover/deposit",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => jsonResponse(responseBody, status)
     });
     for (const prove of [
@@ -748,6 +768,151 @@ test("generic deposit prover enforces the exact endpoint response policy", async
           new RegExp(`status ${status}`).test(error.message)
       );
     }
+  }
+});
+
+test("canonical prover routes reject unattested custom fetch before sending private inputs", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const depositRequest = depositRequestFromContract();
+  let fetchCalls = 0;
+  const unsafeFetch = async () => {
+    fetchCalls += 1;
+    throw new Error("unattested fetch must not be called");
+  };
+  const routes = [
+    adapter => adapter.proveDeposit(depositRequest),
+    adapter => adapter.proveTransfer(examples.transfer.request, {
+      nowUnix: examples.transfer.request.payload.expires_at_unix - 1
+    }),
+    adapter => adapter.proveWithdraw(examples.withdraw.request, {
+      nowUnix: examples.withdraw.request.payload.expires_at_unix - 1
+    })
+  ];
+
+  for (const invoke of routes) {
+    await assert.rejects(
+      async () => invoke(createHttpProverAdapter({
+        baseURL: "https://prover.example",
+        fetchImpl: unsafeFetch
+      })),
+      /custom prover fetch implementation must set proverTransportRedirectsDisabled to true/
+    );
+  }
+  await assert.rejects(
+    async () => createHttpDepositProofProviderV1({
+      url: "https://prover.example/v1/prover/deposit",
+      fetchImpl: unsafeFetch
+    })(depositRequest),
+    /custom prover fetch implementation must set proverTransportRedirectsDisabled to true/
+  );
+  assert.equal(fetchCalls, 0);
+});
+
+test("canonical prover routes reject redirected or cross-endpoint custom-fetch responses", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const depositRequest = depositRequestFromContract();
+  const depositResponse = {
+    version: "v1",
+    proof: {
+      version: "v1",
+      note_commitment_hex: depositRequest.payload.note_commitment_hex,
+      proof_hex: canonicalEmptyGroth16ProofHex()
+    }
+  };
+  const routes = [
+    {
+      response: depositResponse,
+      invoke: adapter => adapter.proveDeposit(depositRequest)
+    },
+    {
+      response: examples.transfer.response,
+      invoke: adapter => adapter.proveTransfer(examples.transfer.request, {
+        nowUnix: examples.transfer.request.payload.expires_at_unix - 1
+      })
+    },
+    {
+      response: examples.withdraw.response,
+      invoke: adapter => adapter.proveWithdraw(examples.withdraw.request, {
+        nowUnix: examples.withdraw.request.payload.expires_at_unix - 1
+      })
+    }
+  ];
+
+  for (const route of routes) {
+    for (const responseIdentity of [
+      { redirected: true, url: "https://other.example/proof" },
+      { redirected: false, url: "https://other.example/proof" }
+    ]) {
+      const adapter = createHttpProverAdapter({
+        baseURL: "https://prover.example",
+        proverTransportRedirectsDisabled: true,
+        fetchImpl: async () => {
+          const response = jsonResponse(route.response);
+          Object.defineProperties(response, {
+            redirected: { value: responseIdentity.redirected },
+            url: { value: responseIdentity.url }
+          });
+          return response;
+        }
+      });
+      await assert.rejects(
+        () => route.invoke(adapter),
+        error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+          /must not redirect|configured endpoint/.test(error.message)
+      );
+    }
+  }
+});
+
+test("native prover fetch refuses redirects without disclosing route payloads", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const depositRequest = depositRequestFromContract();
+  let originHits = 0;
+  let targetHits = 0;
+  const target = createServer((request, response) => {
+    targetHits += 1;
+    request.resume();
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  await new Promise((resolve, reject) => {
+    target.once("error", reject);
+    target.listen(0, "127.0.0.1", resolve);
+  });
+  const targetURL = `http://127.0.0.1:${target.address().port}`;
+  const origin = createServer((request, response) => {
+    originHits += 1;
+    request.resume();
+    response.writeHead(307, { location: `${targetURL}${request.url}` });
+    response.end();
+  });
+  await new Promise((resolve, reject) => {
+    origin.once("error", reject);
+    origin.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const adapter = createHttpProverAdapter({
+      baseURL: `http://127.0.0.1:${origin.address().port}`
+    });
+    for (const invoke of [
+      () => adapter.proveDeposit(depositRequest),
+      () => adapter.proveTransfer(examples.transfer.request, {
+        nowUnix: examples.transfer.request.payload.expires_at_unix - 1
+      }),
+      () => adapter.proveWithdraw(examples.withdraw.request, {
+        nowUnix: examples.withdraw.request.payload.expires_at_unix - 1
+      })
+    ]) {
+      await assert.rejects(invoke);
+    }
+    assert.equal(originHits, 3);
+    assert.equal(targetHits, 0);
+  } finally {
+    await Promise.all([
+      new Promise(resolve => origin.close(resolve)),
+      new Promise(resolve => target.close(resolve))
+    ]);
   }
 });
 
@@ -774,10 +939,12 @@ test("canonical deposit adapters enforce exact response Content-Type and no-stor
     const providers = [
       createHttpProverAdapter({
         baseURL: "https://deposit.example",
+        proverTransportRedirectsDisabled: true,
         fetchImpl
       }).proveDeposit,
       createHttpDepositProofProviderV1({
         url: "https://deposit.example/v1/prover/deposit",
+        proverTransportRedirectsDisabled: true,
         fetchImpl
       })
     ];
@@ -797,6 +964,7 @@ test("canonical deposit adapters enforce exact response Content-Type and no-stor
   ]) {
     const adapter = createHttpProverAdapter({
       baseURL: "https://deposit.example",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => jsonResponse(responseBody, 200, contentType)
     });
     await assert.rejects(
@@ -814,6 +982,7 @@ test("pinned v1 deposit provider uses an exact endpoint with the canonical neste
   const provider = createHttpDepositProofProviderV1({
     url: "https://deposit.example/prove",
     bearerToken: " deposit-token ",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async (url, init) => {
       calls.push({
         url: String(url),
@@ -861,6 +1030,7 @@ test("pinned v1 deposit provider uses an exact endpoint with the canonical neste
 
   const mismatchedCommitment = createHttpDepositProofProviderV1({
     url: "https://deposit.example/prove",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => jsonResponse({
       version: "v1",
       proof: {
@@ -880,6 +1050,7 @@ test("legacy pinned deposit provider preserves the flat EVM request and response
   const calls = [];
   const provider = createHttpDepositProofProvider({
     url: "https://deposit.example/legacy-prove",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async (url, init) => {
       calls.push({
         url: String(url),
@@ -984,6 +1155,7 @@ test("pinned v1 DepositCircuit provider forwards caller cancellation", async () 
   const provider = createHttpDepositProofProviderV1({
     url: "http://127.0.0.1:8080/deposit-proof",
     timeoutMs: 1000,
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
       init.signal.addEventListener("abort", () => {
         sawAbort = true;
@@ -1049,6 +1221,7 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
 
   const nonJson = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => new Response("not-json", {
       status: 200,
       headers: {
@@ -1064,6 +1237,7 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
 
   const malformedUnavailable = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => new Response("down", {
       status: 503,
       headers: {
@@ -1110,6 +1284,7 @@ test("malformed prover error envelopes are rejected before 5xx availability clas
   for (const body of malformedBodies) {
     const adapter = createHttpProverAdapter({
       baseURL: "http://127.0.0.1",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => jsonResponse(body, 500)
     });
     await assert.rejects(
@@ -1127,10 +1302,12 @@ test("malformed prover error envelopes are rejected before 5xx availability clas
   const canonicalDepositProviders = [
     createHttpProverAdapter({
       baseURL: "http://127.0.0.1",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => jsonResponse({ unexpected: true }, 500)
     }).proveDeposit,
     createHttpDepositProofProviderV1({
       url: "http://127.0.0.1/v1/prover/deposit",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => jsonResponse({ unexpected: true }, 500)
     })
   ];
@@ -1156,6 +1333,7 @@ test("HTTP prover adapter classifies exact browser fetch failures as unavailable
   ]) {
     const adapter = createHttpProverAdapter({
       baseURL: "https://prover.example",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => {
         throw new TypeError(message);
       }
@@ -1173,6 +1351,7 @@ test("HTTP prover adapter classifies exact browser fetch failures as unavailable
   ]) {
     const adapter = createHttpProverAdapter({
       baseURL: "https://prover.example",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => {
         throw new TypeError(message);
       }
@@ -1222,6 +1401,7 @@ test("prover failures preserve only safe error metadata and never echo server or
   const examples = readFixture("privacy_prover_example_bundle.json");
   const busy = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => jsonResponse({
       version: "v1",
       code: "busy",
@@ -1241,6 +1421,7 @@ test("prover failures preserve only safe error metadata and never echo server or
 
   const incompleteBusy = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => jsonResponse({
       version: "v1",
       code: "busy",
@@ -1257,6 +1438,7 @@ test("prover failures preserve only safe error metadata and never echo server or
 
   const proofFailed = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => jsonResponse({
       version: "v1",
       code: "proof_failed",
@@ -1275,6 +1457,7 @@ test("prover failures preserve only safe error metadata and never echo server or
 
   const unavailable = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => jsonResponse({
       version: "v1",
       code: "unavailable",
@@ -1314,6 +1497,7 @@ test("HTTP prover adapter requires HTTPS remotely, denies redirects, and strict-
   const fetchOptions = [];
   const adapter = createHttpProverAdapter({
     baseURL: "https://prover.example",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async (_url, init) => {
       fetchOptions.push(init.redirect);
       return jsonResponse(examples.transfer.response);
@@ -1341,6 +1525,7 @@ test("HTTP prover adapter requires HTTPS remotely, denies redirects, and strict-
   ]) {
     const strictAdapter = createHttpProverAdapter({
       baseURL: "http://127.0.0.1",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => new Response(body, {
         status: 200,
         headers: {
@@ -1398,6 +1583,7 @@ test("HTTP prover adapter bounds response bytes before parsing", fixtureTestOpti
   const adapter = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
     maxResponseBytes: 16,
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => new Response("x".repeat(17), {
       status: 200,
       headers: {
@@ -1414,6 +1600,7 @@ test("HTTP prover adapter bounds response bytes before parsing", fixtureTestOpti
   const declaredOversize = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
     maxResponseBytes: 16,
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => new Response("{}", {
       status: 200,
       headers: {

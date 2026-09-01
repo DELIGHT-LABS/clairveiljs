@@ -231,6 +231,11 @@ commitment를 노출하지만 memo, creator, denom, encrypted note, seed와 chai
 제외한다. 선택한 remote service를 신뢰 주체로 평가하고 automatic
 cross-endpoint fallback을 사용하지 않는다. EVM profile 해석은 유지된다.
 
+Platform `fetch`는 `redirect: "error"`로 호출된다. 애플리케이션이 custom prover
+`fetchImpl`을 주입하면 해당 구현이 redirect를 절대 따라가지 않음을 보장하고
+HTTP prover/provider constructor에 `proverTransportRedirectsDisabled: true`를
+지정해야 한다. 이 확인이 없는 custom transport는 request body 전송 전에 거부된다.
+
 ### Remote prover 운영 경계
 
 Clairveil reference prover를 원격으로 운영할 때의 server-side 기본 admission은

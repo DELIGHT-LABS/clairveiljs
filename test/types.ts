@@ -207,6 +207,12 @@ const requiredHttpProverAdapter = createHttpProverAdapter({
   bearerToken: "token",
   timeoutMs: 30_000,
   maxResponseBytes: 1_048_576,
+  proverTransportRedirectsDisabled: true,
+  fetchImpl: fetch
+});
+// @ts-expect-error A custom prover fetch must attest that redirects are disabled.
+createHttpProverAdapter({
+  baseURL: "https://prover.example",
   fetchImpl: fetch
 });
 const requiredHttpProverCapabilities: ProverAdapter & BatchTransferProverAdapter & DepositProverAdapter =

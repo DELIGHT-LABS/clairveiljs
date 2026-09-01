@@ -101,6 +101,30 @@ function proverRequestURL(baseURL, path) {
   return url;
 }
 
+function assertRedirectSafeProverFetch(fetchImpl, proverTransportRedirectsDisabled) {
+  if (typeof fetchImpl !== "function") {
+    throw new Error("fetch implementation is required");
+  }
+  // The platform fetch is invoked with redirect:"error" below. A custom
+  // implementation can ignore that option, so it must explicitly attest the
+  // same no-redirect policy before any private witness is sent.
+  if (fetchImpl !== globalThis.fetch && proverTransportRedirectsDisabled !== true) {
+    throw new Error(
+      "custom prover fetch implementation must set proverTransportRedirectsDisabled to true"
+    );
+  }
+}
+
+function assertDirectProverResponse(response, endpoint, label = "prover response") {
+  if (response?.redirected === true) {
+    throw new Error(`${label} must not redirect`);
+  }
+  const finalURL = String(response?.url || "");
+  if (finalURL && new URL(finalURL).href !== endpoint.href) {
+    throw new Error(`${label} must be served directly from its configured endpoint`);
+  }
+}
+
 function isLoopbackProverHost(hostname) {
   const normalized = String(hostname || "").replace(/^\[|\]$/g, "").toLowerCase();
   if (normalized === "localhost" || normalized === "::1") return true;
@@ -344,7 +368,8 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
   }
 
   try {
-    const response = await fetchImpl(proverRequestURL(baseURL, path), {
+    const endpoint = proverRequestURL(baseURL, path);
+    const response = await fetchImpl(endpoint, {
       method: "POST",
       headers,
       body: serializedBody ?? JSON.stringify(body),
@@ -352,6 +377,7 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
       redirect: "error",
       signal: controller.signal
     });
+    assertDirectProverResponse(response, endpoint);
     // The common Core prover contract fixes JSON response media type for both
     // successes and errors. Reject an ambiguous body before parsing it or
     // classifying any untrusted error envelope.
@@ -385,13 +411,7 @@ function assertDirectDepositProofResponse(
   endpoint,
   { canonicalResponseHeaders = false } = {}
 ) {
-  if (response?.redirected === true) {
-    throw new Error("deposit proof response must not redirect");
-  }
-  const finalURL = String(response?.url || "");
-  if (finalURL && new URL(finalURL).href !== endpoint.href) {
-    throw new Error("deposit proof response must be served directly from its configured endpoint");
-  }
+  assertDirectProverResponse(response, endpoint, "deposit proof response");
   if (canonicalResponseHeaders) {
     assertCanonicalProverResponseHeaders(response, "deposit proof response");
   } else {
@@ -991,11 +1011,10 @@ export function createHttpProverAdapter({
   bearerToken = "",
   timeoutMs = 120000,
   maxResponseBytes = defaultProverResponseMaxBytes,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  proverTransportRedirectsDisabled = false
 } = {}) {
-  if (!fetchImpl) {
-    throw new Error("fetch implementation is required");
-  }
+  assertRedirectSafeProverFetch(fetchImpl, proverTransportRedirectsDisabled);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error("timeoutMs must be positive");
   }
@@ -1109,9 +1128,10 @@ export function createHttpDepositProofProvider({
   url,
   timeoutMs = defaultDepositProofTimeoutMs,
   maxResponseBytes = defaultProverResponseMaxBytes,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  proverTransportRedirectsDisabled = false
 } = {}) {
-  if (!fetchImpl) throw new Error("fetch implementation is required");
+  assertRedirectSafeProverFetch(fetchImpl, proverTransportRedirectsDisabled);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error("deposit proof timeoutMs must be positive");
   }
@@ -1173,9 +1193,10 @@ export function createHttpDepositProofProviderV1({
   bearerToken = "",
   timeoutMs = defaultDepositProofTimeoutMs,
   maxResponseBytes = defaultProverResponseMaxBytes,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  proverTransportRedirectsDisabled = false
 } = {}) {
-  if (!fetchImpl) throw new Error("fetch implementation is required");
+  assertRedirectSafeProverFetch(fetchImpl, proverTransportRedirectsDisabled);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error("deposit proof timeoutMs must be positive");
   }

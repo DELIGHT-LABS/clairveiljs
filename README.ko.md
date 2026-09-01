@@ -448,6 +448,11 @@ const proverAdapter = createHttpProverAdapter({
 
 `baseURL`에 deployment path prefix를 포함할 수 있습니다. Adapter는 각 route를 붙일 때 그 prefix를 보존합니다. 예를 들어 Cosmos deposit proof에는 `https://prover.example/tenant-a/v1/prover/deposit`를 호출합니다.
 
+기본 `fetch`는 redirect를 비활성화해 호출합니다. Custom `fetchImpl`은 redirect를
+절대 따라가지 않는다고 독립적으로 보장하고
+`proverTransportRedirectsDisabled: true`를 명시해야 합니다. 그렇지 않으면
+adapter는 private prover payload를 전송하기 전에 거부합니다.
+
 Remote prover가 job ID를 반환하는 구조라면 `createAsyncJobProverAdapter`로 submit/poll 함수를 감싸세요. one-proof batch 전용 prover는 `submitBatchTransferJob`과 `getJob`만 제공해도 됩니다.
 
 ## Disclosure

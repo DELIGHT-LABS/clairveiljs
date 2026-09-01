@@ -231,6 +231,12 @@ commitment, but excludes memo, creator, denom, encrypted note, seed, and chain
 ID. Evaluate every selected remote service as a trust principal and do not use
 automatic cross-endpoint fallback. EVM profile resolution is unchanged.
 
+The platform `fetch` is called with `redirect: "error"`. If an application
+injects a custom prover `fetchImpl`, that implementation must guarantee that it
+never follows redirects and set `proverTransportRedirectsDisabled: true` on the
+HTTP prover/provider constructor. Unattested custom transports are rejected
+before the request body is sent.
+
 ### Remote prover operational boundary
 
 When operating the Clairveil reference prover remotely, the server-side default admission is `max_in_flight=1` per circuit, `max_queued=4`, and positive `max_request_bytes=8,388,608` (8 MiB); zero is invalid. These are prover deployment settings, not `ClairveilBrowserClientOptions`. Do not expose a raw transport handler; expose only a bounded service handler with body limits, authentication, TLS, timeouts, rate limits, and redacted logging.

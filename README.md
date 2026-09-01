@@ -714,6 +714,11 @@ const noteStore = new LocalStorageNoteStore({
 
 `baseURL` may include a deployment path prefix. The adapter preserves it when appending Cosmos `/v1/prover/deposit`, `/v1/prover/transfer`, `/v1/prover/withdraw`, and the batch proof route; for example, `https://prover.example/tenant-a` calls `https://prover.example/tenant-a/v1/prover/deposit` for a Cosmos deposit proof.
 
+The built-in `fetch` is invoked with redirects disabled. A custom `fetchImpl`
+must independently guarantee that it never follows redirects and explicitly set
+`proverTransportRedirectsDisabled: true`; otherwise the adapter rejects it
+before sending any private prover payload.
+
 `LocalStorageNoteStore` is intentionally opt-in because it stores decrypted wallet notes in plaintext browser storage. Use it only for local demos/tests; production wallets should store the same fields in an encrypted wallet database.
 
 ## EVM Privacy Precompile

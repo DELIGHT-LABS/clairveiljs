@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { canonicalFieldBytes, derivePubKeyFromScalar, packPoint, signNoteHash } from "clairveiljs/core";
 import { base64FromBytes, bytesFromBase64, hexFromBytes } from "clairveiljs/browser-crypto";
 import {
@@ -224,6 +225,7 @@ test("one-proof batch prover uses the Clairveil v0.3.1 route and binds the respo
   let call;
   const adapter = createHttpProverAdapter({
     baseURL: "https://prover.example",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async (url, init) => {
       call = { url: String(url), body: JSON.parse(init.body) };
       return jsonResponse({
@@ -247,6 +249,99 @@ test("one-proof batch prover uses the Clairveil v0.3.1 route and binds the respo
   assert.equal(message.nullifiers.length, 1);
   assert.equal(message.outputs.length, 1);
   assert.equal(message.creator, "clair1creator");
+});
+
+test("one-proof batch prover rejects unattested custom fetch before sending the payload", async () => {
+  const payload = await batchPayload();
+  let fetchCalls = 0;
+  await assert.rejects(
+    async () => createHttpProverAdapter({
+      baseURL: "https://prover.example",
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        throw new Error("unattested fetch must not be called");
+      }
+    }).proveBatchTransfer(payload),
+    /custom prover fetch implementation must set proverTransportRedirectsDisabled to true/
+  );
+  assert.equal(fetchCalls, 0);
+});
+
+test("one-proof batch prover rejects redirected or cross-endpoint custom-fetch responses", async () => {
+  const payload = await batchPayload();
+  const body = {
+    version: "v1",
+    proof: {
+      version: preparedBatchTransferProofVersion,
+      request_payload_hash: payload.payload_hash,
+      proof: base64FromBytes(new Uint8Array(164).fill(7)),
+      circuit_set_id: "privacy-note-v1"
+    }
+  };
+
+  for (const responseIdentity of [
+    { redirected: true, url: "https://other.example/proof" },
+    { redirected: false, url: "https://other.example/proof" }
+  ]) {
+    const adapter = createHttpProverAdapter({
+      baseURL: "https://prover.example",
+      proverTransportRedirectsDisabled: true,
+      fetchImpl: async () => {
+        const response = jsonResponse(body);
+        Object.defineProperties(response, {
+          redirected: { value: responseIdentity.redirected },
+          url: { value: responseIdentity.url }
+        });
+        return response;
+      }
+    });
+    await assert.rejects(
+      () => adapter.proveBatchTransfer(payload),
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+        /must not redirect|configured endpoint/.test(error.message)
+    );
+  }
+});
+
+test("native one-proof batch fetch refuses redirects without disclosing the payload", async () => {
+  const payload = await batchPayload();
+  let originHits = 0;
+  let targetHits = 0;
+  const target = createServer((request, response) => {
+    targetHits += 1;
+    request.resume();
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  await new Promise((resolve, reject) => {
+    target.once("error", reject);
+    target.listen(0, "127.0.0.1", resolve);
+  });
+  const targetURL = `http://127.0.0.1:${target.address().port}`;
+  const origin = createServer((request, response) => {
+    originHits += 1;
+    request.resume();
+    response.writeHead(307, { location: `${targetURL}${request.url}` });
+    response.end();
+  });
+  await new Promise((resolve, reject) => {
+    origin.once("error", reject);
+    origin.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const adapter = createHttpProverAdapter({
+      baseURL: `http://127.0.0.1:${origin.address().port}`
+    });
+    await assert.rejects(() => adapter.proveBatchTransfer(payload));
+    assert.equal(originHits, 1);
+    assert.equal(targetHits, 0);
+  } finally {
+    await Promise.all([
+      new Promise(resolve => origin.close(resolve)),
+      new Promise(resolve => target.close(resolve))
+    ]);
+  }
 });
 
 test("one-proof batch HTTP prover requires exact JSON Content-Type on success and error", async () => {
@@ -279,6 +374,7 @@ test("one-proof batch HTTP prover requires exact JSON Content-Type on success an
     ]) {
       const adapter = createHttpProverAdapter({
         baseURL: "https://prover.example",
+        proverTransportRedirectsDisabled: true,
         fetchImpl: async () => jsonResponse(body, status, contentType)
       });
       await assert.rejects(
@@ -313,6 +409,7 @@ test("one-proof batch HTTP prover requires Cache-Control: no-store", async () =>
   ]) {
     const adapter = createHttpProverAdapter({
       baseURL: "https://prover.example",
+      proverTransportRedirectsDisabled: true,
       fetchImpl
     });
     await assert.rejects(
@@ -383,6 +480,7 @@ test("batch prover adapters reject missing or falsy versions on explicit envelop
   const adapters = [
     createHttpProverAdapter({
       baseURL: "https://prover.example",
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async () => {
         httpCalls += 1;
         throw new Error("invalid envelope must not reach the prover");
@@ -426,6 +524,7 @@ test("batch prover adapters validate with the caller's authoritative time", asyn
     {
       adapter: createHttpProverAdapter({
         baseURL: "https://prover.example",
+        proverTransportRedirectsDisabled: true,
         fetchImpl: async () => {
           httpCalls += 1;
           return jsonResponse({ version: "v1", proof });
@@ -461,6 +560,7 @@ test("one-proof batch prover rejects a proof bound to another prepared operation
   const payload = await batchPayload();
   const adapter = createHttpProverAdapter({
     baseURL: "https://prover.example",
+    proverTransportRedirectsDisabled: true,
     fetchImpl: async () => jsonResponse({
       version: "v1",
       proof: {

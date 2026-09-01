@@ -152,14 +152,24 @@ export const depositProofByteLength: 164;
 export const defaultProverResponseMaxBytes: number;
 export const defaultDepositProofTimeoutMs: number;
 
+export type ProverTransportFetchOptions =
+  | {
+      fetchImpl?: never;
+      proverTransportRedirectsDisabled?: never;
+    }
+  | {
+      fetchImpl: typeof fetch;
+      /** Asserts that the custom implementation never follows redirects. */
+      proverTransportRedirectsDisabled: true;
+    };
+
 export function createHttpProverAdapter(input: {
   baseURL: string;
   bearerToken?: string;
   timeoutMs?: number;
   /** Maximum decoded HTTP response size. Defaults to 1 MiB. */
   maxResponseBytes?: number;
-  fetchImpl?: typeof fetch;
-}): ProverAdapter & BatchTransferProverAdapter & DepositProverAdapter;
+} & ProverTransportFetchOptions): ProverAdapter & BatchTransferProverAdapter & DepositProverAdapter;
 
 export function buildDepositProofRequestV1(input: DepositProofRequestInput): DepositProofRequestV1;
 export function validateDepositProofRequestV1(request: DepositProofRequestV1 | object): DepositProofRequestV1;
@@ -175,8 +185,7 @@ export function createHttpDepositProofProvider(input?: {
   url: string;
   timeoutMs?: number;
   maxResponseBytes?: number;
-  fetchImpl?: typeof fetch;
-}): HttpDepositProofProvider;
+} & ProverTransportFetchOptions): HttpDepositProofProvider;
 
 /** Creates the strict exact-endpoint provider for Core v0.4 Cosmos deposits. */
 export function createHttpDepositProofProviderV1(input: {
@@ -184,8 +193,7 @@ export function createHttpDepositProofProviderV1(input: {
   bearerToken?: string;
   timeoutMs?: number;
   maxResponseBytes?: number;
-  fetchImpl?: typeof fetch;
-}): HttpDepositProofProviderV1;
+} & ProverTransportFetchOptions): HttpDepositProofProviderV1;
 
 export function createAsyncJobProverAdapter<T extends AsyncJobProverAdapterInput>(input: T): AsyncJobProverAdapterFor<T>;
 

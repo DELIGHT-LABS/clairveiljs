@@ -296,12 +296,15 @@ async function loadDepositProofProvider() {
   return provider;
 }
 
-function createE2eProverAdapter(config, { fetchImpl } = {}) {
+function createE2eProverAdapter(config, {
+  fetchImpl,
+  proverTransportRedirectsDisabled = false
+} = {}) {
   return createHttpProverAdapter({
     baseURL: config.proverUrl,
     bearerToken: config.proverBearerToken,
     timeoutMs: config.proverTimeoutMs,
-    ...(fetchImpl ? { fetchImpl } : {})
+    ...(fetchImpl ? { fetchImpl, proverTransportRedirectsDisabled } : {})
   });
 }
 
@@ -343,6 +346,7 @@ test("E2E prover adapter forwards only a configured bearer credential", async ()
       proverBearerToken: token.trim(),
       proverTimeoutMs: 1000
     }, {
+      proverTransportRedirectsDisabled: true,
       fetchImpl: async (_url, init) => {
         authorization = init.headers.get("Authorization");
         return new Response(JSON.stringify({ unexpected: true }), {
