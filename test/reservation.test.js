@@ -5918,6 +5918,57 @@ test("external relay inclusion evidence atomically binds the exact handed-off op
   );
 });
 
+test("relay inclusion alone cannot prove withdraw operation success", async () => {
+  const store = new MemoryReservationStore();
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1relay-withdraw-operation-evidence",
+    indexKey: "relay-withdraw-operation-evidence-index"
+  });
+  const note = noteFixture({ nullifier: "ba".repeat(32), sequence: 913 });
+  const payloadHash = "35".repeat(32);
+  const txHash = "45".repeat(32);
+  const batch = await preparePlanReservation(manager, {
+    plan: { selectedNote: note },
+    kind: "relay_withdraw"
+  });
+  const operationId = batch.operation_id;
+  await manager.markProofReady(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    payloadHash,
+    expectedRecipientHash: "65".repeat(32),
+    expectedAmount: "5",
+    expectedAmountHash: "75".repeat(32),
+    expectedDenom: "uclair",
+    operationSuccessEvidenceRequired: true
+  });
+  await manager.recordRelayHandoff(batch.reservation_ids, {
+    leaseToken: batch.lease_token,
+    payloadHash
+  });
+  await manager.recordRelayTransactionEvidence({
+    operationId,
+    payloadHash,
+    txHash,
+    checkedHeight: 501,
+    transactionIncludedConfirmed: true,
+    payloadHashMatched: true
+  });
+
+  await manager.reconcileSpentNotes([{ ...note, isSpent: true }]);
+  const reconciled = await store.getReservation(batch.reservation_ids[0]);
+  assert.equal(reconciled.status, reservationStatuses.ConfirmedSpent);
+  assert.equal(reconciled.metadata.operation_status, operationStatuses.ConflictSpent);
+  assert.equal(reconciled.metadata.operation_success_evidence_matches, false);
+  assert.deepEqual(reconciled.metadata.operation_success_evidence_errors, [
+    "tx_hash_or_tx_bytes mismatch",
+    "expected_recipient_hash missing",
+    "expected_amount missing",
+    "expected_amount_hash missing",
+    "expected_denom missing"
+  ]);
+});
+
 test("local relay inclusion evidence recovers an exact durable same-origin attempt", async () => {
   let now = new Date("2026-08-25T00:00:00.000Z");
   const store = new MemoryReservationStore({ now: () => now });

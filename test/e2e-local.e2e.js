@@ -44,6 +44,8 @@ import {
   createNoteReservationManager,
   hashAmount,
   hashRecipient,
+  hashTransparentRecipient,
+  operationStatuses,
   reservationStatuses
 } from "clairveiljs/reservation";
 import {
@@ -1256,6 +1258,19 @@ test("local full deposit, typed scan, disclosure, direct withdraw, and separatel
     const checkedHeight = String(relayTx?.height ?? "");
     assert.match(checkedHeight, /^[1-9][0-9]*$/, "relay transaction evidence requires a positive included height");
     const relayReservation = await relayReservationManager.getReservation(relayReservationIDs[0]);
+    const relayWithdrawCoin = parseCoin(
+      relayWithdraw.payload.amount,
+      relayWithdraw.payload.asset_denom || relayWithdraw.payload.assetDenom || config.denom
+    );
+    const relayRecipientHash = hashTransparentRecipient(relayWithdraw.payload.recipient, {
+      accountPrefix: config.accountPrefix
+    });
+    const relayAmountHash = hashAmount(relayWithdrawCoin.denom, relayWithdrawCoin.amount);
+    assert.equal(relayReservation.expected_recipient_hash, relayRecipientHash);
+    assert.equal(relayReservation.expected_amount, relayWithdrawCoin.amount);
+    assert.equal(relayReservation.expected_amount_hash, relayAmountHash);
+    assert.equal(relayReservation.expected_denom, relayWithdrawCoin.denom);
+    assert.equal(relayReservation.metadata.operation_success_evidence_required, true);
     await relayReservationManager.recordRelayTransactionEvidence({
       operationId: relayReservation.operation_id,
       payloadHash: relayWithdraw.payload.payload_hash,
@@ -1272,12 +1287,21 @@ test("local full deposit, typed scan, disclosure, direct withdraw, and separatel
     );
     await relayReservationManager.reconcileSpentNotes([{
       ...relayWithdraw.selectedNote,
-      isSpent: true
+      isSpent: true,
+      operationSuccessEvidence: {
+        txHash: relayTxHash,
+        txResult: relayTx,
+        recipientHash: relayRecipientHash,
+        amount: relayWithdrawCoin.amount,
+        amountHash: relayAmountHash,
+        denom: relayWithdrawCoin.denom
+      }
     }]);
-    assert.equal(
-      (await relayReservationManager.getReservation(relayReservationIDs[0])).status,
-      "ConfirmedSpent"
-    );
+    const reconciledRelayReservation = await relayReservationManager.getReservation(relayReservationIDs[0]);
+    assert.equal(reconciledRelayReservation.status, reservationStatuses.ConfirmedSpent);
+    assert.equal(reconciledRelayReservation.metadata.operation_status, operationStatuses.Succeeded);
+    assert.equal(reconciledRelayReservation.metadata.operation_success_evidence_matches, true);
+    assert.deepEqual(reconciledRelayReservation.metadata.operation_success_evidence_errors, []);
     assert.equal((await client.queryReserve(config.denom)).invariant_holds, true, "reserve invariant should hold after withdraw");
 
   } finally {
