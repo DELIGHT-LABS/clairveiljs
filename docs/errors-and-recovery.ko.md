@@ -62,7 +62,7 @@ try {
 | `PROVER_UNAVAILABLE` | prover URL 없음, network failure, `busy` 또는 `unavailable` 응답 | `retryable`을 확인한다. Core v0.4.0은 `429 busy`만 retryable이고 `503 unavailable`은 non-retryable이다. 안전한 reservation 상태를 확인한 뒤 동일 endpoint 재시도를 판단한다. |
 | `PROVER_TIMEOUT` | prover 요청 또는 async job timeout/abort | 응답이 늦게 완료될 수 있는 adapter인지 확인하고 checkpoint/job ID로 조회. 새 proof를 무조건 중복 요청하지 않음 |
 | `PROVER_CANCELLED` | client의 prover 대기 또는 async job poll 취소 | client wait가 끝났다는 뜻일 뿐 in-process solver 종료를 보장하지 않는다. Durable reservation을 다시 읽는다. `Proving`/`ProofReady`는 자동 release 대신 격리되며 만료·foreign lease는 명시적 reconcile이 필요할 수 있다. Job/checkpoint는 별도 operation store에서 추적한다. |
-| `PROVER_REJECTED` | non-retryable prover 응답 또는 proof job 실패 | payload/circuit/config 불일치 조사. 같은 입력의 blind retry 금지 |
+| `PROVER_REJECTED` | non-retryable prover 응답, proof job 실패 또는 redirect-policy 위반 | payload/circuit/config 또는 endpoint routing 불일치 조사. 같은 입력의 blind retry 금지 |
 | `OPERATION_STATE_MIXED` | 같은 operation의 linked reservation 상태가 서로 다름 | `details.reservations`를 확인하고 operation 전체를 격리·reconcile |
 | `OPERATION_EVIDENCE_CONFLICT` | tx/output/disclosure evidence가 persisted expectation과 충돌 | `details.conflicts`를 보존하고 `ManualReview` 또는 `ConflictSpent` 처리 |
 

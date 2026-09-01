@@ -12,7 +12,7 @@ import {
   validateDepositProofBytesV1,
   validateDepositProofResponseV1
 } from "clairveiljs/prover";
-import { ClairveilErrorCode } from "clairveiljs/errors";
+import { ClairveilErrorCode, wrapProverError } from "clairveiljs/errors";
 import { unpackPointHex } from "clairveiljs/crypto";
 import {
   depositProverConformanceFixtureName,
@@ -904,7 +904,10 @@ test("native prover fetch refuses redirects without disclosing route payloads", 
         nowUnix: examples.withdraw.request.payload.expires_at_unix - 1
       })
     ]) {
-      await assert.rejects(invoke);
+      await assert.rejects(
+        invoke,
+        error => error?.code === ClairveilErrorCode.PROVER_REJECTED
+      );
     }
     assert.equal(originHits, 3);
     assert.equal(targetHits, 0);
@@ -1321,6 +1324,44 @@ test("malformed prover error envelopes are rejected before 5xx availability clas
         !error.message.includes("unexpected")
     );
   }
+});
+
+test("prover errors preserve structured identity before inspecting message text", () => {
+  for (const error of [
+    Object.assign(new Error("socket aborted"), { code: "ECONNRESET" }),
+    new Error("request aborted", {
+      cause: Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" })
+    })
+  ]) {
+    assert.equal(wrapProverError(error).code, ClairveilErrorCode.PROVER_UNAVAILABLE);
+  }
+
+  for (const code of [
+    ClairveilErrorCode.PROVER_CANCELLED,
+    ClairveilErrorCode.PROVER_TIMEOUT,
+    ClairveilErrorCode.PROVER_UNAVAILABLE,
+    ClairveilErrorCode.PROVER_REJECTED
+  ]) {
+    assert.equal(
+      wrapProverError(Object.assign(new Error("ambiguous abort wording"), { code })).code,
+      code
+    );
+  }
+
+  assert.equal(
+    wrapProverError(new TypeError("fetch failed", {
+      cause: new Error("unexpected redirect")
+    })).code,
+    ClairveilErrorCode.PROVER_REJECTED
+  );
+  assert.equal(
+    wrapProverError(new TypeError("fetch failed")).code,
+    ClairveilErrorCode.PROVER_UNAVAILABLE
+  );
+  assert.equal(
+    wrapProverError(new Error("prover request timed out")).code,
+    ClairveilErrorCode.PROVER_TIMEOUT
+  );
 });
 
 test("HTTP prover adapter classifies exact browser fetch failures as unavailable", fixtureTestOptions, async () => {

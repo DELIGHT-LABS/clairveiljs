@@ -77,6 +77,33 @@ const proverTransportErrorCodes = new Set([
   "ETIMEDOUT",
   "UND_ERR_SOCKET"
 ]);
+const proverRedirectPolicyErrorCodes = new Set([
+  "ERR_INVALID_REDIRECT",
+  "ERR_REDIRECT",
+  "UND_ERR_REDIRECT"
+]);
+const stableProverErrorCodes = new Set([
+  ClairveilErrorCode.PROVER_CANCELLED,
+  ClairveilErrorCode.PROVER_TIMEOUT,
+  ClairveilErrorCode.PROVER_UNAVAILABLE,
+  ClairveilErrorCode.PROVER_REJECTED
+]);
+
+function isProverRedirectPolicyError(error) {
+  const seen = new Set();
+  let cause = error?.cause;
+  while (cause && typeof cause === "object" && !seen.has(cause)) {
+    seen.add(cause);
+    const code = String(cause.code || "").toUpperCase();
+    const message = String(cause.message || "");
+    if (proverRedirectPolicyErrorCodes.has(code) ||
+        /unexpected redirect|redirect(?:s)? (?:are|is) (?:disabled|disallowed)|redirect mode is set to error/i.test(message)) {
+      return true;
+    }
+    cause = cause.cause;
+  }
+  return false;
+}
 
 function isBrowserFetchNetworkError(error, message) {
   if (error?.name !== "TypeError" && error?.name !== "NetworkError") return false;
@@ -104,14 +131,11 @@ export function wrapProverError(error) {
     if (details.retryable !== undefined) result.retryable = details.retryable;
     return result;
   };
-  if (error?.code === ClairveilErrorCode.PROVER_CANCELLED) {
-    return wrapped(ClairveilErrorCode.PROVER_CANCELLED);
+  if (stableProverErrorCodes.has(error?.code)) {
+    return wrapped(error.code);
   }
-  if (error?.code === ClairveilErrorCode.PROVER_REJECTED) {
+  if (isProverRedirectPolicyError(error)) {
     return wrapped(ClairveilErrorCode.PROVER_REJECTED);
-  }
-  if (/timed out|abort/i.test(message)) {
-    return wrapped(ClairveilErrorCode.PROVER_TIMEOUT);
   }
   if (error?.proverCode) {
     if (error.proverCode === "busy" || error.proverCode === "unavailable") {
@@ -123,6 +147,9 @@ export function wrapProverError(error) {
   if (error?.retryable === true || status === 429 || (status >= 500 && status <= 599) ||
       isProverTransportError(error, message)) {
     return wrapped(ClairveilErrorCode.PROVER_UNAVAILABLE);
+  }
+  if (/timed out|abort/i.test(message)) {
+    return wrapped(ClairveilErrorCode.PROVER_TIMEOUT);
   }
   return wrapped(ClairveilErrorCode.PROVER_REJECTED);
 }

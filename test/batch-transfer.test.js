@@ -333,7 +333,10 @@ test("native one-proof batch fetch refuses redirects without disclosing the payl
     const adapter = createHttpProverAdapter({
       baseURL: `http://127.0.0.1:${origin.address().port}`
     });
-    await assert.rejects(() => adapter.proveBatchTransfer(payload));
+    await assert.rejects(
+      () => adapter.proveBatchTransfer(payload),
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED
+    );
     assert.equal(originHits, 1);
     assert.equal(targetHits, 0);
   } finally {
