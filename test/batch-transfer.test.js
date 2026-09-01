@@ -7,6 +7,7 @@ import {
   buildPreparedBatchTransferPayload,
   buildMsgBatchTransferFromPrepared,
   computePreparedBatchTransferPayloadHash,
+  normalizePreparedBatchTransferProof,
   preparedBatchTransferProofVersion,
   signValidatedBatchTransferIntentV1,
   serializeBatchTransferProofRequest,
@@ -249,6 +250,83 @@ test("one-proof batch prover uses the Clairveil v0.3.1 route and binds the respo
   assert.equal(message.nullifiers.length, 1);
   assert.equal(message.outputs.length, 1);
   assert.equal(message.creator, "clair1creator");
+});
+
+test("batch proof optional response fields require exact string types", async () => {
+  const payload = await batchPayload();
+  const baseProof = {
+    version: preparedBatchTransferProofVersion,
+    request_payload_hash: payload.payload_hash,
+    proof: base64FromBytes(new Uint8Array(164).fill(7))
+  };
+
+  for (const optionalFields of [
+    {},
+    { circuit_set_id: "" },
+    { circuit_set_id: payload.circuit_set_id },
+    { artifact_checksum: "" },
+    { artifact_checksum: "sha256:example" }
+  ]) {
+    assert.doesNotThrow(() => normalizePreparedBatchTransferProof(
+      payload,
+      { ...baseProof, ...optionalFields }
+    ));
+  }
+
+  assert.throws(
+    () => normalizePreparedBatchTransferProof(payload, {
+      ...baseProof,
+      circuit_set_id: "another-circuit"
+    }),
+    /circuit set mismatch/
+  );
+  for (const field of ["circuit_set_id", "artifact_checksum"]) {
+    for (const value of [null, false, 0, {}, []]) {
+      assert.throws(
+        () => normalizePreparedBatchTransferProof(payload, {
+          ...baseProof,
+          [field]: value
+        }),
+        new RegExp(`${field} must be a string when present`)
+      );
+    }
+  }
+});
+
+test("HTTP and async batch adapters reject non-string optional response fields", async () => {
+  const payload = await batchPayload();
+  const response = optionalFields => ({
+    version: "v1",
+    proof: {
+      version: preparedBatchTransferProofVersion,
+      request_payload_hash: payload.payload_hash,
+      proof: base64FromBytes(new Uint8Array(164).fill(7)),
+      ...optionalFields
+    }
+  });
+  const http = createHttpProverAdapter({
+    baseURL: "https://prover.example",
+    proverTransportRedirectsDisabled: true,
+    fetchImpl: async () => jsonResponse(response({ artifact_checksum: { bad: true } }))
+  });
+  await assert.rejects(
+    () => http.proveBatchTransfer(payload),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+      /artifact_checksum must be a string/.test(error.message)
+  );
+
+  const asyncJob = createAsyncJobProverAdapter({
+    submitBatchTransferJob: async () => ({ job_id: "strict-batch-job" }),
+    getJob: async () => ({
+      status: "completed",
+      result: response({ circuit_set_id: false })
+    }),
+    intervalMs: 0
+  });
+  await assert.rejects(
+    () => asyncJob.proveBatchTransfer(payload),
+    /circuit_set_id must be a string/
+  );
 });
 
 test("one-proof batch prover rejects unattested custom fetch before sending the payload", async () => {

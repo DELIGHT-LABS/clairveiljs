@@ -998,6 +998,11 @@ export function normalizePreparedBatchTransferProof(payload, proof, { nowUnix } 
   if (!proof || typeof proof !== "object") throw new Error("prepared batch transfer proof is required");
   if (proof.version !== preparedBatchTransferProofVersion) throw new Error(`unsupported prepared batch transfer proof version ${JSON.stringify(proof.version)}`);
   if (proof.request_payload_hash !== payload.payload_hash) throw new Error("prepared batch transfer proof payload hash mismatch");
+  for (const field of ["circuit_set_id", "artifact_checksum"]) {
+    if (Object.prototype.hasOwnProperty.call(proof, field) && typeof proof[field] !== "string") {
+      throw new Error(`prepared batch transfer proof ${field} must be a string when present`);
+    }
+  }
   if (proof.circuit_set_id && proof.circuit_set_id !== payload.circuit_set_id) throw new Error("prepared batch transfer proof circuit set mismatch");
   const proofBytes = exactBase64(proof.proof, "prepared batch transfer proof", batchTransferProofSize);
   return {
