@@ -192,6 +192,10 @@ export type BrowserRuntimeWalletProfile =
 
 export type BrowserWalletType = "cosmos" | "evm";
 
+type BrowserRuntimeWalletProfileForTransport<
+  TWalletType extends BrowserWalletType
+> = Extract<BrowserRuntimeWalletProfile, { transport: TWalletType }>;
+
 /** Server-provided feature visibility flags from clairveil-web-client-config-v1. */
 export interface BrowserServerFeatures {
   localTestMode?: boolean;
@@ -253,7 +257,7 @@ export type ValidatedClairveilWebClientConfig = Omit<ClairveilWebClientConfig, "
 export interface ClairveilBrowserClientOptions<
   TWalletType extends BrowserWalletType = "cosmos"
 > {
-  profile?: BrowserRuntimeWalletProfile;
+  profile?: BrowserRuntimeWalletProfileForTransport<TWalletType>;
   /** Direct-construction transport; set to EVM when no validated profile is supplied. */
   transport?: TWalletType;
   walletType?: TWalletType;
@@ -1179,7 +1183,11 @@ export class ClairveilBrowserClient<
 > {
   constructor(options: ClairveilBrowserClientOptions<
     EffectiveBrowserWalletType<TDefaultWalletType, TProfileTransport>
-  > & { profile: BrowserRuntimeWalletProfile & { transport: TProfileTransport } });
+  > & {
+    profile: BrowserRuntimeWalletProfileForTransport<
+      Extract<TProfileTransport, BrowserWalletType>
+    >;
+  });
   constructor(options?: ClairveilBrowserClientOptions<TDefaultWalletType>);
   privacyStateAdapter: Readonly<PrivacyStateAdapter> | null;
   evmFinalityPolicy: Readonly<EvmFinalityPolicy> | null;
@@ -1259,14 +1267,6 @@ export class ClairveilBrowserClient<
   /** Validate the connected EIP-1193 wallet against the active EVM profile. */
   assertEvmWalletNetwork(wallet: EvmNetworkWallet): Promise<string | null>;
   /** Resolve an injected provider, exact override, or the canonical Cosmos prover route. */
-  depositProofProvider(
-    provider: CosmosDepositProofProvider | null | undefined,
-    walletType: "cosmos"
-  ): CosmosDepositProofProvider | null;
-  depositProofProvider(
-    provider: DepositProofProvider | null | undefined,
-    walletType: "evm"
-  ): DepositProofProvider | null;
   depositProofProvider(
     provider?: DepositProofProviderForTransport<
       EffectiveBrowserWalletType<TDefaultWalletType, TProfileTransport>
@@ -1356,7 +1356,7 @@ export class ClairveilBrowserClient<
 
 export function createClairveilBrowserClient<TWalletType extends BrowserWalletType>(
   options: ClairveilBrowserClientOptions<TWalletType> & {
-    profile: BrowserRuntimeWalletProfile & { transport: TWalletType };
+    profile: BrowserRuntimeWalletProfileForTransport<TWalletType>;
   }
 ): ClairveilBrowserClient<TWalletType, TWalletType>;
 export function createClairveilBrowserClient<TWalletType extends BrowserWalletType>(
@@ -1382,7 +1382,7 @@ export type ClairveilBrowserDappClientOptions<
 export { ClairveilBrowserClient as ClairveilBrowserDappClient };
 export function createClairveilBrowserDappClient<TWalletType extends BrowserWalletType>(
   options: ClairveilBrowserClientOptions<TWalletType> & {
-    profile: BrowserRuntimeWalletProfile & { transport: TWalletType };
+    profile: BrowserRuntimeWalletProfileForTransport<TWalletType>;
   }
 ): ClairveilBrowserClient<TWalletType, TWalletType>;
 export function createClairveilBrowserDappClient<TWalletType extends BrowserWalletType>(

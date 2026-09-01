@@ -1305,6 +1305,7 @@ export class ClairveilBrowserClient {
 
   /** Resolve a DepositCircuit provider for the active transport. */
   depositProofProvider(provider = null, walletType = this.defaultWalletType) {
+    walletType = this.walletTypeFromBody({ walletType });
     if (provider) return provider;
     if (this.configuredDepositProofProvider) return this.configuredDepositProofProvider;
     if (this.depositProofUrl) {

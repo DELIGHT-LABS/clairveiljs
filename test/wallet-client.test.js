@@ -111,6 +111,46 @@ function webEvmProfile(overrides = {}) {
   };
 }
 
+test("browser deposit provider resolution is fenced to the active profile transport", () => {
+  const evmProvider = async () => ({});
+  const cosmosProvider = async () => ({});
+  const evmClient = browserClient({
+    profile: webEvmProfile(),
+    depositProofProvider: evmProvider
+  });
+  const cosmosClient = browserClient({
+    profile: webCosmosProfile(),
+    depositProofProvider: cosmosProvider
+  });
+  const evmUrlClient = browserClient({
+    profile: webEvmProfile({ depositProofUrl: "https://deposit.example/prove" })
+  });
+  const cosmosUrlClient = browserClient({
+    profile: webCosmosProfile({ depositProofUrl: "https://deposit.example/prove" })
+  });
+
+  assert.equal(evmClient.depositProofProvider(undefined, "evm"), evmProvider);
+  assert.equal(cosmosClient.depositProofProvider(undefined, "cosmos"), cosmosProvider);
+  for (const provider of [undefined, async () => ({})]) {
+    assert.throws(
+      () => evmClient.depositProofProvider(provider, "cosmos"),
+      /wallet type cosmos does not match active profile transport evm/
+    );
+    assert.throws(
+      () => cosmosClient.depositProofProvider(provider, "evm"),
+      /wallet type evm does not match active profile transport cosmos/
+    );
+  }
+  assert.throws(
+    () => evmUrlClient.depositProofProvider(undefined, "cosmos"),
+    /wallet type cosmos does not match active profile transport evm/
+  );
+  assert.throws(
+    () => cosmosUrlClient.depositProofProvider(undefined, "evm"),
+    /wallet type evm does not match active profile transport cosmos/
+  );
+});
+
 function completePrivacyStateAdapter() {
   const empty = async () => ({});
   return {

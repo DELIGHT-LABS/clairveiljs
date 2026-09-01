@@ -250,6 +250,17 @@ const canonicalCosmosDepositProofProvider: CosmosDepositProofProvider = async re
   void amount;
   return {};
 };
+declare const evmProfileForDepositProviderTypes: BrowserEvmPrivacyStateAdapterProfile;
+// @ts-expect-error An EVM profile cannot be paired with a canonical Cosmos deposit provider.
+createClairveilBrowserDappClient({
+  profile: evmProfileForDepositProviderTypes,
+  depositProofProvider: canonicalCosmosDepositProofProvider
+});
+new ClairveilBrowserDappClient({
+  profile: evmProfileForDepositProviderTypes,
+  // @ts-expect-error The constructor must enforce the same profile/provider transport binding.
+  depositProofProvider: canonicalCosmosDepositProofProvider
+});
 const canonicalCosmosProviderClient = createClairveilBrowserDappClient({
   depositProofProvider: canonicalCosmosDepositProofProvider
 });
@@ -288,6 +299,19 @@ const resolvedLegacyEvmProvider = legacyEvmProviderClient.depositProofProvider(
 if (resolvedLegacyEvmProvider) {
   void resolvedLegacyEvmProvider({ material: {} });
 }
+const evmProfileProviderClient = createClairveilBrowserDappClient({
+  profile: evmProfileForDepositProviderTypes,
+  depositProofProvider: hybridDepositProofProvider
+});
+const resolvedEvmProfileProvider = evmProfileProviderClient.depositProofProvider(
+  hybridDepositProofProvider,
+  "evm"
+);
+if (resolvedEvmProfileProvider) {
+  void resolvedEvmProfileProvider({ material: {} });
+}
+// @ts-expect-error A profiled EVM client cannot resolve a Cosmos deposit provider.
+evmProfileProviderClient.depositProofProvider(canonicalCosmosDepositProofProvider, "cosmos");
 // @ts-expect-error Batch-only job provers must not promise legacy transfer support.
 batchOnlyAsyncProver.proveTransfer;
 const shielded: string = deriveShieldedAddress(rootSeed, { shieldedPrefix: "demos" });
