@@ -310,7 +310,11 @@ export type ClairveilBrowserClientOptions<
 > = TWalletType extends BrowserWalletType
   ? ClairveilBrowserClientCommonOptions<TWalletType> & {
       profile?: BrowserRuntimeWalletProfileForTransport<TWalletType>;
-      /** Optional local/WASM DepositCircuit provider; Cosmos otherwise uses the canonical prover route. */
+      /**
+       * Optional local/WASM DepositCircuit provider bound to this client's
+       * default/profile transport. A different per-call transport must supply
+       * its own provider/proof or use a compatible depositProofUrl.
+       */
       depositProofProvider?: TWalletType extends "cosmos"
         ? CosmosDepositProofProvider
         : DepositProofProvider;
@@ -1278,6 +1282,18 @@ export class ClairveilBrowserClient<
   /** Validate the connected EIP-1193 wallet against the active EVM profile. */
   assertEvmWalletNetwork(wallet: EvmNetworkWallet): Promise<string | null>;
   /** Resolve an injected provider, exact override, or the canonical Cosmos prover route. */
+  depositProofProvider(
+    provider: TProfileTransport extends BrowserWalletType
+      ? never
+      : CosmosDepositProofProvider | null | undefined,
+    walletType: TProfileTransport extends BrowserWalletType ? never : "cosmos"
+  ): CosmosDepositProofProvider | null;
+  depositProofProvider(
+    provider: TProfileTransport extends BrowserWalletType
+      ? never
+      : DepositProofProvider | null | undefined,
+    walletType: TProfileTransport extends BrowserWalletType ? never : "evm"
+  ): DepositProofProvider | null;
   depositProofProvider(
     provider?: DepositProofProviderForTransport<
       EffectiveBrowserWalletType<TDefaultWalletType, TProfileTransport>

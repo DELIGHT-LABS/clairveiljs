@@ -409,6 +409,15 @@ declare const canonicalDepositProofRequest: DepositProofRequestV1;
 if (resolvedCanonicalCosmosProvider) {
   void resolvedCanonicalCosmosProvider(canonicalDepositProofRequest);
 }
+const resolvedProfilelessEvmProvider = canonicalCosmosProviderClient.depositProofProvider(
+  hybridDepositProofProvider,
+  "evm"
+);
+if (resolvedProfilelessEvmProvider) {
+  void resolvedProfilelessEvmProvider({ material: {} });
+}
+// @ts-expect-error A canonical Cosmos provider cannot serve an explicit EVM operation.
+canonicalCosmosProviderClient.depositProofProvider(canonicalCosmosDepositProofProvider, "evm");
 const legacyEvmProviderClient = createClairveilBrowserDappClient({
   transport: "evm",
   depositProofProvider: hybridDepositProofProvider

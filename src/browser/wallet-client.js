@@ -1333,7 +1333,13 @@ export class ClairveilBrowserClient {
   depositProofProvider(provider = null, walletType = this.defaultWalletType) {
     walletType = this.walletTypeFromBody({ walletType });
     if (provider) return provider;
-    if (this.configuredDepositProofProvider) return this.configuredDepositProofProvider;
+    // Constructor providers are typed for, and remain bound to, the client's
+    // default transport. A profileless client may select the other transport
+    // per operation, but it must provide that operation's proof/provider (or
+    // use a compatible URL) instead of receiving the wrong provider wire.
+    if (this.configuredDepositProofProvider && walletType === this.defaultWalletType) {
+      return this.configuredDepositProofProvider;
+    }
     if (this.depositProofUrl) {
       const createProvider = walletType === "cosmos"
         ? createHttpDepositProofProviderV1

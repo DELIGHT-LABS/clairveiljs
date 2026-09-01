@@ -151,6 +151,56 @@ test("browser deposit provider resolution is fenced to the active profile transp
   );
 });
 
+test("profileless constructor deposit provider stays bound to the default Cosmos transport", async () => {
+  let constructorProviderCalls = 0;
+  let constructorProviderRequest = null;
+  const client = allowCosmosProtocolPreflight(browserClient({
+    depositProofProvider: async request => {
+      constructorProviderCalls += 1;
+      constructorProviderRequest = request;
+      return {
+        version: "v1",
+        proof: {
+          version: "v1",
+          note_commitment_hex: request.payload.note_commitment_hex,
+          proof_hex: canonicalDepositProofHex
+        }
+      };
+    }
+  }));
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
+  });
+  client.cosmos.prepareDeposit = async input => ({
+    signDoc: { chainId: "clairveil-local-3" },
+    material: input.depositMaterial,
+    privacyAccount: { shielded_address: "clairs1sender" }
+  });
+
+  await client.prepareDeposit({ amount: "1uclair" });
+  assert.equal(constructorProviderCalls, 1);
+  assert.deepEqual(Reflect.ownKeys(constructorProviderRequest), ["version", "payload"]);
+  assert.equal(Object.isFrozen(constructorProviderRequest), true);
+  assert.equal(Object.isFrozen(constructorProviderRequest.payload), true);
+
+  client.assertEvmPreparationNetwork = async () => {};
+  await assert.rejects(
+    () => client.prepareDeposit({
+      walletType: "evm",
+      evmWallet: { getChainId: async () => "0x539" },
+      amount: "1uclair"
+    }),
+    /deposit proof is required/
+  );
+  assert.equal(constructorProviderCalls, 1);
+  assert.equal(client.depositProofProvider(undefined, "evm"), null);
+
+  const evmProvider = async () => ({ proof: Uint8Array.of(1) });
+  assert.equal(client.depositProofProvider(evmProvider, "evm"), evmProvider);
+  assert.equal(constructorProviderCalls, 1);
+});
+
 function completePrivacyStateAdapter() {
   const empty = async () => ({});
   return {
