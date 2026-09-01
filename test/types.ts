@@ -203,6 +203,22 @@ const batchOnlyAsyncProver = createAsyncJobProverAdapter({
 });
 const batchOnlyAsyncProverContract: BatchTransferProverAdapter = batchOnlyAsyncProver;
 void batchOnlyAsyncProverContract;
+// @ts-expect-error Batch-only async adapters do not expose Cosmos deposit proving.
+batchOnlyAsyncProver.proveDeposit;
+const depositOnlyAsyncProver = createAsyncJobProverAdapter({
+  submitDepositJob: async (request, options) => {
+    const amount: string = request.payload.amount;
+    const signal: AbortSignal | undefined = options?.signal;
+    void amount;
+    void signal;
+    return { job_id: "deposit-job" };
+  },
+  getJob: async () => ({ status: "completed" })
+});
+const depositOnlyAsyncProverContract: DepositProverAdapter = depositOnlyAsyncProver;
+void depositOnlyAsyncProverContract.proveDeposit;
+// @ts-expect-error Deposit-only async adapters do not expose transfer proving.
+depositOnlyAsyncProver.proveTransfer;
 // @ts-expect-error The canonical HTTP prover adapter requires a base URL binding.
 createHttpProverAdapter();
 // @ts-expect-error An empty options object cannot establish a prover origin.

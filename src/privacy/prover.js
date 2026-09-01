@@ -1260,13 +1260,15 @@ export function createAsyncJobProverAdapter({
   submitTransferJob,
   submitWithdrawJob,
   submitBatchTransferJob,
+  submitDepositJob,
   getJob,
   intervalMs = 1000,
   timeoutMs = 300000,
   now = () => Date.now(),
   sleepImpl = sleep
 } = {}) {
-  if (![submitTransferJob, submitWithdrawJob, submitBatchTransferJob].some(submit => typeof submit === "function")) {
+  if (![submitTransferJob, submitWithdrawJob, submitBatchTransferJob, submitDepositJob]
+    .some(submit => typeof submit === "function")) {
     throw new Error("at least one prover job submit function is required");
   }
   if (typeof getJob !== "function") {
@@ -1340,6 +1342,18 @@ export function createAsyncJobProverAdapter({
         unwrap: unwrapBatchTransferProof,
         unwrapOptions: { nowUnix },
         signal
+      });
+    };
+  }
+
+  if (typeof submitDepositJob === "function") {
+    adapter.proveDeposit = async (input, { signal } = {}) => {
+      const request = buildDepositProofRequestV1(input);
+      return waitForProof({
+        request,
+        submit: submitDepositJob,
+        unwrap: validateDepositProofResponseV1,
+        signal: signal ?? input?.signal
       });
     };
   }

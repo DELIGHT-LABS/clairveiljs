@@ -116,11 +116,16 @@ export type HttpDepositProofProviderV1 = (
 ) => Promise<DepositProofProviderResponseV1>;
 
 export type AsyncJobSubmitter = (request: object, options?: ProverRequestOptions) => Promise<object>;
+export type AsyncDepositJobSubmitter = (
+  request: DepositProofRequestV1,
+  options?: ProverRequestOptions
+) => Promise<object>;
 
 interface AsyncJobProverAdapterOptions {
   submitTransferJob?: AsyncJobSubmitter;
   submitWithdrawJob?: AsyncJobSubmitter;
   submitBatchTransferJob?: AsyncJobSubmitter;
+  submitDepositJob?: AsyncDepositJobSubmitter;
   getJob: (jobId: string, options?: ProverRequestOptions) => Promise<object>;
   intervalMs?: number;
   timeoutMs?: number;
@@ -131,13 +136,15 @@ interface AsyncJobProverAdapterOptions {
 export type AsyncJobProverAdapterInput = AsyncJobProverAdapterOptions & (
   { submitTransferJob: AsyncJobSubmitter } |
   { submitWithdrawJob: AsyncJobSubmitter } |
-  { submitBatchTransferJob: AsyncJobSubmitter }
+  { submitBatchTransferJob: AsyncJobSubmitter } |
+  { submitDepositJob: AsyncDepositJobSubmitter }
 );
 
 export type AsyncJobProverAdapterFor<T extends AsyncJobProverAdapterInput> =
   (T["submitTransferJob"] extends AsyncJobSubmitter ? Pick<ProverAdapter, "proveTransfer"> : {}) &
   (T["submitWithdrawJob"] extends AsyncJobSubmitter ? Pick<ProverAdapter, "proveWithdraw"> : {}) &
-  (T["submitBatchTransferJob"] extends AsyncJobSubmitter ? BatchTransferProverAdapter : {});
+  (T["submitBatchTransferJob"] extends AsyncJobSubmitter ? BatchTransferProverAdapter : {}) &
+  (T["submitDepositJob"] extends AsyncDepositJobSubmitter ? DepositProverAdapter : {});
 
 export const transferProofRequestVersion: "v2";
 export const transferProofResponseVersion: "v2";

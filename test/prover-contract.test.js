@@ -708,6 +708,144 @@ test("HTTP prover adapter supports the canonical v0.4 deposit route", async () =
   });
 });
 
+test("async prover job adapter supports a deposit-only canonical v0.4 prover", async () => {
+  const input = structuredClone(depositRequestFromContract());
+  const signal = new AbortController().signal;
+  const proofHex = canonicalEmptyGroth16ProofHex();
+  const response = {
+    version: "v1",
+    proof: {
+      version: "v1",
+      note_commitment_hex: input.payload.note_commitment_hex,
+      proof_hex: proofHex
+    }
+  };
+  let submitted;
+  let submitOptions;
+  let getOptions;
+  const adapter = createAsyncJobProverAdapter({
+    submitDepositJob: async (request, options) => {
+      submitted = request;
+      submitOptions = options;
+      return { job_id: "deposit-job-1" };
+    },
+    getJob: async (jobId, options) => {
+      assert.equal(jobId, "deposit-job-1");
+      getOptions = options;
+      return { status: "completed", response };
+    },
+    intervalMs: 0
+  });
+
+  const result = await adapter.proveDeposit(input, { signal });
+
+  assert.notEqual(submitted, input);
+  assert.deepEqual(submitted, input);
+  assert.equal(Object.isFrozen(submitted), true);
+  assert.equal(Object.isFrozen(submitted.payload), true);
+  assert.deepEqual(submitOptions, { signal });
+  assert.deepEqual(getOptions, { signal });
+  assert.deepEqual(result, response);
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.proof), true);
+  assert.equal(typeof adapter.proveTransfer, "undefined");
+  assert.equal(typeof adapter.proveWithdraw, "undefined");
+  assert.equal(typeof adapter.proveBatchTransfer, "undefined");
+});
+
+test("async deposit jobs validate requests and completed proof bindings", async () => {
+  const request = depositRequestFromContract();
+  const proofHex = canonicalEmptyGroth16ProofHex();
+  let submissions = 0;
+  let response = {
+    version: "v1",
+    proof: {
+      version: "v1",
+      note_commitment_hex: request.payload.note_commitment_hex,
+      proof_hex: proofHex
+    }
+  };
+  const adapter = createAsyncJobProverAdapter({
+    submitDepositJob: async () => {
+      submissions += 1;
+      return { job_id: "deposit-validation" };
+    },
+    getJob: async () => ({ status: "completed", result: response }),
+    intervalMs: 0
+  });
+
+  await assert.rejects(
+    () => adapter.proveDeposit({ ...request, version: "v2" }),
+    /deposit proof request\.version must be v1/
+  );
+  assert.equal(submissions, 0);
+
+  for (const [mutate, pattern] of [
+    [value => ({ ...value, version: "v2" }), /deposit proof response\.version must be v1/],
+    [value => ({
+      ...value,
+      proof: { ...value.proof, note_commitment_hex: `${"00".repeat(31)}01` }
+    }), /note commitment mismatch/],
+    [value => ({
+      ...value,
+      proof: { ...value.proof, proof_hex: value.proof.proof_hex.slice(0, -2) }
+    }), /exactly 328 lowercase hex characters/]
+  ]) {
+    response = mutate({
+      version: "v1",
+      proof: {
+        version: "v1",
+        note_commitment_hex: request.payload.note_commitment_hex,
+        proof_hex: proofHex
+      }
+    });
+    await assert.rejects(() => adapter.proveDeposit(request), pattern);
+  }
+  assert.equal(submissions, 3);
+});
+
+test("async deposit jobs share cancellation, timeout, and failed-job semantics", async () => {
+  const request = depositRequestFromContract();
+  const controller = new AbortController();
+  const cancelled = createAsyncJobProverAdapter({
+    submitDepositJob: async () => ({ job_id: "deposit-cancelled" }),
+    getJob: async () => new Promise(() => {}),
+    intervalMs: 0
+  });
+  const pending = cancelled.proveDeposit(request, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(
+    () => pending,
+    error => error?.code === ClairveilErrorCode.PROVER_CANCELLED
+  );
+
+  let clock = 0;
+  const timedOut = createAsyncJobProverAdapter({
+    submitDepositJob: async () => ({ job_id: "deposit-timeout" }),
+    getJob: async () => ({ status: "pending" }),
+    timeoutMs: 1,
+    intervalMs: 0,
+    now: () => clock++,
+    sleepImpl: async () => {}
+  });
+  await assert.rejects(
+    () => timedOut.proveDeposit(request),
+    error => error?.code === ClairveilErrorCode.PROVER_TIMEOUT && /timed out/.test(error.message)
+  );
+
+  const failed = createAsyncJobProverAdapter({
+    submitDepositJob: async () => ({ job_id: "deposit-failed" }),
+    getJob: async () => ({ status: "failed", error: "private solver details" }),
+    intervalMs: 0
+  });
+  await assert.rejects(
+    () => failed.proveDeposit(request),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+      /prover job deposit-failed failed/.test(error.message) &&
+      !error.message.includes("private solver")
+  );
+});
+
 test("generic deposit prover enforces the exact endpoint response policy", async () => {
   const request = depositRequestFromContract();
   const proofHex = canonicalEmptyGroth16ProofHex();
