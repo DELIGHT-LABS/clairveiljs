@@ -859,6 +859,11 @@ invariant를 포함하는 Clairveil v0.3.1 query preflight를 수행합니다.
 
 Full flow에는 wallet module을 넘깁니다. Deposit은 기본 prover의 canonical route를 사용합니다. 선택적 override module은 `default`, `createDepositProof`, 또는 `depositProofProvider`를 export합니다. Cosmos callback에는 deep-frozen canonical v1 `{ version, payload }`만 전달되며 SDK가 만든 deposit material, memo, creator, denom, encrypted note, seed와 chain ID는 붙지 않습니다. Module은 canonical nested response 또는 `{ proof }`, `{ depositProof }`, `{ proofHex }`, `{ proof_hex }` 같은 proof bytes/hex를 반환할 수 있습니다.
 
+Owner와 relayer wallet factory에는 frozen public deployment descriptor
+`{ chainId, rpc, rest, accountPrefix, shieldedPrefix, denom }`만 전달됩니다.
+Prover bearer token, audit private key, flow-control 값은 wallet module에
+전달되지 않습니다.
+
 ```bash
 CLAIRVEIL_E2E_LOCAL=1 \
 CLAIRVEIL_E2E_FULL_FLOW=1 \

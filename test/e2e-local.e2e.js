@@ -233,6 +233,23 @@ function rootSignatureBase64FromEnv() {
   return hex ? hexToBase64(hex) : "";
 }
 
+function walletModuleFactoryConfig(config) {
+  return Object.freeze({
+    chainId: config.chainId,
+    rpc: config.rpc,
+    rest: config.rest,
+    accountPrefix: config.accountPrefix,
+    shieldedPrefix: config.shieldedPrefix,
+    denom: config.denom
+  });
+}
+
+async function resolveWalletModuleExport(factoryOrWallet, config) {
+  return typeof factoryOrWallet === "function"
+    ? await factoryOrWallet(walletModuleFactoryConfig(config))
+    : factoryOrWallet;
+}
+
 async function loadWalletFromModule(config) {
   const modulePath = String(env.CLAIRVEIL_E2E_WALLET_MODULE || "").trim();
   if (!modulePath) return null;
@@ -241,9 +258,7 @@ async function loadWalletFromModule(config) {
     : pathToFileURL(resolve(modulePath)).href;
   const mod = await import(specifier);
   const factoryOrWallet = mod.default ?? mod.createWallet ?? mod.wallet;
-  const walletLike = typeof factoryOrWallet === "function"
-    ? await factoryOrWallet(config)
-    : factoryOrWallet;
+  const walletLike = await resolveWalletModuleExport(factoryOrWallet, config);
   const wallet = walletLike?.wallet ?? walletLike;
   if (!wallet) {
     throw new Error("CLAIRVEIL_E2E_WALLET_MODULE must export a wallet object or wallet factory");
@@ -347,6 +362,47 @@ test("E2E prover adapter forwards only a configured bearer credential", async ()
   }
 });
 
+test("E2E owner and relayer factories receive only frozen public deployment config", async () => {
+  const config = {
+    chainId: "clairveil-testnet-1",
+    rpc: "https://rpc.example",
+    rest: "https://rest.example",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    denom: "uclair",
+    proverUrl: "https://prover.example",
+    proverBearerToken: "must-not-reach-wallets",
+    auditDisclosurePrivKeyHex: "must-not-reach-wallets",
+    transferAmount: "1uclair"
+  };
+  const expected = {
+    chainId: config.chainId,
+    rpc: config.rpc,
+    rest: config.rest,
+    accountPrefix: config.accountPrefix,
+    shieldedPrefix: config.shieldedPrefix,
+    denom: config.denom
+  };
+
+  for (const role of ["owner", "relayer"]) {
+    let received;
+    const result = await resolveWalletModuleExport(factoryConfig => {
+      received = factoryConfig;
+      return { role };
+    }, config);
+    assert.deepEqual(result, { role });
+    assert.deepEqual(received, expected);
+    assert.deepEqual(Reflect.ownKeys(received), Reflect.ownKeys(expected));
+    assert.equal(Object.isFrozen(received), true);
+    assert.equal(Object.hasOwn(received, "proverBearerToken"), false);
+    assert.equal(Object.hasOwn(received, "auditDisclosurePrivKeyHex"), false);
+    assert.equal(Object.hasOwn(received, "transferAmount"), false);
+  }
+
+  const prebuiltWallet = { getAddress: async () => "clair1owner" };
+  assert.equal(await resolveWalletModuleExport(prebuiltWallet, config), prebuiltWallet);
+});
+
 async function loadWalletFromMnemonic(config) {
   const mnemonic = String(env.CLAIRVEIL_E2E_MNEMONIC || "").trim();
   const signatureBase64 = rootSignatureBase64FromEnv();
@@ -372,9 +428,7 @@ async function loadRelayerWalletFromModule(config) {
     : pathToFileURL(resolve(modulePath)).href;
   const mod = await import(specifier);
   const factoryOrWallet = mod.createRelayerWallet ?? mod.relayerWallet ?? mod.default;
-  const walletLike = typeof factoryOrWallet === "function"
-    ? await factoryOrWallet(config)
-    : factoryOrWallet;
+  const walletLike = await resolveWalletModuleExport(factoryOrWallet, config);
   const wallet = walletLike?.relayerWallet ?? walletLike?.wallet ?? walletLike;
   if (!wallet) {
     throw new Error("CLAIRVEIL_E2E_RELAYER_WALLET_MODULE must export a relayer wallet or factory");

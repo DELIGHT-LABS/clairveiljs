@@ -527,6 +527,11 @@ Mnemonic-based E2E wallets accept either `CLAIRVEIL_E2E_COIN_TYPE` or a full `CL
 
 The recommended wallet input is a module that exports a ClairveilJS-compatible wallet adapter or async factory:
 
+Wallet factories receive only the frozen public deployment descriptor
+`{ chainId, rpc, rest, accountPrefix, shieldedPrefix, denom }`. Prover bearer
+tokens, audit private keys, and flow-control values are never passed to owner or
+relayer wallet modules.
+
 ```js
 // /absolute/path/to/wallet-adapter.mjs
 export default async function createWallet(config) {
