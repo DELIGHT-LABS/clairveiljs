@@ -74,6 +74,14 @@ const proverErrorStatusCodes = Object.freeze({
   busy: new Set([429])
 });
 
+function assertNativeTimerDelayMs(value, label) {
+  if (!Number.isFinite(value) || value <= 0 || value > maxNativeTimerDelayMs) {
+    throw new Error(
+      `${label} must be a positive finite number no greater than ${maxNativeTimerDelayMs}`
+    );
+  }
+}
+
 function normalizeBaseURL(baseURL) {
   const url = new URL(String(baseURL || ""));
   if (url.protocol !== "http:" && url.protocol !== "https:") {
@@ -1014,9 +1022,7 @@ export function createHttpProverAdapter({
   proverTransportRedirectsDisabled = false
 } = {}) {
   assertRedirectSafeProverFetch(fetchImpl, proverTransportRedirectsDisabled);
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error("timeoutMs must be positive");
-  }
+  assertNativeTimerDelayMs(timeoutMs, "timeoutMs");
   if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
     throw new Error("maxResponseBytes must be a positive safe integer");
   }
@@ -1131,9 +1137,7 @@ export function createHttpDepositProofProvider({
   proverTransportRedirectsDisabled = false
 } = {}) {
   assertRedirectSafeProverFetch(fetchImpl, proverTransportRedirectsDisabled);
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error("deposit proof timeoutMs must be positive");
-  }
+  assertNativeTimerDelayMs(timeoutMs, "deposit proof timeoutMs");
   if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
     throw new Error("deposit proof maxResponseBytes must be a positive safe integer");
   }
@@ -1196,9 +1200,7 @@ export function createHttpDepositProofProviderV1({
   proverTransportRedirectsDisabled = false
 } = {}) {
   assertRedirectSafeProverFetch(fetchImpl, proverTransportRedirectsDisabled);
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error("deposit proof timeoutMs must be positive");
-  }
+  assertNativeTimerDelayMs(timeoutMs, "deposit proof timeoutMs");
   if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
     throw new Error("deposit proof maxResponseBytes must be a positive safe integer");
   }
@@ -1295,11 +1297,7 @@ export function createAsyncJobProverAdapter({
   if (!Number.isFinite(intervalMs) || intervalMs < 0) {
     throw new Error("prover job intervalMs must be a non-negative finite number");
   }
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > maxNativeTimerDelayMs) {
-    throw new Error(
-      `prover job timeoutMs must be a positive finite number no greater than ${maxNativeTimerDelayMs}`
-    );
-  }
+  assertNativeTimerDelayMs(timeoutMs, "prover job timeoutMs");
   if (typeof now !== "function") {
     throw new Error("prover job now must be a function");
   }

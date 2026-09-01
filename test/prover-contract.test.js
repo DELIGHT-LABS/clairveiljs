@@ -1128,6 +1128,32 @@ test("async job timing configuration fails closed", () => {
   }
 });
 
+test("HTTP prover timing configuration enforces the native timer bound", () => {
+  const maximumTimeoutMs = 2_147_483_647;
+  const factories = [
+    timeoutMs => createHttpProverAdapter({
+      baseURL: "https://prover.example",
+      timeoutMs
+    }),
+    timeoutMs => createHttpDepositProofProvider({
+      url: "https://prover.example/v1/deposit-proof",
+      timeoutMs
+    }),
+    timeoutMs => createHttpDepositProofProviderV1({
+      url: "https://prover.example/v1/prover/deposit",
+      timeoutMs
+    })
+  ];
+
+  for (const createProvider of factories) {
+    assert.doesNotThrow(() => createProvider(maximumTimeoutMs));
+    assert.throws(
+      () => createProvider(maximumTimeoutMs + 1),
+      /must be a positive finite number no greater than 2147483647/
+    );
+  }
+});
+
 test("generic deposit prover enforces the exact endpoint response policy", async () => {
   const request = depositRequestFromContract();
   const proofHex = canonicalEmptyGroth16ProofHex();
