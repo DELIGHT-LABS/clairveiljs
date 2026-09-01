@@ -1114,6 +1114,32 @@ function plannerError(result) {
   return error;
 }
 
+function proverCancelledError() {
+  return new ClairveilError(
+    ClairveilErrorCode.PROVER_CANCELLED,
+    "prover request cancelled"
+  );
+}
+
+async function waitForCosmosDepositProofProvider(provider, request, signal) {
+  if (signal?.aborted) throw proverCancelledError();
+  if (!signal) return provider(request, { signal });
+
+  let cancel;
+  const cancellation = new Promise((_, reject) => {
+    cancel = () => reject(proverCancelledError());
+    signal.addEventListener("abort", cancel, { once: true });
+  });
+  const pendingProvider = Promise.resolve().then(() => provider(request, { signal }));
+  try {
+    const response = await Promise.race([pendingProvider, cancellation]);
+    if (signal.aborted) throw proverCancelledError();
+    return response;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+}
+
 function asBytesBase64(bytes) {
   let binary = "";
   for (let i = 0; i < bytes.length; i += 0x8000) {
@@ -1986,7 +2012,11 @@ export class ClairveilBrowserClient {
         // The injected Cosmos prover receives only the canonical, deeply frozen
         // v0.4 request. Execution controls remain in the separate options
         // argument so local providers cannot inspect browser-side material.
-        const response = await resolvedDepositProofProvider(request, { signal });
+        const response = await waitForCosmosDepositProofProvider(
+          resolvedDepositProofProvider,
+          request,
+          signal
+        );
         // Rebuild after the async provider boundary so a caller cannot swap a
         // supplied material object between proving and sign-doc construction.
         const currentRequest = buildDepositProofRequestV1({ material: depositMaterial });

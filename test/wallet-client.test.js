@@ -936,6 +936,88 @@ test("browser Cosmos deposit providers receive only the frozen canonical request
   }
 });
 
+test("browser Cosmos deposit rejects a pre-aborted provider request before disclosure", async () => {
+  const client = allowCosmosProtocolPreflight(browserClient());
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
+  });
+  let providerCalls = 0;
+  let prepareCalls = 0;
+  client.cosmos.prepareDeposit = async () => {
+    prepareCalls += 1;
+    throw new Error("must not prepare a sign doc");
+  };
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    () => client.prepareDeposit({
+      amount: "1uclair",
+      signal: controller.signal,
+      depositProofProvider: async () => {
+        providerCalls += 1;
+        throw new Error("must not disclose the deposit request");
+      }
+    }),
+    error => error?.code === "PROVER_CANCELLED" && /cancelled/.test(error.message)
+  );
+  assert.equal(providerCalls, 0);
+  assert.equal(prepareCalls, 0);
+});
+
+test("browser Cosmos deposit cancellation stops waiting for an uncooperative provider", async () => {
+  const client = allowCosmosProtocolPreflight(browserClient());
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
+  });
+  let prepareCalls = 0;
+  client.cosmos.prepareDeposit = async () => {
+    prepareCalls += 1;
+    throw new Error("must not prepare a sign doc");
+  };
+  const controller = new AbortController();
+  let receivedSignal = null;
+  let providerSettled = false;
+  let rejectProvider;
+  let markProviderStarted;
+  const providerStarted = new Promise(resolve => {
+    markProviderStarted = resolve;
+  });
+  const providerResult = new Promise((_resolve, reject) => {
+    rejectProvider = reject;
+  });
+  const pending = client.prepareDeposit({
+    amount: "1uclair",
+    signal: controller.signal,
+    depositProofProvider: async (_request, options) => {
+      receivedSignal = options.signal;
+      markProviderStarted();
+      try {
+        return await providerResult;
+      } finally {
+        providerSettled = true;
+      }
+    }
+  });
+
+  await providerStarted;
+  controller.abort();
+  await assert.rejects(
+    () => pending,
+    error => error?.code === "PROVER_CANCELLED" && /cancelled/.test(error.message)
+  );
+  assert.equal(receivedSignal, controller.signal);
+  assert.equal(providerSettled, false);
+  assert.equal(prepareCalls, 0);
+
+  rejectProvider(new Error("late private provider failure"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(providerSettled, true);
+  assert.equal(prepareCalls, 0);
+});
+
 test("browser Cosmos profile uses its exact deposit endpoint override with the canonical v0.4 wire", async () => {
   const client = allowCosmosProtocolPreflight(browserClient({
     profile: webCosmosProfile({ depositProofUrl: "https://deposit.example/prove" }),
