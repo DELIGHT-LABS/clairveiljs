@@ -53,6 +53,7 @@ export const depositProofByteLength = 164;
 export const defaultProverResponseMaxBytes = 1 << 20;
 /** Browser-DApp deposit proof requests have the same 120s bound as the reference integration. */
 export const defaultDepositProofTimeoutMs = 120000;
+const maxNativeTimerDelayMs = 2_147_483_647;
 const proverErrorResponseVersion = "v1";
 const proverErrorCodes = new Set([
   "invalid_request",
@@ -1227,8 +1228,27 @@ export function createHttpDepositProofProviderV1({
   };
 }
 
-async function sleep(ms) {
-  await new Promise(resolve => setTimeout(resolve, ms));
+async function sleep(ms, { signal } = {}) {
+  if (!signal) {
+    await new Promise(resolve => setTimeout(resolve, ms));
+    return;
+  }
+  if (signal.aborted) throw proverCancelledError();
+  let timeout;
+  let abort;
+  try {
+    await new Promise((resolve, reject) => {
+      timeout = setTimeout(resolve, ms);
+      abort = () => {
+        clearTimeout(timeout);
+        reject(proverCancelledError());
+      };
+      signal.addEventListener("abort", abort, { once: true });
+    });
+  } finally {
+    clearTimeout(timeout);
+    signal.removeEventListener("abort", abort);
+  }
 }
 
 async function abortable(value, signal) {
@@ -1272,20 +1292,81 @@ export function createAsyncJobProverAdapter({
   if (typeof getJob !== "function") {
     throw new Error("getJob(jobId) is required");
   }
+  if (!Number.isFinite(intervalMs) || intervalMs < 0) {
+    throw new Error("prover job intervalMs must be a non-negative finite number");
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > maxNativeTimerDelayMs) {
+    throw new Error(
+      `prover job timeoutMs must be a positive finite number no greater than ${maxNativeTimerDelayMs}`
+    );
+  }
+  if (typeof now !== "function") {
+    throw new Error("prover job now must be a function");
+  }
+  if (typeof sleepImpl !== "function") {
+    throw new Error("prover job sleepImpl must be a function");
+  }
 
   async function waitForProof({ request, submit, unwrap, unwrapOptions, signal }) {
+    const readClock = () => {
+      const value = now();
+      if (!Number.isFinite(value)) {
+        throw new Error("prover job now() must return a finite number");
+      }
+      return value;
+    };
+    const startedAt = readClock();
+    const deadline = startedAt + timeoutMs;
+    if (!Number.isFinite(deadline)) {
+      throw new Error("prover job deadline must be finite");
+    }
+    const waitController = new AbortController();
+    let timedOut = false;
+    let cancelled = false;
+    let jobId = "";
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      waitController.abort();
+    }, timeoutMs);
+    const unlinkAbortSignal = linkAbortSignal(signal, waitController, () => {
+      cancelled = true;
+    });
+    const timeoutError = () => {
+      const label = jobId ? `prover job ${jobId}` : "prover job submission";
+      const error = new Error(`${label} timed out after ${timeoutMs}ms`);
+      error.code = ClairveilErrorCode.PROVER_TIMEOUT;
+      return wrapProverError(error);
+    };
+    const remainingTime = () => {
+      if (cancelled || signal?.aborted) throw proverCancelledError();
+      const remaining = deadline - readClock();
+      if (timedOut || remaining <= 0) {
+        timedOut = true;
+        waitController.abort();
+        throw timeoutError();
+      }
+      return remaining;
+    };
+
     try {
-      if (signal?.aborted) throw proverCancelledError();
-      const submitted = await abortable(submit(request, { signal }), signal);
-      const jobId = submitted?.jobId ?? submitted?.job_id ?? submitted?.id;
+      remainingTime();
+      const submitted = await abortable(
+        Promise.resolve(submit(request, { signal })),
+        waitController.signal
+      );
+      jobId = submitted?.jobId ?? submitted?.job_id ?? submitted?.id;
+      remainingTime();
       if (!jobId) {
         throw new Error("prover job submit response must include jobId");
       }
 
-      const deadline = now() + timeoutMs;
-      while (now() <= deadline) {
-        if (signal?.aborted) throw proverCancelledError();
-        const job = await abortable(getJob(jobId, { signal }), signal);
+      while (true) {
+        remainingTime();
+        const job = await abortable(
+          Promise.resolve(getJob(jobId, { signal })),
+          waitController.signal
+        );
+        remainingTime();
         const status = normalizeJobResult(job);
         if (status === "completed") {
           const response = job.response ?? job.result ?? job;
@@ -1294,12 +1375,26 @@ export function createAsyncJobProverAdapter({
         if (status === "failed") {
           throw wrapProverError(new Error(`prover job ${jobId} failed`));
         }
-        await abortable(sleepImpl(intervalMs), signal);
+        const delay = Math.min(intervalMs, remainingTime());
+        await abortable(
+          Promise.resolve(sleepImpl(delay, { signal: waitController.signal })),
+          waitController.signal
+        );
+        remainingTime();
       }
-      throw wrapProverError(new Error(`prover job ${jobId} timed out after ${timeoutMs}ms`));
     } catch (error) {
+      if (cancelled || signal?.aborted) {
+        throw wrapProverError(proverCancelledError());
+      }
+      if (timedOut) {
+        if (error?.code === ClairveilErrorCode.PROVER_TIMEOUT) throw error;
+        throw timeoutError();
+      }
       if (error?.code === "PROVER_CANCELLED") throw wrapProverError(error);
       throw error;
+    } finally {
+      clearTimeout(timeout);
+      unlinkAbortSignal();
     }
   }
 

@@ -986,6 +986,148 @@ test("async deposit jobs share cancellation, timeout, and failed-job semantics",
   );
 });
 
+test("async deposit job timeout bounds hanging submit, poll, and sleep phases", {
+  timeout: 1000
+}, async () => {
+  const request = depositRequestFromContract();
+  let sleepSignal = null;
+  const cases = [
+    ["submit", createAsyncJobProverAdapter({
+      submitDepositJob: async () => new Promise(() => {}),
+      getJob: async () => ({ status: "pending" }),
+      timeoutMs: 5
+    })],
+    ["poll", createAsyncJobProverAdapter({
+      submitDepositJob: async () => ({ job_id: "hung-poll" }),
+      getJob: async () => new Promise(() => {}),
+      timeoutMs: 5
+    })],
+    ["sleep", createAsyncJobProverAdapter({
+      submitDepositJob: async () => ({ job_id: "hung-sleep" }),
+      getJob: async () => ({ status: "pending" }),
+      sleepImpl: async (_ms, options) => {
+        sleepSignal = options.signal;
+        return new Promise(() => {});
+      },
+      intervalMs: 1000,
+      timeoutMs: 5
+    })]
+  ];
+
+  for (const [phase, adapter] of cases) {
+    await assert.rejects(
+      () => adapter.proveDeposit(request),
+      error => error?.code === ClairveilErrorCode.PROVER_TIMEOUT &&
+        /timed out/.test(error.message),
+      `${phase} must observe the end-to-end timeout`
+    );
+  }
+  assert.equal(sleepSignal.aborted, true);
+});
+
+test("async job deadline is checked after submit before polling", async () => {
+  const request = depositRequestFromContract();
+  let clock = 0;
+  let pollCalls = 0;
+  const adapter = createAsyncJobProverAdapter({
+    submitDepositJob: async () => {
+      clock = 5;
+      return { job_id: "expired-after-submit" };
+    },
+    getJob: async () => {
+      pollCalls += 1;
+      return { status: "pending" };
+    },
+    timeoutMs: 5,
+    now: () => clock
+  });
+
+  await assert.rejects(
+    () => adapter.proveDeposit(request),
+    error => error?.code === ClairveilErrorCode.PROVER_TIMEOUT &&
+      /expired-after-submit/.test(error.message)
+  );
+  assert.equal(pollCalls, 0);
+});
+
+test("async job caller cancellation wins while submit is uncooperative", {
+  timeout: 1000
+}, async () => {
+  const request = depositRequestFromContract();
+  const controller = new AbortController();
+  let submittedSignal = null;
+  const adapter = createAsyncJobProverAdapter({
+    submitDepositJob: async (_request, options) => {
+      submittedSignal = options.signal;
+      return new Promise(() => {});
+    },
+    getJob: async () => ({ status: "pending" }),
+    timeoutMs: 1000
+  });
+
+  const pending = adapter.proveDeposit(request, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(
+    () => pending,
+    error => error?.code === ClairveilErrorCode.PROVER_CANCELLED
+  );
+  assert.equal(submittedSignal, controller.signal);
+});
+
+test("async job success clears its deadline timer and wait signal", {
+  timeout: 1000
+}, async () => {
+  const request = depositRequestFromContract();
+  const proofHex = canonicalEmptyGroth16ProofHex();
+  let polls = 0;
+  let waitSignal = null;
+  const adapter = createAsyncJobProverAdapter({
+    submitDepositJob: async () => ({ job_id: "quick-success" }),
+    getJob: async () => {
+      polls += 1;
+      if (polls === 1) return { status: "pending" };
+      return {
+        status: "completed",
+        response: {
+          version: "v1",
+          proof: {
+            version: "v1",
+            note_commitment_hex: request.payload.note_commitment_hex,
+            proof_hex: proofHex
+          }
+        }
+      };
+    },
+    sleepImpl: async (_ms, options) => {
+      waitSignal = options.signal;
+    },
+    intervalMs: 0,
+    timeoutMs: 250
+  });
+
+  await adapter.proveDeposit(request);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(waitSignal.aborted, false);
+});
+
+test("async job timing configuration fails closed", () => {
+  const base = {
+    submitDepositJob: async () => ({ job_id: "invalid-config" }),
+    getJob: async () => ({ status: "pending" })
+  };
+  for (const options of [
+    { intervalMs: -1 },
+    { intervalMs: Number.NaN },
+    { timeoutMs: 0 },
+    { timeoutMs: Number.POSITIVE_INFINITY },
+    { timeoutMs: 2_147_483_648 },
+    { now: null },
+    { sleepImpl: null }
+  ]) {
+    assert.throws(() => createAsyncJobProverAdapter({ ...base, ...options }));
+  }
+});
+
 test("generic deposit prover enforces the exact endpoint response policy", async () => {
   const request = depositRequestFromContract();
   const proofHex = canonicalEmptyGroth16ProofHex();

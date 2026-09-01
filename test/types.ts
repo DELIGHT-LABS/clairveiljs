@@ -215,7 +215,12 @@ const depositOnlyAsyncProver = createAsyncJobProverAdapter({
     void signal;
     return { job_id: "deposit-job" };
   },
-  getJob: async () => ({ status: "completed" })
+  getJob: async () => ({ status: "completed" }),
+  sleepImpl: async (ms, options) => {
+    const signal: AbortSignal | undefined = options?.signal;
+    void ms;
+    void signal;
+  }
 });
 const depositOnlyAsyncProverContract: DepositProverAdapter = depositOnlyAsyncProver;
 void depositOnlyAsyncProverContract.proveDeposit;

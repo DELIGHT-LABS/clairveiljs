@@ -150,7 +150,7 @@ interface AsyncJobProverAdapterOptions {
   intervalMs?: number;
   timeoutMs?: number;
   now?: () => number;
-  sleepImpl?: (ms: number) => Promise<void>;
+  sleepImpl?: (ms: number, options?: ProverRequestOptions) => Promise<void>;
 }
 
 export type AsyncJobProverAdapterInput = AsyncJobProverAdapterOptions & (
