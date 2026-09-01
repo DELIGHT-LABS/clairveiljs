@@ -369,20 +369,23 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
 
   try {
     const endpoint = proverRequestURL(baseURL, path);
-    const response = await fetchImpl(endpoint, {
+    const response = await abortable(fetchImpl(endpoint, {
       method: "POST",
       headers,
       body: serializedBody ?? JSON.stringify(body),
       cache: "no-store",
       redirect: "error",
       signal: controller.signal
-    });
+    }), controller.signal);
     assertDirectProverResponse(response, endpoint);
     // The common Core prover contract fixes JSON response media type for both
     // successes and errors. Reject an ambiguous body before parsing it or
     // classifying any untrusted error envelope.
     assertCanonicalProverResponseHeaders(response);
-    const text = await readBoundedResponseText(response, maxResponseBytes);
+    const text = await abortable(
+      readBoundedResponseText(response, maxResponseBytes),
+      controller.signal
+    );
     if (response.status !== 200) {
       throw proverRequestError(response.status, text);
     }
@@ -392,13 +395,8 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
       throw new Error("prover response was not valid canonical JSON");
     }
   } catch (error) {
-    if (error?.name === "AbortError") {
-      if (cancelled || signal?.aborted) throw proverCancelledError();
-      if (timedOut) throw new Error(`prover request timed out after ${timeoutMs}ms`);
-    }
-    if (cancelled || signal?.aborted) {
-      throw proverCancelledError();
-    }
+    if (cancelled || signal?.aborted) throw proverCancelledError();
+    if (timedOut) throw new Error(`prover request timed out after ${timeoutMs}ms`);
     throw error;
   } finally {
     clearTimeout(timeout);
@@ -463,9 +461,12 @@ async function postDepositProofJSON({
       signal: controller.signal
     };
     if (noStore) requestInit.cache = "no-store";
-    const response = await fetchImpl(endpoint, requestInit);
+    const response = await abortable(fetchImpl(endpoint, requestInit), controller.signal);
     assertDirectDepositProofResponse(response, endpoint, { canonicalResponseHeaders });
-    const text = await readBoundedResponseText(response, maxResponseBytes);
+    const text = await abortable(
+      readBoundedResponseText(response, maxResponseBytes),
+      controller.signal
+    );
     const succeeded = exactSuccessStatus === undefined
       ? response.ok
       : response.status === exactSuccessStatus;
@@ -476,11 +477,8 @@ async function postDepositProofJSON({
       throw new Error("deposit proof response was not valid canonical JSON");
     }
   } catch (error) {
-    if (error?.name === "AbortError") {
-      if (cancelled || signal?.aborted) throw proverCancelledError();
-      if (timedOut) throw new Error(`deposit proof request timed out after ${timeoutMs}ms`);
-    }
     if (cancelled || signal?.aborted) throw proverCancelledError();
+    if (timedOut) throw new Error(`deposit proof request timed out after ${timeoutMs}ms`);
     throw error;
   } finally {
     clearTimeout(timeout);

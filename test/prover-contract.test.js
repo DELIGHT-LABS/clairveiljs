@@ -35,6 +35,27 @@ function jsonResponse(body, status = 200, contentType = "application/json", extr
   });
 }
 
+function hangingJSONBodyResponse() {
+  return {
+    status: 200,
+    ok: true,
+    redirected: false,
+    url: "",
+    headers: new Headers({
+      "cache-control": "no-store",
+      "content-type": "application/json"
+    }),
+    body: {
+      getReader() {
+        return {
+          read: () => new Promise(() => {}),
+          releaseLock() {}
+        };
+      }
+    }
+  };
+}
+
 function canonicalEmptyGroth16ProofHex() {
   return [
     `40${"00".repeat(31)}`,
@@ -619,6 +640,118 @@ test("HTTP prover adapter supports caller cancellation separately from timeout",
     error => error?.code === ClairveilErrorCode.PROVER_CANCELLED && /cancelled/.test(error.message)
   );
   assert.equal(sawAbort, true);
+});
+
+test("HTTP prover adapter bounds fetch implementations that ignore abort", {
+  ...fixtureTestOptions,
+  timeout: 1000
+}, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  let timeoutSignal = null;
+  let rejectLateFetch;
+  const timedOut = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    timeoutMs: 5,
+    proverTransportRedirectsDisabled: true,
+    fetchImpl: async (_url, init) => {
+      timeoutSignal = init.signal;
+      return new Promise((_resolve, reject) => {
+        rejectLateFetch = reject;
+      });
+    }
+  });
+
+  await assert.rejects(
+    () => timedOut.proveTransfer(examples.transfer.request),
+    error => error?.code === ClairveilErrorCode.PROVER_TIMEOUT && /timed out/.test(error.message)
+  );
+  assert.equal(timeoutSignal.aborted, true);
+  rejectLateFetch(new Error("late ignored fetch failure"));
+  await new Promise(resolve => setImmediate(resolve));
+
+  const controller = new AbortController();
+  let cancellationSignal = null;
+  const cancelled = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    timeoutMs: 1000,
+    proverTransportRedirectsDisabled: true,
+    fetchImpl: async (_url, init) => {
+      cancellationSignal = init.signal;
+      return new Promise(() => {});
+    }
+  });
+  const pending = cancelled.proveTransfer(examples.transfer.request, {
+    signal: controller.signal
+  });
+  controller.abort();
+  await assert.rejects(
+    () => pending,
+    error => error?.code === ClairveilErrorCode.PROVER_CANCELLED && /cancelled/.test(error.message)
+  );
+  assert.equal(cancellationSignal.aborted, true);
+});
+
+test("canonical deposit provider bounds body reads that ignore abort", {
+  timeout: 1000
+}, async () => {
+  const request = depositRequestFromContract();
+  let timeoutSignal = null;
+  const timedOut = createHttpDepositProofProviderV1({
+    url: "http://127.0.0.1:8080/deposit-proof",
+    timeoutMs: 5,
+    proverTransportRedirectsDisabled: true,
+    fetchImpl: async (_url, init) => {
+      timeoutSignal = init.signal;
+      return hangingJSONBodyResponse();
+    }
+  });
+  await assert.rejects(
+    () => timedOut(request),
+    error => error?.code === ClairveilErrorCode.PROVER_TIMEOUT && /timed out/.test(error.message)
+  );
+  assert.equal(timeoutSignal.aborted, true);
+
+  const controller = new AbortController();
+  let cancellationSignal = null;
+  const cancelled = createHttpDepositProofProviderV1({
+    url: "http://127.0.0.1:8080/deposit-proof",
+    timeoutMs: 1000,
+    proverTransportRedirectsDisabled: true,
+    fetchImpl: async (_url, init) => {
+      cancellationSignal = init.signal;
+      return hangingJSONBodyResponse();
+    }
+  });
+  const pending = cancelled(request, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(
+    () => pending,
+    error => error?.code === ClairveilErrorCode.PROVER_CANCELLED && /cancelled/.test(error.message)
+  );
+  assert.equal(cancellationSignal.aborted, true);
+});
+
+test("HTTP prover adapter clears timeout and caller-abort hooks after success", {
+  ...fixtureTestOptions,
+  timeout: 1000
+}, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const controller = new AbortController();
+  let internalSignal = null;
+  const adapter = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    timeoutMs: 20,
+    proverTransportRedirectsDisabled: true,
+    fetchImpl: async (_url, init) => {
+      internalSignal = init.signal;
+      return jsonResponse(examples.transfer.response);
+    }
+  });
+
+  await adapter.proveTransfer(examples.transfer.request, { signal: controller.signal });
+  controller.abort();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(internalSignal.aborted, false);
 });
 
 test("deposit request builder emits the canonical v0.4 memo-free payload", () => {
