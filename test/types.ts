@@ -991,6 +991,20 @@ const rejectedReservations = reservationManager.markBroadcastRejected([], {
   walletRejectedBeforeBroadcast: true,
   error: "User rejected the request"
 });
+const checkTxUnknownReservations = reservationManager.markUnknown([], {
+  leaseToken: "lease",
+  txHash: "ab".repeat(32),
+  providerCode: 32,
+  providerCodespace: "sdk",
+  rpcInvoked: true,
+  checkTxRejected: true
+});
+reservationManager.markBroadcastRejected([], {
+  leaseToken: "lease",
+  providerCode: 32,
+  // @ts-expect-error CheckTx crossed the RPC boundary and must become Unknown first.
+  rpcInvoked: true
+});
 const failedBroadcastReservations = reservationManager.markBroadcastFailed([], {
   txHashChecked: "ab".repeat(32),
   checkedHeight: 10,

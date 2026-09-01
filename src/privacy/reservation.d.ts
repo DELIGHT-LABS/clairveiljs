@@ -572,6 +572,15 @@ export type ReservationRelaySubmissionMetadata = ReservationLeaseMetadata & Rese
 export type ReservationUnknownMetadata = ReservationLeaseMetadata & ReservationBroadcastMetadataFields & ReservationSubmittedBroadcastAttempt & ReservationDurableErrorMetadata & {
   fromStatus?: "ProofReady" | "Submitted";
   from_status?: "ProofReady" | "Submitted";
+  /** Explicit CheckTx evidence retains the reservation in Unknown until authoritative reconciliation. */
+  providerCode?: string | number;
+  provider_code?: string | number;
+  providerCodespace?: string;
+  provider_codespace?: string;
+  rpcInvoked?: true;
+  rpc_invoked?: true;
+  checkTxRejected?: true;
+  check_tx_rejected?: true;
 };
 
 type RequiredAliasedValue<Camel extends string, Snake extends string, Value> =
@@ -677,10 +686,10 @@ export declare class NoteReservationManager {
     provider_code?: string | number;
     providerCodespace?: string;
     provider_codespace?: string;
-    rpcInvoked?: boolean;
-    rpc_invoked?: boolean;
-    checkTxRejected?: boolean;
-    check_tx_rejected?: boolean;
+    rpcInvoked?: false;
+    rpc_invoked?: false;
+    checkTxRejected?: never;
+    check_tx_rejected?: never;
     broadcastAbortedBeforeRpc?: boolean;
     broadcast_aborted_before_rpc?: boolean;
     walletRejectedBeforeBroadcast?: boolean;

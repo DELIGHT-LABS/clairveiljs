@@ -719,21 +719,32 @@ test("reservation lifecycle persists stable error codes without external error p
     txHash: "a2".repeat(32),
     reason: "test_check_tx"
   });
-  const [rejected] = await manager.markBroadcastRejected(rejectedBatch.reservation_ids, {
+  await assert.rejects(
+    () => manager.markBroadcastRejected(rejectedBatch.reservation_ids, {
+      leaseToken: rejectedBatch.lease_token,
+      providerCode: 32,
+      rpcInvoked: true,
+      checkTxRejected: true,
+      walletRejectedBeforeBroadcast: false
+    }),
+    /limited to definitive no-RPC rejection/
+  );
+  const [rejected] = await manager.markUnknown(rejectedBatch.reservation_ids, {
     leaseToken: rejectedBatch.lease_token,
+    txHash: "a2".repeat(32),
     error: rawProse,
     providerCode: 32,
     providerCodespace: "sdk",
-    providerLog: rawProse,
     rpcInvoked: true,
-    checkTxRejected: true,
-    walletRejectedBeforeBroadcast: false
+    checkTxRejected: true
   });
+  assert.equal(rejected.status, reservationStatuses.Unknown);
   assert.equal(rejected.last_broadcast_error, "check_tx_rejected");
   assert.equal(rejected.metadata.provider_rejection_code, "32");
   assert.equal(rejected.metadata.provider_rejection_codespace, "sdk");
   assert.equal(rejected.metadata.check_tx_rejected, true);
   assert.equal(Object.hasOwn(rejected.metadata, "provider_rejection_log"), false);
+  assert.notEqual(rejected.metadata.proof_discarded, true);
 
   const replanBatch = await prepareProofReadyBatch(manager, {
     notes: [noteFixture({ nullifier: "c3".repeat(32), sequence: 203 })],

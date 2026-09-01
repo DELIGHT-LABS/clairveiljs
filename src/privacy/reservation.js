@@ -1387,6 +1387,7 @@ function assertManagedLifecycleMetadataMutation(current, to, patch = {}, {
   managedRelayEvidence = false,
   managedBroadcastAttempt = false,
   managedBroadcastRejection = false,
+  managedCheckTxUnknown = false,
   managedExpiredProofReadyBroadcastFailure = false,
   managedOperationReconcile = false
 } = {}) {
@@ -1429,6 +1430,15 @@ function assertManagedLifecycleMetadataMutation(current, to, patch = {}, {
     allowed.add("broadcast_aborted_before_rpc");
     allowed.add("no_broadcast_attempt");
     allowed.add("proof_discarded");
+  }
+  if (managedCheckTxUnknown) {
+    allowed.add("wallet_rejected_before_broadcast");
+    allowed.add("provider_rejection_code");
+    allowed.add("provider_rejection_codespace");
+    allowed.add("rpc_invoked");
+    allowed.add("check_tx_rejected");
+    allowed.add("broadcast_aborted_before_rpc");
+    allowed.add("no_broadcast_attempt");
   }
   if (managedExpiredProofReadyBroadcastFailure) {
     allowed.add("authoritative_execution_failure");
@@ -1801,6 +1811,34 @@ function isManagedBroadcastRejectionMutation(current, to, patch = {}) {
     to === reservationStatuses.ReplanRequired;
 }
 
+function isManagedCheckTxUnknownMutation(current, to, patch = {}) {
+  return patch[managedReservationEvidenceMutation] === "check_tx_unknown" &&
+    current.status === reservationStatuses.ProofReady &&
+    to === reservationStatuses.Unknown;
+}
+
+function assertManagedCheckTxUnknownMutation(current, to, patch, now) {
+  if (!isManagedCheckTxUnknownMutation(current, to, patch)) return false;
+  const metadata = patch.metadata || {};
+  if (!current.broadcast_in_flight || Number(current.broadcast_attempt_count || 0) < 1) {
+    throw new Error("CheckTx reconciliation requires a durable in-flight broadcast attempt");
+  }
+  if (patch.broadcast_in_flight !== false ||
+      metadata.rpc_invoked !== true ||
+      metadata.check_tx_rejected !== true ||
+      metadata.wallet_rejected_before_broadcast !== false ||
+      metadata.broadcast_aborted_before_rpc !== false ||
+      metadata.no_broadcast_attempt !== false ||
+      !String(metadata.provider_rejection_code ?? "").trim()) {
+    throw new Error("CheckTx reconciliation requires explicit provider rejection evidence");
+  }
+  if (metadata.proof_discarded === true) {
+    throw new Error("CheckTx reconciliation cannot discard the proof before authoritative failure evidence");
+  }
+  assertCurrentLeaseToken(current, patchLeaseToken(patch), patchLeaseOwner(patch), now);
+  return true;
+}
+
 function assertManagedBroadcastRejectionMutation(current, to, patch, now) {
   if (!isManagedBroadcastRejectionMutation(current, to, patch)) return false;
   if (current.metadata?.relay_handed_off === true || current.metadata?.relayHandedOff === true) {
@@ -1820,8 +1858,8 @@ function assertManagedBroadcastRejectionMutation(current, to, patch, now) {
   const walletRejected = metadata.wallet_rejected_before_broadcast === true;
   const abortedBeforeRpc = metadata.broadcast_aborted_before_rpc === true;
   const checkTxRejected = metadata.check_tx_rejected === true;
-  if (Number(walletRejected) + Number(abortedBeforeRpc) + Number(checkTxRejected) !== 1) {
-    throw new Error("broadcast rejection resolution requires exactly one definitive rejection kind");
+  if (checkTxRejected || Number(walletRejected) + Number(abortedBeforeRpc) !== 1) {
+    throw new Error("broadcast rejection resolution is limited to definitive no-RPC rejection");
   }
   if (metadata.proof_discarded !== true) {
     throw new Error("broadcast rejection resolution requires proof-discard evidence");
@@ -1839,11 +1877,6 @@ function assertManagedBroadcastRejectionMutation(current, to, patch, now) {
         metadata.no_broadcast_attempt !== true) {
       throw new Error("pre-RPC broadcast abort requires a durable marker and definitive no-RPC evidence");
     }
-  } else if (!durableBroadcastRejection ||
-      metadata.rpc_invoked !== true ||
-      metadata.no_broadcast_attempt !== false ||
-      !String(metadata.provider_rejection_code ?? "").trim()) {
-    throw new Error("CheckTx rejection resolution requires a durable marker and explicit provider rejection evidence");
   }
   assertCurrentLeaseToken(current, patchLeaseToken(patch), patchLeaseOwner(patch), now);
   return true;
@@ -4157,6 +4190,12 @@ export class MemoryReservationStore {
       const managedRelayHandoff = assertManagedRelayHandoffMutation(current, transition.to, transition.patch, now);
       const managedBroadcastAttempt = assertManagedBroadcastAttemptMutation(current, transition.to, transition.patch, now);
       const managedBroadcastRejection = assertManagedBroadcastRejectionMutation(current, transition.to, transition.patch, now);
+      const managedCheckTxUnknown = assertManagedCheckTxUnknownMutation(
+        current,
+        transition.to,
+        transition.patch,
+        now
+      );
       const managedBroadcastFailure = assertManagedAuthoritativeBroadcastFailureMutation(
         current,
         transition.to,
@@ -4206,6 +4245,7 @@ export class MemoryReservationStore {
         managedRelayEvidence,
         managedBroadcastAttempt,
         managedBroadcastRejection,
+        managedCheckTxUnknown,
         managedExpiredProofReadyBroadcastFailure,
         managedOperationReconcile
       });
@@ -5188,14 +5228,18 @@ export class NoteReservationManager {
         String(metadata.providerCode ?? metadata.provider_code ?? "4001") === "4001";
       const rpcInvoked = metadata.rpcInvoked ?? metadata.rpc_invoked ??
         (walletRejected === true ? false : undefined);
-      if (typeof rpcInvoked !== "boolean") {
-        throw new Error("broadcast rejection resolution requires rpcInvoked boolean evidence");
+      if (checkTxRejected === true || rpcInvoked !== false) {
+        throw new Error("markBroadcastRejected is limited to definitive no-RPC rejection");
+      }
+      if (Number(walletRejected === true) + Number(abortedBeforeRpc === true) !== 1) {
+        throw new Error("broadcast rejection resolution requires one definitive no-RPC rejection kind");
+      }
+      if (abortedBeforeRpc === true && !durableAttempt) {
+        throw new Error("pre-RPC broadcast abort requires a durable broadcast attempt marker");
       }
       const reconcileReason = walletRejected === true
         ? "wallet_rejected_before_broadcast"
-        : abortedBeforeRpc === true
-          ? "broadcast_aborted_before_rpc"
-          : "check_tx_rejected";
+        : "broadcast_aborted_before_rpc";
       const patch = {
         lease_owner: this.leaseOwner,
         lease_token: leaseToken,
@@ -5214,7 +5258,7 @@ export class NoteReservationManager {
             ? { provider_rejection_codespace: String(metadata.providerCodespace ?? metadata.provider_codespace) }
             : {}),
           rpc_invoked: rpcInvoked,
-          check_tx_rejected: checkTxRejected === true,
+          check_tx_rejected: false,
           broadcast_aborted_before_rpc: abortedBeforeRpc === true,
           no_broadcast_attempt: !rpcInvoked,
           proof_discarded: true,
@@ -5263,21 +5307,49 @@ export class NoteReservationManager {
     if (![reservationStatuses.ProofReady, reservationStatuses.Submitted].includes(from)) {
       throw new Error(`markUnknown requires ProofReady or Submitted status, got ${from}`);
     }
+    const checkTxRejected = metadata.checkTxRejected ?? metadata.check_tx_rejected;
+    const rpcInvoked = metadata.rpcInvoked ?? metadata.rpc_invoked;
+    const providerCode = metadata.providerCode ?? metadata.provider_code;
+    const providerCodespace = metadata.providerCodespace ?? metadata.provider_codespace;
+    if (checkTxRejected === true) {
+      if (from !== reservationStatuses.ProofReady || rpcInvoked !== true || !String(providerCode ?? "").trim()) {
+        throw new Error("CheckTx reconciliation requires ProofReady, rpcInvoked, and providerCode evidence");
+      }
+    } else if (rpcInvoked != null || providerCode != null || providerCodespace != null) {
+      throw new Error("provider rejection evidence is only valid for CheckTx reconciliation");
+    }
+    const reconcileReason = checkTxRejected === true
+      ? "check_tx_rejected"
+      : durableReservationReconcileReason(metadata, "broadcast_result_unknown");
     const patch = {
       lease_token: metadata.leaseToken || metadata.lease_token || "",
       last_broadcast_error: explicitDurableReservationErrorCode(
         metadata,
-        durableReservationReconcileReason(metadata, "broadcast_result_unknown")
+        reconcileReason
       ),
       broadcast_in_flight: false,
       metadata: {
         ...(metadata.metadata || {}),
-        no_broadcast_attempt: false
+        no_broadcast_attempt: false,
+        ...(checkTxRejected === true ? {
+          wallet_rejected_before_broadcast: false,
+          provider_rejection_code: String(providerCode),
+          ...(providerCodespace != null
+            ? { provider_rejection_codespace: String(providerCodespace) }
+            : {}),
+          rpc_invoked: true,
+          check_tx_rejected: true,
+          broadcast_aborted_before_rpc: false,
+          reconcile_reason: "check_tx_rejected"
+        } : {})
       }
     };
     patchIfPresent(patch, "submitted_tx_hash", attempt.txHash);
     patchIfPresent(patch, "tx_bytes_hash", attempt.txBytesHash);
     patchIfPresent(patch, "sign_doc_hash", attempt.signDocHash);
+    if (checkTxRejected === true) {
+      markManagedPatch(patch, managedReservationEvidenceMutation, "check_tx_unknown");
+    }
     return this.transitionBatch(reservationIDs, from, reservationStatuses.Unknown, patch);
   }
 

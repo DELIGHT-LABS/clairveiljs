@@ -2370,13 +2370,23 @@ async function beginBroadcastReservation(context, reason, evidence = {}) {
 async function markBroadcastReservationUnknown(context, error, evidence = {}) {
   if (!context) return;
   try {
+    const checkTxRejected = evidence.checkTxRejected === true;
+    const reconcileReason = checkTxRejected
+      ? "check_tx_rejected"
+      : "sdk_broadcast_result_unknown";
     await context.reservationManager.markUnknown(context.reservationIDs, {
       leaseToken: context.leaseToken,
       txHash: evidence.txHash || "",
       txBytesHash: evidence.txBytesHash || "",
       signDocHash: evidence.signDocHash || "",
-      error: "sdk_broadcast_result_unknown",
-      metadata: { reconcile_reason: "sdk_broadcast_result_unknown" }
+      error: reconcileReason,
+      ...(checkTxRejected ? {
+        rpcInvoked: true,
+        checkTxRejected: true,
+        providerCode: evidence.providerCode,
+        providerCodespace: evidence.providerCodespace
+      } : {}),
+      metadata: { reconcile_reason: reconcileReason }
     });
   } catch (bookkeepingError) {
     throw attachReservationBookkeepingError(error, bookkeepingError);
@@ -2401,9 +2411,7 @@ async function markBroadcastReservationSubmitted(context, evidence = {}) {
 }
 
 async function markBroadcastReservationRejected(context, error, {
-  kind,
-  providerCode = "",
-  providerCodespace = ""
+  kind
 } = {}) {
   if (!context) return;
   try {
@@ -2411,18 +2419,15 @@ async function markBroadcastReservationRejected(context, error, {
       throw new Error("reservationManager.markBroadcastRejected is required for definitive broadcast rejection");
     }
     const beforeRpc = kind === "before_rpc";
-    const checkTx = kind === "check_tx";
     await context.reservationManager.markBroadcastRejected(context.reservationIDs, {
       leaseToken: context.leaseToken,
-      error: beforeRpc ? "broadcast_aborted_before_rpc" : "check_tx_rejected",
-      providerCode,
-      providerCodespace,
-      rpcInvoked: checkTx,
-      checkTxRejected: checkTx,
+      error: "broadcast_aborted_before_rpc",
+      rpcInvoked: false,
+      checkTxRejected: false,
       broadcastAbortedBeforeRpc: beforeRpc,
       walletRejectedBeforeBroadcast: false,
       metadata: {
-        reconcile_reason: beforeRpc ? "broadcast_aborted_before_rpc" : "check_tx_rejected"
+        reconcile_reason: "broadcast_aborted_before_rpc"
       }
     });
   } catch (bookkeepingError) {
@@ -6688,8 +6693,9 @@ export class ClairveilJS {
           attachBroadcastEvidence(error, broadcastIdentity),
           { rpcInvoked: true, checkTxRejected: true }
         );
-        await markBroadcastReservationRejected(reservationContext, wrapped, {
-          kind: "check_tx",
+        await markBroadcastReservationUnknown(reservationContext, wrapped, {
+          ...broadcastIdentity,
+          checkTxRejected: true,
           providerCode: error.code,
           providerCodespace: error.codespace
         });

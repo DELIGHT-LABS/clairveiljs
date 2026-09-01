@@ -62,8 +62,8 @@
 | `recordRelayTransactionEvidence(...)` | 하나의 relay operation에 연결된 모든 reservation을 `ProofReady`에서 `Submitted`로 원자적으로 전이 | Exact payload transaction 포함과 기록된 external handoff 또는 durable same-origin local-relay attempt가 필요하다. Lease 없이 transaction evidence만 기록하며 성공·release는 reconcile이 판정한다. |
 | `markBroadcastAttempting(...)` | `ProofReady` 유지, `broadcast_in_flight`와 attempt count 기록 | 외부 broadcast 경계를 넘기기 직전 호출, 유효한 lease |
 | `markSubmitted(...)` | `ProofReady → Submitted` | 사전 `markBroadcastAttempting(...)` 기록과 유효한 lease. EVM tag가 있으면 network `txHash` 필수, 그 외에는 `txHash` 또는 `txBytesHash` |
-| `markUnknown(...)` | `ProofReady/Submitted → Unknown` | 사전 broadcast attempt, 유효한 lease와 `txHash` 또는 `txBytesHash`. `signDocHash`만으로는 부족 |
-| `markBroadcastRejected(...)` | `ProofReady → ReplanRequired` | wallet이 broadcast 전에 거절했고 proof 폐기를 기록할 수 있어야 한다. |
+| `markUnknown(...)` | `ProofReady/Submitted → Unknown` | 사전 broadcast attempt, 유효한 lease와 `txHash` 또는 `txBytesHash`. nonzero CheckTx 결과는 code/codespace와 함께 여기에 기록하고 authoritative failure reconciliation 전까지 lock을 유지한다. `signDocHash`만으로는 부족 |
+| `markBroadcastRejected(...)` | `ProofReady → ReplanRequired` | wallet signing 거절 또는 synchronous pre-RPC fence 중단으로 definitive no-RPC evidence와 proof 폐기를 기록할 수 있어야 한다. CheckTx 결과는 허용하지 않는다. |
 | `markBroadcastFailed(...)` | `ProofReady/Submitted/Unknown → ReplanRequired` | 정확한 실패/부재 transaction identity와 전체 input의 명시적 unspent evidence. Live `ProofReady`는 현재 manager의 일치하는 미만료 lease도 필요하고 `Submitted`/`Unknown`은 lease가 필요 없다. |
 | `recoverExpiredProofReadyBroadcastFailure(...)` | `ProofReady → ReplanRequired` | Complete operation, 만료 lease, complete stored network-tx/tx-bytes/sign-doc identity, positive height, confirmed execution failure(단순 부재 제외), exact raw input-nullifier 집합, 전체 input 미사용이 필요하며 재시작 후에도 atomic·idempotent하다. |
 | `markReplanRequired(...)` | 허용된 상태에서 `ReplanRequired` | source 상태별 proof 폐기·expiry·nullifier·transaction failure evidence |

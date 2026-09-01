@@ -6579,15 +6579,21 @@ test("cosmos beforeBroadcast rejects Promise-returning callbacks without submitt
   assert.equal(stored.metadata.broadcast_aborted_before_rpc, true);
 });
 
-test("cosmos explicit CheckTx rejection replans instead of becoming Unknown", async () => {
+test("cosmos explicit CheckTx rejection becomes Unknown until authoritative failure reconciliation", async () => {
   const signedTx = signedTxFixture([16, 17, 18]);
   const client = cosmosTestClient();
-  const { txHash: signedTxHash } = signedTxIdentity(client, signedTx);
+  const {
+    txHash: signedTxHash,
+    txBytesHash: signedTxBytesHash
+  } = signedTxIdentity(client, signedTx);
+  const signedSignDocHash = cosmosSignDocBindingHash(signedTx);
   const { store, reservationManager, reservation } = await readyBroadcastReservation("30", {
-    signDocHash: cosmosSignDocBindingHash(signedTx)
+    signDocHash: signedSignDocHash
   });
+  let broadcastCalls = 0;
   client.connect = async () => ({
     async broadcastTxSync() {
+      broadcastCalls += 1;
       throw Object.freeze(new BroadcastTxError(32, "sdk", "account sequence mismatch"));
     }
   });
@@ -6601,10 +6607,12 @@ test("cosmos explicit CheckTx rejection replans instead of becoming Unknown", as
       error.checkTxRejected === true
   );
   const stored = await store.getReservation(reservation.reservation_ids[0]);
-  assert.equal(stored.status, reservationStatuses.ReplanRequired);
+  assert.equal(stored.status, reservationStatuses.Unknown);
   assert.equal(stored.broadcast_attempt_count, 1);
   assert.equal(stored.broadcast_in_flight, false);
   assert.equal(stored.submitted_tx_hash, signedTxHash);
+  assert.equal(stored.tx_bytes_hash, signedTxBytesHash);
+  assert.equal(stored.sign_doc_hash, signedSignDocHash);
   assert.equal(stored.metadata.rpc_invoked, true);
   assert.equal(stored.metadata.check_tx_rejected, true);
   assert.equal(stored.metadata.broadcast_aborted_before_rpc, false);
@@ -6613,7 +6621,39 @@ test("cosmos explicit CheckTx rejection replans instead of becoming Unknown", as
   assert.equal(stored.metadata.provider_rejection_codespace, "sdk");
   assert.equal(Object.hasOwn(stored.metadata, "provider_rejection_log"), false);
   assert.equal(stored.last_broadcast_error, "check_tx_rejected");
-  assert.equal(stored.metadata.proof_discarded, true);
+  assert.notEqual(stored.metadata.proof_discarded, true);
+
+  await assert.rejects(
+    () => client.broadcastSignedTx(signedTx, { reservationManager, reservation })
+  );
+  assert.equal(broadcastCalls, 1);
+
+  await assert.rejects(
+    () => reservationManager.markBroadcastFailed(reservation.reservation_ids, {
+      txHashChecked: signedTxHash,
+      checkedHeight: 0,
+      nullifierUnspentConfirmed: true,
+      txAbsentOrFailedConfirmed: true
+    }),
+    /requires exact tx_hash_checked/
+  );
+  assert.equal(
+    (await store.getReservation(reservation.reservation_ids[0])).status,
+    reservationStatuses.Unknown
+  );
+
+  const [replanned] = await reservationManager.markBroadcastFailed(
+    reservation.reservation_ids,
+    {
+      txHashChecked: signedTxHash,
+      checkedHeight: 100,
+      nullifierUnspentConfirmed: true,
+      txAbsentOrFailedConfirmed: true
+    }
+  );
+  assert.equal(replanned.status, reservationStatuses.ReplanRequired);
+  assert.equal(replanned.metadata.proof_discarded, true);
+  assert.equal(replanned.metadata.tx_hash_checked, signedTxHash);
 });
 
 test("cosmos broadcastSignedTx does not mark unindexed transactions as ok", async () => {
