@@ -123,10 +123,26 @@ function verifyClairveilReleaseTag(sourceRoot) {
   }
   const tagHeader = gitOutput(sourceRoot, ["cat-file", "-p", tagRef])
     .split(/\r?\n\r?\n/, 1)[0];
-  const targetObject = /^object ([0-9a-f]+)$/m.exec(tagHeader)?.[1] || "";
-  const targetType = /^type ([^\s]+)$/m.exec(tagHeader)?.[1] || "";
-  if (!targetObject || !targetType) {
+  const headerLines = tagHeader.split(/\r?\n/);
+  const headerValues = name => headerLines
+    .filter(line => line.startsWith(`${name} `))
+    .map(line => line.slice(name.length + 1));
+  const targetObjects = headerValues("object");
+  const targetTypes = headerValues("type");
+  const tagNames = headerValues("tag");
+  if (targetObjects.length !== 1 || targetTypes.length !== 1 || tagNames.length !== 1 ||
+      !/^[0-9a-f]+$/.test(targetObjects[0]) || !/^\S+$/.test(targetTypes[0]) ||
+      !/^\S+$/.test(tagNames[0])) {
     fail(`Clairveil tag ${supportedClairveilProverRelease} has malformed tag headers`);
+  }
+  const [targetObject] = targetObjects;
+  const [targetType] = targetTypes;
+  const [tagName] = tagNames;
+  if (tagName !== supportedClairveilProverRelease) {
+    fail(
+      `Clairveil tag ${supportedClairveilProverRelease} declares embedded tag name ${tagName}; ` +
+      `expected ${supportedClairveilProverRelease}`
+    );
   }
   if (targetType !== "commit") {
     fail(

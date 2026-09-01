@@ -42,6 +42,7 @@ function gitInCheckout(temporaryCheckout, args) {
     { encoding: "utf8" }
   );
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  return result.stdout.trim();
 }
 
 test("bundled Clairveil handoff contracts validate without a core checkout", () => {
@@ -198,6 +199,42 @@ test("release verifier rejects a v0.4.0 tag that directly targets the wrong comm
         clairveilSourceRoot: temporaryCheckout
       }),
       /tag v0\.4\.0 directly targets 0ff9283.*expected ca85b027/
+    );
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("release verifier rejects an annotated v0.4.0 ref with a different embedded tag name", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
+  const { temporaryRoot, temporaryCheckout } = temporaryClairveilCheckout(
+    "clairveiljs-wrong-tag-name-"
+  );
+
+  try {
+    const tagIdentity = [
+      "-c", "user.name=ClairveilJS Tests",
+      "-c", "user.email=clairveiljs@example.invalid"
+    ];
+    gitInCheckout(temporaryCheckout, [
+      ...tagIdentity,
+      "tag", "--annotate", "--message", "wrong embedded release name",
+      "wrong-name", "ca85b02708fdd75259d4d2ee2d671c21198cec69"
+    ]);
+    const wrongTagObject = gitInCheckout(temporaryCheckout, [
+      "rev-parse", "wrong-name^{tag}"
+    ]);
+    gitInCheckout(temporaryCheckout, [
+      "update-ref", "refs/tags/v0.4.0", wrongTagObject
+    ]);
+
+    assert.throws(
+      () => verifyVendoredClairveilProverContractSnapshot({
+        packageRoot,
+        clairveilSourceRoot: temporaryCheckout
+      }),
+      /tag v0\.4\.0 declares embedded tag name wrong-name; expected v0\.4\.0/
     );
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
