@@ -74,7 +74,8 @@ const proverTransportErrorCodes = new Set([
   "EHOSTUNREACH",
   "ENETDOWN",
   "ENETUNREACH",
-  "ETIMEDOUT"
+  "ETIMEDOUT",
+  "UND_ERR_SOCKET"
 ]);
 
 function isBrowserFetchNetworkError(error, message) {

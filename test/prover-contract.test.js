@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import {
   buildDepositProofRequestV1,
   createAsyncJobProverAdapter,
@@ -1181,6 +1182,40 @@ test("HTTP prover adapter classifies exact browser fetch failures as unavailable
       error => error?.code === ClairveilErrorCode.PROVER_REJECTED
     );
   }
+});
+
+test("HTTP prover adapter classifies a truncated response stream as unavailable", fixtureTestOptions, async t => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const partialBody = '{"version":"v2","proof":';
+  const server = createServer((request, response) => {
+    request.resume();
+    response.writeHead(200, {
+      "cache-control": "no-store",
+      "content-length": String(Buffer.byteLength(partialBody) + 1024),
+      "content-type": "application/json"
+    });
+    response.write(partialBody, () => response.socket?.destroy());
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(async () => {
+    server.closeAllConnections?.();
+    await new Promise(resolve => server.close(resolve));
+  });
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  const adapter = createHttpProverAdapter({
+    baseURL: `http://127.0.0.1:${address.port}`
+  });
+
+  await assert.rejects(
+    () => adapter.proveTransfer(examples.transfer.request),
+    error => error?.code === ClairveilErrorCode.PROVER_UNAVAILABLE &&
+      error.message === "terminated" &&
+      error?.details?.cause?.cause?.code === "UND_ERR_SOCKET"
+  );
 });
 
 test("prover failures preserve only safe error metadata and never echo server or solver text", fixtureTestOptions, async () => {
