@@ -14,6 +14,7 @@ import {
   ClairveilBrowserDappClient,
   createClairveilBrowserDappClient,
   type BrowserProverAdapter,
+  type CosmosDepositProofProvider,
   type DepositProofProvider,
   type BrowserEvmPrivacyStateAdapterProfile,
   type ClairveilWebClientConfig,
@@ -161,7 +162,8 @@ import {
   createAsyncJobProverAdapter,
   createHttpDepositProofProvider,
   createHttpDepositProofProviderV1,
-  type BatchTransferProverAdapter
+  type BatchTransferProverAdapter,
+  type DepositProofRequestV1
 } from "clairveiljs/prover";
 
 const rootSeed = new Uint8Array(32);
@@ -226,6 +228,49 @@ const hybridDepositProofProvider: DepositProofProvider = async input => {
   return {};
 };
 void hybridDepositProofProvider;
+const canonicalCosmosDepositProofProvider: CosmosDepositProofProvider = async request => {
+  const amount: string = request.payload.amount;
+  void amount;
+  return {};
+};
+const canonicalCosmosProviderClient = createClairveilBrowserDappClient({
+  depositProofProvider: canonicalCosmosDepositProofProvider
+});
+createClairveilBrowserDappClient({
+  depositProofProvider: request => {
+    const amount: string = request.payload.amount;
+    // @ts-expect-error Cosmos constructor callbacks do not expose legacy material.
+    request.material;
+    void amount;
+    return {};
+  }
+});
+const resolvedCanonicalCosmosProvider = canonicalCosmosProviderClient.depositProofProvider(
+  canonicalCosmosDepositProofProvider,
+  "cosmos"
+);
+declare const canonicalDepositProofRequest: DepositProofRequestV1;
+if (resolvedCanonicalCosmosProvider) {
+  void resolvedCanonicalCosmosProvider(canonicalDepositProofRequest);
+}
+const legacyEvmProviderClient = createClairveilBrowserDappClient({
+  transport: "evm",
+  depositProofProvider: hybridDepositProofProvider
+});
+createClairveilBrowserDappClient({
+  transport: "evm",
+  depositProofProvider: input => {
+    void input.material;
+    return {};
+  }
+});
+const resolvedLegacyEvmProvider = legacyEvmProviderClient.depositProofProvider(
+  hybridDepositProofProvider,
+  "evm"
+);
+if (resolvedLegacyEvmProvider) {
+  void resolvedLegacyEvmProvider({ material: {} });
+}
 // @ts-expect-error Batch-only job provers must not promise legacy transfer support.
 batchOnlyAsyncProver.proveTransfer;
 const shielded: string = deriveShieldedAddress(rootSeed, { shieldedPrefix: "demos" });
@@ -1108,6 +1153,18 @@ const evmProfileDepositInput: PrepareDepositInput<"evm"> = {
   amount: "1udemo"
 };
 const depositResult: Promise<PreparedCosmosDeposit> = dappClient.prepareDeposit(depositInput);
+const canonicalProviderDepositResult: Promise<PreparedCosmosDeposit> = dappClient.prepareDeposit({
+  ...walletIdentity,
+  amount: "1udemo",
+  depositProofProvider: request => {
+    const commitment: string = request.payload.note_commitment_hex;
+    // @ts-expect-error Per-call Cosmos providers receive only the canonical request.
+    request.material;
+    void commitment;
+    return {};
+  }
+});
+void canonicalProviderDepositResult;
 const evmProfileDepositResult: Promise<PreparedEvmDeposit> = evmProfileDappClient.prepareDeposit(evmProfileDepositInput);
 const evmProfileInlineDepositResult: Promise<PreparedEvmDeposit> = evmProfileDappClient.prepareDeposit({
   ...walletIdentity,
