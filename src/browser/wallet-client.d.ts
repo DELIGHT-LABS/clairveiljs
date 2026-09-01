@@ -1203,7 +1203,15 @@ export class ClairveilBrowserClient<
       Extract<TProfileTransport, BrowserWalletType>
     >;
   });
-  constructor(options?: ClairveilBrowserClientOptions<TDefaultWalletType>);
+  constructor(
+    ...args: [TDefaultWalletType] extends ["cosmos"]
+      ? [options?: ClairveilBrowserClientOptions<TDefaultWalletType>]
+      : [options: ClairveilBrowserClientOptions<TDefaultWalletType> & (
+          | { profile: BrowserRuntimeWalletProfileForTransport<TDefaultWalletType> }
+          | { transport: TDefaultWalletType }
+          | { walletType: TDefaultWalletType }
+        )]
+  );
   privacyStateAdapter: Readonly<PrivacyStateAdapter> | null;
   evmFinalityPolicy: Readonly<EvmFinalityPolicy> | null;
   /**

@@ -427,6 +427,16 @@ const legacyEvmProviderClient = createClairveilBrowserDappClient({
   transport: "evm",
   depositProofProvider: hybridDepositProofProvider
 });
+new ClairveilBrowserDappClient<"evm">({
+  transport: "evm",
+  depositProofProvider: hybridDepositProofProvider
+});
+// @ts-expect-error An explicit EVM generic requires a runtime transport/profile discriminator.
+new ClairveilBrowserDappClient<"evm">({
+  depositProofProvider: hybridDepositProofProvider
+});
+// @ts-expect-error Runtime defaults to Cosmos when explicit EVM options are omitted.
+new ClairveilBrowserDappClient<"evm">();
 createClairveilBrowserDappClient({
   transport: "evm",
   depositProofProvider: input => {
