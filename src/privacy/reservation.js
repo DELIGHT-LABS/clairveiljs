@@ -838,6 +838,10 @@ function normalizeReservationMetadata(value) {
   ]) {
     delete metadata[field];
   }
+  const reconcileReason = normalizedReservationMetadataReconcileReason(metadata);
+  delete metadata.reconcile_reason;
+  delete metadata.reconcileReason;
+  if (reconcileReason) metadata.reconcile_reason = reconcileReason;
   const evidenceRequired = operationSuccessEvidenceRequiredMetadataState(metadata);
   if (evidenceRequired.present) {
     metadata.operation_success_evidence_required = evidenceRequired.value;
@@ -880,11 +884,20 @@ function explicitDurableReservationErrorCode(input = {}, fallback = "") {
   return normalizeDurableReservationErrorCode(fallback);
 }
 
+function normalizedReservationMetadataReconcileReason(metadata = {}, fallback = "") {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return normalizeDurableReservationErrorCode(fallback);
+  }
+  const canonical = normalizeDurableReservationErrorCode(metadata.reconcile_reason);
+  const alias = normalizeDurableReservationErrorCode(metadata.reconcileReason);
+  if (canonical && alias && canonical !== alias) {
+    return normalizeDurableReservationErrorCode(fallback);
+  }
+  return canonical || alias || normalizeDurableReservationErrorCode(fallback);
+}
+
 function durableReservationReconcileReason(input = {}, fallback = "") {
-  return normalizeDurableReservationErrorCode(
-    input?.metadata?.reconcile_reason,
-    fallback
-  );
+  return normalizedReservationMetadataReconcileReason(input?.metadata, fallback);
 }
 
 function normalizeReservation(input = {}) {
@@ -5331,6 +5344,7 @@ export class NoteReservationManager {
       metadata: {
         ...(metadata.metadata || {}),
         no_broadcast_attempt: false,
+        reconcile_reason: reconcileReason,
         ...(checkTxRejected === true ? {
           wallet_rejected_before_broadcast: false,
           provider_rejection_code: String(providerCode),
@@ -5339,8 +5353,7 @@ export class NoteReservationManager {
             : {}),
           rpc_invoked: true,
           check_tx_rejected: true,
-          broadcast_aborted_before_rpc: false,
-          reconcile_reason: "check_tx_rejected"
+          broadcast_aborted_before_rpc: false
         } : {})
       }
     };
@@ -5603,13 +5616,17 @@ export class NoteReservationManager {
     patchIfPresent(patch, "submitted_tx_hash", metadata.txHash ?? metadata.tx_hash);
     patchIfPresent(patch, "tx_bytes_hash", metadata.txBytesHash ?? metadata.tx_bytes_hash);
     patchIfPresent(patch, "sign_doc_hash", metadata.signDocHash ?? metadata.sign_doc_hash);
+    const reconcileReason = durableReservationReconcileReason(metadata, "replan_required");
     patch.last_broadcast_error = explicitDurableReservationErrorCode(
       metadata,
-      durableReservationReconcileReason(metadata, "replan_required")
+      reconcileReason
     );
     const nestedMetadata = metadataObject(metadata);
+    patch.metadata = {
+      ...nestedMetadata,
+      reconcile_reason: reconcileReason
+    };
     if (
-      Object.keys(nestedMetadata).length ||
       evidence.nullifierUnspentConfirmed !== undefined ||
       evidence.checkedHeight !== undefined ||
       evidence.txHashChecked !== undefined ||
@@ -5617,7 +5634,6 @@ export class NoteReservationManager {
       proofDiscarded !== undefined ||
       authoritativeExpiryConfirmed !== undefined
     ) {
-      patch.metadata = { ...nestedMetadata };
       if (booleanEvidence(evidence.nullifierUnspentConfirmed)) {
         patch.metadata.nullifier_unspent_confirmed = true;
       }
@@ -5694,16 +5710,21 @@ export class NoteReservationManager {
   async markManualReview(reservationIDs = [], metadata = {}) {
     assertPatchKeepsReservationIdentity(metadata);
     const now = this.timestamp();
+    const reconcileReason = durableReservationReconcileReason(
+      metadata,
+      "manual_review_required"
+    );
     const patch = {
       lease_token: metadata.leaseToken || metadata.lease_token || "",
       lease_owner: this.leaseOwner,
       last_broadcast_error: explicitDurableReservationErrorCode(
         metadata,
-        durableReservationReconcileReason(metadata, "manual_review_required")
+        reconcileReason
       ),
       updated_at: now,
       metadata: {
-        ...(metadata.metadata || {})
+        ...(metadata.metadata || {}),
+        reconcile_reason: reconcileReason
       }
     };
     const transitions = [];

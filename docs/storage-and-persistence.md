@@ -334,6 +334,7 @@ If a relayer is extended to act as the wallet Note Store, the trust model change
 Automate at least these tests:
 
 - Note amount, randomness, nullifier, and private material do not appear in raw IndexedDB data or logs.
+- Durable reservation error fields, including `last_broadcast_error` and metadata `reconcile_reason`, contain only stable internal codes; raw provider/RPC text remains transient.
 - Saving the same state twice produces different IVs and ciphertexts.
 - A wrong key, modified ciphertext/AAD, or unknown version stops with an authentication error.
 - A corrupted record is not automatically converted into an empty wallet.

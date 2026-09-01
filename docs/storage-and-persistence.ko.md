@@ -355,6 +355,7 @@ Relayer가 wallet Note Store 역할까지 맡도록 확장하면 신뢰 모델�
 최소한 다음 테스트를 자동화한다.
 
 - IndexedDB 원문과 로그에 note amount, randomness, nullifier, private material이 나타나지 않는다.
+- `last_broadcast_error`와 metadata `reconcile_reason`을 포함한 durable reservation error field에는 stable internal code만 남고 raw provider/RPC 문구는 transient로만 유지된다.
 - 같은 state를 두 번 저장해도 IV와 ciphertext가 달라진다.
 - 잘못된 key, 변조된 ciphertext/AAD, 알 수 없는 version은 인증 오류로 중단된다.
 - 손상된 record가 빈 wallet으로 자동 변환되지 않는다.

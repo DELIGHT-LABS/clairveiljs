@@ -693,9 +693,15 @@ test("reservation lifecycle persists stable error codes without external error p
   const [unknown] = await manager.markUnknown(unknownBatch.reservation_ids, {
     leaseToken: unknownBatch.lease_token,
     txHash: unknownTxHash,
-    error: rawProse
+    error: rawProse,
+    metadata: {
+      reconcile_reason: rawProse,
+      reconcileReason: rawProse
+    }
   });
   assert.equal(unknown.last_broadcast_error, "broadcast_result_unknown");
+  assert.equal(unknown.metadata.reconcile_reason, "broadcast_result_unknown");
+  assert.equal(Object.hasOwn(unknown.metadata, "reconcileReason"), false);
 
   const [failed] = await manager.markBroadcastFailed(unknownBatch.reservation_ids, {
     txHashChecked: unknownTxHash,
@@ -761,18 +767,48 @@ test("reservation lifecycle persists stable error codes without external error p
     }
   });
   assert.equal(replanned.last_broadcast_error, "local_payload_discarded");
+  assert.equal(replanned.metadata.reconcile_reason, "local_payload_discarded");
+
+  const rawReplanBatch = await prepareProofReadyBatch(manager, {
+    notes: [noteFixture({ nullifier: "c5".repeat(32), sequence: 205 })],
+    operationId: "durable-error-raw-replan",
+    payloadHash: "raw-replan-payload"
+  });
+  const [rawReplanned] = await manager.markReplanRequired(rawReplanBatch.reservation_ids, {
+    leaseToken: rawReplanBatch.lease_token,
+    error: rawProse,
+    metadata: {
+      reconcile_reason: rawProse,
+      no_broadcast_attempt: true,
+      proof_discarded: true
+    }
+  });
+  assert.equal(rawReplanned.last_broadcast_error, "replan_required");
+  assert.equal(rawReplanned.metadata.reconcile_reason, "replan_required");
 
   const manualBatch = await manager.reserveNotes({
     notes: [noteFixture({ nullifier: "c4".repeat(32), sequence: 204 })],
     operationId: "durable-error-manual"
   });
   const [manual] = await manager.markManualReview(manualBatch.reservation_ids, {
-    error: rawProse
+    error: rawProse,
+    metadata: { reconcile_reason: rawProse }
   });
   assert.equal(manual.last_broadcast_error, "manual_review_required");
+  assert.equal(manual.metadata.reconcile_reason, "manual_review_required");
 
   const persisted = JSON.stringify(await store.load());
   assert.equal(persisted.includes(rawProse), false);
+
+  const legacyState = await store.load();
+  legacyState.reservations[0].metadata.reconcile_reason = rawProse;
+  legacyState.reservations[0].metadata.reconcileReason = rawProse;
+  const normalizedLegacyState = await new MemoryReservationStore({ state: legacyState }).load();
+  assert.equal(JSON.stringify(normalizedLegacyState).includes(rawProse), false);
+  assert.equal(
+    Object.hasOwn(normalizedLegacyState.reservations[0].metadata, "reconcileReason"),
+    false
+  );
 });
 
 test("authoritative exact broadcast failure recovers an expired linked operation without operator approval", async () => {
