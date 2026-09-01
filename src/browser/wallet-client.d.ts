@@ -254,10 +254,9 @@ export type ValidatedClairveilWebClientConfig = Omit<ClairveilWebClientConfig, "
   activeProfile: BrowserWalletProfile;
 };
 
-export interface ClairveilBrowserClientOptions<
-  TWalletType extends BrowserWalletType = "cosmos"
+interface ClairveilBrowserClientCommonOptions<
+  TWalletType extends BrowserWalletType
 > {
-  profile?: BrowserRuntimeWalletProfileForTransport<TWalletType>;
   /** Direct-construction transport; set to EVM when no validated profile is supplied. */
   transport?: TWalletType;
   walletType?: TWalletType;
@@ -274,10 +273,6 @@ export interface ClairveilBrowserClientOptions<
   /** Optional bearer credential for the default HTTP prover adapter. */
   proverBearerToken?: string;
   proverTimeoutMs?: number;
-  /** Optional local/WASM DepositCircuit provider; Cosmos otherwise uses the canonical prover route. */
-  depositProofProvider?: TWalletType extends "cosmos"
-    ? CosmosDepositProofProvider
-    : DepositProofProvider;
   /** Cosmos uses the v0.4 envelope at this exact URL; EVM preserves the legacy flat wire. */
   depositProofUrl?: string;
   depositProofTimeoutMs?: number;
@@ -305,6 +300,22 @@ export interface ClairveilBrowserClientOptions<
   enableExperimentalBatchTransfer?: boolean;
   enable_experimental_batch_transfer?: boolean;
 }
+
+/**
+ * Transport-discriminated browser options. Keeping the conditional outermost
+ * preserves the profile/provider correlation even when TWalletType is a union.
+ */
+export type ClairveilBrowserClientOptions<
+  TWalletType extends BrowserWalletType = "cosmos"
+> = TWalletType extends BrowserWalletType
+  ? ClairveilBrowserClientCommonOptions<TWalletType> & {
+      profile?: BrowserRuntimeWalletProfileForTransport<TWalletType>;
+      /** Optional local/WASM DepositCircuit provider; Cosmos otherwise uses the canonical prover route. */
+      depositProofProvider?: TWalletType extends "cosmos"
+        ? CosmosDepositProofProvider
+        : DepositProofProvider;
+    }
+  : never;
 
 /**
  * Runtime prover injection accepted by the browser facade. Individual

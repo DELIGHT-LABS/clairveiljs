@@ -16,7 +16,11 @@ import {
   type BrowserProverAdapter,
   type CosmosDepositProofProvider,
   type DepositProofProvider,
+  type BrowserCosmosWalletProfile,
   type BrowserEvmPrivacyStateAdapterProfile,
+  type BrowserWalletProfile,
+  type BrowserWalletType,
+  type ClairveilBrowserClientOptions,
   type ClairveilWebClientConfig,
   type DecodeAuditDisclosureInput,
   type DecodeSelfViewDisclosureInput,
@@ -274,6 +278,8 @@ const legacyFlatCosmosDepositProofProvider: CosmosDepositProofProvider = async r
 });
 void legacyFlatCosmosDepositProofProvider;
 declare const evmProfileForDepositProviderTypes: BrowserEvmPrivacyStateAdapterProfile;
+declare const cosmosProfileForDepositProviderTypes: BrowserCosmosWalletProfile;
+declare const unionProfileForDepositProviderTypes: BrowserWalletProfile;
 // @ts-expect-error An EVM profile cannot be paired with a canonical Cosmos deposit provider.
 createClairveilBrowserDappClient({
   profile: evmProfileForDepositProviderTypes,
@@ -283,6 +289,37 @@ new ClairveilBrowserDappClient({
   profile: evmProfileForDepositProviderTypes,
   // @ts-expect-error The constructor must enforce the same profile/provider transport binding.
   depositProofProvider: canonicalCosmosDepositProofProvider
+});
+// @ts-expect-error An explicit union generic must still preserve EVM/profile provider correlation.
+createClairveilBrowserDappClient<BrowserWalletType>({
+  profile: evmProfileForDepositProviderTypes,
+  depositProofProvider: canonicalCosmosDepositProofProvider
+});
+// @ts-expect-error The union-generic constructor cannot pair EVM with a Cosmos provider.
+new ClairveilBrowserDappClient<BrowserWalletType>({
+  profile: evmProfileForDepositProviderTypes,
+  depositProofProvider: canonicalCosmosDepositProofProvider
+});
+// @ts-expect-error A union profile must be narrowed before selecting a transport-specific provider.
+createClairveilBrowserDappClient({
+  profile: unionProfileForDepositProviderTypes,
+  depositProofProvider: canonicalCosmosDepositProofProvider
+});
+// @ts-expect-error Intersecting a widened option union with EVM must retain the EVM provider contract.
+const invalidWidenedProviderOptions: ClairveilBrowserClientOptions<BrowserWalletType> & {
+  profile: BrowserEvmPrivacyStateAdapterProfile;
+} = {
+  profile: evmProfileForDepositProviderTypes,
+  depositProofProvider: canonicalCosmosDepositProofProvider
+};
+void invalidWidenedProviderOptions;
+createClairveilBrowserDappClient<"cosmos">({
+  profile: cosmosProfileForDepositProviderTypes,
+  depositProofProvider: canonicalCosmosDepositProofProvider
+});
+createClairveilBrowserDappClient<"evm">({
+  profile: evmProfileForDepositProviderTypes,
+  depositProofProvider: hybridDepositProofProvider
 });
 const canonicalCosmosProviderClient = createClairveilBrowserDappClient({
   depositProofProvider: canonicalCosmosDepositProofProvider
