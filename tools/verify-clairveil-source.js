@@ -121,13 +121,22 @@ function verifyClairveilReleaseTag(sourceRoot) {
       `got ${tagObjectType || "an unknown object type"}`
     );
   }
-  const tagCommit = gitOutput(
-    sourceRoot,
-    ["rev-parse", `${tagRef}^{commit}`]
-  ).trim();
-  if (tagCommit !== supportedClairveilProverCommit) {
+  const tagHeader = gitOutput(sourceRoot, ["cat-file", "-p", tagRef])
+    .split(/\r?\n\r?\n/, 1)[0];
+  const targetObject = /^object ([0-9a-f]+)$/m.exec(tagHeader)?.[1] || "";
+  const targetType = /^type ([^\s]+)$/m.exec(tagHeader)?.[1] || "";
+  if (!targetObject || !targetType) {
+    fail(`Clairveil tag ${supportedClairveilProverRelease} has malformed tag headers`);
+  }
+  if (targetType !== "commit") {
     fail(
-      `Clairveil tag ${supportedClairveilProverRelease} resolves to ${tagCommit}; ` +
+      `Clairveil tag ${supportedClairveilProverRelease} must directly target a commit; ` +
+      `got ${targetType}`
+    );
+  }
+  if (targetObject !== supportedClairveilProverCommit) {
+    fail(
+      `Clairveil tag ${supportedClairveilProverRelease} directly targets ${targetObject}; ` +
       `expected ${supportedClairveilProverCommit}`
     );
   }

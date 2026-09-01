@@ -22,6 +22,28 @@ const releaseSourceTestsEnabled = process.env.CLAIRVEIL_RELEASE_SOURCE_TESTS ===
 const clairveilSourceRoot = resolve(
   process.env.CLAIRVEIL_SOURCE_DIR || resolve(packageRoot, "..", "clairveil")
 );
+
+function temporaryClairveilCheckout(prefix) {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), prefix));
+  const temporaryCheckout = join(temporaryRoot, "clairveil");
+  const clone = spawnSync(
+    "git",
+    ["clone", "--shared", "--no-checkout", clairveilSourceRoot, temporaryCheckout],
+    { encoding: "utf8" }
+  );
+  assert.equal(clone.status, 0, clone.stderr || clone.stdout);
+  return { temporaryRoot, temporaryCheckout };
+}
+
+function gitInCheckout(temporaryCheckout, args) {
+  const result = spawnSync(
+    "git",
+    ["-C", temporaryCheckout, ...args],
+    { encoding: "utf8" }
+  );
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+}
+
 test("bundled Clairveil handoff contracts validate without a core checkout", () => {
   const result = verifyBundledClairveilContractSnapshot({ packageRoot });
 
@@ -96,30 +118,17 @@ test("vendored v0.4.0 prover contracts match the exact Core release tag", {
 test("release verifier rejects a lightweight v0.4.0 tag", {
   skip: !releaseSourceTestsEnabled
 }, () => {
-  const temporaryRoot = mkdtempSync(join(tmpdir(), "clairveiljs-lightweight-tag-"));
-  const temporaryCheckout = join(temporaryRoot, "clairveil");
+  const { temporaryRoot, temporaryCheckout } = temporaryClairveilCheckout(
+    "clairveiljs-lightweight-tag-"
+  );
 
   try {
-    const clone = spawnSync(
-      "git",
-      ["clone", "--shared", "--no-checkout", clairveilSourceRoot, temporaryCheckout],
-      { encoding: "utf8" }
-    );
-    assert.equal(clone.status, 0, clone.stderr || clone.stdout);
-
-    const replaceTag = spawnSync(
-      "git",
-      [
-        "-C",
-        temporaryCheckout,
-        "tag",
-        "--force",
-        "v0.4.0",
-        "ca85b02708fdd75259d4d2ee2d671c21198cec69"
-      ],
-      { encoding: "utf8" }
-    );
-    assert.equal(replaceTag.status, 0, replaceTag.stderr || replaceTag.stdout);
+    gitInCheckout(temporaryCheckout, [
+      "tag",
+      "--force",
+      "v0.4.0",
+      "ca85b02708fdd75259d4d2ee2d671c21198cec69"
+    ]);
 
     assert.throws(
       () => verifyVendoredClairveilProverContractSnapshot({
@@ -127,6 +136,68 @@ test("release verifier rejects a lightweight v0.4.0 tag", {
         clairveilSourceRoot: temporaryCheckout
       }),
       /tag v0\.4\.0 must be annotated; got commit/
+    );
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("release verifier rejects a nested annotated v0.4.0 tag", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
+  const { temporaryRoot, temporaryCheckout } = temporaryClairveilCheckout(
+    "clairveiljs-nested-tag-"
+  );
+
+  try {
+    const tagIdentity = [
+      "-c", "user.name=ClairveilJS Tests",
+      "-c", "user.email=clairveiljs@example.invalid"
+    ];
+    gitInCheckout(temporaryCheckout, [
+      ...tagIdentity,
+      "tag", "--annotate", "--force", "--message", "inner release tag",
+      "nested-v0.4.0", "ca85b02708fdd75259d4d2ee2d671c21198cec69"
+    ]);
+    gitInCheckout(temporaryCheckout, [
+      ...tagIdentity,
+      "tag", "--annotate", "--force", "--message", "outer release tag",
+      "v0.4.0", "nested-v0.4.0"
+    ]);
+
+    assert.throws(
+      () => verifyVendoredClairveilProverContractSnapshot({
+        packageRoot,
+        clairveilSourceRoot: temporaryCheckout
+      }),
+      /tag v0\.4\.0 must directly target a commit; got tag/
+    );
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("release verifier rejects a v0.4.0 tag that directly targets the wrong commit", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
+  const { temporaryRoot, temporaryCheckout } = temporaryClairveilCheckout(
+    "clairveiljs-wrong-tag-target-"
+  );
+
+  try {
+    gitInCheckout(temporaryCheckout, [
+      "-c", "user.name=ClairveilJS Tests",
+      "-c", "user.email=clairveiljs@example.invalid",
+      "tag", "--annotate", "--force", "--message", "wrong release target",
+      "v0.4.0", "0ff92839872de26b787a60d8e4d5822cc459855b"
+    ]);
+
+    assert.throws(
+      () => verifyVendoredClairveilProverContractSnapshot({
+        packageRoot,
+        clairveilSourceRoot: temporaryCheckout
+      }),
+      /tag v0\.4\.0 directly targets 0ff9283.*expected ca85b027/
     );
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
