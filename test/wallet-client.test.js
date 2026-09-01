@@ -1197,6 +1197,69 @@ test("browser Cosmos deposit rejects an unvalidated provider proof before sign-d
   assert.equal(prepareCalls, 0);
 });
 
+test("browser Cosmos deposit rejects legacy provider response shapes before sign-doc preparation", async () => {
+  const legacyResponses = [
+    request => ({
+      proof_hex: canonicalDepositProofHex,
+      note_commitment_hex: request.payload.note_commitment_hex
+    }),
+    request => ({
+      version: "v1",
+      proof_hex: canonicalDepositProofHex,
+      note_commitment_hex: request.payload.note_commitment_hex
+    }),
+    request => ({
+      proofHex: canonicalDepositProofHex,
+      noteCommitmentHex: request.payload.note_commitment_hex
+    }),
+    () => ({ proof: Uint8Array.from([1, 2, 3, 4]) })
+  ];
+
+  for (const responseForRequest of legacyResponses) {
+    const client = allowCosmosProtocolPreflight(browserClient());
+    client.privacyMaterial = () => ({
+      address: "clair1sender",
+      rootSeed: new Uint8Array(32)
+    });
+    let prepareCalls = 0;
+    client.cosmos.prepareDeposit = async () => {
+      prepareCalls += 1;
+      throw new Error("must not prepare a sign doc");
+    };
+
+    await assert.rejects(() => client.prepareDeposit({
+      amount: "1uclair",
+      depositProofProvider: async request => responseForRequest(request)
+    }));
+    assert.equal(prepareCalls, 0);
+  }
+});
+
+test("browser Cosmos deposit strictly validates configured prover-adapter responses", async () => {
+  const client = allowCosmosProtocolPreflight(browserClient({
+    proverAdapter: {
+      async proveDeposit(request) {
+        return {
+          proof_hex: canonicalDepositProofHex,
+          note_commitment_hex: request.payload.note_commitment_hex
+        };
+      }
+    }
+  }));
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
+  });
+  let prepareCalls = 0;
+  client.cosmos.prepareDeposit = async () => {
+    prepareCalls += 1;
+    throw new Error("must not prepare a sign doc");
+  };
+
+  await assert.rejects(() => client.prepareDeposit({ amount: "1uclair" }));
+  assert.equal(prepareCalls, 0);
+});
+
 test("browser Cosmos deposit validates private material before exposing it to a provider", async () => {
   const client = allowCosmosProtocolPreflight(browserClient());
   const rootSeed = new Uint8Array(32).fill(10);

@@ -166,6 +166,7 @@ import {
   type BatchTransferProverAdapter,
   type DepositProverAdapter,
   type DepositProofRequestV1,
+  type DepositProofResponseV1,
   type ProverAdapter
 } from "clairveiljs/prover";
 
@@ -251,11 +252,27 @@ const hybridDepositProofProvider: DepositProofProvider = async input => {
   return {};
 };
 void hybridDepositProofProvider;
+const canonicalCosmosDepositProofResponse = (
+  request: DepositProofRequestV1
+): DepositProofResponseV1 => ({
+  version: "v1",
+  proof: {
+    version: "v1",
+    note_commitment_hex: request.payload.note_commitment_hex,
+    proof_hex: "40".repeat(164)
+  }
+});
 const canonicalCosmosDepositProofProvider: CosmosDepositProofProvider = async request => {
   const amount: string = request.payload.amount;
   void amount;
-  return {};
+  return canonicalCosmosDepositProofResponse(request);
 };
+// @ts-expect-error Cosmos callbacks must return the exact nested v1 response.
+const legacyFlatCosmosDepositProofProvider: CosmosDepositProofProvider = async request => ({
+  proof_hex: "40".repeat(164),
+  note_commitment_hex: request.payload.note_commitment_hex
+});
+void legacyFlatCosmosDepositProofProvider;
 declare const evmProfileForDepositProviderTypes: BrowserEvmPrivacyStateAdapterProfile;
 // @ts-expect-error An EVM profile cannot be paired with a canonical Cosmos deposit provider.
 createClairveilBrowserDappClient({
@@ -276,7 +293,7 @@ createClairveilBrowserDappClient({
     // @ts-expect-error Cosmos constructor callbacks do not expose legacy material.
     request.material;
     void amount;
-    return {};
+    return canonicalCosmosDepositProofResponse(request);
   }
 });
 const resolvedCanonicalCosmosProvider = canonicalCosmosProviderClient.depositProofProvider(
@@ -1222,7 +1239,7 @@ const canonicalProviderDepositResult: Promise<PreparedCosmosDeposit> = dappClien
     // @ts-expect-error Per-call Cosmos providers receive only the canonical request.
     request.material;
     void commitment;
-    return {};
+    return canonicalCosmosDepositProofResponse(request);
   }
 });
 void canonicalProviderDepositResult;

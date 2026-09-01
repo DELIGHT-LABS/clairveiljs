@@ -72,8 +72,8 @@ import type {
   BatchTransferProverAdapter,
   DepositProverAdapter,
   DepositProofRequestV1,
+  DepositProofResponseV1,
   DepositProofProvider as DepositProofProviderContract,
-  DepositProofProviderResult,
   ProverRequestOptions,
   ProverAdapter
 } from "../privacy/prover.js";
@@ -391,7 +391,7 @@ export type DepositProofProvider = DepositProofProviderContract;
 export type CosmosDepositProofProvider = (
   input: DepositProofRequestV1,
   options?: ProverRequestOptions
-) => Promise<DepositProofProviderResult> | DepositProofProviderResult;
+) => Promise<DepositProofResponseV1> | DepositProofResponseV1;
 
 /** The connected EVM signing wallet required before an EVM prepare request. */
 export type EvmNetworkWallet = Pick<Eip1193WalletAdapter, "getChainId">;

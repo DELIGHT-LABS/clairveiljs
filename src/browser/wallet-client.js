@@ -46,7 +46,7 @@ import {
   createHttpProverAdapter,
   defaultDepositProofTimeoutMs,
   defaultProverResponseMaxBytes,
-  normalizeDepositProofProviderResultV1
+  validateDepositProofResponseV1
 } from "../privacy/prover.js";
 
 const defaultFetchTimeoutMs = 30000;
@@ -1990,7 +1990,7 @@ export class ClairveilBrowserClient {
         // Rebuild after the async provider boundary so a caller cannot swap a
         // supplied material object between proving and sign-doc construction.
         const currentRequest = buildDepositProofRequestV1({ material: depositMaterial });
-        const validated = normalizeDepositProofProviderResultV1(currentRequest, response);
+        const validated = validateDepositProofResponseV1(currentRequest, response);
         depositProofHex = validated.proof.proof_hex;
       } else {
         // Preserve the existing EVM provider contract. The v0.4 canonical
