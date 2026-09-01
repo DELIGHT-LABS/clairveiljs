@@ -31,9 +31,11 @@ import {
   computeTransferFullDisclosureDigestV2,
   computeTransferUserDisclosureDigestV2,
   decryptDisclosureV1,
+  decryptDepositNoteV1,
   decryptTransferNoteV1,
   emptyNoteTreeRootsV1,
   encryptDisclosureV1,
+  encryptDepositNoteV1,
   encryptNoteForTransferV1,
   encryptedEnvelopeKindV1,
   marshalDisclosurePlaintextV1,
@@ -133,6 +135,61 @@ test("privacy-fixed-v1 rejects identity and non-canonical recipient key coordina
     () => validateNoteV1({ ...base, receiverSpendPubKeyX: 0n }),
     /point coordinates are not canonical/
   );
+});
+
+test("NoteV1 distinguishes missing scalar fields from explicit zero", () => {
+  const spend = derivePubKeyFromScalar(17n);
+  const view = derivePubKeyFromScalar(19n);
+  const note = {
+    receiverSpendPubKeyX: spend.x,
+    receiverSpendPubKeyY: spend.y,
+    receiverViewPubKeyX: view.x,
+    receiverViewPubKeyY: view.y,
+    amount: 0n,
+    assetID: 0n,
+    randomness: 0n,
+    memo: ""
+  };
+
+  assert.doesNotThrow(() => validateNoteV1(note));
+  for (const [field, pattern] of [
+    ["amount", /NoteV1 amount is required/],
+    ["assetID", /NoteV1 asset id is required/],
+    ["randomness", /NoteV1 randomness is required/]
+  ]) {
+    const missing = { ...note };
+    delete missing[field];
+    assert.throws(() => validateNoteV1(missing), pattern);
+  }
+});
+
+test("NoteV1 zero asset ID and zero randomness survive plaintext and deposit encryption round trips", () => {
+  const spend = derivePubKeyFromScalar(17n);
+  const view = derivePubKeyFromScalar(19n);
+  const base = {
+    receiverSpendPubKeyX: spend.x,
+    receiverSpendPubKeyY: spend.y,
+    receiverViewPubKeyX: view.x,
+    receiverViewPubKeyY: view.y,
+    amount: 7n,
+    assetID: computeAssetIdV1("uclair"),
+    randomness: 13n,
+    memo: "zero-field"
+  };
+  const rootSeed = new Uint8Array(32).fill(23);
+
+  for (const note of [
+    { ...base, assetID: 0n },
+    { ...base, randomness: 0n }
+  ]) {
+    const validated = validateNoteV1(note);
+    assert.equal(validated.assetID, note.assetID);
+    assert.equal(validated.randomness, note.randomness);
+    assert.notEqual(computeNoteCommitmentV1(note), 0n);
+    assert.notEqual(computeNoteNullifierV1(note), 0n);
+    assert.deepEqual(unmarshalNotePlaintextV1(marshalNotePlaintextV1(note)), validated);
+    assert.deepEqual(decryptDepositNoteV1(encryptDepositNoteV1(note, rootSeed), rootSeed), validated);
+  }
 });
 
 test("batch canonical payload excludes creator and proof while binding every effect", () => {

@@ -13,6 +13,8 @@ import {
 import {
   ClairveilBrowserDappClient,
   createClairveilBrowserDappClient,
+  type BrowserProverAdapter,
+  type DepositProofProvider,
   type BrowserEvmPrivacyStateAdapterProfile,
   type ClairveilWebClientConfig,
   type DecodeAuditDisclosureInput,
@@ -66,7 +68,10 @@ import {
   type PreparedWithdrawPayload,
   type WithdrawMessage
 } from "clairveiljs/payload";
-import { buildPreparedTransferV5Payload } from "clairveiljs/transfer-v5";
+import {
+  buildPreparedTransferV5Payload,
+  validateCanonicalGroth16ProofBytes
+} from "clairveiljs/transfer-v5";
 import {
   createPrivacyScanValidationStateV2,
   scanNotes,
@@ -154,10 +159,16 @@ import type { WalletAdapterLike } from "clairveiljs/wallet-adapter";
 import type { MsgDeposit as GeneratedMsgDepositWithExtension } from "clairveiljs/generated/clairveil/privacy/v1/tx.js";
 import {
   createAsyncJobProverAdapter,
+  createHttpDepositProofProvider,
+  createHttpDepositProofProviderV1,
   type BatchTransferProverAdapter
 } from "clairveiljs/prover";
 
 const rootSeed = new Uint8Array(32);
+const validatedCanonicalProofFrame: Uint8Array = validateCanonicalGroth16ProofBytes(
+  new Uint8Array(164)
+);
+void validatedCanonicalProofFrame;
 const testPrivacyContractAddress = "0x0000000000000000000000000000000000000900";
 const legacyConformanceBundleLabel: typeof clairveilConformanceBundleVersion = supportedClairveilRelease;
 void legacyConformanceBundleLabel;
@@ -182,6 +193,39 @@ const batchOnlyAsyncProver = createAsyncJobProverAdapter({
 });
 const batchOnlyAsyncProverContract: BatchTransferProverAdapter = batchOnlyAsyncProver;
 void batchOnlyAsyncProverContract;
+const legacyDepositHttpProvider = createHttpDepositProofProvider({
+  url: "https://legacy-deposit.example/prove"
+});
+const canonicalDepositHttpProvider = createHttpDepositProofProviderV1({
+  url: "https://cosmos-deposit.example/v1/prover/deposit",
+  bearerToken: "token"
+});
+// @ts-expect-error The Core v0.4 exact-endpoint constructor requires an explicit URL binding.
+createHttpDepositProofProviderV1();
+void legacyDepositHttpProvider;
+void canonicalDepositHttpProvider;
+const depositOnlyBrowserProver: BrowserProverAdapter = {
+  async proveDeposit(request) {
+    const normalized = "payload" in request ? request : request.request;
+    return {
+      version: "v1",
+      proof: {
+        version: "v1",
+        note_commitment_hex: normalized!.payload.note_commitment_hex,
+        proof_hex: "40".repeat(164)
+      }
+    };
+  }
+};
+void depositOnlyBrowserProver;
+const hybridDepositProofProvider: DepositProofProvider = async input => {
+  const canonicalPayload = input.payload;
+  const legacyMaterial = input.material;
+  void canonicalPayload;
+  void legacyMaterial;
+  return {};
+};
+void hybridDepositProofProvider;
 // @ts-expect-error Batch-only job provers must not promise legacy transfer support.
 batchOnlyAsyncProver.proveTransfer;
 const shielded: string = deriveShieldedAddress(rootSeed, { shieldedPrefix: "demos" });
@@ -396,6 +440,19 @@ const cosmos = createClairveilClient({
   merklePathFailover: false,
   enableExperimentalBatchTransfer: true
 });
+cosmos.buildDepositMessage({
+  creator: "demo1sender",
+  root_seed: rootSeed,
+  amount: "1udemo",
+  proof: new Uint8Array(164)
+});
+const validatedDepositMaterial = cosmos.validateDepositMaterial({
+  creator: "demo1sender",
+  rootSeed,
+  amount: "1udemo"
+});
+const validatedDepositCommitment: Uint8Array = validatedDepositMaterial.message.noteCommitment;
+void validatedDepositCommitment;
 declare const cosmosTransferSignDocInput: Parameters<typeof cosmos.prepareTransfer>[0];
 declare const cosmosTransferBatchSignDocInput: Parameters<typeof cosmos.prepareTransferBatch>[0];
 declare const cosmosWithdrawSignDocInput: Parameters<typeof cosmos.prepareWithdraw>[0];
@@ -1015,11 +1072,19 @@ const scanInput: ScanWalletNotesInput = {
   ...walletIdentity,
   limit: 50,
   maxPages: 3,
-  afterHeight: 12,
+  after: { height: 12, globalSequence: 0, outputIndex: 0 },
   page: 2,
   eventTypes: [],
   includeFoundNotes: true
 };
+const legacyEventCursorForTypedScan: ScanWalletNotesInput = {
+  ...walletIdentity,
+  // @ts-expect-error typed wallet scans require the full three-component after cursor.
+  afterHeight: 12,
+  // @ts-expect-error typed wallet scans require the full three-component after cursor.
+  afterSequence: 13
+};
+void legacyEventCursorForTypedScan;
 const filteredWalletScanInput: ScanWalletNotesInput = {
   ...walletIdentity,
   // @ts-expect-error high-level wallet scans never filter the typed projection.
@@ -1028,8 +1093,9 @@ const filteredWalletScanInput: ScanWalletNotesInput = {
 void filteredWalletScanInput;
 // @ts-expect-error walletType rejects misspellings.
 const invalidWalletType: PrepareDepositInput = { ...walletIdentity, walletType: "evmm", amount: "1udemo" };
-// @ts-expect-error Cosmos deposit requires proof/proofHex/depositProofProvider.
-const invalidCosmosDepositInput: PrepareDepositInput = { ...walletIdentity, amount: "1udemo" };
+// A Cosmos profile can acquire its proof from proverUrl + /v1/prover/deposit.
+const cosmosDepositUsingConfiguredProver: PrepareDepositInput = { ...walletIdentity, amount: "1udemo" };
+void cosmosDepositUsingConfiguredProver;
 const evmCompatibleDepositInput: PrepareDepositInput = {
   ...walletIdentity,
   walletType: "evm",
@@ -1425,8 +1491,7 @@ cosmos.prepareTransfer({
   chainNowUnix: 4102444800,
   gas_limit: 8000000,
   feeAmount: [{ denom: "udemo", amount: "200000" }],
-  after_height: 20,
-  after_sequence: 21
+  after: { height: 20, globalSequence: 21, outputIndex: 0 }
 });
 cosmos.prepareWithdraw({
   material,
@@ -1435,8 +1500,7 @@ cosmos.prepareWithdraw({
   proverAdapter: undefined as never,
   gas_limit: 5000000,
   fee_amount: [{ denom: "udemo", amount: "125000" }],
-  afterHeight: 30,
-  afterSequence: 31
+  after: { height: 30, globalSequence: 31, outputIndex: 0 }
 });
 cosmos.prepareWithdraw({
   material,
@@ -1897,7 +1961,7 @@ void {
   scanInput,
   auditDisclosureInput,
   invalidWalletType,
-  invalidCosmosDepositInput,
+  cosmosDepositUsingConfiguredProver,
   evmCompatibleDepositInput,
   depositResult,
   evmProfileDepositResult,

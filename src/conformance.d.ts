@@ -5,10 +5,23 @@ export const clairveilConformanceBundleVersion: "v0.3.1";
 export const supportedClairveilRelease: typeof clairveilConformanceBundleVersion;
 export const supportedClairveilSourceKind: "commit_snapshot";
 export const supportedClairveilCommit: "0ff92839872de26b787a60d8e4d5822cc459855b";
+export const clairveilProverConformanceBundleVersion: "v0.4.0";
+export const supportedClairveilProverRelease: typeof clairveilProverConformanceBundleVersion;
+export const supportedClairveilProverSourceKind: "release_tag";
+export const supportedClairveilProverCommit: "ca85b02708fdd75259d4d2ee2d671c21198cec69";
+export const defaultProverConformanceFixtureDir: string;
+export const proverHttpApiSchemaRelativePath: "docs/schemas/clairveil-proverd-http-api.schema.json";
+export const defaultProverHttpApiSchemaPath: string;
 export const defaultConformanceFixtureNames: readonly string[];
+export const defaultProverConformanceFixtureNames: readonly [
+  "privacy_prover_http_api_contract.json",
+  "privacy_deposit_prover_contract.json"
+];
 export const batchTransferConformanceFixtureName: string;
 export const noteReservationConformanceFixtureName: "privacy_note_reservation_contract.json";
 export const noteReservationContractVersionV3: 3;
+export const proverHttpApiConformanceFixtureName: "privacy_prover_http_api_contract.json";
+export const depositProverConformanceFixtureName: "privacy_deposit_prover_contract.json";
 
 export type NoteReservationStatusV3 =
   | "Discovered"
@@ -230,3 +243,22 @@ export function runClairveilConformanceFixtures(
   options?: ClairveilConformanceFixtureOptions,
   runner?: ClairveilConformanceFixtureRunner
 ): Promise<ClairveilConformanceRunResult>;
+
+export type ClairveilProverConformanceFixtureOptions = ClairveilConformanceFixtureOptions;
+export type ClairveilProverConformanceRunResult = ClairveilConformanceRunResult;
+
+export function suggestClairveilProverConformanceFixtureDirs(options?: { cwd?: string }): string[];
+export function resolveClairveilProverConformanceFixtureDir(options?: ClairveilProverConformanceFixtureOptions): string;
+export function clairveilProverConformanceFixturesAvailable(options?: ClairveilProverConformanceFixtureOptions): boolean;
+export function clairveilProverConformanceFixtureSkipReason(options?: ClairveilProverConformanceFixtureOptions): string;
+export function readClairveilProverConformanceFixture(
+  name: typeof proverHttpApiConformanceFixtureName | typeof depositProverConformanceFixtureName,
+  options?: ClairveilProverConformanceFixtureOptions
+): object;
+export function loadClairveilProverConformanceFixtures(
+  options?: ClairveilProverConformanceFixtureOptions
+): ClairveilConformanceFixtureMap;
+export function runClairveilProverConformanceFixtures(
+  options?: ClairveilProverConformanceFixtureOptions,
+  runner?: ClairveilConformanceFixtureRunner
+): Promise<ClairveilProverConformanceRunResult>;

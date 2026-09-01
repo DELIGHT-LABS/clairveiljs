@@ -108,7 +108,8 @@ import {
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const testPrivacyContractAddress = "0x0000000000000000000000000000000000000900";
-const validV2ProofHex = `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}`;
+const validV2ProofHex = `${"40"}${"00".repeat(31)}${"40"}${"00".repeat(63)}${"40"}${"00".repeat(35)}${"40"}${"00".repeat(31)}`;
+const canonicalDepositProofHex = validV2ProofHex;
 const validClairsRecipient = encodeShieldedAddress(CURVE_BASE, CURVE_BASE, {
   shieldedPrefix: "clairs"
 });
@@ -957,7 +958,7 @@ test("note store clears pre-v0.2 cache state instead of migrating old notes or c
   assert.equal(cleared.scanCursor, null);
 });
 
-test("browser-dapp deposit proof provider reuses the proven deposit material", async () => {
+test("browser-dapp deposit proof provider receives only the canonical proven request", async () => {
   const client = createClairveilBrowserDappClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
@@ -985,15 +986,39 @@ test("browser-dapp deposit proof provider reuses the proven deposit material", a
     amount: "7uclair",
     gasLimit: 2800000,
     feeAmount: [{ denom: "uclair", amount: "19" }],
-    depositProofProvider({ material }) {
-      providerCommitmentHex = material.note_commitment_hex;
-      return { proof_hex: "ab" };
+    depositProofProvider(request, options) {
+      assert.deepEqual(Reflect.ownKeys(request), ["version", "payload"]);
+      assert.equal(Object.isFrozen(request), true);
+      assert.equal(Object.isFrozen(request.payload), true);
+      for (const key of [
+        "material",
+        "amount",
+        "note",
+        "noteJson",
+        "note_json",
+        "noteCommitmentHex",
+        "note_commitment_hex",
+        "signal"
+      ]) {
+        assert.equal(Object.prototype.hasOwnProperty.call(request, key), false);
+      }
+      assert.deepEqual(Reflect.ownKeys(options), ["signal"]);
+      assert.equal(options.signal, undefined);
+      providerCommitmentHex = request.payload.note_commitment_hex;
+      return {
+        version: "v1",
+        proof: {
+          version: "v1",
+          note_commitment_hex: providerCommitmentHex,
+          proof_hex: canonicalDepositProofHex
+        }
+      };
     }
   });
 
   assert.equal(prepared.prepared.noteCommitmentHex, providerCommitmentHex);
   assert.equal(Buffer.from(capturedMessage.noteCommitment).toString("hex"), providerCommitmentHex);
-  assert.deepEqual([...capturedMessage.proof], [0xab]);
+  assert.equal(Buffer.from(capturedMessage.proof).toString("hex"), canonicalDepositProofHex);
   assert.equal(capturedGasLimit, 2800000);
   assert.deepEqual(capturedFeeAmount, [{ denom: "uclair", amount: "19" }]);
 });
@@ -1220,42 +1245,221 @@ test("deposit preparation requires a deposit proof", async () => {
     /deposit proof is required/
   );
 
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: new Uint8Array(32),
+      amount: "7uclair",
+      proof: "0xab"
+    }),
+    /deposit proof must be exactly (?:164 bytes|328 lowercase hex characters)/
+  );
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: new Uint8Array(32),
+      amount: "7uclair",
+      proof: new Uint8Array(164)
+    }),
+    /deposit proof point at offset 0 is not compressed/
+  );
+
   const hexProofDeposit = cosmosClient.buildDepositMessage({
     creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
     rootSeed: new Uint8Array(32),
     amount: "7uclair",
-    proof: "0xab"
+    proof: canonicalDepositProofHex
   });
-  assert.deepEqual([...hexProofDeposit.message.proof], [0xab]);
+  assert.equal(Buffer.from(hexProofDeposit.message.proof).toString("hex"), canonicalDepositProofHex);
 
+  const snakeRootSeedDeposit = cosmosClient.buildDepositMessage({
+    creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    root_seed: new Uint8Array(32).fill(6),
+    amount: "7uclair",
+    proof: canonicalDepositProofHex
+  });
+  assert.equal(Buffer.from(snakeRootSeedDeposit.message.proof).toString("hex"), canonicalDepositProofHex);
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: new Uint8Array(32).fill(6),
+      root_seed: new Uint8Array(32).fill(7),
+      amount: "7uclair",
+      proof: canonicalDepositProofHex
+    }),
+    /rootSeed aliases conflict/
+  );
+
+  const staleCreatorRootSeed = new Uint8Array(32).fill(1);
   const staleCreatorMaterial = cosmosClient.buildDepositMaterial({
     creator: "clair1other",
-    rootSeed: new Uint8Array(32).fill(1),
+    rootSeed: staleCreatorRootSeed,
     amount: "7uclair"
   });
   assert.throws(
     () => cosmosClient.buildDepositMessage({
       creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: staleCreatorRootSeed,
       depositMaterial: staleCreatorMaterial,
       amount: "7uclair",
-      proof: "0xab"
+      proof: canonicalDepositProofHex
     }),
     /deposit material creator mismatch/
   );
 
+  const staleAmountRootSeed = new Uint8Array(32).fill(2);
   const staleAmountMaterial = cosmosClient.buildDepositMaterial({
     creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
-    rootSeed: new Uint8Array(32).fill(2),
+    rootSeed: staleAmountRootSeed,
     amount: "8uclair"
   });
   assert.throws(
     () => cosmosClient.buildDepositMessage({
       creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: staleAmountRootSeed,
       depositMaterial: staleAmountMaterial,
       amount: "7uclair",
-      proof: "0xab"
+      proof: canonicalDepositProofHex
     }),
     /deposit material amount mismatch/
+  );
+
+  const wrongDenomRootSeed = new Uint8Array(32).fill(12);
+  const wrongDenomMaterial = buildDepositMaterial({
+    creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    rootSeed: wrongDenomRootSeed,
+    amount: "7uother",
+    assetDenom: "uother"
+  });
+  assert.throws(
+    () => cosmosClient.validateDepositMaterial({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: wrongDenomRootSeed,
+      depositMaterial: wrongDenomMaterial,
+      amount: "7uother",
+      assetDenom: "uclair"
+    }),
+    /deposit amount denom mismatch: expected uclair, got uother/
+  );
+  assert.throws(
+    () => cosmosClient.validateDepositMaterial({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: wrongDenomRootSeed,
+      depositMaterial: wrongDenomMaterial,
+      amount: "7uother",
+      assetDenom: "uclair",
+      denom: "uother"
+    }),
+    /deposit assetDenom and denom aliases conflict/
+  );
+
+  const corruptedCommitmentRootSeed = new Uint8Array(32).fill(3);
+  const corruptedCommitmentMaterial = cosmosClient.buildDepositMaterial({
+    creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    rootSeed: corruptedCommitmentRootSeed,
+    amount: "7uclair"
+  });
+  corruptedCommitmentMaterial.note_commitment = new Uint8Array(32).fill(0xff);
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: corruptedCommitmentRootSeed,
+      depositMaterial: corruptedCommitmentMaterial,
+      amount: "7uclair",
+      proof: canonicalDepositProofHex
+    }),
+    /deposit material note commitment does not match its NoteV1/
+  );
+
+  const boundRootSeed = new Uint8Array(32).fill(4);
+  const boundMaterial = cosmosClient.buildDepositMaterial({
+    creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    rootSeed: boundRootSeed,
+    amount: "7uclair",
+    memo: "bound memo"
+  });
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      depositMaterial: boundMaterial,
+      amount: "7uclair",
+      proof: canonicalDepositProofHex
+    }),
+    /rootSeed is required to bind the encrypted deposit note/
+  );
+
+  const otherRootSeed = new Uint8Array(32).fill(5);
+  const otherMaterial = cosmosClient.buildDepositMaterial({
+    creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    rootSeed: otherRootSeed,
+    amount: "7uclair"
+  });
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: boundRootSeed,
+      depositMaterial: {
+        ...boundMaterial,
+        encrypted_note: otherMaterial.encrypted_note,
+        encrypted_note_hex: otherMaterial.encrypted_note_hex
+      },
+      amount: "7uclair",
+      proof: canonicalDepositProofHex
+    }),
+    /deposit material encrypted note is not authenticated by rootSeed/
+  );
+
+  const recipientRootSeed = new Uint8Array(32).fill(8);
+  const unrelatedRecipientRootSeed = new Uint8Array(32).fill(9);
+  const unrelatedRecipient = encodeShieldedAddress(
+    deriveSpendKeys(unrelatedRecipientRootSeed).pubKey,
+    deriveViewKeys(unrelatedRecipientRootSeed).pubKey,
+    { shieldedPrefix: "clairs" }
+  );
+  assert.throws(
+    () => cosmosClient.buildDepositMaterial({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: recipientRootSeed,
+      shieldedAddress: unrelatedRecipient,
+      amount: "7uclair"
+    }),
+    /deposit material note receiver public keys do not match rootSeed/
+  );
+  const unrelatedRecipientMaterial = buildDepositMaterial({
+    creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+    rootSeed: recipientRootSeed,
+    shieldedAddress: unrelatedRecipient,
+    shieldedPrefix: "clairs",
+    amount: "7uclair"
+  });
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: recipientRootSeed,
+      depositMaterial: unrelatedRecipientMaterial,
+      amount: "7uclair",
+      proof: canonicalDepositProofHex
+    }),
+    /deposit material note receiver public keys do not match rootSeed/
+  );
+
+  const swappedMemoEnvelope = encryptDepositNoteV1({
+    ...boundMaterial.note,
+    memo: "swapped memo"
+  }, boundRootSeed);
+  assert.throws(
+    () => cosmosClient.buildDepositMessage({
+      creator: "clair1xcjufgh2jarkp2qkx68azh08w9v5gah8sx9zu2",
+      rootSeed: boundRootSeed,
+      depositMaterial: {
+        ...boundMaterial,
+        encrypted_note: swappedMemoEnvelope,
+        encrypted_note_hex: hexFromBytes(swappedMemoEnvelope)
+      },
+      amount: "7uclair",
+      proof: canonicalDepositProofHex
+    }),
+    /deposit material encrypted note does not match its NoteV1/
   );
 });
 
@@ -1295,7 +1499,7 @@ test("cosmos deposit preparation forwards custom memo", async () => {
       rootSignatureHash: ""
     },
     amount: "7uclair",
-    proofHex: "ab",
+    proofHex: canonicalDepositProofHex,
     memo: "custom deposit memo",
     gas_limit: 2700000,
     fee_amount: requestedFee
@@ -1430,8 +1634,6 @@ test("browser-dapp scanWalletNotes forwards typed query options", async () => {
     signatureBase64: "AQID",
     limit: 50,
     maxPages: 4,
-    afterHeight: 12,
-    afterSequence: 34,
     after: { height: 56, globalSequence: 78, outputIndex: 1 },
     page: 3,
     eventTypes: [],
@@ -1446,8 +1648,6 @@ test("browser-dapp scanWalletNotes forwards typed query options", async () => {
 
   assert.equal(forwarded.limit, 50);
   assert.equal(forwarded.maxPages, 4);
-  assert.equal(forwarded.afterHeight, 12);
-  assert.equal(forwarded.afterSequence, 34);
   assert.deepEqual(forwarded.after, { height: 56, globalSequence: 78, outputIndex: 1 });
   assert.equal(forwarded.page, 3);
   assert.deepEqual(forwarded.eventTypes, []);
@@ -1458,6 +1658,50 @@ test("browser-dapp scanWalletNotes forwards typed query options", async () => {
   assert.equal(forwarded.strictPrivacyScan, true);
   assert.equal(forwarded.noteStore, noteStore);
   assert.equal(forwarded.includeFoundNotes, true);
+});
+
+test("typed wallet scans reject event cursors before requesting privacy identity", async () => {
+  const cosmos = createClairveilClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3"
+  });
+  let walletIdentityCalls = 0;
+  cosmos.deriveWalletPrivacyMaterial = async () => {
+    walletIdentityCalls += 1;
+    throw new Error("wallet identity must not be requested");
+  };
+  await assert.rejects(
+    () => cosmos.scanWalletNotes({
+      wallet: {},
+      afterHeight: 12,
+      afterSequence: 34
+    }),
+    /require the full typed after cursor.*afterHeight\/afterSequence aliases are not supported/
+  );
+  assert.equal(walletIdentityCalls, 0);
+
+  const browser = createClairveilBrowserDappClient({
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    chainId: "clairveil-local-3",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    denom: "uclair"
+  });
+  let browserIdentityCalls = 0;
+  browser.privacyMaterial = () => {
+    browserIdentityCalls += 1;
+    throw new Error("browser identity must not be requested");
+  };
+  await assert.rejects(
+    () => browser.scanWalletNotes({
+      after_height: 12,
+      after_sequence: 34
+    }),
+    /require the full typed after cursor.*afterHeight\/afterSequence aliases are not supported/
+  );
+  assert.equal(browserIdentityCalls, 0);
 });
 
 test("browser-dapp exposes chain nullifier checks", async () => {
@@ -2249,7 +2493,7 @@ test("memory note store normalizes nullifier status keys before applying them", 
   assert.equal(updated.nullifierStatus, "spent");
 });
 
-test("Cosmos prepare methods forward complete typed scan cursors and snake-case page budgets", async () => {
+test("Cosmos prepare methods require and forward complete typed scan cursors", async () => {
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
@@ -2269,7 +2513,7 @@ test("Cosmos prepare methods forward complete typed scan cursors and snake-case 
     shieldedAddress: "clairs1example"
   };
   const proverAdapter = {};
-  const calls = [
+  await assert.rejects(
     () => client.prepareTransfer({
       material,
       amount: "1uclair",
@@ -2277,6 +2521,19 @@ test("Cosmos prepare methods forward complete typed scan cursors and snake-case 
       proverAdapter,
       afterHeight: 10,
       afterSequence: 11,
+      strictPrivacyScan: true
+    }),
+    /require the full typed after cursor.*afterHeight\/afterSequence aliases are not supported/
+  );
+  assert.equal(scans.length, 0);
+
+  const calls = [
+    () => client.prepareTransfer({
+      material,
+      amount: "1uclair",
+      recipient: validClairsRecipient,
+      proverAdapter,
+      after: { height: 10, globalSequence: 11, outputIndex: 0 },
       strictPrivacyScan: true
     }),
     () => client.prepareTransferBatch({
@@ -2299,8 +2556,7 @@ test("Cosmos prepare methods forward complete typed scan cursors and snake-case 
       amount: "1uclair",
       recipient: "clair1recipient",
       proverAdapter,
-      afterHeight: 30,
-      afterSequence: 31,
+      after: { height: 30, globalSequence: 31, outputIndex: 0 },
       strict_privacy_scan: true
     }),
     () => client.prepareRelayWithdraw({
@@ -2308,8 +2564,7 @@ test("Cosmos prepare methods forward complete typed scan cursors and snake-case 
       amount: "1uclair",
       recipient: "clair1recipient",
       proverAdapter,
-      after_height: 40,
-      after_sequence: 41,
+      after: { height: 40, global_sequence: 41, output_index: 0 },
       strictPrivacyScan: true,
       expiresAtUnix: 4102448400,
       chainNowUnix: 4102444800
@@ -2320,10 +2575,10 @@ test("Cosmos prepare methods forward complete typed scan cursors and snake-case 
     await assert.rejects(call, /scan captured/);
   }
   assert.deepEqual(scans.map(scan => scan.after), [
-    { height: 10, globalSequence: 11, outputIndex: 1 },
+    { height: 10, globalSequence: 11, outputIndex: 0 },
     { height: 22, globalSequence: 23, outputIndex: 1 },
-    { height: 30, globalSequence: 31, outputIndex: 1 },
-    { height: 40, globalSequence: 41, outputIndex: 1 }
+    { height: 30, globalSequence: 31, outputIndex: 0 },
+    { height: 40, global_sequence: 41, output_index: 0 }
   ]);
   assert.deepEqual(scans[1].after, { height: 22, globalSequence: 23, outputIndex: 1 });
   assert.equal(scans[1].outputLimit, 24);
@@ -3740,7 +3995,8 @@ test("cosmos prepareTransferBatch builds one mixed-disclosure exact-32 MsgBatchT
   let checkpointedPayload = null;
   let checkpointedProof = null;
   const proverAdapter = {
-    async proveBatchTransfer(payload) {
+    async proveBatchTransfer(payload, options) {
+      assert.equal(options.nowUnix, chainNowUnix);
       checkpointOrder.push("prove");
       proveBatchTransferCalls += 1;
       return {
@@ -6356,6 +6612,7 @@ test("cosmos explicit CheckTx rejection replans instead of becoming Unknown", as
   assert.equal(stored.metadata.provider_rejection_code, "32");
   assert.equal(stored.metadata.provider_rejection_codespace, "sdk");
   assert.equal(Object.hasOwn(stored.metadata, "provider_rejection_log"), false);
+  assert.equal(stored.last_broadcast_error, "check_tx_rejected");
   assert.equal(stored.metadata.proof_discarded, true);
 });
 
@@ -8414,20 +8671,14 @@ test("typed privacy scan does not fall back after pagination starts", async () =
   assert.equal(legacyCalls, 0);
 });
 
-test("wallet sync falls back only when a fresh typed privacy scan endpoint is absent", async () => {
+test("wallet sync fails closed when a fresh typed privacy scan endpoint is absent", async () => {
   const client = createClairveilClient({
     rpc: "http://127.0.0.1:26657",
     rest: "http://127.0.0.1:1317",
     chainId: "clairveil-local-3"
   });
-  const typedMissing = new Error("typed privacy scan is not implemented");
-  typedMissing.status = 404;
   let typedCalls = 0;
   const legacyRequests = [];
-  client.fetchPrivacyScan = async () => {
-    typedCalls += 1;
-    throw typedMissing;
-  };
   client.fetchScanEvents = async request => {
     legacyRequests.push(request);
     return {
@@ -8450,26 +8701,24 @@ test("wallet sync falls back only when a fresh typed privacy scan endpoint is ab
     pubKeyHex: "02".padEnd(66, "0"),
     shieldedAddress: "clairs1wallet"
   };
-  await assert.rejects(
-    () => client.scanWalletNotes({
-      material,
-      after: { height: 10, globalSequence: 3, outputIndex: 1 },
-      maxPages: 2,
-      includeFoundNotes: true
-    }),
-    error => error === typedMissing
-  );
-  assert.equal(typedCalls, 1);
+  for (const status of [404, 405, 501]) {
+    const typedMissing = new Error(`typed privacy scan is not implemented (${status})`);
+    typedMissing.status = status;
+    client.fetchPrivacyScan = async () => {
+      typedCalls += 1;
+      throw typedMissing;
+    };
+    await assert.rejects(
+      () => client.scanWalletNotes({
+        material,
+        maxPages: 2,
+        includeFoundNotes: true
+      }),
+      error => error === typedMissing
+    );
+  }
+  assert.equal(typedCalls, 3);
   assert.equal(legacyRequests.length, 0);
-
-  const freshFallback = await client.scanWalletNotes({
-    material,
-    maxPages: 2,
-    includeFoundNotes: true
-  });
-  assert.equal(typedCalls, 2);
-  assert.equal(legacyRequests.length, 1);
-  assert.equal(freshFallback.scanCursor.source, "scan_events");
 
   // Low-level diagnostic scans retain the explicit compatibility fallback.
   const legacyCursorFallback = await client.scanNotes({
@@ -8479,7 +8728,7 @@ test("wallet sync falls back only when a fresh typed privacy scan endpoint is ab
     maxPages: 2,
     includeFoundNotes: true
   });
-  assert.deepEqual(legacyRequests[1], {
+  assert.deepEqual(legacyRequests[0], {
     afterHeight: 10,
     afterSequence: 3,
     limit: 200,
@@ -8501,7 +8750,60 @@ test("wallet sync falls back only when a fresh typed privacy scan endpoint is ab
     }),
     error => error === malformed
   );
-  assert.equal(legacyRequests.length, 2);
+  assert.equal(legacyRequests.length, 1);
+});
+
+test("Cosmos transfer and withdraw preparation fail closed when typed scan is absent", async () => {
+  const client = cosmosTestClient();
+  client.assertTransferProtocolConfig = async () => transferProtocolConfig();
+  let legacyCalls = 0;
+  client.fetchScanEvents = async () => {
+    legacyCalls += 1;
+    throw new Error("spend preparation must not downgrade to scan_events");
+  };
+  const material = {
+    rootSeed: new Uint8Array(32),
+    address: "clair1wallet",
+    pubKeyHex: "02".padEnd(66, "0"),
+    shieldedAddress: "clairs1wallet"
+  };
+  const preparations = [
+    () => client.prepareTransfer({
+      material,
+      amount: "1uclair",
+      recipient: validClairsRecipient,
+      proverAdapter: {}
+    }),
+    () => client.prepareWithdraw({
+      material,
+      amount: "1uclair",
+      recipient: "clair1recipient",
+      proverAdapter: {}
+    }),
+    () => client.prepareRelayWithdraw({
+      material,
+      amount: "1uclair",
+      recipient: "clair1recipient",
+      proverAdapter: {},
+      expiresAtUnix: 4102448400,
+      chainNowUnix: 4102444800
+    })
+  ];
+
+  let typedCalls = 0;
+  for (const status of [404, 405, 501]) {
+    for (const prepare of preparations) {
+      const typedMissing = new Error(`typed privacy scan is not implemented (${status})`);
+      typedMissing.status = status;
+      client.fetchPrivacyScan = async () => {
+        typedCalls += 1;
+        throw typedMissing;
+      };
+      await assert.rejects(prepare, error => error === typedMissing);
+    }
+  }
+  assert.equal(typedCalls, 9);
+  assert.equal(legacyCalls, 0);
 });
 
 test("wallet sync never downgrades a persisted typed privacy scan cursor", async () => {
@@ -8908,7 +9210,8 @@ test("relay withdraw keeps authoritative chain time through proof finalization",
     checkNullifiers: async (nullifiers) =>
       new Map(nullifiers.map((nullifier) => [nullifier, false])),
     proverAdapter: {
-      async proveWithdraw({ payload }) {
+      async proveWithdraw({ payload }, options) {
+        assert.equal(options.nowUnix, 1_000);
         return {
           version: "v2",
           payload_hash: payload.payload_hash,
@@ -9267,8 +9570,9 @@ test("EVM client verifies nullifiers in direct transfer and withdraw preparation
     expiresAtUnix: 2_000,
     checkNullifiers,
     proverAdapter: {
-      async proveWithdraw({ payload }) {
+      async proveWithdraw({ payload }, options) {
         assert.equal(checkedBatches.length, 2);
+        assert.equal(options.nowUnix, 1_000);
         return { version: "v2", payload_hash: payload.payload_hash, proof_hex: validV2ProofHex };
       }
     }

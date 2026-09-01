@@ -5,9 +5,11 @@ import { pathToFileURL } from "node:url";
 import { stringToPath } from "@cosmjs/crypto";
 import { DirectSecp256k1HdWallet } from "@cosmjs/proto-signing";
 import {
+  buildDepositProofRequestV1,
   cosmosSignDocBindingHash,
   createClairveilClient,
-  createHttpProverAdapter
+  createHttpProverAdapter,
+  normalizeDepositProofProviderResultV1
 } from "clairveiljs";
 import {
   createOfflineSignerWalletAdapter,
@@ -272,6 +274,46 @@ async function loadDepositProofProvider(config) {
   return input => provider(input, config);
 }
 
+function depositProofProviderInput(request, material, signal) {
+  const compatible = {
+    version: request.version,
+    payload: request.payload
+  };
+  Object.defineProperties(compatible, {
+    request: { value: request, enumerable: false },
+    material: { value: material, enumerable: false },
+    amount: { value: material.amount, enumerable: false },
+    note: { value: material.note, enumerable: false },
+    noteJson: { value: material.note_json, enumerable: false },
+    note_json: { value: material.note_json, enumerable: false },
+    noteCommitmentHex: { value: material.note_commitment_hex, enumerable: false },
+    note_commitment_hex: { value: material.note_commitment_hex, enumerable: false },
+    signal: { value: signal, enumerable: false }
+  });
+  return Object.freeze(compatible);
+}
+
+test("optional E2E deposit prover input keeps the canonical wire and legacy material view", () => {
+  const request = { version: "v1", payload: { version: "v1" } };
+  const material = {
+    amount: "1uclair",
+    note: { amount: 1n },
+    note_json: "{}",
+    note_commitment_hex: "11".repeat(32)
+  };
+  const signal = new AbortController().signal;
+  const input = depositProofProviderInput(request, material, signal);
+
+  assert.deepEqual(Object.keys(input), ["version", "payload"]);
+  assert.equal(input.request, request);
+  assert.equal(input.material, material);
+  assert.equal(input.amount, material.amount);
+  assert.equal(input.note, material.note);
+  assert.equal(input.noteJson, material.note_json);
+  assert.equal(input.noteCommitmentHex, material.note_commitment_hex);
+  assert.equal(input.signal, signal);
+});
+
 async function loadWalletFromMnemonic(config) {
   const mnemonic = String(env.CLAIRVEIL_E2E_MNEMONIC || "").trim();
   const signatureBase64 = rootSignatureBase64FromEnv();
@@ -403,23 +445,18 @@ async function prepareDepositAndBroadcast(client, wallet, material, amount, conf
     amount,
     assetDenom: config.denom
   });
-  const proof = await depositProofProvider({
-    material: depositMaterial,
-    amount: depositMaterial.amount,
-    note: depositMaterial.note,
-    noteJson: depositMaterial.note_json,
-    note_json: depositMaterial.note_json,
-    noteCommitmentHex: depositMaterial.note_commitment_hex,
-    note_commitment_hex: depositMaterial.note_commitment_hex
-  });
+  const request = buildDepositProofRequestV1({ material: depositMaterial });
+  const response = normalizeDepositProofProviderResultV1(
+    request,
+    await depositProofProvider(depositProofProviderInput(request, depositMaterial))
+  );
   const prepared = await client.prepareDeposit({
     wallet,
     material,
     depositMaterial,
     amount,
     denom: config.denom,
-    proof: proof?.proof,
-    proofHex: proof?.proofHex ?? proof?.proof_hex ?? proof?.depositProofHex ?? proof?.deposit_proof_hex
+    proofHex: response.proof.proof_hex
   });
   const txHash = await broadcastPrepared(client, wallet, prepared, `deposit ${amount}`, config);
   const confirmation = await client.confirmDeposit({
@@ -790,11 +827,6 @@ test("local full deposit, typed scan, disclosure, direct withdraw, and separatel
     skipOrRequire(t, "set CLAIRVEIL_E2E_WALLET_MODULE or CLAIRVEIL_E2E_MNEMONIC plus CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64");
     return;
   }
-  const depositProofProvider = await loadDepositProofProvider(config);
-  if (!depositProofProvider) {
-    skipOrRequire(t, "set CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE to run the full deposit flow");
-    return;
-  }
   const relayerWallet = await loadE2eRelayerWallet(config);
   if (!relayerWallet) {
     skipOrRequire(t, "set CLAIRVEIL_E2E_RELAYER_WALLET_MODULE or CLAIRVEIL_E2E_RELAYER_MNEMONIC for a separately signed relay withdraw");
@@ -810,6 +842,8 @@ test("local full deposit, typed scan, disclosure, direct withdraw, and separatel
     baseURL: config.proverUrl,
     timeoutMs: config.proverTimeoutMs
   });
+  const depositProofProvider = await loadDepositProofProvider(config)
+    ?? proverAdapter.proveDeposit.bind(proverAdapter);
 
   try {
     const material = await client.deriveWalletPrivacyMaterial(wallet);
@@ -1035,11 +1069,6 @@ test("Cosmos one-proof payroll batch proves, broadcasts, and reconciles typed ou
     skipOrRequire(t, "set CLAIRVEIL_E2E_WALLET_MODULE or CLAIRVEIL_E2E_MNEMONIC plus CLAIRVEIL_E2E_ROOT_SIGNATURE_BASE64");
     return;
   }
-  const depositProofProvider = await loadDepositProofProvider(config);
-  if (!depositProofProvider) {
-    skipOrRequire(t, "set CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE to fund the one-proof batch input note");
-    return;
-  }
   if (!config.auditDisclosurePrivKeyHex) {
     skipOrRequire(t, "set CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX to verify typed batch audit disclosures");
     return;
@@ -1050,6 +1079,8 @@ test("Cosmos one-proof payroll batch proves, broadcasts, and reconciles typed ou
     baseURL: config.proverUrl,
     timeoutMs: config.proverTimeoutMs
   });
+  const depositProofProvider = await loadDepositProofProvider(config)
+    ?? proverAdapter.proveDeposit.bind(proverAdapter);
   try {
     const material = await client.deriveWalletPrivacyMaterial(wallet);
     const shapes = selectedOneProofBatchShapes(config);

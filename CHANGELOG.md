@@ -2,6 +2,34 @@
 
 All notable changes to ClairveilJS are documented in this file.
 
+## Unreleased
+
+### Added
+
+- Added Cosmos support for Clairveil Core v0.4.0's canonical
+  `POST /v1/prover/deposit` request, response, bearer-auth, and error contract.
+- Added strict local validation for canonical 164-byte gnark BN254 Groth16
+  deposit proof frames before constructing `MsgDeposit`.
+- Added `createHttpDepositProofProviderV1(...)` for canonical Cosmos exact-URL
+  endpoints and `validateDepositMaterial(...)` for proof-independent deposit
+  binding checks before prover handoff.
+- Added an exact Core `v0.4.0` prover fixture/schema bundle and source-identity
+  release gate while retaining the existing v3 lifecycle snapshot provenance.
+
+### Changed
+
+- Cosmos browser profiles now use `{proverUrl}/v1/prover/deposit` by default;
+  an injected provider or exact `depositProofUrl` remains an explicit override.
+- Cosmos deposits now bind receiver spend/view keys and encrypted-note recovery
+  to the wallet root seed before proving or signing. The unversioned
+  `createHttpDepositProofProvider(...)` retains its legacy flat EVM/product wire.
+- Canonical deposit HTTP handling now requires exact status `200`, redacts
+  malformed remote response details, recognizes browser network failures, and
+  accepts the full IPv4 loopback range used by Core.
+- NoteV1 validation now permits an individually zero asset ID or randomness when
+  the resulting active commitment and nullifier remain non-zero, matching Core
+  v0.4.0.
+
 ## 0.3.1 - 2026-07-31
 
 ### Added

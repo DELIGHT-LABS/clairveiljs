@@ -17,9 +17,25 @@ export const supportedClairveilSourceKind = "commit_snapshot";
 export const supportedClairveilCommit = "0ff92839872de26b787a60d8e4d5822cc459855b";
 export const defaultConformanceFixtureDir = `fixtures/clairveil-${clairveilConformanceBundleVersion}/${conformanceFixtureRelativePath}`;
 
+// Clairveil v0.4.0 added the canonical deposit prover route after the SDK's
+// reservation-lifecycle v3 snapshot diverged from the release tag. Keep the
+// two provenances separate: never relabel the lifecycle snapshot as v0.4.0.
+export const clairveilProverConformanceBundleVersion = "v0.4.0";
+export const supportedClairveilProverRelease = clairveilProverConformanceBundleVersion;
+export const supportedClairveilProverSourceKind = "release_tag";
+export const supportedClairveilProverCommit = "ca85b02708fdd75259d4d2ee2d671c21198cec69";
+export const defaultProverConformanceFixtureDir =
+  `fixtures/clairveil-${clairveilProverConformanceBundleVersion}-prover/${conformanceFixtureRelativePath}`;
+export const proverHttpApiSchemaRelativePath =
+  "docs/schemas/clairveil-proverd-http-api.schema.json";
+export const defaultProverHttpApiSchemaPath =
+  `fixtures/clairveil-${clairveilProverConformanceBundleVersion}-prover/${proverHttpApiSchemaRelativePath}`;
+
 export const batchTransferConformanceFixtureName = "privacy_batch_transfer_v1_contract.json";
 export const noteReservationConformanceFixtureName = "privacy_note_reservation_contract.json";
 export const noteReservationContractVersionV3 = 3;
+export const proverHttpApiConformanceFixtureName = "privacy_prover_http_api_contract.json";
+export const depositProverConformanceFixtureName = "privacy_deposit_prover_contract.json";
 
 const expectedActiveReservationStatusesV3 = Object.freeze([
   "Reserved",
@@ -652,6 +668,11 @@ export const defaultConformanceFixtureNames = Object.freeze([
   "privacy_relay_withdraw_contract.json"
 ]);
 
+export const defaultProverConformanceFixtureNames = Object.freeze([
+  proverHttpApiConformanceFixtureName,
+  depositProverConformanceFixtureName
+]);
+
 function resolveConformanceFixturePath(fixtureDir, name) {
   return join(fixtureDir, name);
 }
@@ -720,6 +741,82 @@ export async function runClairveilConformanceFixtures(options = {}, runner) {
   }
 
   const fixtures = loadClairveilConformanceFixtures({ ...options, fixtureDir });
+  const callback = runner || options.runner || options.test;
+  const result = typeof callback === "function"
+    ? await callback(fixtures, { fixtureDir })
+    : undefined;
+  return {
+    skipped: false,
+    reason: "",
+    fixtureDir,
+    fixtures,
+    result
+  };
+}
+
+export function suggestClairveilProverConformanceFixtureDirs({ cwd = process.cwd() } = {}) {
+  return [
+    resolve(packageRoot, defaultProverConformanceFixtureDir),
+    resolve(cwd, defaultProverConformanceFixtureDir)
+  ];
+}
+
+export function resolveClairveilProverConformanceFixtureDir({ fixtureDir } = {}) {
+  if (fixtureDir) return fixtureDir;
+  if (process.env.CLAIRVEIL_PROVER_CONFORMANCE_FIXTURE_DIR) {
+    return resolve(process.env.CLAIRVEIL_PROVER_CONFORMANCE_FIXTURE_DIR);
+  }
+  const candidates = suggestClairveilProverConformanceFixtureDirs();
+  return candidates.find(candidate => existsSync(candidate)) || candidates[0];
+}
+
+export function clairveilProverConformanceFixturesAvailable(options = {}) {
+  return existsSync(resolveClairveilProverConformanceFixtureDir(options));
+}
+
+export function clairveilProverConformanceFixtureSkipReason(options = {}) {
+  const fixtureDir = resolveClairveilProverConformanceFixtureDir(options);
+  if (existsSync(fixtureDir)) return "";
+  return `Bundled Clairveil ${supportedClairveilProverRelease} prover conformance fixtures ` +
+    `from commit ${supportedClairveilProverCommit} not found at ${fixtureDir}. ` +
+    "Set CLAIRVEIL_PROVER_CONFORMANCE_FIXTURE_DIR only when intentionally testing another fixture directory.";
+}
+
+export function readClairveilProverConformanceFixture(name, options = {}) {
+  const fixtureDir = resolveClairveilProverConformanceFixtureDir(options);
+  if (!existsSync(fixtureDir)) {
+    throw new Error(clairveilProverConformanceFixtureSkipReason({ ...options, fixtureDir }));
+  }
+  if (!defaultProverConformanceFixtureNames.includes(name)) {
+    throw new Error(`unsupported Clairveil prover conformance fixture ${JSON.stringify(name)}`);
+  }
+  return JSON.parse(readFileSync(resolveConformanceFixturePath(fixtureDir, name), "utf8"));
+}
+
+export function loadClairveilProverConformanceFixtures(options = {}) {
+  const fixtureNames = options.fixtureNames || options.fixtures || defaultProverConformanceFixtureNames;
+  const loaded = {};
+  for (const name of fixtureNames) {
+    loaded[name] = readClairveilProverConformanceFixture(name, options);
+  }
+  return loaded;
+}
+
+export async function runClairveilProverConformanceFixtures(options = {}, runner) {
+  const required = Boolean(options.required ?? process.env.CLAIRVEIL_CONFORMANCE_REQUIRED === "1");
+  const fixtureDir = resolveClairveilProverConformanceFixtureDir(options);
+  const reason = clairveilProverConformanceFixtureSkipReason({ ...options, fixtureDir });
+  if (reason) {
+    if (required) throw new Error(reason);
+    return {
+      skipped: true,
+      reason,
+      fixtureDir,
+      fixtures: {}
+    };
+  }
+
+  const fixtures = loadClairveilProverConformanceFixtures({ ...options, fixtureDir });
   const callback = runner || options.runner || options.test;
   const result = typeof callback === "function"
     ? await callback(fixtures, { fixtureDir })

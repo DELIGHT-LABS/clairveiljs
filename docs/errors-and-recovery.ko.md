@@ -59,7 +59,7 @@ try {
 | `SELF_MERGE_REQUIRED` | input 제한 때문에 먼저 self-merge가 필요 | `error.details.plan`의 action과 next amount로 별도 self-merge 수행 |
 | `ZERO_DUMMY_REQUIRED` | transfer shape에 zero helper note가 필요 | helper note 생성 후 새 plan |
 | `EXACT_NOTE_REQUIRED` | withdraw에 정확히 일치하는 단일 note가 필요 | shielded self-transfer로 exact note를 만든 뒤 재계획 |
-| `PROVER_UNAVAILABLE` | prover URL 없음, retryable HTTP/network failure | endpoint 상태를 확인. reservation이 안전한 pre-broadcast 상태인지 확인한 뒤 동일 checkpoint에서 재시도 |
+| `PROVER_UNAVAILABLE` | prover URL 없음, network failure, `busy` 또는 `unavailable` 응답 | `retryable`을 확인한다. Core v0.4.0은 `429 busy`만 retryable이고 `503 unavailable`은 non-retryable이다. 안전한 reservation 상태를 확인한 뒤 동일 endpoint 재시도를 판단한다. |
 | `PROVER_TIMEOUT` | prover 요청 또는 async job timeout/abort | 응답이 늦게 완료될 수 있는 adapter인지 확인하고 checkpoint/job ID로 조회. 새 proof를 무조건 중복 요청하지 않음 |
 | `PROVER_CANCELLED` | client의 prover 대기 또는 async job poll 취소 | client wait가 끝났다는 뜻일 뿐 in-process solver 종료를 보장하지 않는다. Durable reservation을 다시 읽는다. `Proving`/`ProofReady`는 자동 release 대신 격리되며 만료·foreign lease는 명시적 reconcile이 필요할 수 있다. Job/checkpoint는 별도 operation store에서 추적한다. |
 | `PROVER_REJECTED` | non-retryable prover 응답 또는 proof job 실패 | payload/circuit/config 불일치 조사. 같은 입력의 blind retry 금지 |
@@ -105,6 +105,10 @@ evidence가 아니다. Hard termination과 OOM containment는 prover 운영자�
 supervised process isolation으로 제공해야 한다.
 
 - `retryable=true`, HTTP 429, timeout과 queue saturation은 다른 prover endpoint로 failover할 권한이 아니다.
+- Canonical Core v0.4.0 HTTP 계약에서 `400/413/415 invalid_request`,
+  `401 unauthorized`, `404 not_found`, `405 method_not_allowed`,
+  `500 proof_failed`는 terminal rejection이고 `503 unavailable`도
+  non-retryable이다. `retryable: true`는 `429 busy`만 사용한다.
 - 기본 정책은 명시적으로 선택한 endpoint 한 곳과 automatic failover 비활성화다.
 - Same-endpoint retry를 제품 adapter에서 구현한다면 원래 payload/checkpoint와 duplicate proof job 여부를 먼저 확인한다. 일반 prepare helper가 실패를 반환한 뒤에는 release 또는 ownership 유지 어느 쪽도 가정하지 말고 durable reservation을 다시 읽는다.
 - 추가 endpoint로 같은 private witness를 보내려면 privacy boundary 확대를 사용자 또는 제품 정책이 명시적으로 승인해야 한다.

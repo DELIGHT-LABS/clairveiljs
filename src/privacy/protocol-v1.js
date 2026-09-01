@@ -74,6 +74,15 @@ function field(value, label, { nonZero = false } = {}) {
   return parsed;
 }
 
+function requiredNoteField(note, names, label) {
+  for (const name of names) {
+    if (Object.prototype.hasOwnProperty.call(note, name) && note[name] != null) {
+      return note[name];
+    }
+  }
+  throw new Error(`${label} is required`);
+}
+
 function fieldFromBytes(value, label, options) {
   const raw = bytes(value, label);
   if (raw.length !== 32) throw new Error(`${label} must be exactly 32 bytes`);
@@ -238,13 +247,35 @@ export function emptyNoteTreeRootsV1(depth) {
 export function validateNoteV1(note) {
   if (!note || typeof note !== "object") throw new Error("NoteV1 is required");
   const normalized = {
-    receiverSpendPubKeyX: field(note.receiverSpendPubKeyX ?? note.rsx, "NoteV1 receiver spend pubkey x"),
-    receiverSpendPubKeyY: field(note.receiverSpendPubKeyY ?? note.rsy, "NoteV1 receiver spend pubkey y"),
-    receiverViewPubKeyX: field(note.receiverViewPubKeyX ?? note.rvx, "NoteV1 receiver view pubkey x"),
-    receiverViewPubKeyY: field(note.receiverViewPubKeyY ?? note.rvy, "NoteV1 receiver view pubkey y"),
-    amount: uint(note.amount ?? note.am, 64, "NoteV1 amount"),
-    assetID: field(note.assetID ?? note.assetId ?? note.as, "NoteV1 asset id", { nonZero: true }),
-    randomness: field(note.randomness ?? note.rn, "NoteV1 randomness"),
+    receiverSpendPubKeyX: field(
+      requiredNoteField(note, ["receiverSpendPubKeyX", "rsx"], "NoteV1 receiver spend pubkey x"),
+      "NoteV1 receiver spend pubkey x"
+    ),
+    receiverSpendPubKeyY: field(
+      requiredNoteField(note, ["receiverSpendPubKeyY", "rsy"], "NoteV1 receiver spend pubkey y"),
+      "NoteV1 receiver spend pubkey y"
+    ),
+    receiverViewPubKeyX: field(
+      requiredNoteField(note, ["receiverViewPubKeyX", "rvx"], "NoteV1 receiver view pubkey x"),
+      "NoteV1 receiver view pubkey x"
+    ),
+    receiverViewPubKeyY: field(
+      requiredNoteField(note, ["receiverViewPubKeyY", "rvy"], "NoteV1 receiver view pubkey y"),
+      "NoteV1 receiver view pubkey y"
+    ),
+    amount: uint(
+      requiredNoteField(note, ["amount", "am"], "NoteV1 amount"),
+      64,
+      "NoteV1 amount"
+    ),
+    assetID: field(
+      requiredNoteField(note, ["assetID", "assetId", "as"], "NoteV1 asset id"),
+      "NoteV1 asset id"
+    ),
+    randomness: field(
+      requiredNoteField(note, ["randomness", "rn"], "NoteV1 randomness"),
+      "NoteV1 randomness"
+    ),
     memo: String(note.memo ?? note.mm ?? "")
   };
   if (utf8Bytes(normalized.memo).length > noteMemoCapacityV1) {
@@ -314,7 +345,7 @@ export function unmarshalNotePlaintextV1(value) {
     offset += 32;
   }
   const amount = readU64(encoded, offset); offset += 8;
-  const assetID = bytesToBigIntBE(fieldFromBytes(encoded.slice(offset, offset + 32), "NoteV1 asset id", { nonZero: true })); offset += 32;
+  const assetID = bytesToBigIntBE(fieldFromBytes(encoded.slice(offset, offset + 32), "NoteV1 asset id")); offset += 32;
   const randomness = bytesToBigIntBE(fieldFromBytes(encoded.slice(offset, offset + 32), "NoteV1 randomness")); offset += 32;
   const memoLength = readU16(encoded, offset); offset += 2;
   if (memoLength > noteMemoCapacityV1) throw new Error("NotePlaintextV1 memo exceeds fixed capacity");

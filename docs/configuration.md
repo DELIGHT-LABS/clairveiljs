@@ -70,8 +70,8 @@ Cosmos and EVM profiles both contain the following fields.
 | `restEndpoints` | Optional REST candidate list. It cannot be empty or contain duplicates; `rest` is first in the effective order. |
 | `accountPrefix`, `shieldedPrefix` | Bech32 prefixes for account and shielded addresses |
 | `denom`, `displayDenom`, `coinDecimals` | Minimal denom, display denom, and decimals |
-| `proverUrl` | Default HTTP prover base URL for transfer, withdraw, and One-Proof batch. A path prefix is preserved when versioned prover routes are appended. |
-| `depositProofUrl` | Optional exact URL dedicated to DepositCircuit; it is not derived from `proverUrl` |
+| `proverUrl` | Default HTTP prover base URL for transfer, withdraw, One-Proof batch, and Cosmos deposit. A path prefix is preserved when versioned prover routes are appended. |
+| `depositProofUrl` | Optional exact DepositCircuit endpoint override. Cosmos uses the canonical `createHttpDepositProofProviderV1` wire, or otherwise appends `/v1/prover/deposit` to `proverUrl`; EVM behavior remains explicit. |
 
 Profile URLs must use `http` or `https` and must not contain a query, fragment, or embedded credential. The runtime validator allows HTTP for local development, but production endpoints should use HTTPS and must not put bearer tokens or private values in URLs.
 
@@ -104,7 +104,6 @@ const cosmosProfile = {
   displayDenom: "CLAIR",
   coinDecimals: 6,
   proverUrl: "https://prover.example.com",
-  depositProofUrl: "https://deposit-proof.example.com/v1/proof",
   keplrCoinType: 118,
   gasPriceStep: { low: 0.01, average: 0.025, high: 0.04 },
   keplrChainInfo: {
@@ -200,10 +199,10 @@ The main `ClairveilBrowserClientOptions` controlled outside the profile are:
 | `evmFinalityPolicy` | None | Required explicitly for EVM confirmation. Select confirmation depth, `safe`, `finalized`, or `custom` according to the chain. `receipt` is an explicit low-finality opt-in that verifies only mined-block identity. |
 | `nullifierFailover` | `false` | When enabled, the same nullifier may be exposed to multiple REST providers. Requires a product privacy decision. |
 | `merklePathFailover` | `false` | When enabled, the spend commitment and exact-snapshot request may be exposed to multiple providers. |
-| `proverAdapter` | None | Injects a local/WASM, internally authenticated, or async-job prover. Takes precedence over the default HTTP adapter. |
+| `proverAdapter` | None | Injects a local/WASM, internally authenticated, or async-job prover. Its `proveDeposit` method is the third Cosmos deposit choice, after the explicit provider and exact URL. |
 | `proverBearerToken` | None | Authorization credential for the default HTTP prover. Do not put it in a URL or log it. |
 | `proverTimeoutMs` | 120,000ms | Transfer/withdraw/batch prover timeout |
-| `depositProofProvider` | None | Local/WASM DepositCircuit provider. Takes precedence over `depositProofUrl`. |
+| `depositProofProvider` | None | Local/WASM DepositCircuit provider. It is the first Cosmos deposit choice. |
 | `depositProofTimeoutMs` | 120,000ms | Exact deposit-proof HTTP timeout |
 | `depositProofResponseMaxBytes` | 1MiB | Deposit-proof response limit |
 | `enableExperimentalBatchTransfer` | `false` | Explicit opt-in for Cosmos/EVM One-Proof batch. EVM maps it to the canonical single-proof transaction. |
@@ -217,13 +216,20 @@ General queries may retry/fail over among configured REST endpoints, but nullifi
 - `POST /v1/prover/transfer`
 - `POST /v1/prover/withdraw`
 - `POST /v1/proofs/batch-transfer`
+- `POST /v1/prover/deposit` for Cosmos
 
-Deposit proof does not use this base URL. Choose exactly one of:
+Cosmos deposit proof resolution uses this precedence:
 
 1. `depositProofProvider`: a browser-local/WASM or caller-reviewed implementation
-2. `depositProofUrl`: an exact HTTP endpoint fixed in the profile
+2. `depositProofUrl`: an exact HTTP endpoint override fixed in the profile and called through `createHttpDepositProofProviderV1`
+3. `proverAdapter.proveDeposit`: the method on the configured general prover adapter
+4. `{proverUrl}/v1/prover/deposit`: the Core v0.4.0 canonical default
 
-Do not concatenate `depositProofUrl` from `proverUrl` or use a fallback. Evaluate the remote prover and deposit-proof service as separate trust principals that can see private payloads.
+All four use the canonical versioned request/response contract. The remote
+request discloses receiver public keys, amount, asset ID, randomness, and note
+commitment, but excludes memo, creator, denom, encrypted note, seed, and chain
+ID. Evaluate every selected remote service as a trust principal and do not use
+automatic cross-endpoint fallback. EVM profile resolution is unchanged.
 
 ### Remote prover operational boundary
 

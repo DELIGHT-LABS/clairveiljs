@@ -364,6 +364,10 @@ export interface PrivacyScanOptions extends PrivacyEventsQuery {
  */
 export type TypedWalletScanOptions = Omit<
   PrivacyScanOptions,
+  | "afterHeight"
+  | "after_height"
+  | "afterSequence"
+  | "after_sequence"
   | "eventTypes"
   | "event_types"
   | "scanSource"
@@ -371,6 +375,10 @@ export type TypedWalletScanOptions = Omit<
   | "strictPrivacyScan"
   | "strict_privacy_scan"
 > & {
+  afterHeight?: never;
+  after_height?: never;
+  afterSequence?: never;
+  after_sequence?: never;
   eventTypes?: readonly [];
   event_types?: readonly [];
   scanSource?: "privacy_scan";
@@ -669,19 +677,40 @@ export interface PreparedRelayWithdrawSignDoc {
   signDoc: SignDocBase64;
 }
 
+/** A canonical 164-byte gnark BN254 Groth16 frame, validated before MsgDeposit encoding. */
 export type DepositProofInput =
   | { proof: Uint8Array | Hex; proofHex?: Hex; proof_hex?: Hex }
   | { proof?: Uint8Array | Hex; proofHex: Hex; proof_hex?: Hex }
   | { proof?: Uint8Array | Hex; proofHex?: Hex; proof_hex: Hex };
 
-export type BuildDepositMessageInput = {
+/** Required to authenticate and decrypt the supplied deposit envelope before signing. */
+type DepositRootSeedBinding =
+  | { rootSeed: Uint8Array; root_seed?: Uint8Array }
+  | { rootSeed?: Uint8Array; root_seed: Uint8Array };
+
+export type ValidateDepositMaterialInput = {
   creator: ClairAddress;
-  rootSeed: Uint8Array;
   amount: CoinString;
   memo?: string;
+  assetDenom?: string;
+  denom?: string;
+  shieldedAddress?: ShieldedAddress;
   depositMaterial?: object;
   deposit_material?: object;
-} & DepositProofInput;
+  material?: DepositMaterial;
+} & DepositRootSeedBinding;
+
+export interface ValidatedDepositMaterial {
+  material: DepositMaterial;
+  message: {
+    creator: ClairAddress | string;
+    amount: CoinString;
+    noteCommitment: Uint8Array;
+    encryptedNote: Uint8Array;
+  };
+}
+
+export type BuildDepositMessageInput = ValidateDepositMaterialInput & DepositProofInput;
 
 export type PrepareDepositInput = {
   wallet?: WalletAdapterLike;
@@ -1013,10 +1042,6 @@ export type PrepareTransferBatchInput = {
   auditDisclosureTargetPubKeyHex?: Hex;
   audit_disclosure_target_pubkey_hex?: Hex;
   denom?: string;
-  afterHeight?: Uint64CursorInput;
-  after_height?: Uint64CursorInput;
-  afterSequence?: Uint64CursorInput;
-  after_sequence?: Uint64CursorInput;
   page?: number;
   limit?: number;
   maxPages?: number;
@@ -1184,14 +1209,15 @@ export class ClairveilJS {
   }): DerivedPrivacyAccount;
   buildDepositMaterial(input: {
     creator?: ClairAddress | string;
-    rootSeed?: Uint8Array;
     shieldedAddress?: ShieldedAddress;
     amount?: CoinString;
     memo?: string;
     assetDenom?: string;
     denom?: string;
     shieldedPrefix?: string;
-  }): DepositMaterial;
+  } & DepositRootSeedBinding): DepositMaterial;
+  /** Validate every proof-independent Cosmos deposit binding before proving or signing. */
+  validateDepositMaterial(input: ValidateDepositMaterialInput): ValidatedDepositMaterial;
   scanWalletNotes(input: TypedWalletScanOptions & {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
@@ -1256,10 +1282,6 @@ export class ClairveilJS {
     chainNowUnix?: number;
     chain_now_unix?: number;
     denom?: string;
-    afterHeight?: Uint64CursorInput;
-    after_height?: Uint64CursorInput;
-    afterSequence?: Uint64CursorInput;
-    after_sequence?: Uint64CursorInput;
     page?: number;
     limit?: number;
     maxPages?: number;
@@ -1305,10 +1327,6 @@ export class ClairveilJS {
     gas_limit?: number;
     denom?: string;
     assetDenom?: string;
-    afterHeight?: Uint64CursorInput;
-    after_height?: Uint64CursorInput;
-    afterSequence?: Uint64CursorInput;
-    after_sequence?: Uint64CursorInput;
     page?: number;
     limit?: number;
     maxPages?: number;
@@ -1335,10 +1353,6 @@ export class ClairveilJS {
     signal?: AbortSignal;
     denom?: string;
     assetDenom?: string;
-    afterHeight?: Uint64CursorInput;
-    after_height?: Uint64CursorInput;
-    afterSequence?: Uint64CursorInput;
-    after_sequence?: Uint64CursorInput;
     page?: number;
     limit?: number;
     maxPages?: number;

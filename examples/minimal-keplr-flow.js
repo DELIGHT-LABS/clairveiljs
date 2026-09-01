@@ -1,8 +1,11 @@
 import {
+  buildDepositProofRequestV1,
   createClairveilClient,
   createHttpProverAdapter,
   createKeplrWalletAdapter,
-  LocalStorageNoteStore
+  LocalStorageNoteStore,
+  normalizeDepositProofProviderResultV1,
+  parseCoin
 } from "clairveiljs";
 
 export async function runMinimalClairveilFlow({
@@ -47,33 +50,40 @@ export async function runMinimalClairveilFlow({
   };
 
   const material = await clairveil.deriveWalletPrivacyMaterial(wallet);
-  if (typeof depositProofProvider !== "function") {
-    throw new Error("depositProofProvider is required for Cosmos deposits");
-  }
+  // The remote deposit prover sees receiver keys, amount, asset ID, and
+  // randomness. Verify the active circuit and denom mapping before exposing
+  // that witness; prepareDeposit repeats the check before signing.
+  const depositCoin = parseCoin(depositAmount, defaultDenom);
+  await clairveil.assertProtocolPreflight(depositCoin.denom);
   const depositMaterial = clairveil.buildDepositMaterial({
     creator: material.address,
     rootSeed: material.rootSeed,
-    amount: depositAmount
+    amount: depositCoin.raw,
+    assetDenom: depositCoin.denom
   });
-  const proof = await depositProofProvider({
-    material: depositMaterial,
-    amount: depositMaterial.amount,
-    note: depositMaterial.note,
-    noteJson: depositMaterial.note_json,
-    note_json: depositMaterial.note_json,
-    noteCommitmentHex: depositMaterial.note_commitment_hex,
-    note_commitment_hex: depositMaterial.note_commitment_hex
-  });
-  const proofBytes = proof?.proof ?? proof?.depositProof ?? proof?.deposit_proof ?? null;
-  const proofHex = proof?.proofHex ?? proof?.proof_hex ?? proof?.depositProofHex ?? proof?.deposit_proof_hex;
+  const validatedDepositMaterial = clairveil.validateDepositMaterial({
+    depositMaterial,
+    creator: material.address,
+    rootSeed: material.rootSeed,
+    amount: depositCoin.raw,
+    assetDenom: depositCoin.denom
+  }).material;
+  const depositRequest = buildDepositProofRequestV1({ material: validatedDepositMaterial });
+  const provider = typeof depositProofProvider === "function"
+    ? depositProofProvider
+    : proverAdapter.proveDeposit.bind(proverAdapter);
+  const depositResponse = normalizeDepositProofProviderResultV1(
+    depositRequest,
+    await provider(depositRequest)
+  );
 
   const deposit = await clairveil.prepareDeposit({
     wallet,
     material,
-    depositMaterial,
-    amount: depositAmount,
-    proof: proofBytes,
-    proofHex
+    depositMaterial: validatedDepositMaterial,
+    amount: depositCoin.raw,
+    assetDenom: depositCoin.denom,
+    proofHex: depositResponse.proof.proof_hex
   });
   const depositBroadcast = await clairveil.signDirectAndBroadcast({ wallet, signDoc: deposit.signDoc });
   if (!depositBroadcast.ok) {

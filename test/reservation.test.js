@@ -670,6 +670,100 @@ test("reservation metadata rejects values outside its JSON persistence contract"
   assert.deepEqual(await manager.listActiveReservations(), []);
 });
 
+test("reservation lifecycle persists stable error codes without external error prose", async () => {
+  const store = new MemoryReservationStore();
+  const manager = createNoteReservationManager({
+    store,
+    ownerKeyId: "chain:clair1durable-errors",
+    indexKey: "durable-errors-index"
+  });
+  const rawProse = "PRIVATE_RPC_PROSE account sequence mismatch for wallet details";
+
+  const unknownBatch = await prepareProofReadyBatch(manager, {
+    notes: [noteFixture({ nullifier: "c1".repeat(32), sequence: 201 })],
+    operationId: "durable-error-unknown",
+    payloadHash: "unknown-payload"
+  });
+  const unknownTxHash = "a1".repeat(32);
+  await manager.markBroadcastAttempting(unknownBatch.reservation_ids, {
+    leaseToken: unknownBatch.lease_token,
+    txHash: unknownTxHash,
+    reason: "test_unknown"
+  });
+  const [unknown] = await manager.markUnknown(unknownBatch.reservation_ids, {
+    leaseToken: unknownBatch.lease_token,
+    txHash: unknownTxHash,
+    error: rawProse
+  });
+  assert.equal(unknown.last_broadcast_error, "broadcast_result_unknown");
+
+  const [failed] = await manager.markBroadcastFailed(unknownBatch.reservation_ids, {
+    txHashChecked: unknownTxHash,
+    checkedHeight: 200,
+    nullifierUnspentConfirmed: true,
+    txAbsentOrFailedConfirmed: true,
+    error: rawProse
+  });
+  assert.equal(
+    failed.last_broadcast_error,
+    "authoritative_exact_broadcast_failure"
+  );
+
+  const rejectedBatch = await prepareProofReadyBatch(manager, {
+    notes: [noteFixture({ nullifier: "c2".repeat(32), sequence: 202 })],
+    operationId: "durable-error-rejected",
+    payloadHash: "rejected-payload"
+  });
+  await manager.markBroadcastAttempting(rejectedBatch.reservation_ids, {
+    leaseToken: rejectedBatch.lease_token,
+    txHash: "a2".repeat(32),
+    reason: "test_check_tx"
+  });
+  const [rejected] = await manager.markBroadcastRejected(rejectedBatch.reservation_ids, {
+    leaseToken: rejectedBatch.lease_token,
+    error: rawProse,
+    providerCode: 32,
+    providerCodespace: "sdk",
+    providerLog: rawProse,
+    rpcInvoked: true,
+    checkTxRejected: true,
+    walletRejectedBeforeBroadcast: false
+  });
+  assert.equal(rejected.last_broadcast_error, "check_tx_rejected");
+  assert.equal(rejected.metadata.provider_rejection_code, "32");
+  assert.equal(rejected.metadata.provider_rejection_codespace, "sdk");
+  assert.equal(rejected.metadata.check_tx_rejected, true);
+  assert.equal(Object.hasOwn(rejected.metadata, "provider_rejection_log"), false);
+
+  const replanBatch = await prepareProofReadyBatch(manager, {
+    notes: [noteFixture({ nullifier: "c3".repeat(32), sequence: 203 })],
+    operationId: "durable-error-replan",
+    payloadHash: "replan-payload"
+  });
+  const [replanned] = await manager.markReplanRequired(replanBatch.reservation_ids, {
+    leaseToken: replanBatch.lease_token,
+    error: rawProse,
+    metadata: {
+      reconcile_reason: "local_payload_discarded",
+      no_broadcast_attempt: true,
+      proof_discarded: true
+    }
+  });
+  assert.equal(replanned.last_broadcast_error, "local_payload_discarded");
+
+  const manualBatch = await manager.reserveNotes({
+    notes: [noteFixture({ nullifier: "c4".repeat(32), sequence: 204 })],
+    operationId: "durable-error-manual"
+  });
+  const [manual] = await manager.markManualReview(manualBatch.reservation_ids, {
+    error: rawProse
+  });
+  assert.equal(manual.last_broadcast_error, "manual_review_required");
+
+  const persisted = JSON.stringify(await store.load());
+  assert.equal(persisted.includes(rawProse), false);
+});
+
 test("authoritative exact broadcast failure recovers an expired linked operation without operator approval", async () => {
   let clock = new Date("2026-01-01T00:00:00.000Z");
   const now = () => new Date(clock);
@@ -908,6 +1002,7 @@ test("expired foreign ProofReady recovery is atomic, idempotent, and restart-saf
         signDocHash,
         checkedHeight: "500",
         executionFailedConfirmed: true,
+        error: "PRIVATE_RPC_PROSE failed transaction details",
         inputNullifiers: nullifiers,
         checkNullifiers: async values => new Map(values.map(value => [value, false]))
       };
@@ -932,6 +1027,10 @@ test("expired foreign ProofReady recovery is atomic, idempotent, and restart-saf
         assert.equal(reservation.broadcast_in_flight, false);
         assert.equal(reservation.lease_owner, "");
         assert.equal(reservation.lease_token, "");
+        assert.equal(
+          reservation.last_broadcast_error,
+          "expired_proof_ready_authoritative_exact_broadcast_failure"
+        );
         assert.equal(reservation.metadata.checked_height, "500");
         assert.equal(reservation.metadata.tx_hash_checked, txHash);
         assert.equal(reservation.metadata.nullifier_unspent_confirmed, true);
@@ -2600,7 +2699,7 @@ test("reservation rollback quarantines proving notes and spent reconciliation cl
   assert.equal(replanRecord.submitted_tx_hash, "TX123");
   assert.equal(replanRecord.status, reservationStatuses.ReplanRequired);
   assert.equal(replanRecord.submitted_tx_hash, "TX123");
-  assert.equal(replanRecord.last_broadcast_error, "receipt failed and nullifier is unspent");
+  assert.equal(replanRecord.last_broadcast_error, "replan_required");
   assert.equal(replanRecord.metadata.nullifier_unspent_confirmed, true);
   assert.equal(replanRecord.metadata.tx_absent_or_failed_confirmed, true);
   assert.equal(replanRecord.metadata.checked_height, 12345);

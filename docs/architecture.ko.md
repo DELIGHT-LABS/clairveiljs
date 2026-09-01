@@ -6,11 +6,12 @@
 
 ClairveilJS의 `src/` 디렉터리 계층은 구현 구조를 설명하지만, 이 문서는 실제 서비스 배포와 런타임 상호작용을 다룬다. Cosmos와 Clairveil-compatible EVM 체인을 모두 포함하며, 배포 환경에 따라 선택되는 경로를 구분한다.
 
-지원하는 기준 protocol은 Clairveil v0.3.1 SDK handoff(`0ff9283`)의
-`privacy-note-v1` / `privacy-fixed-v1`이다. 해당 source의 공개 상태는
-`PUBLICATION_READY_EXPERIMENTAL`이며 production 배포 승인이 아니다. Formal
-trusted setup, 외부 security/circuit audit, signed production artifact와 target
-chain/product 검증은 이 아키텍처 밖의 별도 release gate다.
+Protocol/lifecycle 기준은 Clairveil v0.3.1 SDK handoff(`0ff9283`)의
+`privacy-note-v1` / `privacy-fixed-v1`이다. Cosmos deposit proving은 Core
+v0.4.0(`ca85b02`)의 canonical prover HTTP 경계를 추가로 구현하지만 Cosmos
+protobuf wire를 바꾸거나 EVM 호환 범위를 넓히지 않는다. 이 source들은
+production 배포 승인이 아니다. Formal trusted setup, 외부 security/circuit
+audit, signed production artifact와 target chain/product 검증은 별도 release gate다.
 
 Note의 예약·증명·제출·재조정 상태는 [Note Reservation 상태 전이](./reservation-state-machine.ko.md) 문서에서 별도로 다룬다.
 
@@ -30,7 +31,7 @@ SDK 메서드가 실제 chain REST/RPC, prover HTTP, Cosmos Msg, EVM precompile�
 | --- | --- | --- |
 | 브라우저 / Wallet | 사용자의 privacy root signature로부터 privacy material을 유도하고, 노트를 스캔하며, 준비된 transaction을 서명한다. | 일반 DApp 서버에 privacy root signature, root seed, spend/view/disclosure private material, 복호화한 note를 전달하면 안 된다. |
 | ClairveilJS | 클라이언트에서 note scan, planner, Merkle path/nullifier 검증, transfer·withdraw payload 구성, prover adapter 호출, Cosmos sign doc 또는 EVM transaction 구성을 수행한다. ZK proof를 자체 생성하지는 않는다. Note 영속화는 주입된 Note Store에 맡기며, SDK의 `LocalStorageNoteStore`는 명시적 opt-in 시 복호화 note를 평문 저장한다. | private material을 임의의 서버로 자동 전송하지 않는다. Production에서는 plaintext `LocalStorageNoteStore`를 사용하지 않고 앱·지갑의 암호화 Note Store를 주입한다. |
-| Prover 서비스 | ClairveilJS가 보낸 준비된 prover payload로 transfer, withdraw 또는 batch ZK proof를 생성해 응답한다. 같은 batch proof는 Cosmos `MsgBatchTransfer` 또는 EVM `singleProofBatchTransfer` 실행으로 매핑되며 Deposit은 별도의 exact `depositProofUrl` 또는 주입한 provider를 사용한다. | 신뢰되지 않은 prover에 private payload/proof를 넘기면 안 된다. 원격 prover를 쓸지, local/WASM prover를 쓸지는 제품의 신뢰 모델이 결정한다. Automatic cross-endpoint failover는 기본 비활성화다. |
+| Prover 서비스 | ClairveilJS가 보낸 payload로 transfer, withdraw, batch 또는 deposit ZK proof를 생성한다. 같은 batch proof는 Cosmos `MsgBatchTransfer` 또는 EVM `singleProofBatchTransfer`로 매핑된다. Cosmos deposit은 canonical Core v0.4.0 route가 기본이며 exact URL override와 주입 provider도 지원한다. | 신뢰되지 않은 prover에 private payload/proof를 넘기면 안 된다. 원격 prover를 쓸지, local/WASM prover를 쓸지는 제품의 신뢰 모델이 결정한다. Automatic cross-endpoint failover는 기본 비활성화다. |
 | Client State Stores | Note store는 scan 결과·cursor·nullifier 상태를, Reservation store는 inventory lock·lease·broadcast evidence를 보존한다. Production browser의 Reservation store는 암호화된 IndexedDB와 Web Locks를 사용한다. | 로컬 저장소이며 서버 저장소가 아니다. private material에서 유도한 암호화 키를 ciphertext와 함께 저장하면 안 된다. |
 | DApp Proxy | 기본 아키텍처에서는 필수가 아니다. 필요한 경우 chain REST/RPC, prover HTTP 또는 broadcast endpoint를 프록시한다. | 일반 production 경로에서 사용자 privacy material이나 복호화 note의 보관 주체가 되면 안 된다. |
 | Product Relayer | relay withdraw payload를 검증하고 relayer 자신의 Cosmos/EVM 계정으로 제출한다. 제품별 인증·수수료·정책은 SDK 공통 계약이 아니다. | 클라이언트가 준 candidate transaction을 검증 없이 제출하면 안 된다. |
@@ -81,12 +82,17 @@ Namespace 분리, 암호화 envelope, Note Store adapter, scan cursor/reorg, key
 | `proveTransfer(...)` | `POST {baseURL}/v1/prover/transfer` | transfer 준비 |
 | `proveWithdraw(...)` | `POST {baseURL}/v1/prover/withdraw` | direct withdraw와 relay withdraw 준비 |
 | `proveBatchTransfer(...)` | `POST {baseURL}/v1/proofs/batch-transfer` | Cosmos one-proof batch transfer 준비 |
+| `proveDeposit(...)` | `POST {baseURL}/v1/prover/deposit` | Cosmos deposit 준비 |
 
 브라우저 클라이언트에 `proverUrl`을 주고 별도의 `proverAdapter`를 주입하지 않으면 ClairveilJS는 이 HTTP adapter를 생성한다. 즉 기본 경로는 **브라우저의 ClairveilJS가 prover URL을 직접 호출**하는 것이다. `proverUrl`이 DApp 서버 프록시를 가리키는 경우에만 prover 요청이 서버를 경유한다.
 
 `proverUrl`이 DApp proxy를 가리키면 input amount·randomness·Merkle path 등 private witness를 포함하는 prepared prover payload가 그 서버를 통과한다. 이 proxy는 일반 read-only query proxy가 아니라 remote prover와 같은 privacy-sensitive 신뢰 주체로 분류하고, request body logging·analytics·cache를 비활성화해야 한다. 해당 신뢰를 허용할 수 없으면 local/WASM prover를 사용한다.
 
-`/v1/prover/transfer`와 `/v1/prover/withdraw`는 deposit proof endpoint가 아니다. Deposit은 local/WASM `depositProofProvider` 또는 profile에 명시적으로 고정한 `depositProofUrl`을 사용하며, `proverUrl`에서 deposit URL을 추론하지 않는다.
+Cosmos deposit은 선택한 `proverUrl`의 canonical Core v0.4.0
+`/v1/prover/deposit` route를 기본으로 사용한다. Local/WASM
+`depositProofProvider` 또는 exact `depositProofUrl`이 있으면 기본 경로를
+대체하며 같은 private payload를 다른 endpoint로 자동 failover하지 않는다.
+EVM profile endpoint 해석은 유지된다.
 
 HTTP prover adapter는 response shape, request payload hash와 circuit/artifact identity 같은 계약 binding을 확인한다. ZK proof의 최종 유효성은 Clairveil 온체인 실행 규칙에서 검증된다.
 
@@ -95,11 +101,15 @@ HTTP prover adapter는 response shape, request payload hash와 circuit/artifact 
 Deposit은 transfer/withdraw와 proof endpoint가 다르다.
 
 1. ClairveilJS가 wallet privacy material과 deposit note/commitment를 준비한다.
-2. 호출자가 제공한 local/WASM `depositProofProvider` 또는 profile에 고정된 `depositProofUrl`에서 DepositCircuit proof를 얻는다.
+2. Cosmos에서는 canonical `proverUrl` route, local/WASM `depositProofProvider`, 또는 exact `depositProofUrl` override에서 DepositCircuit proof를 얻는다.
 3. SDK가 Cosmos `MsgDeposit` sign doc 또는 EVM precompile transaction을 구성한다.
 4. Wallet이 서명·승인하고 chain endpoint로 제출한다.
 
-`depositProofUrl`은 기본 `proverUrl`에서 파생하지 않는다. Product-hosted endpoint를 사용할 경우 redirect를 허용하지 않고 요청 commitment와 응답 commitment가 정확히 일치해야 한다.
+기본 Cosmos route는 `proverUrl`의 path prefix를 유지하며
+`/v1/prover/deposit`를 붙인다. `depositProofUrl`은 fallback이 아닌 exact
+override다. SDK는 redirect를 거부하고 response version, exact commitment
+binding과 canonical 164-byte gnark BN254 proof frame을 `MsgDeposit` 구성 전에
+검증한다.
 
 ## Transfer 흐름
 

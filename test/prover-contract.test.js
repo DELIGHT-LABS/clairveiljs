@@ -1,22 +1,58 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildDepositProofRequestV1,
   createAsyncJobProverAdapter,
   createHttpDepositProofProvider,
+  createHttpDepositProofProviderV1,
   createHttpProverAdapter,
-  createStaticProverAdapter
+  createStaticProverAdapter,
+  normalizeDepositProofProviderResultV1,
+  validateDepositProofBytesV1,
+  validateDepositProofResponseV1
 } from "clairveiljs/prover";
 import { ClairveilErrorCode } from "clairveiljs/errors";
+import { unpackPointHex } from "clairveiljs/crypto";
+import {
+  depositProverConformanceFixtureName,
+  readClairveilProverConformanceFixture
+} from "clairveiljs/conformance";
 import {
   fixtureTestOptions,
   readFixture
 } from "./helpers.js";
 
-function jsonResponse(body, status = 200) {
+function jsonResponse(body, status = 200, contentType = "application/json") {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" }
+    headers: contentType == null ? {} : { "content-type": contentType }
   });
+}
+
+function canonicalEmptyGroth16ProofHex() {
+  return [
+    `40${"00".repeat(31)}`,
+    `40${"00".repeat(63)}`,
+    `40${"00".repeat(31)}`,
+    "00000000",
+    `40${"00".repeat(31)}`
+  ].join("");
+}
+
+// gnark-compatible frame using the BN254 G1/G2 generators. Core v0.4.0's
+// ValidateCanonicalProofBN254 accepts this decode -> encode round trip.
+const canonicalGeneratorGroth16ProofHex =
+  "8000000000000000000000000000000000000000000000000000000000000001" +
+  "998e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c" +
+  "21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed" +
+  "8000000000000000000000000000000000000000000000000000000000000001" +
+  "00000000" +
+  "8000000000000000000000000000000000000000000000000000000000000001";
+
+function depositRequestFromContract() {
+  return readClairveilProverConformanceFixture(
+    depositProverConformanceFixtureName
+  ).canonical_positive_request;
 }
 
 test("static prover adapter validates and returns a transfer v5 proof", fixtureTestOptions, async () => {
@@ -29,6 +65,57 @@ test("static prover adapter validates and returns a transfer v5 proof", fixtureT
 
   assert.equal(response.version, "v2");
   assert.deepEqual(response.proof, examples.transfer.response.proof);
+});
+
+test("prover adapters reject missing or falsy versions on explicit envelopes", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  let httpCalls = 0;
+  let submissions = 0;
+  const adapters = [
+    createStaticProverAdapter({
+      transferProofHex: examples.transfer.response.proof.proof_hex,
+      withdrawProofHex: examples.withdraw.response.proof.proof_hex
+    }),
+    createHttpProverAdapter({
+      baseURL: "http://127.0.0.1",
+      fetchImpl: async () => {
+        httpCalls += 1;
+        throw new Error("invalid envelope must not reach the prover");
+      }
+    }),
+    createAsyncJobProverAdapter({
+      submitTransferJob: async () => {
+        submissions += 1;
+        throw new Error("invalid envelope must not reach the prover");
+      },
+      submitWithdrawJob: async () => {
+        submissions += 1;
+        throw new Error("invalid envelope must not reach the prover");
+      },
+      getJob: async () => ({ status: "pending" })
+    })
+  ];
+
+  for (const adapter of adapters) {
+    for (const invalidVersion of [undefined, "", null, 0]) {
+      const transferEnvelope = invalidVersion === undefined
+        ? { payload: examples.transfer.request.payload }
+        : { version: invalidVersion, payload: examples.transfer.request.payload };
+      const withdrawEnvelope = invalidVersion === undefined
+        ? { payload: examples.withdraw.request.payload }
+        : { version: invalidVersion, payload: examples.withdraw.request.payload };
+      await assert.rejects(
+        () => adapter.proveTransfer(transferEnvelope),
+        /unsupported transfer proof request version/
+      );
+      await assert.rejects(
+        () => adapter.proveWithdraw(withdrawEnvelope),
+        /unsupported withdraw proof request version/
+      );
+    }
+  }
+  assert.equal(httpCalls, 0);
+  assert.equal(submissions, 0);
 });
 
 test("transfer prover adapters validate proofs against authoritative chain time", fixtureTestOptions, async () => {
@@ -61,6 +148,191 @@ test("transfer prover adapters validate proofs against authoritative chain time"
       () => adapter.proveTransfer(examples.transfer.request, { nowUnix: expiry }),
       /transfer v5 payload expired/
     );
+  }
+});
+
+test("withdraw prover adapters validate proofs against authoritative chain time", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const expiry = examples.withdraw.request.payload.expires_at_unix;
+  const adapters = [
+    createStaticProverAdapter({
+      withdrawProofHex: examples.withdraw.response.proof.proof_hex
+    }),
+    createHttpProverAdapter({
+      baseURL: "http://127.0.0.1",
+      fetchImpl: async () => jsonResponse(examples.withdraw.response)
+    }),
+    createAsyncJobProverAdapter({
+      submitWithdrawJob: async () => ({ job_id: "withdraw-authoritative-time" }),
+      getJob: async () => ({
+        status: "completed",
+        response: examples.withdraw.response
+      }),
+      intervalMs: 0
+    })
+  ];
+
+  for (const adapter of adapters) {
+    const response = await adapter.proveWithdraw(examples.withdraw.request, {
+      nowUnix: expiry - 1
+    });
+    assert.deepEqual(response.proof, examples.withdraw.response.proof);
+    await assert.rejects(
+      () => adapter.proveWithdraw(examples.withdraw.request, { nowUnix: expiry }),
+      /withdraw prover payload expired/
+    );
+  }
+});
+
+test("transfer and withdraw requests are validated and reduced to canonical fields before handoff", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const marker = "private-marker-must-not-cross-prover-boundary";
+  const transferRequest = structuredClone(examples.transfer.request);
+  transferRequest.private_marker = marker;
+  transferRequest.payload.private_marker = marker;
+  transferRequest.payload.inputs[0].private_marker = marker;
+  const withdrawRequest = structuredClone(examples.withdraw.request);
+  withdrawRequest.private_marker = marker;
+  withdrawRequest.payload.private_marker = marker;
+
+  const httpCalls = [];
+  const httpAdapter = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    fetchImpl: async (url, init) => {
+      httpCalls.push(JSON.parse(init.body));
+      return url.pathname.endsWith("/transfer")
+        ? jsonResponse(examples.transfer.response)
+        : jsonResponse(examples.withdraw.response);
+    }
+  });
+  await httpAdapter.proveTransfer(transferRequest, {
+    nowUnix: transferRequest.payload.expires_at_unix - 1
+  });
+  await httpAdapter.proveWithdraw(withdrawRequest, {
+    nowUnix: withdrawRequest.payload.expires_at_unix - 1
+  });
+  assert.equal(JSON.stringify(httpCalls).includes(marker), false);
+
+  const submitted = [];
+  const asyncAdapter = createAsyncJobProverAdapter({
+    submitTransferJob: async request => {
+      submitted.push(request);
+      return { job_id: "canonical-transfer" };
+    },
+    submitWithdrawJob: async request => {
+      submitted.push(request);
+      return { job_id: "canonical-withdraw" };
+    },
+    getJob: async jobId => ({
+      status: "completed",
+      response: jobId === "canonical-transfer"
+        ? examples.transfer.response
+        : examples.withdraw.response
+    }),
+    intervalMs: 0
+  });
+  await asyncAdapter.proveTransfer(transferRequest, {
+    nowUnix: transferRequest.payload.expires_at_unix - 1
+  });
+  await asyncAdapter.proveWithdraw(withdrawRequest, {
+    nowUnix: withdrawRequest.payload.expires_at_unix - 1
+  });
+  assert.equal(JSON.stringify(submitted).includes(marker), false);
+
+  const httpCallsBeforeExpiryChecks = httpCalls.length;
+  const submissionsBeforeExpiryChecks = submitted.length;
+  for (const [adapter, requestsBefore] of [
+    [httpAdapter, httpCallsBeforeExpiryChecks],
+    [asyncAdapter, submissionsBeforeExpiryChecks]
+  ]) {
+    await assert.rejects(
+      () => adapter.proveTransfer(transferRequest, {
+        nowUnix: transferRequest.payload.expires_at_unix
+      }),
+      /transfer v5 payload expired/
+    );
+    await assert.rejects(
+      () => adapter.proveWithdraw(withdrawRequest, {
+        nowUnix: withdrawRequest.payload.expires_at_unix
+      }),
+      /withdraw prover payload expired/
+    );
+    assert.equal(
+      adapter === httpAdapter ? httpCalls.length : submitted.length,
+      requestsBefore
+    );
+  }
+});
+
+test("transfer and withdraw proofs require a fully canonical BN254 Groth16 frame", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const malformedInfinity = Uint8Array.from(Buffer.from(canonicalEmptyGroth16ProofHex(), "hex"));
+  malformedInfinity[1] = 1;
+  const proofHex = Buffer.from(malformedInfinity).toString("hex");
+  const adapter = createStaticProverAdapter({
+    transferProofHex: proofHex,
+    withdrawProofHex: proofHex
+  });
+
+  await assert.rejects(
+    () => adapter.proveTransfer(examples.transfer.request, { nowUnix: 0 }),
+    /non-canonical infinity encoding/
+  );
+  await assert.rejects(
+    () => adapter.proveWithdraw(examples.withdraw.request, { nowUnix: 0 }),
+    /non-canonical infinity encoding/
+  );
+});
+
+test("common transfer and withdraw routes require exact HTTP 200 success", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  for (const kind of ["transfer", "withdraw"]) {
+    const adapter = createHttpProverAdapter({
+      baseURL: "http://127.0.0.1",
+      fetchImpl: async () => jsonResponse(examples[kind].response, 201)
+    });
+    await assert.rejects(
+      () => adapter[kind === "transfer" ? "proveTransfer" : "proveWithdraw"](
+        examples[kind].request,
+        { nowUnix: examples[kind].request.payload.expires_at_unix - 1 }
+      ),
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+        error?.status === 201 &&
+        /status 201/.test(error.message)
+    );
+  }
+});
+
+test("common transfer and withdraw routes require JSON media type on success and error", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const errorBody = {
+    version: "v1",
+    code: "proof_failed",
+    message: "must not be parsed without the declared JSON media type",
+    retryable: false
+  };
+
+  for (const kind of ["transfer", "withdraw"]) {
+    const prove = adapter => adapter[kind === "transfer" ? "proveTransfer" : "proveWithdraw"](
+      examples[kind].request,
+      { nowUnix: examples[kind].request.payload.expires_at_unix - 1 }
+    );
+    for (const [status, body] of [
+      [200, examples[kind].response],
+      [500, errorBody]
+    ]) {
+      for (const contentType of [null, "text/plain"]) {
+        const adapter = createHttpProverAdapter({
+          baseURL: "http://127.0.0.1",
+          fetchImpl: async () => jsonResponse(body, status, contentType)
+        });
+        await assert.rejects(
+          () => prove(adapter),
+          error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+            /Content-Type: application\/json/.test(error.message)
+        );
+      }
+    }
   }
 });
 
@@ -245,15 +517,230 @@ test("HTTP prover adapter supports caller cancellation separately from timeout",
   assert.equal(sawAbort, true);
 });
 
-test("pinned DepositCircuit provider uses its exact endpoint and validates the response contract", async () => {
+test("deposit request builder emits the canonical v0.4 memo-free payload", () => {
+  const expected = depositRequestFromContract();
+  const spend = unpackPointHex(expected.payload.receiver_spend_pubkey_hex);
+  const view = unpackPointHex(expected.payload.receiver_view_pubkey_hex);
+  const request = buildDepositProofRequestV1({
+    note: {
+      receiverSpendPubKeyX: spend.x,
+      receiverSpendPubKeyY: spend.y,
+      receiverViewPubKeyX: view.x,
+      receiverViewPubKeyY: view.y,
+      amount: BigInt(expected.payload.amount),
+      assetID: BigInt(`0x${expected.payload.asset_id_hex}`),
+      randomness: BigInt(`0x${expected.payload.randomness_hex}`),
+      memo: "must stay local"
+    },
+    note_commitment_hex: expected.payload.note_commitment_hex,
+    note_json: "must never be serialized"
+  });
+
+  assert.deepEqual(request, expected);
+  assert.equal(JSON.stringify(request).includes("memo"), false);
+  assert.equal(JSON.stringify(request).includes("note_json"), false);
+  assert.throws(
+    () => buildDepositProofRequestV1({ ...expected, unexpected: true }),
+    /unknown JSON field/
+  );
+  assert.throws(
+    () => buildDepositProofRequestV1({
+      note_json: "{}",
+      note_commitment_hex: expected.payload.note_commitment_hex
+    }),
+    /NoteV1 is required/
+  );
+});
+
+test("HTTP prover adapter supports the canonical v0.4 deposit route", async () => {
+  const request = depositRequestFromContract();
+  const proofHex = canonicalEmptyGroth16ProofHex();
   const calls = [];
-  const provider = createHttpDepositProofProvider({
-    url: "https://deposit.example/prove",
+  const adapter = createHttpProverAdapter({
+    baseURL: "https://deposit.example/base",
+    bearerToken: " deposit-token ",
     fetchImpl: async (url, init) => {
       calls.push({
         url: String(url),
         method: init.method,
         redirect: init.redirect,
+        cache: init.cache,
+        accept: init.headers.get("Accept"),
+        contentType: init.headers.get("Content-Type"),
+        authorization: init.headers.get("Authorization"),
+        body: JSON.parse(init.body)
+      });
+      return jsonResponse({
+        version: "v1",
+        proof: {
+          version: "v1",
+          note_commitment_hex: request.payload.note_commitment_hex,
+          proof_hex: proofHex
+        }
+      });
+    }
+  });
+
+  const result = await adapter.proveDeposit(request);
+
+  assert.deepEqual(calls, [{
+    url: "https://deposit.example/base/v1/prover/deposit",
+    method: "POST",
+    redirect: "error",
+    cache: "no-store",
+    accept: "application/json",
+    contentType: "application/json",
+    authorization: "Bearer deposit-token",
+    body: request
+  }]);
+  assert.deepEqual(result, {
+    version: "v1",
+    proof: {
+      version: "v1",
+      note_commitment_hex: request.payload.note_commitment_hex,
+      proof_hex: proofHex
+    }
+  });
+});
+
+test("generic deposit prover enforces the exact endpoint response policy", async () => {
+  const request = depositRequestFromContract();
+  const proofHex = canonicalEmptyGroth16ProofHex();
+  const responseBody = {
+    version: "v1",
+    proof: {
+      version: "v1",
+      note_commitment_hex: request.payload.note_commitment_hex,
+      proof_hex: proofHex
+    }
+  };
+  const missingContentType = createHttpProverAdapter({
+    baseURL: "https://deposit.example/base",
+    fetchImpl: async () => new Response(JSON.stringify(responseBody), { status: 200 })
+  });
+  await assert.rejects(
+    () => missingContentType.proveDeposit(request),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /Content-Type/.test(error.message)
+  );
+
+  const redirected = createHttpProverAdapter({
+    baseURL: "https://deposit.example/base",
+    fetchImpl: async () => {
+      const response = jsonResponse(responseBody);
+      Object.defineProperties(response, {
+        redirected: { value: true },
+        url: { value: "https://other.example/v1/prover/deposit" }
+      });
+      return response;
+    }
+  });
+  await assert.rejects(
+    () => redirected.proveDeposit(request),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /must not redirect/.test(error.message)
+  );
+
+  for (const status of [201, 202, 206]) {
+    const adapter = createHttpProverAdapter({
+      baseURL: "https://deposit.example/base",
+      fetchImpl: async () => jsonResponse(responseBody, status)
+    });
+    const pinned = createHttpDepositProofProviderV1({
+      url: "https://deposit.example/v1/prover/deposit",
+      fetchImpl: async () => jsonResponse(responseBody, status)
+    });
+    for (const prove of [
+      () => adapter.proveDeposit(request),
+      () => pinned(request)
+    ]) {
+      await assert.rejects(
+        prove,
+        error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+          error?.status === status &&
+          new RegExp(`status ${status}`).test(error.message)
+      );
+    }
+  }
+});
+
+test("pinned v1 deposit provider uses an exact endpoint with the canonical nested wire", async () => {
+  const request = depositRequestFromContract();
+  const proofHex = canonicalEmptyGroth16ProofHex();
+  const calls = [];
+  const provider = createHttpDepositProofProviderV1({
+    url: "https://deposit.example/prove",
+    bearerToken: " deposit-token ",
+    fetchImpl: async (url, init) => {
+      calls.push({
+        url: String(url),
+        method: init.method,
+        redirect: init.redirect,
+        cache: init.cache,
+        accept: init.headers.get("Accept"),
+        contentType: init.headers.get("Content-Type"),
+        authorization: init.headers.get("Authorization"),
+        body: JSON.parse(init.body)
+      });
+      return jsonResponse({
+        version: "v1",
+        proof: {
+          version: "v1",
+          note_commitment_hex: request.payload.note_commitment_hex,
+          proof_hex: proofHex
+        }
+      });
+    }
+  });
+
+  const result = await provider(request);
+
+  assert.deepEqual(calls, [{
+    url: "https://deposit.example/prove",
+    method: "POST",
+    redirect: "error",
+    cache: "no-store",
+    accept: "application/json",
+    contentType: "application/json",
+    authorization: "Bearer deposit-token",
+    body: request
+  }]);
+  assert.deepEqual(result, {
+    version: "v1",
+    proof: {
+      version: "v1",
+      note_commitment_hex: request.payload.note_commitment_hex,
+      proof_hex: proofHex
+    }
+  });
+  assert.equal(result.proof_hex, proofHex);
+  assert.equal(result.note_commitment_hex, request.payload.note_commitment_hex);
+
+  const mismatchedCommitment = createHttpDepositProofProviderV1({
+    url: "https://deposit.example/prove",
+    fetchImpl: async () => jsonResponse({
+      version: "v1",
+      proof: {
+        version: "v1",
+        proof_hex: proofHex,
+        note_commitment_hex: "22".repeat(32)
+      }
+    })
+  });
+  await assert.rejects(
+    () => mismatchedCommitment(request),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /commitment mismatch/.test(error.message)
+  );
+});
+
+test("legacy pinned deposit provider preserves the flat EVM request and response wire", async () => {
+  const calls = [];
+  const provider = createHttpDepositProofProvider({
+    url: "https://deposit.example/legacy-prove",
+    fetchImpl: async (url, init) => {
+      calls.push({
+        url: String(url),
+        method: init.method,
+        redirect: init.redirect,
+        cache: init.cache,
         accept: init.headers.Accept,
         contentType: init.headers["Content-Type"],
         body: JSON.parse(init.body)
@@ -262,7 +749,7 @@ test("pinned DepositCircuit provider uses its exact endpoint and validates the r
         version: "v1",
         proof_hex: "ab",
         note_commitment_hex: "11".repeat(32)
-      });
+      }, 201);
     }
   });
 
@@ -272,9 +759,10 @@ test("pinned DepositCircuit provider uses its exact endpoint and validates the r
   });
 
   assert.deepEqual(calls, [{
-    url: "https://deposit.example/prove",
+    url: "https://deposit.example/legacy-prove",
     method: "POST",
     redirect: "error",
+    cache: undefined,
     accept: "application/json",
     contentType: "application/json",
     body: {
@@ -287,28 +775,65 @@ test("pinned DepositCircuit provider uses its exact endpoint and validates the r
     proof_hex: "ab",
     note_commitment_hex: "11".repeat(32)
   });
+});
 
-  const mismatchedCommitment = createHttpDepositProofProvider({
-    url: "https://deposit.example/prove",
-    fetchImpl: async () => jsonResponse({
+test("deposit proof validation enforces full canonical gnark framing", () => {
+  const request = depositRequestFromContract();
+  const proofHex = canonicalEmptyGroth16ProofHex();
+  const response = {
+    version: "v1",
+    proof: {
       version: "v1",
-      proof_hex: "ab",
-      note_commitment_hex: "22".repeat(32)
-    })
-  });
-  await assert.rejects(
-    () => mismatchedCommitment({
-      note_json: "{}",
-      note_commitment_hex: "11".repeat(32)
-    }),
-    error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /does not match the request/.test(error.message)
+      note_commitment_hex: request.payload.note_commitment_hex,
+      proof_hex: proofHex
+    }
+  };
+  assert.equal(validateDepositProofBytesV1(proofHex).length, 164);
+  assert.equal(validateDepositProofBytesV1(canonicalGeneratorGroth16ProofHex).length, 164);
+  assert.deepEqual(validateDepositProofResponseV1(request, response), response);
+  assert.deepEqual(normalizeDepositProofProviderResultV1(request, {
+    version: "v1",
+    note_commitment_hex: request.payload.note_commitment_hex,
+    proof_hex: proofHex
+  }), response);
+  for (const [field, value] of [
+    ["proof", proofHex],
+    ["depositProof", Uint8Array.from(Buffer.from(proofHex, "hex"))],
+    ["deposit_proof", proofHex],
+    ["proofHex", proofHex],
+    ["proof_hex", proofHex]
+  ]) {
+    assert.deepEqual(
+      normalizeDepositProofProviderResultV1(request, { [field]: value }),
+      response,
+      `local provider alias ${field}`
+    );
+  }
+
+  const badInfinity = Uint8Array.from(Buffer.from(proofHex, "hex"));
+  badInfinity[1] = 1;
+  assert.throws(
+    () => validateDepositProofBytesV1(badInfinity),
+    /non-canonical infinity encoding/
+  );
+  const commitments = Uint8Array.from(Buffer.from(proofHex, "hex"));
+  commitments[131] = 1;
+  assert.throws(
+    () => validateDepositProofBytesV1(commitments),
+    /commitments are not supported/
+  );
+  const invalidByteArray = [...badInfinity];
+  invalidByteArray[0] = 256;
+  assert.throws(
+    () => validateDepositProofBytesV1(invalidByteArray),
+    /only integers from 0 through 255/
   );
 });
 
-test("pinned DepositCircuit provider forwards caller cancellation", async () => {
+test("pinned v1 DepositCircuit provider forwards caller cancellation", async () => {
   const controller = new AbortController();
   let sawAbort = false;
-  const provider = createHttpDepositProofProvider({
+  const provider = createHttpDepositProofProviderV1({
     url: "http://127.0.0.1:8080/deposit-proof",
     timeoutMs: 1000,
     fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
@@ -319,17 +844,34 @@ test("pinned DepositCircuit provider forwards caller cancellation", async () => 
     })
   });
 
-  const pending = provider({
-    note_json: "{}",
-    note_commitment_hex: "11".repeat(32),
-    signal: controller.signal
-  });
+  const pending = provider(depositRequestFromContract(), { signal: controller.signal });
   controller.abort();
   await assert.rejects(
     () => pending,
     error => error?.code === ClairveilErrorCode.PROVER_CANCELLED && /cancelled/.test(error.message)
   );
   assert.equal(sawAbort, true);
+});
+
+test("prover base and exact URLs reject credentials, queries, and fragments", () => {
+  for (const url of [
+    "https://user:secret@prover.example/base",
+    "https://prover.example/base?tenant=other",
+    "https://prover.example/base#alternate"
+  ]) {
+    assert.throws(
+      () => createHttpProverAdapter({ baseURL: url }),
+      /must not contain credentials, query parameters, or a fragment/
+    );
+    assert.throws(
+      () => createHttpDepositProofProvider({ url }),
+      /must not contain credentials, query parameters, or a fragment/
+    );
+    assert.throws(
+      () => createHttpDepositProofProviderV1({ url }),
+      /must not contain credentials, query parameters, or a fragment/
+    );
+  }
 });
 
 test("async prover job adapter stops waiting when the caller cancels", fixtureTestOptions, async () => {
@@ -359,16 +901,22 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
 
   const nonJson = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
-    fetchImpl: async () => new Response("not-json", { status: 200 })
+    fetchImpl: async () => new Response("not-json", {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    })
   });
   await assert.rejects(
     () => nonJson.proveTransfer(examples.transfer.request),
-    error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /not JSON/.test(error.message)
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /not valid canonical JSON/.test(error.message)
   );
 
   const unavailable = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
-    fetchImpl: async () => new Response("down", { status: 503 })
+    fetchImpl: async () => new Response("down", {
+      status: 503,
+      headers: { "content-type": "application/json" }
+    })
   });
   await assert.rejects(
     () => unavailable.proveWithdraw(examples.withdraw.request),
@@ -376,6 +924,44 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
       /status 503/.test(error.message) &&
       !error.message.includes("down")
   );
+});
+
+test("HTTP prover adapter classifies exact browser fetch failures as unavailable", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  for (const message of [
+    "fetch failed",
+    "Failed to fetch",
+    "NetworkError when attempting to fetch resource.",
+    "Load failed"
+  ]) {
+    const adapter = createHttpProverAdapter({
+      baseURL: "https://prover.example",
+      fetchImpl: async () => {
+        throw new TypeError(message);
+      }
+    });
+    await assert.rejects(
+      () => adapter.proveTransfer(examples.transfer.request),
+      error => error?.code === ClairveilErrorCode.PROVER_UNAVAILABLE && error.message === message
+    );
+  }
+
+  for (const message of [
+    "Failed to fetch witness schema",
+    "proof unavailable because its payload is invalid",
+    "Load failed after validating the response"
+  ]) {
+    const adapter = createHttpProverAdapter({
+      baseURL: "https://prover.example",
+      fetchImpl: async () => {
+        throw new TypeError(message);
+      }
+    });
+    await assert.rejects(
+      () => adapter.proveTransfer(examples.transfer.request),
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED
+    );
+  }
 });
 
 test("prover failures preserve only safe error metadata and never echo server or solver text", fixtureTestOptions, async () => {
@@ -397,6 +983,56 @@ test("prover failures preserve only safe error metadata and never echo server or
       error?.retryable === true &&
       error?.details?.retryable === true &&
       !error.message.includes("private witness")
+  );
+
+  const incompleteBusy = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    fetchImpl: async () => jsonResponse({
+      version: "v1",
+      code: "busy",
+      message: "private witness solver details"
+    }, 429)
+  });
+  await assert.rejects(
+    () => incompleteBusy.proveDeposit(depositRequestFromContract()),
+    error => error?.code === ClairveilErrorCode.PROVER_UNAVAILABLE &&
+      error?.status === 429 &&
+      error?.proverCode === undefined &&
+      error?.retryable === false
+  );
+
+  const proofFailed = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    fetchImpl: async () => jsonResponse({
+      version: "v1",
+      code: "proof_failed",
+      message: "private witness solver details",
+      retryable: false
+    }, 500)
+  });
+  await assert.rejects(
+    () => proofFailed.proveDeposit(depositRequestFromContract()),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+      error?.status === 500 &&
+      error?.proverCode === "proof_failed" &&
+      error?.retryable === false &&
+      !error.message.includes("private witness")
+  );
+
+  const unavailable = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    fetchImpl: async () => jsonResponse({
+      version: "v1",
+      code: "unavailable",
+      message: "operator diagnostics"
+    }, 503)
+  });
+  await assert.rejects(
+    () => unavailable.proveDeposit(depositRequestFromContract()),
+    error => error?.code === ClairveilErrorCode.PROVER_UNAVAILABLE &&
+      error?.status === 503 &&
+      error?.proverCode === "unavailable" &&
+      error?.retryable === false
   );
 
   const job = createAsyncJobProverAdapter({
@@ -421,7 +1057,6 @@ test("HTTP prover adapter requires HTTPS remotely, denies redirects, and strict-
     () => createHttpProverAdapter({ baseURL: "http://prover.example" }),
     /requires HTTPS for non-loopback/
   );
-
   const fetchOptions = [];
   const adapter = createHttpProverAdapter({
     baseURL: "https://prover.example",
@@ -433,27 +1068,66 @@ test("HTTP prover adapter requires HTTPS remotely, denies redirects, and strict-
   await adapter.proveTransfer(examples.transfer.request);
   assert.deepEqual(fetchOptions, ["error"]);
 
-  for (const [body, pattern] of [
+  for (const [body, secret, pattern] of [
     [
-      `{"version":"v2","proof":${JSON.stringify(examples.transfer.response.proof)},"unexpected":true}`,
-      /unknown JSON field/
+      `{"version":"v2","proof":${JSON.stringify(examples.transfer.response.proof)},"private_witness_field":true}`,
+      "private_witness_field",
+      /contains an unknown JSON field/
     ],
     [
-      `{"version":"v2","version":"v2","proof":${JSON.stringify(examples.transfer.response.proof)}}`,
-      /duplicate JSON object key/
+      `{"version":"v2","private_duplicate_key":"first","private_duplicate_key":"second","proof":${JSON.stringify(examples.transfer.response.proof)}}`,
+      "private_duplicate_key",
+      /not valid canonical JSON/
     ],
     [
-      `${JSON.stringify(examples.transfer.response)} {}`,
-      /multiple JSON values are not allowed/
+      `${JSON.stringify(examples.transfer.response)} "sensitive-trailing-text"`,
+      "sensitive-trailing-text",
+      /not valid canonical JSON/
     ]
   ]) {
     const strictAdapter = createHttpProverAdapter({
       baseURL: "http://127.0.0.1",
-      fetchImpl: async () => new Response(body, { status: 200 })
+      fetchImpl: async () => new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
     });
     await assert.rejects(
       () => strictAdapter.proveTransfer(examples.transfer.request),
-      error => error?.code === ClairveilErrorCode.PROVER_REJECTED && pattern.test(error.message)
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+        pattern.test(error.message) &&
+        !error.message.includes(secret)
+    );
+  }
+});
+
+test("HTTP prover URL policy accepts the full IPv4 loopback range and rejects spoof hosts", () => {
+  for (const baseURL of [
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://127.0.0.2:8080",
+    "http://127.255.255.254:8080",
+    "http://[::1]:8080"
+  ]) {
+    assert.doesNotThrow(() => createHttpProverAdapter({ baseURL }));
+    assert.doesNotThrow(() => createHttpDepositProofProviderV1({
+      url: `${baseURL}/v1/prover/deposit`
+    }));
+  }
+
+  for (const baseURL of [
+    "http://localhost.example:8080",
+    "http://127.0.0.1.example:8080",
+    "http://127.example:8080",
+    "http://128.0.0.1:8080"
+  ]) {
+    assert.throws(
+      () => createHttpProverAdapter({ baseURL }),
+      /requires HTTPS for non-loopback/
+    );
+    assert.throws(
+      () => createHttpDepositProofProviderV1({ url: `${baseURL}/v1/prover/deposit` }),
+      /requires HTTPS for non-loopback/
     );
   }
 });
@@ -467,7 +1141,10 @@ test("HTTP prover adapter bounds response bytes before parsing", fixtureTestOpti
   const adapter = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
     maxResponseBytes: 16,
-    fetchImpl: async () => new Response("x".repeat(17), { status: 200 })
+    fetchImpl: async () => new Response("x".repeat(17), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    })
   });
   await assert.rejects(
     () => adapter.proveTransfer(examples.transfer.request),
@@ -479,7 +1156,10 @@ test("HTTP prover adapter bounds response bytes before parsing", fixtureTestOpti
     maxResponseBytes: 16,
     fetchImpl: async () => new Response("{}", {
       status: 200,
-      headers: { "content-length": "17" }
+      headers: {
+        "content-length": "17",
+        "content-type": "application/json"
+      }
     })
   });
   await assert.rejects(

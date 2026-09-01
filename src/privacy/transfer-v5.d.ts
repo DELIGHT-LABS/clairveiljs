@@ -149,6 +149,8 @@ export function signValidatedJoinSplitOwnerIntentV1(signer: JoinSplitOwnerIntent
 export function computePreparedTransferV5PayloadHash(payload: Partial<PreparedTransferV5Payload>): Hex;
 export function validatePreparedTransferV5PayloadMetadata(payload: PreparedTransferV5Payload): true;
 export function validatePreparedTransferV5PayloadAt(payload: PreparedTransferV5Payload, nowUnix?: number): true;
+/** Validate and defensively copy Core's canonical 164-byte gnark BN254 proof frame. */
+export function validateCanonicalGroth16ProofBytes(value: BytesLike | Hex, label?: string): Uint8Array;
 export function validatePreparedTransferV5Proof(payload: PreparedTransferV5Payload, proof: PreparedTransferV5Proof, options?: { nowUnix?: number }): true;
 export function buildTransferV5MsgFromPayloadAndProof(payload: PreparedTransferV5Payload, proof: PreparedTransferV5Proof, options?: {
   nowUnix?: number;

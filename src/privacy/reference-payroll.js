@@ -1393,10 +1393,11 @@ export async function markOneProofPayrollReservationSubmitted(reservationManager
 /** Invoke exactly one explicitly selected one-proof prover; no automatic prover failover is performed. */
 export async function proveOneProofPayrollOperation(payload, prover, { nowUnix } = {}) {
   if (!prover || typeof prover.proveBatchTransfer !== "function") throw new Error("one explicit proveBatchTransfer adapter is required");
-  validatePreparedBatchTransferPayloadEnvelope(payload, nowUnix == null ? {} : { nowUnix });
-  const response = await prover.proveBatchTransfer(payload);
+  const proverOptions = nowUnix == null ? {} : { nowUnix };
+  validatePreparedBatchTransferPayloadEnvelope(payload, proverOptions);
+  const response = await prover.proveBatchTransfer(payload, proverOptions);
   const proof = response?.proof && typeof response.proof === "object" ? response.proof : response;
-  return normalizePreparedBatchTransferProof(payload, proof, nowUnix == null ? {} : { nowUnix });
+  return normalizePreparedBatchTransferProof(payload, proof, proverOptions);
 }
 
 function sameEvidence(expected, actual) {

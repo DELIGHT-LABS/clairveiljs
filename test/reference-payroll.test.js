@@ -446,12 +446,15 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   assert.equal(reservation.reservations[0].status, "Proving");
   await assert.rejects(() => reserveOneProofPayrollOperation(reservationManager, plan.operations[0]), /operation_id has already been used|already reserved/i);
   const proof = await proveOneProofPayrollOperation(prepared.payload, {
-    proveBatchTransfer: async payload => ({
-      version: preparedBatchTransferProofVersion,
-      request_payload_hash: payload.payload_hash,
-      proof: base64FromBytes(new Uint8Array(164).fill(7))
-    })
-  });
+    proveBatchTransfer: async (payload, options) => {
+      assert.equal(options.nowUnix, 1_700_000_000);
+      return {
+        version: preparedBatchTransferProofVersion,
+        request_payload_hash: payload.payload_hash,
+        proof: base64FromBytes(new Uint8Array(164).fill(7))
+      };
+    }
+  }, { nowUnix: 1_700_000_000 });
   assert.equal(proof.request_payload_hash, prepared.payload.payload_hash);
   await assert.doesNotReject(() => assertOneProofPayrollNullifiersUnspent(prepared.payload, checkNullifiersAs(false)));
   await assert.rejects(
@@ -461,11 +464,14 @@ test("reference payroll prepares one signed batch payload and binds per-item evi
   );
   const proofCalls = [];
   const execution = await provePreparedOneProofPayrollOperation(prepared, {
-    proveBatchTransfer: async payload => ({
-      version: preparedBatchTransferProofVersion,
-      request_payload_hash: payload.payload_hash,
-      proof: base64FromBytes(new Uint8Array(164).fill(9))
-    })
+    proveBatchTransfer: async (payload, options) => {
+      assert.equal(options.nowUnix, 1_700_000_000);
+      return {
+        version: preparedBatchTransferProofVersion,
+        request_payload_hash: payload.payload_hash,
+        proof: base64FromBytes(new Uint8Array(164).fill(9))
+      };
+    }
   }, {
     creator: payrollSignerAddress,
     nowUnix: 1_700_000_000,

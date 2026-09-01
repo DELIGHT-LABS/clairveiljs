@@ -64,15 +64,24 @@ import {
 import {
   batchTransferConformanceFixtureName,
   clairveilConformanceBundleVersion,
+  clairveilProverConformanceBundleVersion,
   conformanceFixtureRelativePath,
   defaultConformanceFixtureDir,
   defaultConformanceFixtureNames,
+  defaultProverConformanceFixtureNames,
+  depositProverConformanceFixtureName,
   noteReservationConformanceFixtureName,
   noteReservationContractVersionV3,
+  proverHttpApiConformanceFixtureName,
   readClairveilConformanceFixture,
+  readClairveilProverConformanceFixture,
   runClairveilConformanceFixtures,
+  runClairveilProverConformanceFixtures,
   supportedClairveilRelease,
   supportedClairveilCommit,
+  supportedClairveilProverCommit,
+  supportedClairveilProverRelease,
+  supportedClairveilProverSourceKind,
   supportedClairveilSourceKind,
   suggestClairveilConformanceFixtureDirs,
   validateNoteReservationContractV3
@@ -175,6 +184,32 @@ test("conformance helper default fixtures include the reservation contract", fix
   assert.ok(contract.success_evidence_required.includes("expected_recipient_hash"));
   assert.ok(contract.success_evidence_required.includes("expected_amount_hash"));
   assert.equal(contract.batch_reserve.atomic, true);
+});
+
+test("v0.4.0 prover fixtures load independently from the lifecycle v3 snapshot", async () => {
+  const result = await runClairveilProverConformanceFixtures();
+
+  assert.equal(result.skipped, false);
+  assert.deepEqual(
+    Object.keys(result.fixtures),
+    [...defaultProverConformanceFixtureNames]
+  );
+  assert.equal(clairveilProverConformanceBundleVersion, "v0.4.0");
+  assert.equal(supportedClairveilProverRelease, "v0.4.0");
+  assert.equal(supportedClairveilProverSourceKind, "release_tag");
+  assert.equal(supportedClairveilProverCommit, "ca85b02708fdd75259d4d2ee2d671c21198cec69");
+
+  const routeContract = result.fixtures[proverHttpApiConformanceFixtureName];
+  assert.equal(routeContract.schema_version, "v3");
+  assert.equal(routeContract.deposit_route.path, "/v1/prover/deposit");
+  assert.equal(routeContract.common_policy.route_failure_status.deposit.prover_failure, 500);
+
+  const depositContract = readClairveilProverConformanceFixture(
+    depositProverConformanceFixtureName
+  );
+  assert.equal(depositContract.transport.request_version, "v1");
+  assert.equal(depositContract.transport.proof_version, "v1");
+  assert.equal(depositContract.proof_wire.byte_length, 164);
 });
 
 test("reservation contract v3 validator rejects incomplete or downgraded semantics", fixtureTestOptions, () => {

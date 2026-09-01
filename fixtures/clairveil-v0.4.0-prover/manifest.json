@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "source": {
+    "repository": "https://github.com/DELIGHT-LABS/clairveil",
+    "kind": "release_tag",
+    "release": "v0.4.0",
+    "commit": "ca85b02708fdd75259d4d2ee2d671c21198cec69"
+  },
+  "files": [
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.4.0-prover/x/privacy/client/sdk/conformance/testdata/privacy_prover_http_api_contract.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_prover_http_api_contract.json",
+      "sha256": "9667abb9258a9bd2c3bfa49f4fe99b35615e4e4b0c7a689b126118b280e43dad"
+    },
+    {
+      "kind": "conformance_fixture",
+      "local_path": "fixtures/clairveil-v0.4.0-prover/x/privacy/client/sdk/conformance/testdata/privacy_deposit_prover_contract.json",
+      "upstream_path": "x/privacy/client/sdk/conformance/testdata/privacy_deposit_prover_contract.json",
+      "sha256": "1bba3377674a28279b81843d6ef4663c48d4e713aa2bfee7fb3a8361c8adbb39"
+    },
+    {
+      "kind": "json_schema",
+      "local_path": "fixtures/clairveil-v0.4.0-prover/docs/schemas/clairveil-proverd-http-api.schema.json",
+      "upstream_path": "docs/schemas/clairveil-proverd-http-api.schema.json",
+      "sha256": "8a6bb7094c0a1f57bab3ca8c2381bbba9126fca41fb8d5caac0af4d656ba5d8c"
+    }
+  ]
+}

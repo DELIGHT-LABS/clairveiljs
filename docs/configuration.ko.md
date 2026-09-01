@@ -70,8 +70,8 @@ Cosmos와 EVM profile은 아래 필드를 모두 가진다.
 | `restEndpoints` | 선택적 REST 후보 목록. 비어 있거나 중복될 수 없으며 실제 순서는 `rest`가 먼저다. |
 | `accountPrefix`, `shieldedPrefix` | account와 shielded address의 Bech32 prefix |
 | `denom`, `displayDenom`, `coinDecimals` | minimal denom, 표시 denom과 decimals |
-| `proverUrl` | transfer, withdraw, One-Proof batch용 기본 HTTP prover base URL. Versioned prover route를 붙일 때 path prefix를 보존함 |
-| `depositProofUrl` | 선택적 DepositCircuit 전용 exact URL. `proverUrl`에서 파생하지 않음 |
+| `proverUrl` | transfer, withdraw, One-Proof batch와 Cosmos deposit용 기본 HTTP prover base URL. Versioned prover route를 붙일 때 path prefix를 보존함 |
+| `depositProofUrl` | 선택적 exact DepositCircuit endpoint override. Cosmos는 canonical `createHttpDepositProofProviderV1` wire를 사용하고, 생략 시 `proverUrl`에 `/v1/prover/deposit`를 붙이며 EVM 동작은 유지함 |
 
 Profile URL은 `http` 또는 `https`이고 query, fragment, embedded credential이 없어야 한다. Runtime validator는 로컬 개발을 위해 HTTP도 허용하지만 production endpoint에는 HTTPS를 사용하고 bearer token이나 private 값을 URL에 넣지 않는다.
 
@@ -104,7 +104,6 @@ const cosmosProfile = {
   displayDenom: "CLAIR",
   coinDecimals: 6,
   proverUrl: "https://prover.example.com",
-  depositProofUrl: "https://deposit-proof.example.com/v1/proof",
   keplrCoinType: 118,
   gasPriceStep: { low: 0.01, average: 0.025, high: 0.04 },
   keplrChainInfo: {
@@ -200,10 +199,10 @@ Profile 밖에서 조절하는 주요 `ClairveilBrowserClientOptions`는 다음�
 | `evmFinalityPolicy` | 없음 | EVM confirmation에는 명시적으로 필요하다. Chain 기준에 맞춰 confirmation depth, `safe`, `finalized`, `custom` 중 하나를 사용한다. `receipt`는 mined block identity만 확인하는 명시적 low-finality opt-in이다. |
 | `nullifierFailover` | `false` | 켜면 같은 nullifier를 여러 REST provider에 노출할 수 있다. 제품의 privacy 결정이 있어야 한다. |
 | `merklePathFailover` | `false` | 켜면 spend commitment와 exact snapshot 요청이 여러 provider에 노출될 수 있다. |
-| `proverAdapter` | 없음 | local/WASM, 사내 인증 또는 async job prover를 주입한다. 있으면 기본 HTTP adapter보다 우선한다. |
+| `proverAdapter` | 없음 | local/WASM, 사내 인증 또는 async job prover를 주입한다. `proveDeposit` method는 명시적 provider와 exact URL 다음인 Cosmos deposit 3순위다. |
 | `proverBearerToken` | 없음 | 기본 HTTP prover의 Authorization credential. URL이나 로그에 남기지 않는다. |
 | `proverTimeoutMs` | 120,000ms | transfer/withdraw/batch prover timeout |
-| `depositProofProvider` | 없음 | local/WASM DepositCircuit provider. 있으면 `depositProofUrl`보다 우선한다. |
+| `depositProofProvider` | 없음 | local/WASM DepositCircuit provider. Cosmos deposit의 1순위다. |
 | `depositProofTimeoutMs` | 120,000ms | exact deposit proof HTTP timeout |
 | `depositProofResponseMaxBytes` | 1MiB | deposit proof 응답 상한 |
 | `enableExperimentalBatchTransfer` | `false` | Cosmos/EVM One-Proof batch 명시적 opt-in. EVM에서는 canonical single-proof transaction으로 매핑한다. |
@@ -217,13 +216,20 @@ Profile 밖에서 조절하는 주요 `ClairveilBrowserClientOptions`는 다음�
 - `POST /v1/prover/transfer`
 - `POST /v1/prover/withdraw`
 - `POST /v1/proofs/batch-transfer`
+- `POST /v1/prover/deposit` (Cosmos)
 
-Deposit proof는 이 base URL을 사용하지 않는다. 다음 중 하나만 선택한다.
+Cosmos deposit proof는 다음 우선순위로 선택한다.
 
 1. `depositProofProvider`: 브라우저 local/WASM 또는 호출자가 검토한 구현
-2. `depositProofUrl`: profile에 고정된 정확한 HTTP endpoint
+2. `depositProofUrl`: profile에 고정되어 `createHttpDepositProofProviderV1`로 호출되는 exact HTTP endpoint override
+3. `proverAdapter.proveDeposit`: configured general prover adapter의 method
+4. `{proverUrl}/v1/prover/deposit`: Core v0.4.0 canonical default
 
-`depositProofUrl`을 `proverUrl`에서 문자열로 조합하거나 fallback하지 않는다. 원격 prover와 deposit proof service는 private payload를 보는 별도 신뢰 주체로 평가한다.
+네 경로는 모두 같은 canonical versioned request/response 계약을 사용한다.
+Remote request는 receiver public key, amount, asset ID, randomness와 note
+commitment를 노출하지만 memo, creator, denom, encrypted note, seed와 chain ID는
+제외한다. 선택한 remote service를 신뢰 주체로 평가하고 automatic
+cross-endpoint fallback을 사용하지 않는다. EVM profile 해석은 유지된다.
 
 ### Remote prover 운영 경계
 

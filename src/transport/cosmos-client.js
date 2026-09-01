@@ -38,6 +38,7 @@ import {
   defaultAssetDenom,
   createNote,
   createSpendNoteHashSigner,
+  normalizeNote,
   parseCoin
 } from "../core/note.js";
 import {
@@ -75,9 +76,16 @@ import {
 import {
   computeAssetIdV1,
   computeNoteCommitmentV1,
+  decryptDepositNoteV1,
+  encryptedEnvelopeKindV1,
   fieldHexV1,
+  marshalNotePlaintextV1,
+  unwrapEncryptedEnvelopeV1,
   validateBatchTransferEffectsV1
 } from "../privacy/protocol-v1.js";
+import {
+  validateDepositProofBytesV1
+} from "../privacy/prover.js";
 import {
   assertPlanCanBuildTx,
   planTransferBatchNotes,
@@ -851,17 +859,84 @@ function normalizeRestEndpoints(primary, restEndpoints = [], { allowEmpty = fals
 
 function requiredDepositProof(input = {}) {
   if (input?.proof != null) {
-    const proof = typeof input.proof === "string"
-      ? bytesFromHex(input.proof, "deposit proof")
-      : Uint8Array.from(input.proof);
-    if (proof.length) return proof;
+    const supplied = input.proof;
+    if (typeof supplied !== "string" || supplied.trim()) {
+      return validateDepositProofBytesV1(supplied, "deposit proof");
+    }
   }
   const proofHex = input?.proofHex ?? input?.proof_hex;
   if (proofHex != null && String(proofHex).trim()) {
-    const proof = bytesFromHex(proofHex, "deposit proof");
-    if (proof.length) return proof;
+    return validateDepositProofBytesV1(proofHex, "deposit proof");
   }
   throw new Error("deposit proof is required; provide proof or proofHex");
+}
+
+function requiredDepositRootSeed(input = {}) {
+  const camel = input?.rootSeed;
+  const snake = input?.root_seed;
+  if (camel == null && snake == null) {
+    throw new Error("rootSeed is required to bind the encrypted deposit note to its NoteV1");
+  }
+  const normalize = supplied => {
+    let rootSeed;
+    try {
+      rootSeed = typeof supplied === "string"
+        ? bytesFromHex(supplied, "deposit rootSeed")
+        : Uint8Array.from(supplied);
+    } catch {
+      throw new Error("deposit rootSeed must be exactly 32 bytes");
+    }
+    if (rootSeed.length !== 32) {
+      throw new Error("deposit rootSeed must be exactly 32 bytes");
+    }
+    return rootSeed;
+  };
+  const rootSeed = normalize(camel ?? snake);
+  if (camel != null && snake != null && hexFromBytes(rootSeed) !== hexFromBytes(normalize(snake))) {
+    throw new Error("rootSeed aliases conflict");
+  }
+  return rootSeed;
+}
+
+function depositAssetDenom(input = {}, fallback = defaultAssetDenom) {
+  const assetDenom = input?.assetDenom == null
+    ? null
+    : canonicalAssetDenomV1(input.assetDenom);
+  const denom = input?.denom == null
+    ? null
+    : canonicalAssetDenomV1(input.denom);
+  if (assetDenom && denom && assetDenom !== denom) {
+    throw new Error("deposit assetDenom and denom aliases conflict");
+  }
+  return assetDenom ?? denom ?? canonicalAssetDenomV1(fallback);
+}
+
+function assertEncryptedDepositNoteBinding(rootSeed, encryptedNote, note) {
+  let decrypted;
+  try {
+    decrypted = decryptDepositNoteV1(encryptedNote, rootSeed);
+  } catch {
+    throw new Error("deposit material encrypted note is not authenticated by rootSeed");
+  }
+  if (
+    hexFromBytes(marshalNotePlaintextV1(decrypted)) !==
+    hexFromBytes(marshalNotePlaintextV1(note))
+  ) {
+    throw new Error("deposit material encrypted note does not match its NoteV1");
+  }
+}
+
+function assertDepositReceiverKeyBinding(rootSeed, note) {
+  const spendPubKey = deriveSpendKeys(rootSeed).pubKey;
+  const viewPubKey = deriveViewKeys(rootSeed).pubKey;
+  if (
+    note.receiverSpendPubKeyX !== BigInt(spendPubKey.x) ||
+    note.receiverSpendPubKeyY !== BigInt(spendPubKey.y) ||
+    note.receiverViewPubKeyX !== BigInt(viewPubKey.x) ||
+    note.receiverViewPubKeyY !== BigInt(viewPubKey.y)
+  ) {
+    throw new Error("deposit material note receiver public keys do not match rootSeed");
+  }
 }
 
 export const MsgDeposit = GeneratedMsgDeposit;
@@ -1826,25 +1901,17 @@ function resolveWalletScanOptions(options = {}) {
   if (strictAliases.some(value => value !== true)) {
     throw new Error("wallet and spend scans require strictPrivacyScan=true");
   }
-  // The preparation facades historically exposed the event-level cursor
-  // aliases. Preserve that caller position when entering the typed scan by
-  // expressing the completed event as its full three-component cursor.
-  const after = resolved.after == null &&
-      resolved.afterHeight != null && resolved.afterSequence != null
-    ? {
-        height: uint64CursorValue(resolved.afterHeight, "wallet scan after height"),
-        globalSequence: uint64CursorValue(resolved.afterSequence, "wallet scan after sequence"),
-        outputIndex: 1
-      }
-    : resolved.after;
-  return {
-    ...resolved,
-    after,
-    ...(after !== resolved.after ? {
-      afterHeight: undefined,
-      afterSequence: undefined
-    } : {})
-  };
+  // Event cursors do not identify which output of a typed privacy event was
+  // consumed. Guessing an output index can either skip an unconsumed note or
+  // construct a cursor that Core rejects for single-output events. Require the
+  // complete cursor returned by nextPrivacyScanOptions instead.
+  if (resolved.afterHeight != null || resolved.afterSequence != null) {
+    throw new Error(
+      "wallet and spend scans require the full typed after cursor; " +
+      "afterHeight/afterSequence aliases are not supported"
+    );
+  }
+  return resolved;
 }
 
 function indexedTxToRestish(tx) {
@@ -2336,8 +2403,7 @@ async function markBroadcastReservationSubmitted(context, evidence = {}) {
 async function markBroadcastReservationRejected(context, error, {
   kind,
   providerCode = "",
-  providerCodespace = "",
-  providerLog = ""
+  providerCodespace = ""
 } = {}) {
   if (!context) return;
   try {
@@ -2351,7 +2417,6 @@ async function markBroadcastReservationRejected(context, error, {
       error: beforeRpc ? "broadcast_aborted_before_rpc" : "check_tx_rejected",
       providerCode,
       providerCodespace,
-      providerLog,
       rpcInvoked: checkTx,
       checkTxRejected: checkTx,
       broadcastAbortedBeforeRpc: beforeRpc,
@@ -3279,8 +3344,7 @@ export class ClairveilJS {
     scan_source,
     strictPrivacyScan,
     strict_privacy_scan,
-    requireTypedScan = false,
-    allowInitialPrivacyScanFallback = false
+    requireTypedScan = false
   } = {}) {
     for (const [value, label] of [
       [strictPrivacyScan, "strictPrivacyScan"],
@@ -3393,13 +3457,11 @@ export class ClairveilJS {
             { cause: error }
           );
         }
-        // Wallet/spend scans are otherwise strict, but the contract permits a
-        // one-time capability downgrade before any typed cursor state exists.
-        // Never translate a persisted typed cursor or validation snapshot.
-        const hasTypedResumeState = after != null || requestedValidationState != null;
-        if (strictTypedScan && (!allowInitialPrivacyScanFallback || hasTypedResumeState)) {
-          throw error;
-        }
+        // Strict wallet/spend scans never interpret an unavailable typed route
+        // as proof that only the legacy projection exists. A 404/405/501 can
+        // also mean a broken v0.4 gateway or deployment, so fail closed even
+        // before the first typed cursor has been persisted.
+        if (strictTypedScan) throw error;
         // A typed cursor may point inside an event's output list, while the
         // compatibility endpoint only has an event-level cursor. Rewind one
         // height only when translating an actual typed cursor. If the caller
@@ -3755,41 +3817,89 @@ export class ClairveilJS {
   }
 
   buildDepositMaterial(input) {
-    return buildDepositMaterialCore({
+    const rootSeed = requiredDepositRootSeed(input);
+    const assetDenom = depositAssetDenom(input, this.defaultDenom);
+    const material = buildDepositMaterialCore({
       shieldedPrefix: this.shieldedPrefix,
-      assetDenom: input?.assetDenom ?? input?.denom ?? this.defaultDenom,
-      ...input
+      ...input,
+      assetDenom,
+      rootSeed
     });
+    assertDepositReceiverKeyBinding(rootSeed, normalizeNote(material.note));
+    return material;
   }
 
-  buildDepositMessage(input) {
+  validateDepositMaterial(input) {
+    const rootSeed = requiredDepositRootSeed(input);
+    const assetDenom = depositAssetDenom(input, this.defaultDenom);
     const material = input?.depositMaterial ?? input?.deposit_material ?? (
       input?.material?.note_commitment && input?.material?.encrypted_note
         ? input.material
-        : buildDepositMaterialCore({
-          shieldedPrefix: this.shieldedPrefix,
-          assetDenom: input?.assetDenom ?? input?.denom ?? this.defaultDenom,
-          ...input
+        : this.buildDepositMaterial({
+          ...input,
+          assetDenom,
+          rootSeed
         })
     );
     const expectedCreator = String(input?.creator || "").trim();
     if (expectedCreator && String(material.creator || "").trim() !== expectedCreator) {
       throw new Error(`deposit material creator mismatch: expected ${expectedCreator}, got ${material.creator || ""}`);
     }
-    const expectedAmount = input?.amount == null
-      ? ""
-      : parseCoin(input.amount, input?.assetDenom ?? input?.denom ?? this.defaultDenom).raw;
-    if (expectedAmount && String(material.amount || "").trim() !== expectedAmount) {
-      throw new Error(`deposit material amount mismatch: expected ${expectedAmount}, got ${material.amount || ""}`);
+    const requestedCoin = parseCoin(input?.amount, assetDenom);
+    if (requestedCoin.denom !== assetDenom) {
+      throw new Error(`deposit amount denom mismatch: expected ${assetDenom}, got ${requestedCoin.denom}`);
     }
-    const proof = requiredDepositProof(input);
+    if (String(material.amount || "").trim() !== requestedCoin.raw) {
+      throw new Error(`deposit material amount mismatch: expected ${requestedCoin.raw}, got ${material.amount || ""}`);
+    }
+    const depositCoin = parseCoin(material.amount, assetDenom);
+    if (depositCoin.denom !== assetDenom) {
+      throw new Error(`deposit material denom mismatch: expected ${assetDenom}, got ${depositCoin.denom}`);
+    }
+    const note = normalizeNote(material.note);
+    if (note.amount.toString() !== depositCoin.amount) {
+      throw new Error(`deposit material note amount mismatch: expected ${depositCoin.amount}, got ${note.amount}`);
+    }
+    const expectedAssetIDHex = fieldHexV1(computeAssetIdV1(depositCoin.denom));
+    if (fieldHexV1(note.assetID) !== expectedAssetIDHex) {
+      throw new Error("deposit material note asset ID does not match its transparent denom");
+    }
+    const expectedCommitmentHex = fieldHexV1(computeNoteCommitmentV1(note));
+    if (expectedCommitmentHex === "00".repeat(32)) {
+      throw new Error("deposit material note commitment must be non-zero");
+    }
+    const commitment = Uint8Array.from(material.note_commitment || []);
+    if (commitment.length !== 32 || hexFromBytes(commitment) !== expectedCommitmentHex) {
+      throw new Error("deposit material note commitment does not match its NoteV1");
+    }
+    if (material.note_commitment_hex != null && material.note_commitment_hex !== expectedCommitmentHex) {
+      throw new Error("deposit material note_commitment_hex does not match its NoteV1");
+    }
+    const encryptedNote = Uint8Array.from(material.encrypted_note || []);
+    unwrapEncryptedEnvelopeV1(encryptedNote, encryptedEnvelopeKindV1.depositNote);
+    if (material.encrypted_note_hex != null && material.encrypted_note_hex !== hexFromBytes(encryptedNote)) {
+      throw new Error("deposit material encrypted_note_hex does not match its encrypted note");
+    }
+    assertDepositReceiverKeyBinding(rootSeed, note);
+    assertEncryptedDepositNoteBinding(rootSeed, encryptedNote, note);
     return {
       material,
       message: {
         creator: material.creator,
         amount: material.amount,
-        noteCommitment: material.note_commitment,
-        encryptedNote: material.encrypted_note,
+        noteCommitment: commitment,
+        encryptedNote
+      }
+    };
+  }
+
+  buildDepositMessage(input) {
+    const validated = this.validateDepositMaterial(input);
+    const proof = requiredDepositProof(input);
+    return {
+      material: validated.material,
+      message: {
+        ...validated.message,
         proof
       }
     };
@@ -3824,7 +3934,6 @@ export class ClairveilJS {
     strictPrivacyScan,
     strict_privacy_scan
   } = {}) {
-    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const walletScanOptions = resolveWalletScanOptions({
       after,
       afterHeight,
@@ -3850,6 +3959,7 @@ export class ClairveilJS {
       strictPrivacyScan,
       strict_privacy_scan
     });
+    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const resolvedMaxPages = resolveScanMaxPagesAlias(maxPages, max_pages) ?? 1;
     let resolvedAfter = walletScanOptions.after;
     let resolvedAfterHeight = walletScanOptions.afterHeight;
@@ -3918,7 +4028,6 @@ export class ClairveilJS {
       maxEncodedBytes: max_encoded_bytes ?? maxEncodedBytes,
       validationStateSnapshot: resolvedValidationStateSnapshot,
       strictPrivacyScan: true,
-      allowInitialPrivacyScanFallback: true,
       includeFoundNotes: true
     });
     if (noteStore) {
@@ -4254,7 +4363,6 @@ export class ClairveilJS {
       denom: denom ?? this.defaultDenom,
       shieldedPrefix: this.shieldedPrefix
     });
-    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveWalletScanOptions({
       scan,
       after,
@@ -4279,6 +4387,7 @@ export class ClairveilJS {
       strictPrivacyScan,
       strict_privacy_scan
     });
+    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const transferProtocolConfig = await this.assertTransferProtocolConfig(
       denom ?? this.defaultDenom
     );
@@ -4287,7 +4396,6 @@ export class ClairveilJS {
       ...scanOptions,
       limit: scanOptions.limit ?? 200,
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
-      allowInitialPrivacyScanFallback: true,
       includeFoundNotes: true
     });
     const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
@@ -4653,7 +4761,6 @@ export class ClairveilJS {
     if (typeof persistPreparedProof !== "function") {
       throw new Error("one-proof batch transfer requires onPreparedProof to durably persist the private proof before signing");
     }
-    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveWalletScanOptions({
       scan,
       after,
@@ -4678,6 +4785,7 @@ export class ClairveilJS {
       strictPrivacyScan,
       strict_privacy_scan
     });
+    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     if (scanOptions.scanSource != null &&
         String(scanOptions.scanSource).trim() !== "privacy_scan") {
       throw new Error("one-proof batch transfer only supports the typed privacy_scan source");
@@ -5205,7 +5313,10 @@ export class ClairveilJS {
       await this.checkNullifiers(effects.nullifier_hexes),
       effects.nullifier_hexes
     );
-    const proofResponse = await proverAdapter.proveBatchTransfer(payload, { signal });
+    const proofResponse = await proverAdapter.proveBatchTransfer(payload, {
+      signal,
+      nowUnix: resolvedNowUnix
+    });
     if (proofResponse?.proof && typeof proofResponse.proof === "object" &&
         proofResponse.version !== batchTransferProofResponseVersion) {
       throw new Error(`unsupported batch transfer proof response version ${JSON.stringify(proofResponse.version)}`);
@@ -5545,7 +5656,6 @@ export class ClairveilJS {
       "chainNowUnix"
     );
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
-    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveWalletScanOptions({
       scan,
       after,
@@ -5570,12 +5680,12 @@ export class ClairveilJS {
       strictPrivacyScan,
       strict_privacy_scan
     });
+    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
       ...scanOptions,
       limit: scanOptions.limit ?? 200,
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
-      allowInitialPrivacyScanFallback: true,
       includeFoundNotes: true
     });
     const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
@@ -5744,7 +5854,6 @@ export class ClairveilJS {
       "chainNowUnix"
     );
     const resolvedReservationManager = reservationManager ?? reservation_manager ?? null;
-    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanOptions = resolveWalletScanOptions({
       scan,
       after,
@@ -5769,12 +5878,12 @@ export class ClairveilJS {
       strictPrivacyScan,
       strict_privacy_scan
     });
+    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
     const scanResult = await this.scanNotes({
       rootSeed: privacy.rootSeed,
       ...scanOptions,
       limit: scanOptions.limit ?? 200,
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
-      allowInitialPrivacyScanFallback: true,
       includeFoundNotes: true
     });
     const availableFoundNotes = await reservationAvailableNotes(resolvedReservationManager, scanResult.foundNotes);
@@ -6582,8 +6691,7 @@ export class ClairveilJS {
         await markBroadcastReservationRejected(reservationContext, wrapped, {
           kind: "check_tx",
           providerCode: error.code,
-          providerCodespace: error.codespace,
-          providerLog: error.log || ""
+          providerCodespace: error.codespace
         });
         throw wrapped;
       }

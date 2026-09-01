@@ -5,13 +5,20 @@ import {
   resolveActiveClairveilWebClientProfile,
   validateClairveilWebClientConfig
 } from "clairveiljs/browser-dapp";
-import { CURVE_BASE, encodeShieldedAddress } from "clairveiljs/core";
+import {
+  buildDepositMaterial,
+  CURVE_BASE,
+  deriveSpendKeys,
+  deriveViewKeys,
+  encodeShieldedAddress
+} from "clairveiljs/core";
 import { createEvmContractAdapter } from "clairveiljs/evm";
 import { fixtureTestOptions, readFixture } from "./helpers.js";
 
 const validClairsRecipient = encodeShieldedAddress(CURVE_BASE, CURVE_BASE, {
   shieldedPrefix: "clairs"
 });
+const canonicalDepositProofHex = `${"40"}${"00".repeat(31)}${"40"}${"00".repeat(63)}${"40"}${"00".repeat(35)}${"40"}${"00".repeat(31)}`;
 
 function browserClient(options = {}) {
   return new ClairveilBrowserClient({
@@ -23,6 +30,11 @@ function browserClient(options = {}) {
     denom: "uclair",
     ...options
   });
+}
+
+function allowCosmosProtocolPreflight(client) {
+  client.cosmos.assertProtocolPreflight = async () => ({});
+  return client;
 }
 
 function webCosmosProfile(overrides = {}) {
@@ -743,24 +755,155 @@ test("browser Cosmos deposit preserves exact encrypted output for confirmation",
 
   assert.equal(prepared.prepared.noteCommitmentHex, "11".repeat(32));
   assert.equal(prepared.prepared.encryptedNoteHex, "22".repeat(48));
-  assert.equal(received.gas_limit, 3123456);
-  assert.deepEqual(received.fee_amount, [{ denom: "uclair", amount: "17" }]);
+  assert.equal(received.gasLimit, 3123456);
+  assert.deepEqual(received.feeAmount, [{ denom: "uclair", amount: "17" }]);
+  assert.equal(received.gas_limit, undefined);
+  assert.equal(received.fee_amount, undefined);
 });
 
-test("browser profile uses only its pinned DepositCircuit endpoint", async () => {
-  const client = browserClient({
-    profile: webCosmosProfile({ depositProofUrl: "https://deposit.example/prove" }),
-    depositProofUrl: "https://ignored.example/prove"
-  });
+test("browser Cosmos deposit fails gas and protocol preflight before invoking a proof provider", async () => {
+  const client = browserClient();
   client.privacyMaterial = () => ({
     address: "clair1sender",
     rootSeed: new Uint8Array(32)
   });
-  client.cosmos.buildDepositMaterial = () => ({
+  let preflightCalls = 0;
+  let providerCalls = 0;
+  client.cosmos.assertProtocolPreflight = async () => {
+    preflightCalls += 1;
+    throw new Error("active circuit configuration is unavailable");
+  };
+  const depositProofProvider = async () => {
+    providerCalls += 1;
+    throw new Error("proof provider must not be called");
+  };
+
+  await assert.rejects(
+    () => client.prepareDeposit({
+      amount: "1uclair",
+      gasLimit: 0,
+      depositProofProvider
+    }),
+    /gasLimit must be a positive safe integer/
+  );
+  assert.equal(preflightCalls, 0);
+  assert.equal(providerCalls, 0);
+
+  await assert.rejects(
+    () => client.prepareDeposit({ amount: "1uclair", depositProofProvider }),
+    /active circuit configuration is unavailable/
+  );
+  assert.equal(preflightCalls, 1);
+  assert.equal(providerCalls, 0);
+});
+
+test("browser Cosmos deposit snapshots fee and gas before the async proof boundary", async () => {
+  const client = browserClient();
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
+  });
+  client.cosmos.assertProtocolPreflight = async () => ({});
+  let preparedInput = null;
+  client.cosmos.prepareDeposit = async input => {
+    preparedInput = input;
+    return {
+      signDoc: { chainId: "clairveil-local-3" },
+      material: input.depositMaterial,
+      privacyAccount: { shielded_address: "clairs1sender" }
+    };
+  };
+  const feeAmount = [{ denom: "uclair", amount: "17" }];
+  const input = {
     amount: "1uclair",
-    note: { amount: "1" },
-    note_json: '{"amount":"1"}',
-    note_commitment_hex: "11".repeat(32)
+    gasLimit: 3123456,
+    feeAmount,
+    depositProofProvider: async request => {
+      input.gasLimit = 9999999;
+      feeAmount[0].amount = "999";
+      return {
+        version: "v1",
+        proof: {
+          version: "v1",
+          note_commitment_hex: request.payload.note_commitment_hex,
+          proof_hex: canonicalDepositProofHex
+        }
+      };
+    }
+  };
+
+  await client.prepareDeposit(input);
+
+  assert.equal(preparedInput.gasLimit, 3123456);
+  assert.deepEqual(preparedInput.feeAmount, [{ denom: "uclair", amount: "17" }]);
+  assert.equal(Object.isFrozen(preparedInput.feeAmount), true);
+  assert.equal(Object.isFrozen(preparedInput.feeAmount[0]), true);
+});
+
+test("browser Cosmos deposit providers receive only the frozen canonical request", async () => {
+  const client = allowCosmosProtocolPreflight(browserClient());
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
+  });
+  client.cosmos.prepareDeposit = async input => ({
+    signDoc: { chainId: "clairveil-local-3" },
+    material: input.depositMaterial,
+    privacyAccount: { shielded_address: "clairs1sender" }
+  });
+  const controller = new AbortController();
+  let providerRequest = null;
+  let providerOptions = null;
+
+  await client.prepareDeposit({
+    amount: "1uclair",
+    signal: controller.signal,
+    depositProofProvider: async (request, options) => {
+      providerRequest = request;
+      providerOptions = options;
+      return {
+        version: "v1",
+        proof: {
+          version: "v1",
+          note_commitment_hex: request.payload.note_commitment_hex,
+          proof_hex: canonicalDepositProofHex
+        }
+      };
+    }
+  });
+
+  assert.deepEqual(Reflect.ownKeys(providerRequest), ["version", "payload"]);
+  assert.equal(Object.isFrozen(providerRequest), true);
+  assert.equal(Object.isFrozen(providerRequest.payload), true);
+  assert.deepEqual(Reflect.ownKeys(providerOptions), ["signal"]);
+  assert.equal(providerOptions.signal, controller.signal);
+  for (const key of [
+    "request",
+    "material",
+    "amount",
+    "note",
+    "noteJson",
+    "note_json",
+    "noteCommitmentHex",
+    "note_commitment_hex",
+    "signal"
+  ]) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(providerRequest, key),
+      false,
+      `Cosmos deposit provider request must not expose ${key}`
+    );
+  }
+});
+
+test("browser Cosmos profile uses its exact deposit endpoint override with the canonical v0.4 wire", async () => {
+  const client = allowCosmosProtocolPreflight(browserClient({
+    profile: webCosmosProfile({ depositProofUrl: "https://deposit.example/prove" }),
+    depositProofUrl: "https://ignored.example/prove"
+  }));
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
   });
   let preparedInput = null;
   client.cosmos.prepareDeposit = async input => {
@@ -785,10 +928,14 @@ test("browser profile uses only its pinned DepositCircuit endpoint", async () =>
       body: JSON.parse(init.body),
       signal: init.signal
     });
+    const request = JSON.parse(init.body);
     return new Response(JSON.stringify({
       version: "v1",
-      proof_hex: "ab",
-      note_commitment_hex: "11".repeat(32)
+      proof: {
+        version: "v1",
+        proof_hex: canonicalDepositProofHex,
+        note_commitment_hex: request.payload.note_commitment_hex
+      }
     }), {
       status: 200,
       headers: { "content-type": "application/json" }
@@ -806,12 +953,244 @@ test("browser profile uses only its pinned DepositCircuit endpoint", async () =>
     method: "POST",
     redirect: "error",
     body: {
-      note_json: '{"amount":"1"}',
-      note_commitment_hex: "11".repeat(32)
+      version: "v1",
+      payload: {
+        version: "v1",
+        receiver_spend_pubkey_hex: calls[0].body.payload.receiver_spend_pubkey_hex,
+        receiver_view_pubkey_hex: calls[0].body.payload.receiver_view_pubkey_hex,
+        amount: "1",
+        asset_id_hex: calls[0].body.payload.asset_id_hex,
+        randomness_hex: calls[0].body.payload.randomness_hex,
+        note_commitment_hex: calls[0].body.payload.note_commitment_hex
+      }
     }
   }]);
   assert.equal(calls[0].signal.aborted, false);
-  assert.equal(preparedInput.proofHex, "ab");
+  assert.equal(preparedInput.proofHex, canonicalDepositProofHex);
+});
+
+test("browser Cosmos profile derives the canonical deposit route from proverUrl", async () => {
+  const client = allowCosmosProtocolPreflight(browserClient({
+    profile: webCosmosProfile({
+      proverUrl: "https://prover.example/base",
+      depositProofUrl: undefined
+    }),
+    proverBearerToken: " deposit-token "
+  }));
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
+  });
+  client.cosmos.prepareDeposit = async input => ({
+    signDoc: { chainId: "clairveil-local-3" },
+    material: {
+      note_commitment_hex: input.depositMaterial.note_commitment_hex,
+      encrypted_note_hex: input.depositMaterial.encrypted_note_hex,
+      amount: input.depositMaterial.amount
+    },
+    privacyAccount: { shielded_address: "clairs1sender" }
+  });
+  const originalFetch = globalThis.fetch;
+  let call = null;
+  globalThis.fetch = async (url, init) => {
+    const request = JSON.parse(init.body);
+    call = {
+      url: String(url),
+      authorization: init.headers.get("Authorization"),
+      request
+    };
+    return new Response(JSON.stringify({
+      version: "v1",
+      proof: {
+        version: "v1",
+        note_commitment_hex: request.payload.note_commitment_hex,
+        proof_hex: canonicalDepositProofHex
+      }
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    await client.prepareDeposit({ amount: "1uclair" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(call.url, "https://prover.example/base/v1/prover/deposit");
+  assert.equal(call.authorization, "Bearer deposit-token");
+  assert.deepEqual(Object.keys(call.request), ["version", "payload"]);
+  assert.deepEqual(Object.keys(call.request.payload), [
+    "version",
+    "receiver_spend_pubkey_hex",
+    "receiver_view_pubkey_hex",
+    "amount",
+    "asset_id_hex",
+    "randomness_hex",
+    "note_commitment_hex"
+  ]);
+});
+
+test("browser Cosmos canonical deposit route uses the deposit-specific timeout", async () => {
+  const client = allowCosmosProtocolPreflight(browserClient({
+    profile: webCosmosProfile({
+      proverUrl: "https://prover.example",
+      depositProofUrl: undefined
+    }),
+    proverTimeoutMs: 80,
+    depositProofTimeoutMs: 5
+  }));
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
+  });
+  const originalFetch = globalThis.fetch;
+  let sawAbort = false;
+  globalThis.fetch = async (_url, init) => new Promise((_resolve, reject) => {
+    init.signal.addEventListener("abort", () => {
+      sawAbort = true;
+      reject(new DOMException("aborted", "AbortError"));
+    }, { once: true });
+  });
+
+  try {
+    await assert.rejects(
+      () => client.prepareDeposit({ amount: "1uclair" }),
+      /deposit proof request timed out after 5ms/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(sawAbort, true);
+});
+
+test("browser Cosmos prefers an injected deposit prover adapter over proverUrl", async () => {
+  let adapterCalls = 0;
+  let adapterRequest = null;
+  let adapterOptions = null;
+  const client = allowCosmosProtocolPreflight(browserClient({
+    profile: webCosmosProfile({
+      proverUrl: "https://unused-prover.example",
+      depositProofUrl: undefined
+    }),
+    proverAdapter: {
+      async proveDeposit(request, options) {
+        adapterCalls += 1;
+        adapterRequest = request;
+        adapterOptions = options;
+        return {
+          version: "v1",
+          proof: {
+            version: "v1",
+            note_commitment_hex: request.payload.note_commitment_hex,
+            proof_hex: canonicalDepositProofHex
+          }
+        };
+      }
+    }
+  }));
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
+  });
+  client.cosmos.prepareDeposit = async input => ({
+    signDoc: { chainId: "clairveil-local-3" },
+    material: input.depositMaterial,
+    privacyAccount: { shielded_address: "clairs1sender" }
+  });
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("HTTP prover must not be called");
+  };
+  const controller = new AbortController();
+
+  try {
+    await client.prepareDeposit({ amount: "1uclair", signal: controller.signal });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(adapterCalls, 1);
+  assert.deepEqual(Reflect.ownKeys(adapterRequest), ["version", "payload"]);
+  assert.equal(Object.isFrozen(adapterRequest), true);
+  assert.equal(Object.isFrozen(adapterRequest.payload), true);
+  assert.deepEqual(Reflect.ownKeys(adapterOptions), ["signal"]);
+  assert.equal(adapterOptions.signal, controller.signal);
+  assert.equal(fetchCalls, 0);
+});
+
+test("browser Cosmos deposit rejects an unvalidated provider proof before sign-doc preparation", async () => {
+  const client = allowCosmosProtocolPreflight(browserClient());
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32)
+  });
+  let prepareCalls = 0;
+  client.cosmos.prepareDeposit = async () => {
+    prepareCalls += 1;
+    throw new Error("must not prepare a sign doc");
+  };
+
+  await assert.rejects(
+    () => client.prepareDeposit({
+      amount: "1uclair",
+      depositProofProvider: async request => ({
+        version: "v1",
+        proof: {
+          version: "v1",
+          note_commitment_hex: request.payload.note_commitment_hex,
+          proof_hex: "ab"
+        }
+      })
+    }),
+    /deposit proof.*(?:164 bytes|328)/
+  );
+  assert.equal(prepareCalls, 0);
+});
+
+test("browser Cosmos deposit validates private material before exposing it to a provider", async () => {
+  const client = allowCosmosProtocolPreflight(browserClient());
+  const rootSeed = new Uint8Array(32).fill(10);
+  const unrelatedRootSeed = new Uint8Array(32).fill(11);
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed
+  });
+  const unrelatedRecipient = encodeShieldedAddress(
+    deriveSpendKeys(unrelatedRootSeed).pubKey,
+    deriveViewKeys(unrelatedRootSeed).pubKey,
+    { shieldedPrefix: "clairs" }
+  );
+  const depositMaterial = buildDepositMaterial({
+    creator: "clair1sender",
+    rootSeed,
+    shieldedAddress: unrelatedRecipient,
+    shieldedPrefix: "clairs",
+    amount: "1uclair"
+  });
+  let providerCalls = 0;
+  let prepareCalls = 0;
+  client.cosmos.prepareDeposit = async () => {
+    prepareCalls += 1;
+    throw new Error("must not prepare a sign doc");
+  };
+
+  await assert.rejects(
+    () => client.prepareDeposit({
+      amount: "1uclair",
+      depositMaterial,
+      depositProofProvider: async () => {
+        providerCalls += 1;
+        throw new Error("must not expose invalid deposit material");
+      }
+    }),
+    /deposit material note receiver public keys do not match rootSeed/
+  );
+  assert.equal(providerCalls, 0);
+  assert.equal(prepareCalls, 0);
 });
 
 test("EVM profile prepare checks the connected wallet network before building an artifact", async () => {
@@ -977,6 +1356,100 @@ test("EVM prepareDeposit forwards its required proof into the canonical precompi
   assert.equal(captured.proof, "ab");
   assert.equal(prepared.transaction.data, "0x1234");
   assert.equal(prepared.prepared.encryptedNoteHex, "22".repeat(48));
+});
+
+test("EVM deposit providers may return proof bytes without being treated as a nested response", async () => {
+  const client = browserClient({ profile: webEvmProfile() });
+  client.evmJsonRpc = async () => "0x539";
+  client.cosmos.assertProtocolPreflight = async () => ({});
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32),
+    shieldedAddress: "clairs1sender"
+  });
+  client.cosmos.buildDepositMaterial = () => ({
+    amount: "1uclair",
+    note: {},
+    note_json: "{}",
+    note_commitment_hex: "11".repeat(32)
+  });
+  const proofBytes = Uint8Array.of(1, 2, 3, 4);
+  let captured = null;
+  client.evm.buildDepositTransaction = input => {
+    captured = input;
+    return {
+      material: {
+        shieldedAddress: "clairs1sender",
+        note_commitment_hex: "11".repeat(32),
+        encrypted_note_hex: "22".repeat(48),
+        amount: "1uclair"
+      },
+      transaction: { to: webEvmProfile().evmPrivacyPrecompileAddress, data: "0x1234" }
+    };
+  };
+
+  await client.prepareDeposit({
+    amount: "1uclair",
+    evmWallet: { getChainId: async () => "0x539" },
+    depositProofProvider: async () => ({ proof: proofBytes })
+  });
+
+  assert.equal(captured.proof, proofBytes);
+});
+
+test("EVM depositProofUrl preserves the legacy flat request and response wire", async () => {
+  const client = browserClient({
+    profile: webEvmProfile({ depositProofUrl: "https://evm-deposit.example/prove" })
+  });
+  client.evmJsonRpc = async () => "0x539";
+  client.cosmos.assertProtocolPreflight = async () => ({});
+  client.privacyMaterial = () => ({
+    address: "clair1sender",
+    rootSeed: new Uint8Array(32),
+    shieldedAddress: "clairs1sender"
+  });
+  let capturedProof = null;
+  client.evm.buildDepositTransaction = input => {
+    capturedProof = input.proof;
+    return {
+      material: {
+        shieldedAddress: "clairs1sender",
+        note_commitment_hex: input.material.note_commitment_hex,
+        encrypted_note_hex: input.material.encrypted_note_hex,
+        amount: input.material.amount
+      },
+      transaction: { to: webEvmProfile().evmPrivacyPrecompileAddress, data: "0x1234" }
+    };
+  };
+  const originalFetch = globalThis.fetch;
+  let call = null;
+  globalThis.fetch = async (url, init) => {
+    const request = JSON.parse(init.body);
+    call = { url: String(url), request };
+    return new Response(JSON.stringify({
+      version: "v1",
+      proof_hex: "ab",
+      note_commitment_hex: request.note_commitment_hex
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    await client.prepareDeposit({
+      amount: "1uclair",
+      evmWallet: { getChainId: async () => "0x539" }
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(call.url, "https://evm-deposit.example/prove");
+  assert.deepEqual(Object.keys(call.request), ["note_json", "note_commitment_hex"]);
+  assert.equal(typeof call.request.note_json, "string");
+  assert.match(call.request.note_commitment_hex, /^[0-9a-f]{64}$/);
+  assert.equal(capturedProof, "ab");
 });
 
 test("browser DApp profiles reject schema-incomplete or transport-incompatible configuration", () => {

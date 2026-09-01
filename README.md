@@ -30,7 +30,7 @@ It uses CosmJS as the transport/signing foundation and provides Clairveil-specif
 - prepared transfer payload building
 - experimental, feature-gated One-Proof BatchTransfer V1 preparation (`MsgBatchTransfer`, 1–16 inputs, 1–32 outputs)
 - prepared withdraw and relay withdraw prover/final payload building
-- HTTP prover adapter for `/v1/prover/transfer`, `/v1/prover/withdraw`, and `/v1/proofs/batch-transfer`
+- HTTP prover adapter for Cosmos `/v1/prover/deposit`, `/v1/prover/transfer`, `/v1/prover/withdraw`, and `/v1/proofs/batch-transfer`
 - async job prover adapter for remote queue/poll prover deployments
 - direct sign-doc construction for Keplr `signDirect`
 - signed tx assembly and broadcast
@@ -64,13 +64,14 @@ For EVM chains, ClairveilJS calls the chain-provided privacy precompile. The DAp
 
 ## Clairveil Compatibility
 
-| ClairveilJS | Verified Core source identity | Public Cosmos wire | Downstream EVM deposit |
+| ClairveilJS | Verified Core contract sources | Public Cosmos support | Downstream EVM deposit |
 | --- | --- | --- | --- |
-| `0.3.1` | SDK bundle `v0.3.1` / Core `commit_snapshot` (`0ff9283`) | unchanged `MsgDeposit`/query contracts | opt-in `payable-exact-value` |
+| `0.3.1` | lifecycle/wallet `commit_snapshot` (`0ff9283`) plus prover API release tag `v0.4.0` (`ca85b02`) | unchanged protobuf wire plus canonical `/v1/prover/deposit` | unchanged opt-in `payable-exact-value` |
 
-`clairveiljs@0.3.1` targets the pinned SDK handoff shown above; later core
-changes are not implied. See [Handoff Conformance](#handoff-conformance) for the
-exact commit and release checks.
+`clairveiljs@0.3.1` keeps the pinned SDK lifecycle handoff and additionally
+implements the Cosmos-facing deposit prover contract published by Core v0.4.0.
+This is not a claim of unrestricted compatibility with later Core changes. See
+[Handoff Conformance](#handoff-conformance) for both exact source identities.
 
 Reservation behavior follows the v0.3.1 transition table:
 `releaseReservedOrProving(...)` releases only `Reserved`, while uncertain work
@@ -126,7 +127,7 @@ src/
 
 Public consumers should import through the package export map (`clairveiljs`, `clairveiljs/core`, `clairveiljs/cosmos`, `clairveiljs/cosmos-client`, `clairveiljs/evm`, `clairveiljs/browser-dapp`, `clairveiljs/reservation`, `clairveiljs/generated/...`) instead of reaching into files directly. The export map preserves semantic entrypoints even when an entrypoint shares an internal implementation; for example, `clairveiljs/browser-dapp` points at the browser wallet client surface.
 
-Minimal SDK usage examples live in [`examples/`](https://github.com/DELIGHT-LABS/clairveiljs/tree/main/examples). Start with [`examples/minimal-keplr-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-keplr-flow.js) for Keplr/Cosmos and [`examples/minimal-metamask-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-metamask-flow.js) for MetaMask/EVM. Both examples derive wallet privacy material, prepare a deposit, scan notes, prepare a transfer, and broadcast through the SDK surface. The Keplr/Cosmos example requires a `depositProofProvider` because Cosmos `MsgDeposit` includes a `DepositCircuit` proof.
+Minimal SDK usage examples live in [`examples/`](https://github.com/DELIGHT-LABS/clairveiljs/tree/main/examples). Start with [`examples/minimal-keplr-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-keplr-flow.js) for Keplr/Cosmos and [`examples/minimal-metamask-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-metamask-flow.js) for MetaMask/EVM. Both examples derive wallet privacy material, prepare a deposit, scan notes, prepare a transfer, and broadcast through the SDK surface. Keplr/Cosmos uses the canonical deposit route on `proverUrl` by default; `depositProofProvider` is an optional local/WASM override.
 
 ## Experimental One-Proof BatchTransfer V1
 
@@ -248,10 +249,15 @@ ClairveilJS `0.3.1` package, not a claim that it is the immutable Clairveil core
 `v0.3.1` release tag. The npm package ships this snapshot, so runtime consumers
 of the conformance helper do not need a Clairveil source checkout. The release
 identity gate does require a checkout containing the pinned commit object. The
-default fixture directory is:
+SDK also ships a separate, provenance-preserving prover overlay copied from the
+annotated Core `v0.4.0` tag at commit
+`ca85b02708fdd75259d4d2ee2d671c21198cec69`. It contains only the canonical
+prover HTTP/deposit fixtures and their dedicated JSON Schema; it does not replace
+or downgrade the v3 lifecycle snapshot. The default fixture directories are:
 
 ```bash
 fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata
+fixtures/clairveil-v0.4.0-prover/x/privacy/client/sdk/conformance/testdata
 ```
 
 For local development, run:
@@ -265,6 +271,7 @@ explicitly:
 
 ```bash
 CLAIRVEIL_CONFORMANCE_FIXTURE_DIR=/path/to/testdata npm run test:conformance
+CLAIRVEIL_PROVER_CONFORMANCE_FIXTURE_DIR=/path/to/prover/testdata npm run test:conformance
 ```
 
 For release handoff or CI, use the strict command. It uses only the bundled
@@ -277,10 +284,12 @@ npm run test:conformance:required
 
 `npm run verify:clairveil-source` is retained as the release-script name for
 compatibility. It validates the pinned metadata and local SHA-256 manifest, then
-compares four protobufs, twelve fixtures, and one JSON Schema byte-for-byte with
-the claimed git commit. Set `CLAIRVEIL_SOURCE_DIR` to a Clairveil checkout that
-contains the commit; otherwise the command uses the sibling `../clairveil`
-checkout and fails closed when the commit object is unavailable.
+compares four protobufs, twelve fixtures, and one wallet JSON Schema byte-for-byte
+with the lifecycle snapshot. It separately compares two prover fixtures and the
+prover HTTP JSON Schema with the exact annotated Core `v0.4.0` tag. Set
+`CLAIRVEIL_SOURCE_DIR` to a Clairveil checkout containing both source identities;
+otherwise the command uses sibling `../clairveil` and fails closed when either
+identity is unavailable.
 
 The canonical EVM `IPrivacy` interface is an SDK-owned contract, independent of
 any downstream EVM implementation. Run `npm run verify:evm-contract` to validate
@@ -296,7 +305,7 @@ release helpers enforce the same rejection of `Proving -> Released`.
 `prepublishOnly` runs `verify:release:integration`: package checks, required
 conformance fixtures, the required Cosmos localnet and testnet full-flow pinned
 five-shape one-proof matrices, and the downstream EVM full-flow evidence gate. Missing
-owner/relayer wallet, local/testnet node, deposit-proof, prover, or EVM driver
+owner/relayer wallet, local/testnet node, prover, or EVM driver
 configuration fails instead of skipping.
 
 These tests verify root seed/key/address derivation, note primitives and disclosure-blinding rules, browser signer adapter behavior, note scan results, prepared transfer and one-proof batch payload/prover contracts, withdraw payload hashes, disclosure decoding, and relay withdraw message handoff behavior against the Go-generated fixtures.
@@ -317,7 +326,7 @@ if (!result.skipped) {
 
 ## Cosmos Node E2E and Release Gate
 
-Local-node E2E remains opt-in for ordinary development, but it is mandatory for `npm publish`. The release environment must provide a Clairveil node, one explicitly selected prover, owner and separate relayer wallet credentials, an audit-disclosure private scalar, and a deposit-proof provider.
+Local-node E2E remains opt-in for ordinary development, but it is mandatory for `npm publish`. The release environment must provide a Clairveil node, one explicitly selected prover with the canonical deposit route, owner and separate relayer wallet credentials, and an audit-disclosure private scalar. A deposit-proof module is an optional local override.
 
 Current local e2e scope is deposit, typed wallet note scan, shielded transfer, validated typed-scan public/self-view/recipient/audit disclosure decode, direct withdraw, a separately signed relayed withdraw with reservation reconciliation, and an opt-in one-proof payroll batch with its reservation lifecycle.
 
@@ -340,8 +349,6 @@ CLAIRVEIL_E2E_LOCAL=1 \
 CLAIRVEIL_E2E_FULL_FLOW=1 \
 CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
 CLAIRVEIL_E2E_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs \
-CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<audit-private-scalar> \
-CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<auditor-private-scalar-hex> \
 npm run test:e2e:local
 ```
@@ -363,8 +370,6 @@ CLAIRVEIL_E2E_FULL_FLOW=1 \
 CLAIRVEIL_E2E_ONE_PROOF_BATCH=1 \
 CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
 CLAIRVEIL_E2E_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs \
-CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<audit-private-scalar> \
-CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<auditor-private-scalar-hex> \
 npm run test:e2e:local
 ```
@@ -375,12 +380,13 @@ Set `CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE` to run an actual selected localnet sha
 
 The required `test:e2e:local:one-proof-all` release command reads its deployment,
 wallet, prover, and timeout values from `CLAIRVEIL_E2E_LOCAL_*` variables. For
-example, use `CLAIRVEIL_E2E_LOCAL_WALLET_MODULE` and
-`CLAIRVEIL_E2E_LOCAL_DEPOSIT_PROOF_MODULE`. The unscoped variables above remain
-available to the standalone `test:e2e:local` developer command.
+example, use `CLAIRVEIL_E2E_LOCAL_WALLET_MODULE`. To override the canonical
+route with a local module, set `CLAIRVEIL_E2E_LOCAL_DEPOSIT_PROOF_MODULE`.
+The unscoped variables above remain available to the standalone
+`test:e2e:local` developer command.
 
 The required Cosmos downstream testnet gate runs the complete flow and all five
-pinned shapes. All seven deployment values below are mandatory; testnet mode
+pinned shapes. All deployment values below are mandatory; testnet mode
 rejects local chain IDs and loopback RPC, REST, or prover URLs.
 
 ```bash
@@ -393,12 +399,11 @@ CLAIRVEIL_E2E_TESTNET_SHIELDED_PREFIX=<shielded-prefix> \
 CLAIRVEIL_E2E_TESTNET_DENOM=<native-denom> \
 CLAIRVEIL_E2E_TESTNET_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
 CLAIRVEIL_E2E_TESTNET_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs \
-CLAIRVEIL_E2E_TESTNET_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 CLAIRVEIL_E2E_TESTNET_AUDIT_DISCLOSURE_PRIVKEY_HEX=<auditor-private-scalar-hex> \
 npm run test:e2e:cosmos:testnet
 ```
 
-For a release environment with the testnet, wallet, and deposit-proof credentials, run
+For a release environment with the testnet, wallet, and prover credentials, run
 `npm run verify:release:integration`. It validates the published wallet-contract
 JSON Schema, required Go fixtures, the Cosmos localnet and testnet full flows and
 every pinned one-proof shape, and the downstream EVM behavior described below; missing
@@ -539,12 +544,19 @@ export default async function createWallet(config) {
 }
 ```
 
-The deposit proof module must export `default`, `createDepositProof`, or `depositProofProvider`. It receives the browser/SDK-built deposit material and returns proof bytes or proof hex, such as `{ proof }`, `{ depositProof }`, `{ proofHex }`, or `{ proof_hex }`.
+The optional deposit-proof override module must export `default`,
+`createDepositProof`, or `depositProofProvider`. For Cosmos it receives exactly
+the deep-frozen canonical v1 `{ version, payload }` request; SDK-built deposit
+material, memo, creator, denom, encrypted note, seed, and chain ID are not
+attached to the callback input. It may return the canonical nested response or
+proof bytes/hex such as `{ proof }`, `{ depositProof }`, `{ proofHex }`, or
+`{ proof_hex }`. The SDK binds local results to the request commitment and still
+enforces canonical framing.
 
 ```js
 // /absolute/path/to/deposit-proof-provider.mjs
-export async function createDepositProof({ material }) {
-  return { proofHex: await proveDepositCircuit(material) };
+export async function createDepositProof(request) {
+  return { proofHex: await proveDepositCircuit(request.payload) };
 }
 ```
 
@@ -590,11 +602,7 @@ const deposit = await clairveil.prepareDeposit({
   address: walletAddress,
   pubKeyHex: walletPubKeyHex,
   signatureBase64: privacyRootSignatureBase64,
-  amount: "1000000uexample",
-  async depositProofProvider({ material }) {
-    // Generate a DepositCircuit proof with your local/WASM/trusted deposit prover.
-    return createDepositProof({ material });
-  }
+  amount: "1000000uexample"
 });
 
 // This Cosmos-style client returns deposit.signDoc for the wallet signDirect flow.
@@ -602,14 +610,15 @@ const deposit = await clairveil.prepareDeposit({
 // then prepareDeposit returns deposit.transaction for EIP-1193 submission.
 ```
 
-For a profile-based Cosmos DApp that uses the product-hosted DepositCircuit
-service, configure `profile.depositProofUrl` with the exact reviewed endpoint.
-The SDK never derives this URL from `proverUrl`: it sends one direct `POST`
-with `{ note_json, note_commitment_hex }`, rejects redirects and non-JSON or
-oversized responses, and requires `{ version: "v1", proof_hex,
-note_commitment_hex }` with the same commitment. A local/WASM
-`depositProofProvider` remains supported. The active profile is the only
-source for `depositProofUrl`.
+For Cosmos, the default HTTP adapter sends the Core v0.4.0 canonical request to
+`{proverUrl}/v1/prover/deposit`. The request contains only the versioned,
+memo-free public-key, amount, asset-ID, randomness, and commitment payload. The
+SDK rejects redirects, malformed/oversized responses, wrong versions or
+commitments, and non-canonical 164-byte gnark BN254 proof frames before building
+`MsgDeposit`. `proverBearerToken` is applied without placing credentials in the
+URL. A local/WASM `depositProofProvider` or exact `profile.depositProofUrl`
+remains an explicit override and uses the same canonical request/response
+contract. EVM profile endpoint resolution is unchanged.
 
 Every EVM-profile `prepareDeposit`, `prepareTransfer`, `prepareWithdraw`, and
 `prepareRelayWithdraw` call also requires `evmWallet: { getChainId() }`. The
@@ -695,7 +704,7 @@ const noteStore = new LocalStorageNoteStore({
 });
 ```
 
-`baseURL` may include a deployment path prefix. The adapter preserves it when appending `/v1/prover/transfer`, `/v1/prover/withdraw`, and the batch proof route; for example, `https://prover.example/tenant-a` calls `https://prover.example/tenant-a/v1/prover/transfer`.
+`baseURL` may include a deployment path prefix. The adapter preserves it when appending Cosmos `/v1/prover/deposit`, `/v1/prover/transfer`, `/v1/prover/withdraw`, and the batch proof route; for example, `https://prover.example/tenant-a` calls `https://prover.example/tenant-a/v1/prover/deposit` for a Cosmos deposit proof.
 
 `LocalStorageNoteStore` is intentionally opt-in because it stores decrypted wallet notes in plaintext browser storage. Use it only for local demos/tests; production wallets should store the same fields in an encrypted wallet database.
 
@@ -884,24 +893,29 @@ The derived `rootSeed` stays client-side and is used to scan notes, create new n
 
 ## Deposit
 
-`prepareDeposit` builds a Telescope-generated `MsgDeposit` and returns a Keplr-compatible sign doc. Deposit requires a `DepositCircuit` proof; generate it with a local/WASM/trusted deposit prover and pass the proof with the same deposit material.
+`prepareDeposit` builds a Telescope-generated `MsgDeposit` and returns a Keplr-compatible sign doc. With a Cosmos `proverUrl`, it obtains and validates the Core v0.4.0 DepositCircuit proof automatically. A local/WASM provider can use the same canonical request/response helpers.
 
 ```js
+import {
+  buildDepositProofRequestV1,
+  validateDepositProofResponseV1
+} from "clairveiljs/prover";
+
 const material = await clairveil.deriveWalletPrivacyMaterial(wallet);
 const depositMaterial = clairveil.buildDepositMaterial({
   creator: material.address,
   rootSeed: material.rootSeed,
   amount: "10uclair"
 });
-const { proofHex } = await depositProofProvider({
-  material: depositMaterial
-});
+const request = buildDepositProofRequestV1({ material: depositMaterial });
+const response = await depositProofProvider(request);
+const validated = validateDepositProofResponseV1(request, response);
 
 const deposit = await clairveil.prepareDeposit({
   material,
   depositMaterial,
   amount: "10uclair",
-  proofHex
+  proofHex: validated.proof.proof_hex
 });
 
 const broadcast = await clairveil.signDirectAndBroadcast({

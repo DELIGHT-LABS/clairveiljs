@@ -6,7 +6,7 @@ This document explains the responsibilities and communication paths among the **
 
 The `src/` directory hierarchy explains the implementation structure, but this document focuses on real service deployment and runtime interactions. It covers both Cosmos and Clairveil-compatible EVM chains and distinguishes the path selected by the deployment environment.
 
-The supported protocol baseline is the Clairveil v0.3.1 SDK handoff (`0ff9283`) `privacy-note-v1` / `privacy-fixed-v1`. The public status of that source is `PUBLICATION_READY_EXPERIMENTAL`, not production deployment approval. Formal trusted setup, external security/circuit audit, signed production artifacts, and target chain/product validation are separate release gates outside this architecture.
+The protocol/lifecycle baseline is the Clairveil v0.3.1 SDK handoff (`0ff9283`) `privacy-note-v1` / `privacy-fixed-v1`. Cosmos deposit proving additionally implements the canonical prover HTTP boundary from Core v0.4.0 (`ca85b02`); this does not change the Cosmos protobuf wire or broaden the EVM compatibility claim. The public status of these sources is not production deployment approval. Formal trusted setup, external security/circuit audit, signed production artifacts, and target chain/product validation are separate release gates outside this architecture.
 
 Note reservation, proving, submission, and reconciliation states are covered separately in [Note Reservation State Transitions](./reservation-state-machine.md).
 
@@ -26,7 +26,7 @@ The diagram is intentionally regenerated with `npm run docs:diagram:architecture
 | --- | --- | --- |
 | Browser / Wallet | Derives privacy material from the user's privacy-root signature, scans notes, and signs prepared transactions. | Never send the privacy-root signature, root seed, spend/view/disclosure private material, or decrypted notes to a general DApp server. |
 | ClairveilJS | Performs note scanning, planning, Merkle path/nullifier verification, transfer/withdraw payload construction, prover-adapter calls, and Cosmos sign-doc or EVM transaction construction on the client. It does not generate ZK proofs itself. Note persistence is delegated to the injected Note Store; the SDK's `LocalStorageNoteStore` stores decrypted notes in plaintext only with explicit opt-in. | Does not automatically send private material to arbitrary servers. In production, do not use a plaintext `LocalStorageNoteStore`; inject an encrypted Note Store supplied by the app or wallet. |
-| Prover service | Generates transfer, withdraw, or batch ZK proofs from the prepared prover payload sent by ClairveilJS. The same batch proof maps to either Cosmos `MsgBatchTransfer` or EVM `singleProofBatchTransfer`; Deposit uses a separate exact `depositProofUrl` or injected provider. | Do not send private payloads/proofs to an untrusted prover. Whether to use a remote prover or a local/WASM prover is determined by the product's trust model. Automatic cross-endpoint failover is disabled by default. |
+| Prover service | Generates transfer, withdraw, batch, or deposit ZK proofs from the prepared prover payload sent by ClairveilJS. The same batch proof maps to either Cosmos `MsgBatchTransfer` or EVM `singleProofBatchTransfer`; Cosmos deposit defaults to the canonical Core v0.4.0 route and still permits an exact URL override or injected provider. | Do not send private payloads/proofs to an untrusted prover. Whether to use a remote prover or a local/WASM prover is determined by the product's trust model. Automatic cross-endpoint failover is disabled by default. |
 | Client State Stores | The Note Store retains scan results, cursors, and nullifier state; the Reservation Store retains inventory locks, leases, and broadcast evidence. A production browser Reservation Store uses encrypted IndexedDB and Web Locks. | These are local stores, not server stores. Do not store encryption keys derived from private material alongside the ciphertext. |
 | DApp Proxy | Not required by the default architecture. When needed, proxies chain REST/RPC, prover HTTP, or broadcast endpoints. | Must not become the storage owner for user privacy material or decrypted notes on the normal production path. |
 | Product Relayer | Validates relay-withdraw payloads and submits them using the relayer's own Cosmos/EVM account. Product-specific authentication, fees, and policies are not common SDK contracts. | Must not submit a candidate transaction from the client without validation. |
@@ -77,12 +77,17 @@ Follow the [Storage and persistence implementation guide](./storage-and-persiste
 | `proveTransfer(...)` | `POST {baseURL}/v1/prover/transfer` | Transfer preparation |
 | `proveWithdraw(...)` | `POST {baseURL}/v1/prover/withdraw` | Direct and relay withdraw preparation |
 | `proveBatchTransfer(...)` | `POST {baseURL}/v1/proofs/batch-transfer` | Cosmos one-proof batch transfer preparation |
+| `proveDeposit(...)` | `POST {baseURL}/v1/prover/deposit` | Cosmos deposit preparation |
 
 If a browser client receives `proverUrl` without an injected `proverAdapter`, ClairveilJS creates this HTTP adapter. The default path is therefore **the browser's ClairveilJS calling the prover URL directly**. A prover request passes through a DApp server only when `proverUrl` points to a DApp proxy.
 
 When `proverUrl` points to a DApp proxy, the prepared prover payload containing private witnesses such as input amounts, randomness, and Merkle paths passes through that server. Treat this proxy as a privacy-sensitive trust principal like the remote prover, and disable request-body logging, analytics, and caching. Use a local/WASM prover if that trust cannot be accepted.
 
-`/v1/prover/transfer` and `/v1/prover/withdraw` are not deposit-proof endpoints. Deposit uses a local/WASM `depositProofProvider` or an explicitly fixed `depositProofUrl` in the profile; ClairveilJS does not infer a deposit URL from `proverUrl`.
+Cosmos deposit uses the canonical Core v0.4.0 `/v1/prover/deposit` route on the
+selected `proverUrl` by default. A local/WASM `depositProofProvider` or an
+explicitly fixed `depositProofUrl` replaces that default; the SDK never fails
+over the same private payload to another endpoint automatically. EVM profile
+resolution remains unchanged.
 
 The HTTP prover adapter checks response shape and contract bindings such as the request payload hash and circuit/artifact identity. The final validity of the ZK proof is verified by Clairveil's on-chain execution rules.
 
@@ -91,11 +96,15 @@ The HTTP prover adapter checks response shape and contract bindings such as the 
 Deposit uses a different proof endpoint from transfer/withdraw.
 
 1. ClairveilJS prepares the deposit note/commitment and wallet privacy material.
-2. It obtains a DepositCircuit proof from the caller-provided local/WASM `depositProofProvider` or the profile's fixed `depositProofUrl`.
+2. For Cosmos it obtains a DepositCircuit proof from the canonical `proverUrl` route, a caller-provided local/WASM `depositProofProvider`, or the profile's exact `depositProofUrl` override.
 3. The SDK constructs a Cosmos `MsgDeposit` sign doc or an EVM precompile transaction.
 4. The wallet signs/approves it and submits it to the chain endpoint.
 
-`depositProofUrl` is not derived from the default `proverUrl`. When using a product-hosted endpoint, disallow redirects and require the commitment in the response to match the requested commitment exactly.
+The default Cosmos route appends `/v1/prover/deposit` while preserving any path
+prefix in `proverUrl`; `depositProofUrl` is an exact override, not a fallback.
+The SDK disallows redirects and validates both response versions, exact
+commitment binding, and the canonical 164-byte gnark BN254 proof frame before
+constructing `MsgDeposit`.
 
 ## Transfer flow
 

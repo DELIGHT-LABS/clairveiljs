@@ -127,6 +127,7 @@ export interface NoteReservationRecord {
   submitted_tx_hash: string;
   broadcast_attempt_count: number;
   broadcast_in_flight: boolean;
+  /** Stable internal code only; external wallet/prover/RPC prose is never persisted. */
   last_broadcast_error: string;
   created_at: string;
   updated_at: string;
@@ -547,6 +548,16 @@ type ReservationSubmittedBroadcastAttempt = ReservationBroadcastAttemptFields & 
 
 export type ReservationSubmittedMetadata = ReservationLeaseMetadata & ReservationBroadcastMetadataFields & ReservationSubmittedBroadcastAttempt;
 
+export interface ReservationDurableErrorMetadata {
+  /** Preferred stable internal code. Non-code-shaped values are discarded. */
+  errorCode?: string;
+  error_code?: string;
+  /** Compatibility inputs for transient errors; their values are not persisted as durable codes. */
+  error?: string;
+  lastBroadcastError?: string;
+  last_broadcast_error?: string;
+}
+
 export type ReservationRelaySubmissionMetadata = ReservationLeaseMetadata & ReservationBroadcastMetadataFields & ReservationBroadcastAttemptFields & (
   | { payloadHash: string; payload_hash?: string }
   | { payload_hash: string; payloadHash?: string }
@@ -558,12 +569,9 @@ export type ReservationRelaySubmissionMetadata = ReservationLeaseMetadata & Rese
   | { txHashSubmitted: string; txHash?: string; tx_hash?: string; submittedTxHash?: string; submitted_tx_hash?: string }
 );
 
-export type ReservationUnknownMetadata = ReservationLeaseMetadata & ReservationBroadcastMetadataFields & ReservationSubmittedBroadcastAttempt & {
+export type ReservationUnknownMetadata = ReservationLeaseMetadata & ReservationBroadcastMetadataFields & ReservationSubmittedBroadcastAttempt & ReservationDurableErrorMetadata & {
   fromStatus?: "ProofReady" | "Submitted";
   from_status?: "ProofReady" | "Submitted";
-  error?: string;
-  lastBroadcastError?: string;
-  last_broadcast_error?: string;
 };
 
 type RequiredAliasedValue<Camel extends string, Snake extends string, Value> =
@@ -582,8 +590,8 @@ export type ReservationBroadcastFailureEvidence =
   RequiredAliasedValue<"txHashChecked", "tx_hash_checked", string> &
   RequiredAliasedValue<"checkedHeight", "checked_height", number | string> &
   RequiredAliasedValue<"nullifierUnspentConfirmed", "nullifier_unspent_confirmed", true> &
-  RequiredAliasedValue<"txAbsentOrFailedConfirmed", "tx_absent_or_failed_confirmed", true> & {
-  error?: string;
+  RequiredAliasedValue<"txAbsentOrFailedConfirmed", "tx_absent_or_failed_confirmed", true> &
+  ReservationDurableErrorMetadata & {
   metadata?: ReservationMetadata;
 };
 
@@ -599,14 +607,11 @@ export type ExpiredProofReadyBroadcastFailureRecovery =
     "checkNullifiers",
     "check_nullifiers",
     import("./payload.js").NullifierStatusReader
-  > & {
-  error?: string;
-  lastBroadcastError?: string;
-  last_broadcast_error?: string;
+  > & ReservationDurableErrorMetadata & {
   metadata?: ReservationMetadata;
 };
 
-export interface ReservationReplanMetadata extends ReservationLeaseMetadata {
+export interface ReservationReplanMetadata extends ReservationLeaseMetadata, ReservationDurableErrorMetadata {
   fromStatus?: string;
   from_status?: string;
   txHash?: string;
@@ -615,9 +620,6 @@ export interface ReservationReplanMetadata extends ReservationLeaseMetadata {
   tx_bytes_hash?: string;
   signDocHash?: string;
   sign_doc_hash?: string;
-  error?: string;
-  lastBroadcastError?: string;
-  last_broadcast_error?: string;
   /** Required when replanning a Submitted or Unknown reservation so callers prove the nullifier was checked unspent. */
   nullifierUnspentConfirmed?: boolean;
   nullifier_unspent_confirmed?: boolean;
@@ -670,13 +672,11 @@ export declare class NoteReservationManager {
   markProofReady(reservationIDs?: readonly string[], metadata?: ReservationProofReadyMetadata): Promise<NoteReservationRecord[]>;
   markProofReadyBatch(entries?: readonly ReservationProofReadyBatchEntry[]): Promise<NoteReservationRecord[]>;
   markBroadcastAttempting(reservationIDs: readonly string[], metadata: ReservationLeaseMetadata & ReservationBroadcastAttemptFields & { reason?: string; metadata?: ReservationMetadata }): Promise<NoteReservationRecord[]>;
-  markBroadcastRejected(reservationIDs: readonly string[], metadata: ReservationLeaseMetadata & {
+  markBroadcastRejected(reservationIDs: readonly string[], metadata: ReservationLeaseMetadata & ReservationDurableErrorMetadata & {
     providerCode?: string | number;
     provider_code?: string | number;
     providerCodespace?: string;
     provider_codespace?: string;
-    providerLog?: string;
-    provider_log?: string;
     rpcInvoked?: boolean;
     rpc_invoked?: boolean;
     checkTxRejected?: boolean;
@@ -685,7 +685,6 @@ export declare class NoteReservationManager {
     broadcast_aborted_before_rpc?: boolean;
     walletRejectedBeforeBroadcast?: boolean;
     wallet_rejected_before_broadcast?: boolean;
-    error?: string;
     metadata?: ReservationMetadata;
   }): Promise<NoteReservationRecord[]>;
   markSubmitted(reservationIDs: readonly string[], metadata: ReservationSubmittedMetadata): Promise<NoteReservationRecord[]>;
@@ -728,10 +727,7 @@ export declare class NoteReservationManager {
    */
   recordRelayTransactionEvidence(evidence: ReservationRelayTransactionEvidence): Promise<NoteReservationRecord[]>;
   markReplanRequired(reservationIDs?: readonly string[], metadata?: ReservationReplanMetadata): Promise<NoteReservationRecord[]>;
-  markManualReview(reservationIDs?: readonly string[], metadata?: ReservationLeaseMetadata & {
-    error?: string;
-    lastBroadcastError?: string;
-    last_broadcast_error?: string;
+  markManualReview(reservationIDs?: readonly string[], metadata?: ReservationLeaseMetadata & ReservationDurableErrorMetadata & {
     metadata?: ReservationMetadata;
   }): Promise<NoteReservationRecord[]>;
   resolveManualReview(reservationIDs: readonly string[], resolution: ReservationManualReviewResolution): Promise<NoteReservationRecord[]>;

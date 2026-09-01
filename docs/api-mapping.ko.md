@@ -15,12 +15,12 @@
 
 | 분류 | 의미 | 예시 |
 | --- | --- | --- |
-| SDK 고정 계약 | ClairveilJS와 Clairveil protocol이 경로·shape·version을 정한다. | `/clairveil/privacy/v1/privacy_scan`, `/v1/prover/transfer`, Cosmos Msg type URL |
-| Profile 고정 endpoint | 제품이 검토한 정확한 URL을 profile에 넣고 SDK가 그 URL만 호출한다. | `depositProofUrl` |
+| SDK 고정 계약 | ClairveilJS와 Clairveil protocol이 경로·shape·version을 정한다. | `/clairveil/privacy/v1/privacy_scan`, `/v1/prover/transfer`, `/v1/prover/deposit`, Cosmos Msg type URL |
+| Profile 고정 endpoint | 제품이 검토한 정확한 URL을 profile에 넣고 SDK가 그 URL만 호출한다. | 선택적 `depositProofUrl` override |
 | 주입형 adapter | 호출자가 함수 구현을 제공하며 ClairveilJS는 고정 HTTP route를 가정하지 않는다. | local/WASM prover, `createAsyncJobProverAdapter(...)`의 submit/poll 함수 |
 | Product-defined API | 인증·수수료·queue·URL을 제품이 정의한다. ClairveilJS 공통 서버 계약이 아니다. | relay withdraw handoff, DApp proxy route |
 
-`/v1/prover/transfer`, `/v1/prover/withdraw`, `/v1/proofs/batch-transfer`는 `clairveil.d`의 chain REST endpoint가 아니다. 기본 HTTP prover adapter를 선택한 **브라우저의 ClairveilJS**가 `proverUrl`에 직접 요청한다. `proverUrl`이 DApp proxy를 가리킬 때만 요청이 그 서버를 경유한다.
+`/v1/prover/transfer`, `/v1/prover/withdraw`, `/v1/proofs/batch-transfer`, `/v1/prover/deposit`는 `clairveil.d`의 chain REST endpoint가 아니다. 기본 HTTP prover adapter를 선택한 **브라우저의 ClairveilJS**가 `proverUrl`에 직접 요청한다. `proverUrl`이 DApp proxy를 가리킬 때만 요청이 그 서버를 경유한다.
 
 ## Clairveil v0.3.1 고정 계약
 
@@ -28,6 +28,11 @@
 `0ff92839872de26b787a60d8e4d5822cc459855b`이다. 아래 값은
 배포 profile이 바꿀 수 있는 설정이 아니라 conformance fixture와 consensus
 identity가 고정한 protocol 계약이다.
+
+Cosmos deposit proving은 tag commit
+`ca85b02708fdd75259d4d2ee2d671c21198cec69`의 canonical Core `v0.4.0`
+prover HTTP 계약을 추가로 따른다. Cosmos protobuf와 on-chain `MsgDeposit`
+wire는 바뀌지 않으며 strict off-chain request/response와 proof-frame 경계만 추가된다.
 
 | 계약 | 고정 값 |
 | --- | --- |
@@ -63,7 +68,7 @@ Clairveil `v0.3.1`의 상태는 `PUBLICATION_READY_EXPERIMENTAL`이며, 이 계�
 
 | 사용자 작업 | 주 SDK API | 준비 중 조회 | proof 계약 | 준비 결과 | 서명·최종 제출 | 완료 판단 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Deposit | `prepareDeposit(...)` | circuit config, asset mapping; Cosmos sign doc은 account metadata도 조회 | local/WASM `depositProofProvider` 또는 exact `depositProofUrl` | Cosmos `MsgDeposit` sign doc 또는 EVM `IPrivacy.deposit` transaction | 사용자 Cosmos wallet 또는 EIP-1193 wallet | 두 profile 모두 exact commitment·`encryptedNoteHex`를 준비 결과에 보존. Cosmos는 `confirmDeposit(...)`, EVM은 `waitForEvmTransaction(...)`의 exact RPC call·`PrivacyDeposit` event로 확인 |
+| Deposit | `prepareDeposit(...)` | circuit config, asset mapping; Cosmos sign doc은 account metadata도 조회 | Cosmos: canonical `POST /v1/prover/deposit`, local provider 또는 canonical V1 exact URL override; EVM 동작은 유지 | Cosmos `MsgDeposit` sign doc 또는 EVM `IPrivacy.deposit` transaction | 사용자 Cosmos wallet 또는 EIP-1193 wallet | 두 profile 모두 exact commitment·`encryptedNoteHex`를 보존. Cosmos는 response binding과 164-byte proof frame을 검증한 뒤 `confirmDeposit(...)`, EVM은 `waitForEvmTransaction(...)`으로 확인 |
 | Note scan | `scanWalletNotes(...)`, `queryPrivacyScan(...)` | typed privacy scan과 nullifier 상태 | 없음 | 검증된 found note, cursor, nullifier status | 제출 없음 | malformed page나 불명확한 nullifier는 spendable로 취급하지 않음 |
 | Native transfer | `prepareTransfer(...)` | scan, circuit/asset/audit/disclosure config, same-root path, nullifier 상태 | `POST /v1/prover/transfer` | Cosmos `MsgTransfer` sign doc 또는 EVM `IPrivacy.transfer` transaction | 사용자 wallet | tx identity, input nullifier, 예상 output/disclosure evidence를 reconcile |
 | One-Proof Batch Transfer | `prepareTransferBatch(...)`, `provePreparedBatchTransfer(...)`, `finalizePreparedBatchTransfer(...)` | typed scan, protocol config, same-root path snapshot, 모든 input nullifier | `POST /v1/proofs/batch-transfer` | Cosmos `MsgBatchTransfer` sign doc 또는 EVM `singleProofBatchTransfer` transaction과 선택적 EIP-712 authorization | 사용자 Cosmos/EVM wallet | 같은 operation의 모든 input nullifier, exact transaction binding과 모든 typed output evidence를 원자적으로 reconcile |
@@ -77,13 +82,23 @@ Clairveil `v0.3.1`의 상태는 `PUBLICATION_READY_EXPERIMENTAL`이며, 이 계�
 
 | SDK API / adapter | HTTP 대상 | 요청 계약 | 응답 계약 | 호출되는 흐름 |
 | --- | --- | --- | --- | --- |
-| `createHttpDepositProofProvider({ url })` | `POST <profile.depositProofUrl>` | `{ note_json, note_commitment_hex }` | `version: "v1"`, `proof_hex`, 동일한 `note_commitment_hex` | Deposit 전용. redirect를 허용하지 않으며 `proverUrl`에서 URL을 만들지 않음 |
+| `createHttpProverAdapter(...).proveDeposit(...)` | `POST {proverUrl}/v1/prover/deposit` | request `v1`, compressed receiver key·amount·asset ID·randomness·commitment를 담은 memo-free payload `v1` | response `v1`, nested proof `v1`, exact commitment, canonical 164-byte proof | Core v0.4.0 기본 Cosmos deposit route |
+| `createHttpDepositProofProviderV1({ url })` | `POST <depositProofUrl>` | 동일한 canonical request/payload `v1` | 동일한 canonical response/proof `v1`, exact HTTP 200과 JSON content type | redirect를 허용하지 않는 Cosmos Core v0.4.0 exact endpoint override |
+| `createHttpDepositProofProvider({ url })` | `POST <product endpoint>` | legacy flat `{ note_json, note_commitment_hex }` | legacy flat `{ version: "v1", proof_hex, note_commitment_hex }` | 기존 EVM/product-specific endpoint 호환용이며 Cosmos Core v0.4.0 wire가 아님 |
 | `createHttpProverAdapter(...).proveTransfer(...)` | `POST {proverUrl}/v1/prover/transfer` | request `v2`, prepared transfer payload `v5` | response `v2`, request payload hash와 proof binding | native transfer와 self-merge |
 | `createHttpProverAdapter(...).proveWithdraw(...)` | `POST {proverUrl}/v1/prover/withdraw` | request/prover payload `v2` | response/proof `v2`, request payload hash binding | direct withdraw와 relay withdraw |
 | `createHttpProverAdapter(...).proveBatchTransfer(...)` | `POST {proverUrl}/v1/proofs/batch-transfer` | request `v1`, payload `batch-transfer-payload-v1` | response `v1`, proof `batch-transfer-proof-v1`, payload/circuit binding | Cosmos One-Proof Batch Transfer |
 | `createAsyncJobProverAdapter(...)` | Product-defined | caller의 submit 함수 | caller의 `getJob` 결과를 위 proof 계약으로 검증 | queue/poll 기반 remote prover |
 
-브라우저 client에 `proverUrl`만 제공하고 `proverAdapter`를 주입하지 않으면 SDK가 기본 HTTP adapter를 생성한다. Local/WASM prover나 사내 인증·queue contract를 쓰려면 adapter를 직접 주입한다.
+Cosmos browser client에 `proverUrl`만 제공하고 adapter나 exact deposit URL을
+주입하지 않으면 SDK가 기본 HTTP adapter의 canonical deposit route를 사용한다.
+Local/WASM prover나 사내 인증·queue contract를 쓰려면 adapter를 직접 주입한다.
+Automatic cross-endpoint failover는 계속 비활성화다.
+
+Cosmos profile의 exact `depositProofUrl`은 `createHttpDepositProofProviderV1`로
+해석한다. 이름에 version이 없는 `createHttpDepositProofProvider`는 기존
+EVM/product-specific integration을 위해 legacy flat wire를 의도적으로
+유지하므로 Core v0.4.0 Cosmos prover client로 사용하면 안 된다.
 
 ## Clairveil Chain REST 조회 매핑
 
@@ -92,7 +107,7 @@ Clairveil `v0.3.1`의 상태는 `PUBLICATION_READY_EXPERIMENTAL`이며, 이 계�
 | SDK 메서드 | HTTP | Clairveil REST route | 용도 |
 | --- | --- | --- | --- |
 | `fetchPrivacyEvents(...)` | GET | `/clairveil/privacy/v1/events` | raw privacy event 진단 page |
-| `fetchScanEvents(...)` | GET | `/clairveil/privacy/v1/scan_events` | compatibility/debugging sequence-cursor page; wallet sync에서는 typed endpoint가 첫 요청부터 미구현인 경우에만 fallback으로 사용 |
+| `fetchScanEvents(...)` | GET | `/clairveil/privacy/v1/scan_events` | 저수준 compatibility/debugging sequence-cursor page; 고수준 wallet/spend scan은 이 endpoint로 fallback하지 않음 |
 | `fetchPrivacyScan(...)`, `queryPrivacyScan(...)` | POST | `/clairveil/privacy/v1/privacy_scan` | `privacy-scan-v2` typed summary/output와 완전한 cursor |
 | `fetchTreeState()` | GET | `/clairveil/privacy/v1/tree_state` | 현재 Merkle root, leaf count, depth |
 | `fetchCommitmentInfo(...)` | GET | `/clairveil/privacy/v1/commitment/{commitment_hex}` | commitment 존재와 leaf 위치 |

@@ -15,12 +15,12 @@ It covers high-level flows that communicate with external systems or create tran
 
 | Category | Meaning | Example |
 | --- | --- | --- |
-| SDK-fixed contract | ClairveilJS and the Clairveil protocol fix the route, shape, and version. | `/clairveil/privacy/v1/privacy_scan`, `/v1/prover/transfer`, Cosmos message type URLs |
-| Profile-fixed endpoint | The product places an exact reviewed URL in the profile and the SDK calls only that URL. | `depositProofUrl` |
+| SDK-fixed contract | ClairveilJS and the Clairveil protocol fix the route, shape, and version. | `/clairveil/privacy/v1/privacy_scan`, `/v1/prover/transfer`, `/v1/prover/deposit`, Cosmos message type URLs |
+| Profile-fixed endpoint | The product places an exact reviewed URL in the profile and the SDK calls only that URL. | optional `depositProofUrl` override |
 | Injected adapter | The caller provides the function implementation; ClairveilJS assumes no fixed HTTP route. | local/WASM prover, submit/poll functions for `createAsyncJobProverAdapter(...)` |
 | Product-defined API | The product defines authentication, fees, queueing, and URLs. It is not a common ClairveilJS server contract. | relay-withdraw handoff, DApp proxy route |
 
-`/v1/prover/transfer`, `/v1/prover/withdraw`, and `/v1/proofs/batch-transfer` are not chain REST endpoints from `clairveil.d`. The **browser's ClairveilJS** makes these requests directly to `proverUrl` when the default HTTP prover adapter is selected. A request passes through a DApp proxy only when `proverUrl` points to that proxy.
+`/v1/prover/transfer`, `/v1/prover/withdraw`, `/v1/proofs/batch-transfer`, and `/v1/prover/deposit` are not chain REST endpoints from `clairveil.d`. The **browser's ClairveilJS** makes these requests directly to `proverUrl` when the default HTTP prover adapter is selected. A request passes through a DApp proxy only when `proverUrl` points to that proxy.
 
 ## Clairveil v0.3.1 fixed contract
 
@@ -28,6 +28,11 @@ This document and the SDK support the current Clairveil `v0.3.1` SDK handoff,
 commit `0ff92839872de26b787a60d8e4d5822cc459855b`. The values below are not deployment-profile
 settings; they are protocol contracts fixed by the conformance fixtures and consensus
 identity.
+
+Cosmos deposit proving additionally follows the canonical Core `v0.4.0` prover
+HTTP contract at tag commit `ca85b02708fdd75259d4d2ee2d671c21198cec69`.
+The Cosmos protobuf and on-chain `MsgDeposit` wire are unchanged; the added
+contract is the strict off-chain request/response and proof-frame boundary.
 
 | Contract | Fixed value |
 | --- | --- |
@@ -54,7 +59,7 @@ Raw ciphertext, legacy JSON plaintext, wrong envelope kind, non-zero reserved by
 
 | User task | Main SDK API | Queries during preparation | Proof contract | Prepared result | Signing/final submission | Completion criterion |
 | --- | --- | --- | --- | --- | --- | --- |
-| Deposit | `prepareDeposit(...)` | Circuit config, asset mapping; Cosmos sign doc also queries account metadata | Local/WASM `depositProofProvider` or exact `depositProofUrl` | Cosmos `MsgDeposit` sign doc or EVM `IPrivacy.deposit` transaction | User Cosmos wallet or EIP-1193 wallet | Both profiles preserve the exact commitment and `encryptedNoteHex`. Cosmos uses `confirmDeposit(...)`; EVM uses `waitForEvmTransaction(...)` to verify the exact RPC call and `PrivacyDeposit` event. |
+| Deposit | `prepareDeposit(...)` | Circuit config, asset mapping; Cosmos sign doc also queries account metadata | Cosmos: canonical `POST /v1/prover/deposit`, local provider, or canonical V1 exact URL override; EVM behavior unchanged | Cosmos `MsgDeposit` sign doc or EVM `IPrivacy.deposit` transaction | User Cosmos wallet or EIP-1193 wallet | Both profiles preserve the exact commitment and `encryptedNoteHex`. Cosmos validates the response binding and 164-byte proof frame, then uses `confirmDeposit(...)`; EVM uses `waitForEvmTransaction(...)` to verify the exact RPC call and `PrivacyDeposit` event. |
 | Note scan | `scanWalletNotes(...)`, `queryPrivacyScan(...)` | Typed privacy scan and nullifier state | None | Verified found note, cursor, and nullifier status | No submission | Malformed pages or ambiguous nullifiers are not treated as spendable. |
 | Native transfer | `prepareTransfer(...)` | Scan, circuit/asset/audit/disclosure config, same-root path, nullifier state | `POST /v1/prover/transfer` | Cosmos `MsgTransfer` sign doc or EVM `IPrivacy.transfer` transaction | User wallet | Reconcile tx identity, input nullifier, and expected output/disclosure evidence. |
 | One-Proof Batch Transfer | `prepareTransferBatch(...)`, `provePreparedBatchTransfer(...)`, `finalizePreparedBatchTransfer(...)` | Typed scan, protocol config, same-root path snapshot, every input nullifier | `POST /v1/proofs/batch-transfer` | Cosmos `MsgBatchTransfer` sign doc or EVM `singleProofBatchTransfer` transaction with optional EIP-712 authorization | User Cosmos/EVM wallet | Atomically reconcile every input nullifier, the exact transaction binding, and every typed output evidence for the same operation. |
@@ -68,13 +73,25 @@ The fact that `prepare*` returned does not mean that the transaction was submitt
 
 | SDK API / adapter | HTTP target | Request contract | Response contract | Flow |
 | --- | --- | --- | --- | --- |
-| `createHttpDepositProofProvider({ url })` | `POST <profile.depositProofUrl>` | `{ note_json, note_commitment_hex }` | `version: "v1"`, `proof_hex`, same `note_commitment_hex` | Deposit only. Redirects are not allowed and the URL is not derived from `proverUrl`. |
+| `createHttpProverAdapter(...).proveDeposit(...)` | `POST {proverUrl}/v1/prover/deposit` | request `v1`, memo-free payload `v1` with compressed receiver keys, amount, asset ID, randomness, and commitment | response `v1`, nested proof `v1`, exact commitment, canonical 164-byte proof | Default Cosmos deposit route from Core v0.4.0 |
+| `createHttpDepositProofProviderV1({ url })` | `POST <depositProofUrl>` | Same canonical request/payload `v1` | Same canonical response/proof `v1`; exact HTTP 200 and JSON content type | Cosmos Core v0.4.0 exact endpoint override; redirects are not allowed |
+| `createHttpDepositProofProvider({ url })` | `POST <product endpoint>` | Legacy flat `{ note_json, note_commitment_hex }` | Legacy flat `{ version: "v1", proof_hex, note_commitment_hex }` | Existing EVM/product-specific endpoint compatibility; not the Cosmos Core v0.4.0 wire |
 | `createHttpProverAdapter(...).proveTransfer(...)` | `POST {proverUrl}/v1/prover/transfer` | request `v2`, prepared transfer payload `v5` | response `v2`, request payload hash and proof binding | Native transfer and self-merge |
 | `createHttpProverAdapter(...).proveWithdraw(...)` | `POST {proverUrl}/v1/prover/withdraw` | request/prover payload `v2` | response/proof `v2`, request payload hash binding | Direct and relay withdraw |
 | `createHttpProverAdapter(...).proveBatchTransfer(...)` | `POST {proverUrl}/v1/proofs/batch-transfer` | request `v1`, payload `batch-transfer-payload-v1` | response `v1`, proof `batch-transfer-proof-v1`, payload/circuit binding | Cosmos/EVM One-Proof Batch Transfer |
 | `createAsyncJobProverAdapter(...)` | Product-defined | Caller-provided submit function | Caller-provided `getJob` result validated against the proof contract above | Queue/poll remote prover |
 
-If a browser client receives only `proverUrl` without an injected `proverAdapter`, the SDK creates the default HTTP adapter. Inject an adapter directly for a local/WASM prover or an internal authentication/queue contract.
+If a Cosmos browser client receives only `proverUrl` without an injected
+adapter or exact deposit URL, the SDK creates the default HTTP adapter and uses
+its canonical deposit route. Inject an adapter directly for a local/WASM prover
+or an internal authentication/queue contract. Automatic cross-endpoint
+failover remains disabled.
+
+A Cosmos profile's exact `depositProofUrl` is resolved with
+`createHttpDepositProofProviderV1`. The unversioned
+`createHttpDepositProofProvider` name intentionally retains its legacy flat
+wire for existing EVM and product-specific integrations; do not use it as a
+Core v0.4.0 Cosmos prover client.
 
 ## Clairveil chain REST query mapping
 
@@ -83,7 +100,7 @@ The routes below are the contracts shared by the HTTP annotations in [Query prot
 | SDK method | HTTP | Clairveil REST route | Purpose |
 | --- | --- | --- | --- |
 | `fetchPrivacyEvents(...)` | GET | `/clairveil/privacy/v1/events` | Raw privacy-event diagnostic page |
-| `fetchScanEvents(...)` | GET | `/clairveil/privacy/v1/scan_events` | Compatibility/debugging sequence-cursor page; wallet sync uses it only when the typed endpoint is unavailable from the first request |
+| `fetchScanEvents(...)` | GET | `/clairveil/privacy/v1/scan_events` | Low-level compatibility/debugging sequence-cursor page; high-level wallet and spend scans never fall back to it |
 | `fetchPrivacyScan(...)`, `queryPrivacyScan(...)` | POST | `/clairveil/privacy/v1/privacy_scan` | `privacy-scan-v2` typed summary/output and complete cursor |
 | `fetchTreeState()` | GET | `/clairveil/privacy/v1/tree_state` | Current Merkle root, leaf count, and depth |
 | `fetchCommitmentInfo(...)` | GET | `/clairveil/privacy/v1/commitment/{commitment_hex}` | Commitment existence and leaf position |

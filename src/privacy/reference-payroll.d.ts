@@ -5,6 +5,7 @@ import type { PreparedBatchTransferProof } from "./batch-transfer.js";
 import type { NoteReservationManager, ReservationBatch, ReservationMetadata } from "./reservation.js";
 import type { NoteReservationRecord } from "./reservation.js";
 import type { CircuitConfigV1, ValidatedCircuitConfigV1 } from "./circuit-config.js";
+import type { ProverRequestOptions } from "./prover.js";
 import type { CosmosFeeCoin, SignDocBase64 } from "../transport/cosmos-client.js";
 
 export type PayrollAmount = bigint | number | string;
@@ -599,7 +600,7 @@ export function assertOneProofPayrollNullifiersUnspent(payload: PreparedBatchTra
 export function reservationPlanForOneProofPayrollOperation(operation: OneProofPayrollOperationPlan): OneProofPayrollReservationPlan;
 export function reserveOneProofPayrollOperation(reservationManager: NoteReservationManager, operation: OneProofPayrollOperationPlan, options?: { metadata?: ReservationMetadata }): Promise<ReservationBatch>;
 export function prepareOneProofPayrollReservation(reservationManager: NoteReservationManager, prepared: PreparedOneProofPayrollOperation, options?: { metadata?: ReservationMetadata }): Promise<OneProofPayrollReservationBatch>;
-export function proveOneProofPayrollOperation(payload: PreparedBatchTransferPayload, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options?: { nowUnix?: number }): Promise<PreparedBatchTransferProof & { proof_bytes: Uint8Array }>;
+export function proveOneProofPayrollOperation(payload: PreparedBatchTransferPayload, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload, options?: ProverRequestOptions): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options?: { nowUnix?: number }): Promise<PreparedBatchTransferProof & { proof_bytes: Uint8Array }>;
 export function buildOneProofPayrollOperationEvidence(prepared: PreparedOneProofPayrollOperation, options?: { proof?: PreparedBatchTransferProof; nowUnix?: number }): OneProofPayrollOperationEvidence;
 export function oneProofPayrollOperationEvidenceHash(evidence: OneProofPayrollOperationEvidence): OneProofPayrollOperationEvidenceHash;
 export const oneProofPayrollArtifactVersion: "payroll-one-proof-artifact-v1";
@@ -631,7 +632,7 @@ export function retransmitOneProofPayrollArtifact(value: OneProofPayrollArtifact
   | { retryDecision?: OneProofPayrollRetryDecision; retry_decision: OneProofPayrollRetryDecision }
 )): Promise<unknown>;
 export function validateOneProofPayrollOperationEvidence(evidence: OneProofPayrollOperationEvidence, prepared: PreparedOneProofPayrollOperation, options?: { nowUnix?: number }): true;
-export function provePreparedOneProofPayrollOperation(prepared: PreparedOneProofPayrollOperation, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options: {
+export function provePreparedOneProofPayrollOperation(prepared: PreparedOneProofPayrollOperation, prover: { proveBatchTransfer(payload: PreparedBatchTransferPayload, options?: ProverRequestOptions): Promise<PreparedBatchTransferProof | { proof: PreparedBatchTransferProof }> }, options: {
   /** Optional Cosmos relayer/signer. It may differ from the creator pinned in the prepared payload. */
   creator?: string;
   checkNullifiers: (nullifiers: string[]) => Promise<Map<string, boolean> | Record<string, boolean>>;

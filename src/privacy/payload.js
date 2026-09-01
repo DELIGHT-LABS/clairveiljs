@@ -32,6 +32,7 @@ import {
   computePreparedTransferV5PayloadHash,
   preparedTransferV5PayloadVersion,
   preparedTransferV5ProofVersion,
+  validateCanonicalGroth16ProofBytes,
   validatePreparedTransferV5PayloadMetadata,
   validatePreparedTransferV5Proof
 } from "./transfer-v5.js";
@@ -713,11 +714,7 @@ export function validatePreparedWithdrawProof(proverPayload, proof, nowUnix = Ma
   }
   const proofHex = normalizeHex(proof.proof_hex, "withdraw proof");
   if (proofHex.length !== 328) throw new Error("withdraw proof must be exactly 164 bytes");
-  const proofBytes = hexToBytes(proofHex, "withdraw proof");
-  for (const offset of [0, 32, 96, 132]) {
-    if ((proofBytes[offset] & 0xc0) === 0) throw new Error(`withdraw proof point at offset ${offset} is not compressed`);
-  }
-  if (proofBytes.slice(128, 132).some(byte => byte !== 0)) throw new Error("withdraw proof commitments are not supported");
+  validateCanonicalGroth16ProofBytes(proofHex, "withdraw proof");
   return true;
 }
 
@@ -880,7 +877,7 @@ async function buildWithdrawPayloadWithProof({ proverAdapter, ...input } = {}) {
   const response = await proverAdapter.proveWithdraw({
     version: "v2",
     payload: proverPayload
-  }, { signal: input.signal });
+  }, { signal: input.signal, nowUnix: input.chainNowUnix });
   const proof = response?.proof || response;
   const payload = buildPreparedWithdrawPayloadFromProof(
     proverPayload,

@@ -32,7 +32,7 @@ Note reservation 상태 전이: [docs/reservation-state-machine.ko.md](./docs/re
 - transfer/withdraw planner와 안정적인 `ClairveilError` 코드
 - prepared transfer/withdraw/relay withdraw payload builder
 - experimental feature gate가 적용된 One-Proof BatchTransfer V1 준비 (`MsgBatchTransfer`, 입력 1~16개, 출력 1~32개)
-- `/v1/prover/transfer`, `/v1/prover/withdraw`, `/v1/proofs/batch-transfer` HTTP prover adapter
+- Cosmos `/v1/prover/deposit`, `/v1/prover/transfer`, `/v1/prover/withdraw`, `/v1/proofs/batch-transfer` HTTP prover adapter
 - Keplr `signDirect`용 sign doc 생성, signed tx 조립, broadcast
 - EIP-1193 wallet용 Clairveil-compatible `IPrivacy` EVM precompile calldata adapter
 - runtime shape assertion과 TypeScript declaration
@@ -76,12 +76,13 @@ Public consumer는 내부 파일 경로를 직접 import하지 말고 package ex
 
 ## Clairveil 호환성
 
-| ClairveilJS | 검증한 Core source identity | Public Cosmos wire | Downstream EVM deposit |
+| ClairveilJS | 검증한 Core contract source | Public Cosmos 지원 | Downstream EVM deposit |
 | --- | --- | --- | --- |
-| `0.3.1` | SDK bundle `v0.3.1` / Core `commit_snapshot` (`0ff9283`) | 기존 `MsgDeposit`/query 계약 유지 | opt-in `payable-exact-value` |
+| `0.3.1` | lifecycle/wallet `commit_snapshot` (`0ff9283`) + prover API release tag `v0.4.0` (`ca85b02`) | protobuf wire 유지 + canonical `/v1/prover/deposit` | 기존 opt-in `payable-exact-value` 유지 |
 
-`clairveiljs@0.3.1`은 위 표의 고정 SDK handoff를 대상으로 하며 이후 core
-변경까지 자동으로 지원하지 않습니다. Exact commit과 release 검증은
+`clairveiljs@0.3.1`은 기존 lifecycle handoff를 유지하면서 Core v0.4.0이
+공개한 Cosmos deposit prover 계약을 추가로 구현합니다. 이후 Core 변경 전체를
+자동 지원한다는 의미는 아닙니다. 두 exact source identity 검증은
 [핸드오프 적합성](#handoff-conformance)을 참고하세요.
 
 Reservation은 v0.3.1 전이 표를 따릅니다.
@@ -128,7 +129,7 @@ downstream chain은 동등한 effect와 receipt 검증을 제공하는 custom ad
 - Keplr/Cosmos: [`examples/minimal-keplr-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-keplr-flow.js)
 - MetaMask/EVM: [`examples/minimal-metamask-flow.js`](https://github.com/DELIGHT-LABS/clairveiljs/blob/main/examples/minimal-metamask-flow.js)
 
-두 예제는 wallet privacy material derivation, deposit 준비, note scan, transfer 준비, broadcast 흐름을 SDK surface로 수행합니다. Keplr/Cosmos 예제는 Cosmos `MsgDeposit`에 `DepositCircuit` proof가 포함되기 때문에 `depositProofProvider`가 필요합니다.
+두 예제는 wallet privacy material derivation, deposit 준비, note scan, transfer 준비, broadcast 흐름을 SDK surface로 수행합니다. Keplr/Cosmos는 기본적으로 `proverUrl`의 canonical deposit route를 사용하며 `depositProofProvider`는 선택적 local/WASM override입니다.
 
 ## Experimental One-Proof BatchTransfer V1
 
@@ -278,11 +279,7 @@ const deposit = await clairveil.prepareDeposit({
   address,
   pubKeyHex,
   signatureBase64: privacyRootSignatureBase64,
-  amount: "1000000uclair",
-  async depositProofProvider({ material }) {
-    // local/WASM/trusted deposit prover에서 DepositCircuit proof를 생성합니다.
-    return createDepositProof({ material });
-  }
+  amount: "1000000uclair"
 });
 
 // 이 Cosmos-style client는 wallet signDirect용 deposit.signDoc을 반환합니다.
@@ -290,13 +287,14 @@ const deposit = await clairveil.prepareDeposit({
 // prepareDeposit이 EIP-1193 제출용 deposit.transaction을 반환합니다.
 ```
 
-product-hosted DepositCircuit service를 쓰는 profile 기반 Cosmos DApp은
-`profile.depositProofUrl`에 검토된 정확한 endpoint를 설정하세요. SDK는 이
-URL을 `proverUrl`에서 만들지 않습니다. `{ note_json, note_commitment_hex }`를
-한 번 직접 `POST`하고, redirect·JSON이 아닌 응답·제한을 넘는 응답을 거부하며,
-같은 commitment를 담은 `{ version: "v1", proof_hex, note_commitment_hex }`
-응답만 받습니다. local/WASM `depositProofProvider`도 계속 사용할 수 있습니다.
-활성 profile에서는 `depositProofUrl`도 profile만 source입니다.
+Cosmos의 기본 HTTP adapter는 Core v0.4.0 canonical request를
+`{proverUrl}/v1/prover/deposit`로 보냅니다. Request에는 versioned memo-free
+public key, amount, asset ID, randomness와 commitment만 포함합니다. SDK는
+redirect, malformed/oversized response, version·commitment 불일치와 canonical하지
+않은 164-byte gnark BN254 proof frame을 `MsgDeposit` 구성 전에 거부합니다.
+`proverBearerToken`은 URL에 넣지 않고 authorization header로 전달합니다.
+local/WASM `depositProofProvider` 또는 exact `profile.depositProofUrl`은 같은
+canonical 계약을 사용하는 명시적 override입니다. EVM profile 해석은 바뀌지 않습니다.
 
 EVM profile의 `prepareDeposit`, `prepareTransfer`, `prepareWithdraw`,
 `prepareRelayWithdraw`에는 `evmWallet: { getChainId() }`가 필요합니다. SDK는
@@ -443,11 +441,12 @@ const proverAdapter = createHttpProverAdapter({
 
 기본 HTTP prover adapter는 다음 route contract를 사용합니다.
 
+- `POST /v1/prover/deposit` (Cosmos)
 - `POST /v1/prover/transfer`
 - `POST /v1/prover/withdraw`
 - `POST /v1/proofs/batch-transfer`
 
-`baseURL`에 deployment path prefix를 포함할 수 있습니다. Adapter는 각 route를 붙일 때 그 prefix를 보존합니다. 예를 들어 `https://prover.example/tenant-a`는 `https://prover.example/tenant-a/v1/prover/transfer`를 호출합니다.
+`baseURL`에 deployment path prefix를 포함할 수 있습니다. Adapter는 각 route를 붙일 때 그 prefix를 보존합니다. 예를 들어 Cosmos deposit proof에는 `https://prover.example/tenant-a/v1/prover/deposit`를 호출합니다.
 
 Remote prover가 job ID를 반환하는 구조라면 `createAsyncJobProverAdapter`로 submit/poll 함수를 감싸세요. one-proof batch 전용 prover는 `submitBatchTransferJob`과 `getJob`만 제공해도 됩니다.
 
@@ -772,10 +771,15 @@ commit snapshot이고 immutable Clairveil core `v0.3.1` release tag와 같다는
 표시가 아닙니다. npm package에도 fixture와 wallet-contract JSON Schema가 포함되므로
 runtime conformance helper 사용자는 Clairveil source checkout을 별도로 준비할 필요가
 없습니다. 단, release identity gate는 고정 commit object가 들어 있는 checkout을
-요구합니다. 기본 fixture 경로는 다음과 같습니다.
+요구합니다. 또한 annotated Core `v0.4.0` tag의 commit
+`ca85b02708fdd75259d4d2ee2d671c21198cec69`에서 canonical prover HTTP/deposit
+fixture와 전용 JSON Schema만 가져온 별도 overlay를 포함합니다. 이 overlay는
+기존 v3 lifecycle snapshot을 대체하거나 downgrade하지 않습니다. 기본 fixture
+경로는 다음과 같습니다.
 
 ```bash
 fixtures/clairveil-v0.3.1/x/privacy/client/sdk/conformance/testdata
+fixtures/clairveil-v0.4.0-prover/x/privacy/client/sdk/conformance/testdata
 ```
 
 로컬 개발에서는 다음을 실행하세요.
@@ -785,7 +789,9 @@ npm run test:conformance
 ```
 
 Maintainer가 다른 fixture를 의도적으로 비교할 때만
-`CLAIRVEIL_CONFORMANCE_FIXTURE_DIR=/path/to/testdata`로 경로를 덮어씁니다.
+`CLAIRVEIL_CONFORMANCE_FIXTURE_DIR=/path/to/testdata` 또는
+`CLAIRVEIL_PROVER_CONFORMANCE_FIXTURE_DIR=/path/to/prover/testdata`로 경로를
+덮어씁니다.
 
 Release handoff 또는 CI에서는 bundled fixture만 사용하는 strict command를
 사용하세요. fixture가 없으면 실패합니다.
@@ -795,11 +801,11 @@ npm run test:conformance:required
 ```
 
 `npm run verify:clairveil-source`라는 release script 이름은 호환성을 위해
-유지합니다. 고정 metadata와 local SHA-256 manifest를 확인한 뒤 protobuf 4개,
-fixture 12개, JSON Schema 1개를 주장한 git commit과 byte-for-byte로 대조합니다.
-`CLAIRVEIL_SOURCE_DIR`로 해당 commit을 가진 Clairveil checkout을 지정할 수 있고,
-없으면 sibling `../clairveil`을 사용합니다. checkout 또는 commit object가 없으면
-fail-closed합니다.
+유지합니다. lifecycle snapshot의 protobuf 4개, fixture 12개, wallet JSON
+Schema 1개를 exact commit과 대조하고, prover fixture 2개와 prover HTTP JSON
+Schema를 exact annotated Core `v0.4.0` tag와 별도로 byte-for-byte 대조합니다.
+`CLAIRVEIL_SOURCE_DIR`로 두 identity를 가진 Clairveil checkout을 지정할 수 있고,
+없으면 sibling `../clairveil`을 사용합니다. 어느 identity든 없으면 fail-closed합니다.
 
 Canonical EVM `IPrivacy` interface는 특정 downstream EVM 구현과 독립적인
 SDK 소유 계약입니다. `npm run verify:evm-contract`는 bundled contract version과
@@ -815,7 +821,7 @@ Reservation conformance test는 fixture의 allowed/rejected 전이를
 `prepublishOnly`는 `verify:release:integration`을 실행합니다. Package 검사,
 required conformance fixture, 필수 Cosmos localnet·testnet full-flow와 pinned
 5-shape one-proof matrix, downstream EVM full-flow evidence gate를 모두 실행하며
-owner/relayer wallet, local/testnet node, deposit-proof, prover, EVM driver 설정이
+owner/relayer wallet, local/testnet node, prover, EVM driver 설정이
 없으면 skip하지 않고 실패합니다.
 
 검증 범위:
@@ -830,7 +836,7 @@ owner/relayer wallet, local/testnet node, deposit-proof, prover, EVM driver 설�
 
 ## Cosmos Node E2E와 Release Gate
 
-Local node E2E는 일반 개발에서는 opt-in이지만 `npm publish`에는 필수입니다. Release 환경은 Clairveil node, 명시적으로 선택한 prover 한 곳, owner와 별도 relayer wallet credential, audit disclosure private scalar, deposit-proof provider를 제공해야 합니다.
+Local node E2E는 일반 개발에서는 opt-in이지만 `npm publish`에는 필수입니다. Release 환경은 canonical deposit route를 포함하는 명시적 prover 한 곳, Clairveil node, owner와 별도 relayer wallet credential, audit disclosure private scalar를 제공해야 합니다. Deposit proof module은 선택적 local override입니다.
 
 현재 local e2e scope:
 
@@ -851,15 +857,13 @@ CLAIRVEIL_E2E_LOCAL=1 npm run test:e2e:local
 `privacy_scan`, nullifier batch status, audit/disclosure config, reserve
 invariant를 포함하는 Clairveil v0.3.1 query preflight를 수행합니다.
 
-Full flow까지 실행하려면 wallet module과 deposit proof module을 함께 넘기세요. Deposit proof module은 `default`, `createDepositProof`, 또는 `depositProofProvider`를 export하고 `{ proof }`, `{ depositProof }`, `{ proofHex }`, `{ proof_hex }` 같은 proof bytes 또는 proof hex를 반환해야 합니다.
+Full flow에는 wallet module을 넘깁니다. Deposit은 기본 prover의 canonical route를 사용합니다. 선택적 override module은 `default`, `createDepositProof`, 또는 `depositProofProvider`를 export합니다. Cosmos callback에는 deep-frozen canonical v1 `{ version, payload }`만 전달되며 SDK가 만든 deposit material, memo, creator, denom, encrypted note, seed와 chain ID는 붙지 않습니다. Module은 canonical nested response 또는 `{ proof }`, `{ depositProof }`, `{ proofHex }`, `{ proof_hex }` 같은 proof bytes/hex를 반환할 수 있습니다.
 
 ```bash
 CLAIRVEIL_E2E_LOCAL=1 \
 CLAIRVEIL_E2E_FULL_FLOW=1 \
 CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
 CLAIRVEIL_E2E_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs \
-CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<audit-private-scalar> \
-CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<auditor-private-scalar-hex> \
 npm run test:e2e:local
 ```
@@ -872,8 +876,6 @@ CLAIRVEIL_E2E_FULL_FLOW=1 \
 CLAIRVEIL_E2E_ONE_PROOF_BATCH=1 \
 CLAIRVEIL_E2E_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
 CLAIRVEIL_E2E_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs \
-CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<audit-private-scalar> \
-CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 CLAIRVEIL_E2E_AUDIT_DISCLOSURE_PRIVKEY_HEX=<auditor-private-scalar-hex> \
 npm run test:e2e:local
 ```
@@ -882,14 +884,14 @@ npm run test:e2e:local
 
 필수 `test:e2e:local:one-proof-all` 릴리스 명령은 deployment, wallet,
 prover, timeout 값을 `CLAIRVEIL_E2E_LOCAL_*` 변수에서 읽습니다. 예를 들어
-`CLAIRVEIL_E2E_LOCAL_WALLET_MODULE`과
-`CLAIRVEIL_E2E_LOCAL_DEPOSIT_PROOF_MODULE`을 사용합니다. 위의 prefix 없는
-변수는 standalone `test:e2e:local` 개발 명령에서 계속 사용할 수 있습니다.
+`CLAIRVEIL_E2E_LOCAL_WALLET_MODULE`을 사용합니다. Canonical route 대신 local
+module을 쓰려면 `CLAIRVEIL_E2E_LOCAL_DEPOSIT_PROOF_MODULE`을 추가합니다. 위의
+prefix 없는 변수는 standalone `test:e2e:local` 개발 명령에서 계속 사용할 수 있습니다.
 
 Mnemonic 기반 E2E wallet은 `CLAIRVEIL_E2E_COIN_TYPE` 또는 전체 `CLAIRVEIL_E2E_HD_PATH` 중 하나를 받을 수 있습니다. Clairveil v0.3.1 reference CLI keyring은 coin type `60`을 사용하며, 둘 다 생략하면 CosmJS 기본값 `118`을 사용합니다. Wallet module은 자체 derivation path를 책임집니다.
 
 필수 Cosmos downstream testnet gate는 전체 flow와 pinned 5-shape를 모두
-실행합니다. 아래 7개 deployment 값은 전부 필수이며 testnet mode는 local
+실행합니다. 아래 deployment 값은 전부 필수이며 testnet mode는 local
 chain ID와 loopback RPC, REST, prover URL을 거부합니다.
 
 ```bash
@@ -902,12 +904,11 @@ CLAIRVEIL_E2E_TESTNET_SHIELDED_PREFIX=<shielded-prefix> \
 CLAIRVEIL_E2E_TESTNET_DENOM=<native-denom> \
 CLAIRVEIL_E2E_TESTNET_WALLET_MODULE=/absolute/path/to/wallet-adapter.mjs \
 CLAIRVEIL_E2E_TESTNET_RELAYER_WALLET_MODULE=/absolute/path/to/relayer-wallet-adapter.mjs \
-CLAIRVEIL_E2E_TESTNET_DEPOSIT_PROOF_MODULE=/absolute/path/to/deposit-proof-provider.mjs \
 CLAIRVEIL_E2E_TESTNET_AUDIT_DISCLOSURE_PRIVKEY_HEX=<auditor-private-scalar-hex> \
 npm run test:e2e:cosmos:testnet
 ```
 
-릴리스 환경에서 testnet·wallet·deposit proof credential까지 준비되었다면
+릴리스 환경에서 testnet·wallet·prover credential까지 준비되었다면
 `npm run verify:release:integration`을 실행하세요. 이 명령은 wallet-contract
 JSON Schema, required Go fixture, Cosmos localnet·testnet full flow, 모든
 pinned one-proof shape와 아래의 downstream EVM 동작을 검사하며 필요한 설정이

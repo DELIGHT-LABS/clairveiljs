@@ -40,10 +40,13 @@ import {
   reservationReconciliationFields
 } from "../privacy/reservation-workflow.js";
 import {
+  buildDepositProofRequestV1,
   createHttpDepositProofProvider,
+  createHttpDepositProofProviderV1,
   createHttpProverAdapter,
   defaultDepositProofTimeoutMs,
-  defaultProverResponseMaxBytes
+  defaultProverResponseMaxBytes,
+  normalizeDepositProofProviderResultV1
 } from "../privacy/prover.js";
 
 const defaultFetchTimeoutMs = 30000;
@@ -929,6 +932,26 @@ function scanOptionsFromBody(body = {}) {
 
 function typedWalletScanOptionsFromBody(body = {}) {
   const scan = body.scan || {};
+  const eventCursorAliases = [
+    scan.afterHeight,
+    scan.after_height,
+    scan.afterSequence,
+    scan.after_sequence,
+    body.scanAfterHeight,
+    body.scan_after_height,
+    body.scanAfterSequence,
+    body.scan_after_sequence,
+    body.afterHeight,
+    body.after_height,
+    body.afterSequence,
+    body.after_sequence
+  ];
+  if (eventCursorAliases.some(value => value !== undefined && value !== null)) {
+    throw new Error(
+      "wallet and spend scans require the full typed after cursor; " +
+      "afterHeight/afterSequence aliases are not supported"
+    );
+  }
   const eventTypeAliases = [
     scan.eventTypes,
     scan.event_types,
@@ -1168,9 +1191,9 @@ export class ClairveilBrowserClient {
     this.configuredProverAdapter = proverAdapter || null;
     this.proverBearerToken = String(proverBearerToken || "").trim();
     this.proverTimeoutMs = proverTimeoutMs;
-    // Deposit proof traffic is a distinct privacy boundary from the transfer
-    // prover. A validated profile may pin one exact endpoint; never inherit or
-    // derive it from proverUrl.
+    // An explicit deposit endpoint remains an override. Cosmos profiles may
+    // otherwise use the canonical deposit route exposed by proverUrl; EVM
+    // profiles keep their explicit provider/URL resolution contract.
     this.depositProofUrl = String(hasProfile ? resolved.depositProofUrl || "" : depositProofUrl || "").trim();
     this.configuredDepositProofProvider = depositProofProvider || null;
     this.depositProofTimeoutMs = normalizeTimeoutMs(depositProofTimeoutMs, "depositProofTimeoutMs");
@@ -1280,20 +1303,33 @@ export class ClairveilBrowserClient {
     });
   }
 
-  /**
-   * Resolve a DepositCircuit provider without ever treating the main prover
-   * base URL as a deposit endpoint. Local/WASM callers can inject a provider;
-   * otherwise the exact profile URL receives a bounded, strict HTTP request.
-   */
-  depositProofProvider(provider = null) {
+  /** Resolve a DepositCircuit provider for the active transport. */
+  depositProofProvider(provider = null, walletType = this.defaultWalletType) {
     if (provider) return provider;
     if (this.configuredDepositProofProvider) return this.configuredDepositProofProvider;
-    if (!this.depositProofUrl) return null;
-    return createHttpDepositProofProvider({
-      url: this.depositProofUrl,
+    if (this.depositProofUrl) {
+      const createProvider = walletType === "cosmos"
+        ? createHttpDepositProofProviderV1
+        : createHttpDepositProofProvider;
+      return createProvider({
+        url: this.depositProofUrl,
+        ...(walletType === "cosmos" ? { bearerToken: this.proverBearerToken } : {}),
+        timeoutMs: this.depositProofTimeoutMs,
+        maxResponseBytes: this.depositProofResponseMaxBytes
+      });
+    }
+    if (walletType !== "cosmos") return null;
+    if (typeof this.configuredProverAdapter?.proveDeposit === "function") {
+      return this.configuredProverAdapter.proveDeposit.bind(this.configuredProverAdapter);
+    }
+    if (!this.proverUrl) return null;
+    const adapter = createHttpProverAdapter({
+      baseURL: this.proverUrl,
+      bearerToken: this.proverBearerToken,
       timeoutMs: this.depositProofTimeoutMs,
       maxResponseBytes: this.depositProofResponseMaxBytes
     });
+    return adapter.proveDeposit.bind(adapter);
   }
 
   async health({ allowUninitializedTree = false } = {}) {
@@ -1877,6 +1913,13 @@ export class ClairveilBrowserClient {
 
   async prepareDeposit(body) {
     const walletType = this.walletTypeFromBody(body);
+    const signal = body.signal;
+    const cosmosGasLimit = walletType === "cosmos"
+      ? resolveBrowserCosmosGasLimit(body.gasLimit, body.gas_limit, 2500000)
+      : undefined;
+    const cosmosFeeAmount = walletType === "cosmos"
+      ? resolveBrowserCosmosFeeAmount(body.feeAmount, body.fee_amount)
+      : undefined;
     if (walletType === "evm") {
       await this.assertEvmPreparationNetwork(body);
       if (this.evmDepositMode === evmDepositModePayableExactValue) {
@@ -1912,7 +1955,10 @@ export class ClairveilBrowserClient {
         body.depositProofProvider !== body.deposit_proof_provider) {
       throw new Error("depositProofProvider aliases conflict");
     }
-    const resolvedDepositProofProvider = this.depositProofProvider(suppliedDepositProofProvider);
+    const resolvedDepositProofProvider = this.depositProofProvider(
+      suppliedDepositProofProvider,
+      walletType
+    );
     if (!depositProof && !depositProofHex && typeof resolvedDepositProofProvider === "function") {
       depositMaterial = depositMaterial ?? this.cosmos.buildDepositMaterial({
         creator: material.address,
@@ -1920,21 +1966,57 @@ export class ClairveilBrowserClient {
         amount,
         assetDenom: this.denom
       });
-      const proof = await resolvedDepositProofProvider({
-        material: depositMaterial,
-        amount: depositMaterial.amount,
-        note: depositMaterial.note,
-        noteJson: depositMaterial.note_json,
-        note_json: depositMaterial.note_json,
-        noteCommitmentHex: depositMaterial.note_commitment_hex,
-        note_commitment_hex: depositMaterial.note_commitment_hex,
-        signal: body.signal
-      });
-      depositProof = proof?.proof ?? proof?.depositProof ?? proof?.deposit_proof ?? null;
-      depositProofHex = proof?.proofHex ?? proof?.proof_hex ?? proof?.depositProofHex ?? proof?.deposit_proof_hex ?? "";
+      if (walletType === "cosmos") {
+        // A deposit proof request exposes receiver keys, amount, asset ID,
+        // randomness, and commitment. Confirm the active circuit/asset mapping
+        // before crossing that privacy boundary. The low-level preparation
+        // repeats this check so direct callers retain the same fail-closed rule.
+        await this.cosmos.assertProtocolPreflight(this.denom);
+        // Reject every proof-independent material mismatch before exposing the
+        // private witness to an injected or remote prover.
+        depositMaterial = this.cosmos.validateDepositMaterial({
+          depositMaterial,
+          creator: material.address,
+          rootSeed: material.rootSeed,
+          amount,
+          assetDenom: this.denom
+        }).material;
+        const request = buildDepositProofRequestV1({ material: depositMaterial });
+        // The injected Cosmos prover receives only the canonical, deeply frozen
+        // v0.4 request. Execution controls remain in the separate options
+        // argument so local providers cannot inspect browser-side material.
+        const response = await resolvedDepositProofProvider(request, { signal });
+        // Rebuild after the async provider boundary so a caller cannot swap a
+        // supplied material object between proving and sign-doc construction.
+        const currentRequest = buildDepositProofRequestV1({ material: depositMaterial });
+        const validated = normalizeDepositProofProviderResultV1(currentRequest, response);
+        depositProofHex = validated.proof.proof_hex;
+      } else {
+        // Preserve the existing EVM provider contract. The v0.4 canonical
+        // request/response boundary is enabled only for Cosmos preparation.
+        const proof = await resolvedDepositProofProvider({
+          material: depositMaterial,
+          amount: depositMaterial.amount,
+          note: depositMaterial.note,
+          noteJson: depositMaterial.note_json,
+          note_json: depositMaterial.note_json,
+          noteCommitmentHex: depositMaterial.note_commitment_hex,
+          note_commitment_hex: depositMaterial.note_commitment_hex,
+          signal
+        });
+        const nestedProof = proof?.proof && typeof proof.proof === "object" &&
+          !ArrayBuffer.isView(proof.proof) && !Array.isArray(proof.proof) &&
+          !(proof.proof instanceof ArrayBuffer)
+          ? proof.proof
+          : null;
+        depositProof = nestedProof
+          ? null
+          : proof?.proof ?? proof?.depositProof ?? proof?.deposit_proof ?? null;
+        depositProofHex = nestedProof?.proof_hex ?? proof?.proofHex ?? proof?.proof_hex ?? proof?.depositProofHex ?? proof?.deposit_proof_hex ?? "";
+      }
     }
     if (!depositProof && !depositProofHex) {
-      throw new Error("deposit proof is required; provide proof/proofHex, a depositProofProvider, or the active profile's depositProofUrl");
+      throw new Error("deposit proof is required; provide proof/proofHex, a depositProofProvider, depositProofUrl, or a Cosmos proverUrl");
     }
     if (walletType === "evm") {
       const built = this.evm.buildDepositTransaction({
@@ -1963,10 +2045,8 @@ export class ClairveilBrowserClient {
       material,
       depositMaterial,
       amount,
-      gasLimit: body.gasLimit,
-      gas_limit: body.gas_limit,
-      feeAmount: body.feeAmount,
-      fee_amount: body.fee_amount,
+      gasLimit: cosmosGasLimit,
+      feeAmount: cosmosFeeAmount,
       proof: depositProof,
       proofHex: depositProofHex
     });
@@ -1987,6 +2067,7 @@ export class ClairveilBrowserClient {
 
   async prepareTransfer(body) {
     const walletType = this.walletTypeFromBody(body);
+    const scanOptions = typedWalletScanOptionsFromBody(body);
     if (walletType === "evm") await this.assertEvmPreparationNetwork(body);
     const expiresAtUnix = browserAliasedInputValue(
       body,
@@ -2010,7 +2091,6 @@ export class ClairveilBrowserClient {
     const userDisclosureTargetPubKeyHex = body.disclosurePubKeyHex ?? body.disclosure_pubkey_hex ?? "";
     const auditDisclosureTargetPubKeyHex = auditTargetBindingFromBody(body);
     const allowPlanStep = Boolean(body.allowPlanStep ?? body.allow_plan_step);
-    const scanOptions = typedWalletScanOptionsFromBody(body);
     const reservationManager = body.reservationManager ?? body.reservation_manager ?? null;
     const suppliedProverAdapter = body.proverAdapter ?? body.prover_adapter;
     const gasLimit = resolveBrowserCosmosGasLimit(body.gasLimit, body.gas_limit, 8000000);
@@ -2191,6 +2271,7 @@ export class ClairveilBrowserClient {
 
   async prepareTransferBatch(body) {
     const walletType = this.walletTypeFromBody(body);
+    const scanOptions = typedWalletScanOptionsFromBody(body);
     if (walletType === "evm") await this.assertEvmPreparationNetwork(body);
     const suppliedProverAdapter = browserAliasedInputValue(
       body,
@@ -2272,7 +2353,6 @@ export class ClairveilBrowserClient {
     const payments = body.payments;
     const amounts = body.amounts;
     const recipient = body.recipient;
-    const scanOptions = typedWalletScanOptionsFromBody(body);
     const authorization = browserAliasedInputValue(
       body,
       "authorization",
@@ -2552,6 +2632,7 @@ export class ClairveilBrowserClient {
       canonicalBrowserAliasScalar
     );
     const walletType = this.walletTypeFromBody(body);
+    const scanOptions = typedWalletScanOptionsFromBody(body);
     if (walletType === "evm") await this.assertEvmPreparationNetwork(body);
     const material = this.privacyMaterial(body, walletType);
     const amount = body.amount;
@@ -2579,7 +2660,7 @@ export class ClairveilBrowserClient {
       amount,
       recipient,
       assetDenom: this.denom,
-      scan: typedWalletScanOptionsFromBody(body),
+      scan: scanOptions,
       expiresAtUnix,
       chainNowUnix,
       gasLimit,
@@ -2639,6 +2720,7 @@ export class ClairveilBrowserClient {
     );
     const chainNowUnix = relayChainNowUnixFromBody(body);
     const walletType = this.walletTypeFromBody(body);
+    const scanOptions = typedWalletScanOptionsFromBody(body);
     if (walletType === "evm") await this.assertEvmPreparationNetwork(body);
     const material = this.privacyMaterial(body, walletType);
     const amount = body.amount;
@@ -2663,7 +2745,7 @@ export class ClairveilBrowserClient {
       signal: body.signal,
       amount,
       recipient,
-      scan: typedWalletScanOptionsFromBody(body),
+      scan: scanOptions,
       expiresAtUnix,
       chainNowUnix,
       reservationManager,
@@ -2760,13 +2842,13 @@ export class ClairveilBrowserClient {
   }
 
   async scanWalletNotes(body) {
+    const scanOptions = typedWalletScanOptionsFromBody(body);
     const material = this.privacyMaterial(body);
     const {
       noteStore,
       note_store,
       includeFoundNotes = false
     } = body || {};
-    const scanOptions = typedWalletScanOptionsFromBody(body);
     return this.cosmos.scanWalletNotes({
       material,
       ...scanOptions,

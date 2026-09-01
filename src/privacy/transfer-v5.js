@@ -15,6 +15,7 @@ import {
   packPoint,
   unpackPointHex
 } from "../core/crypto.js";
+import { bn254 } from "@noble/curves/bn254.js";
 import { randomBytes, sha256Hex } from "../core/browser-crypto.js";
 import {
   createNote,
@@ -52,6 +53,170 @@ export const joinSplitOwnerIntentSigningRequestV1Version = "joinsplit-owner-inte
 
 const maxShieldedAmount = (1n << 64n) - 1n;
 const transferV5MerklePathDepth = 32;
+const canonicalGroth16ProofByteLength = 164;
+const gnarkPointMetadataMask = 0xc0;
+const gnarkCompressedInfinity = 0x40;
+const gnarkCompressedSmallest = 0x80;
+const gnarkCompressedLargest = 0xc0;
+const bn254BaseField = bn254.fields.Fp;
+const bn254QuadraticField = bn254.fields.Fp2;
+
+function bigIntFromBytesBE(value) {
+  let result = 0n;
+  for (const byte of value) result = (result << 8n) | BigInt(byte);
+  return result;
+}
+
+function fixedBigEndianBytes(value, size = 32) {
+  let parsed = BigInt(value);
+  const output = new Uint8Array(size);
+  for (let index = size - 1; index >= 0; index -= 1) {
+    output[index] = Number(parsed & 0xffn);
+    parsed >>= 8n;
+  }
+  if (parsed !== 0n) throw new Error(`integer does not fit in ${size} bytes`);
+  return output;
+}
+
+function equalBytes(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
+function lexicographicallyLargestBaseField(value) {
+  return value > (bn254BaseField.ORDER - 1n) / 2n;
+}
+
+function lexicographicallyLargestQuadraticField(value) {
+  return value.c1 === 0n
+    ? lexicographicallyLargestBaseField(value.c0)
+    : lexicographicallyLargestBaseField(value.c1);
+}
+
+function gnarkPointMetadata(encoded, label) {
+  const metadata = encoded[0] & gnarkPointMetadataMask;
+  if (metadata !== gnarkCompressedInfinity &&
+      metadata !== gnarkCompressedSmallest &&
+      metadata !== gnarkCompressedLargest) {
+    throw new Error(`${label} is not compressed`);
+  }
+  return metadata;
+}
+
+function canonicalGnarkInfinity(encoded, metadata, label) {
+  if (metadata !== gnarkCompressedInfinity) return false;
+  const data = Uint8Array.from(encoded);
+  data[0] &= ~gnarkPointMetadataMask;
+  if (data.some(byte => byte !== 0)) throw new Error(`${label} has a non-canonical infinity encoding`);
+  return true;
+}
+
+function decodeCanonicalGnarkG1(encoded, label) {
+  const metadata = gnarkPointMetadata(encoded, label);
+  if (canonicalGnarkInfinity(encoded, metadata, label)) return;
+  const xBytes = Uint8Array.from(encoded);
+  xBytes[0] &= ~gnarkPointMetadataMask;
+  const x = bigIntFromBytesBE(xBytes);
+  if (x >= bn254BaseField.ORDER) throw new Error(`${label} x-coordinate is not canonical`);
+  let y;
+  try {
+    const xCubed = bn254BaseField.mul(bn254BaseField.sqr(x), x);
+    y = bn254BaseField.sqrt(bn254BaseField.add(xCubed, 3n));
+  } catch (error) {
+    throw new Error(`${label} is not on the BN254 curve: ${error.message}`);
+  }
+  const wantsLargest = metadata === gnarkCompressedLargest;
+  if (lexicographicallyLargestBaseField(y) !== wantsLargest) y = bn254BaseField.neg(y);
+  try {
+    bn254.G1.Point.fromAffine({ x, y }).assertValidity();
+  } catch (error) {
+    throw new Error(`${label} failed the BN254 subgroup check: ${error.message}`);
+  }
+  const roundTrip = fixedBigEndianBytes(x);
+  roundTrip[0] |= lexicographicallyLargestBaseField(y)
+    ? gnarkCompressedLargest
+    : gnarkCompressedSmallest;
+  if (!equalBytes(roundTrip, encoded)) throw new Error(`${label} is not canonically encoded`);
+}
+
+function decodeCanonicalGnarkG2(encoded, label) {
+  const metadata = gnarkPointMetadata(encoded, label);
+  if (canonicalGnarkInfinity(encoded, metadata, label)) return;
+  const a1Bytes = encoded.slice(0, 32);
+  a1Bytes[0] &= ~gnarkPointMetadataMask;
+  const a1 = bigIntFromBytesBE(a1Bytes);
+  const a0 = bigIntFromBytesBE(encoded.slice(32, 64));
+  if (a0 >= bn254BaseField.ORDER || a1 >= bn254BaseField.ORDER) {
+    throw new Error(`${label} x-coordinate is not canonical`);
+  }
+  const x = bn254QuadraticField.fromBigTuple([a0, a1]);
+  let y;
+  try {
+    const xCubed = bn254QuadraticField.mul(bn254QuadraticField.sqr(x), x);
+    const ySquared = bn254QuadraticField.add(
+      xCubed,
+      bn254QuadraticField.mulByB(bn254QuadraticField.ONE)
+    );
+    y = bn254QuadraticField.sqrt(ySquared);
+  } catch (error) {
+    throw new Error(`${label} is not on the BN254 twist: ${error.message}`);
+  }
+  const wantsLargest = metadata === gnarkCompressedLargest;
+  if (lexicographicallyLargestQuadraticField(y) !== wantsLargest) {
+    y = bn254QuadraticField.neg(y);
+  }
+  try {
+    bn254.G2.Point.fromAffine({ x, y }).assertValidity();
+  } catch (error) {
+    throw new Error(`${label} failed the BN254 subgroup check: ${error.message}`);
+  }
+  const roundTrip = new Uint8Array(64);
+  roundTrip.set(fixedBigEndianBytes(x.c1), 0);
+  roundTrip.set(fixedBigEndianBytes(x.c0), 32);
+  roundTrip[0] |= lexicographicallyLargestQuadraticField(y)
+    ? gnarkCompressedLargest
+    : gnarkCompressedSmallest;
+  if (!equalBytes(roundTrip, encoded)) throw new Error(`${label} is not canonically encoded`);
+}
+
+function canonicalGroth16ProofBytes(value, label) {
+  if (typeof value === "string") {
+    if (value.length !== canonicalGroth16ProofByteLength * 2 || !/^[0-9a-f]+$/.test(value)) {
+      throw new Error(`${label} must be exactly ${canonicalGroth16ProofByteLength * 2} lowercase hex characters`);
+    }
+    return bytesFromHex(value, label);
+  }
+  if (value instanceof Uint8Array) return Uint8Array.from(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  }
+  if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+  if (Array.isArray(value)) {
+    if (value.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 0xff)) {
+      throw new Error(`${label} byte array must contain only integers from 0 through 255`);
+    }
+    return Uint8Array.from(value);
+  }
+  throw new Error(`${label} must be bytes or lowercase hex`);
+}
+
+/** Match Core ValidateCanonicalProofBN254's exact gnark decode/encode contract. */
+export function validateCanonicalGroth16ProofBytes(value, label = "proof") {
+  const proof = canonicalGroth16ProofBytes(value, label);
+  if (proof.length !== canonicalGroth16ProofByteLength) {
+    throw new Error(`${label} must be exactly ${canonicalGroth16ProofByteLength} bytes`);
+  }
+  decodeCanonicalGnarkG1(proof.slice(0, 32), `${label} point at offset 0`);
+  decodeCanonicalGnarkG2(proof.slice(32, 96), `${label} point at offset 32`);
+  decodeCanonicalGnarkG1(proof.slice(96, 128), `${label} point at offset 96`);
+  if (proof.slice(128, 132).some(byte => byte !== 0)) {
+    throw new Error(`${label} commitments are not supported`);
+  }
+  decodeCanonicalGnarkG1(proof.slice(132, 164), `${label} point at offset 132`);
+  return proof;
+}
 
 const transferPrivacyPolicies = Object.freeze({
   "all-private": 0,
@@ -973,11 +1138,7 @@ export function validatePreparedTransferV5Proof(payload, proof, { nowUnix } = {}
   if (!proof || proof.version !== preparedTransferV5ProofVersion) throw new Error(`unsupported transfer v5 proof version ${JSON.stringify(proof?.version)}`);
   if (proof.payload_hash !== payload.payload_hash) throw new Error("transfer v5 proof payload hash mismatch");
   const proofHex = opaqueHex(proof.proof_hex, "transfer v5 proof", { exactLength: 164 });
-  const proofBytes = bytesFromHex(proofHex, "transfer v5 proof");
-  for (const offset of [0, 32, 96, 132]) {
-    if ((proofBytes[offset] & 0xc0) === 0) throw new Error(`transfer v5 proof point at offset ${offset} is not compressed`);
-  }
-  if (proofBytes.slice(128, 132).some(byte => byte !== 0)) throw new Error("transfer v5 proof commitments are not supported");
+  validateCanonicalGroth16ProofBytes(proofHex, "transfer v5 proof");
   return true;
 }
 

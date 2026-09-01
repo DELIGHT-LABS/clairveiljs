@@ -70,7 +70,11 @@ import type {
 import type { PreparedBatchTransferPayload, PreparedBatchTransferProof } from "../privacy/batch-transfer.js";
 import type {
   BatchTransferProverAdapter,
+  DepositProverAdapter,
+  DepositProofRequestV1,
   DepositProofProvider as DepositProofProviderContract,
+  DepositProofProviderResult,
+  ProverRequestOptions,
   ProverAdapter
 } from "../privacy/prover.js";
 import type { MsgBatchTransfer as MsgBatchTransferMessage } from "../generated/clairveil/privacy/v1/tx.js";
@@ -131,7 +135,7 @@ interface BrowserWalletProfileBase {
   displayDenom: string;
   coinDecimals: number;
   proverUrl: string;
-  /** Exact product-reviewed DepositCircuit proof endpoint; never derived from proverUrl. */
+  /** Exact endpoint override: Cosmos uses the v0.4 envelope; EVM preserves the legacy flat wire. */
   depositProofUrl?: string;
 }
 
@@ -264,8 +268,9 @@ export interface ClairveilBrowserClientOptions {
   /** Optional bearer credential for the default HTTP prover adapter. */
   proverBearerToken?: string;
   proverTimeoutMs?: number;
-  /** Optional local/WASM DepositCircuit provider; profile endpoint remains separate from proverUrl. */
+  /** Optional local/WASM DepositCircuit provider; Cosmos otherwise uses the canonical prover route. */
   depositProofProvider?: DepositProofProvider;
+  /** Cosmos uses the v0.4 envelope at this exact URL; EVM preserves the legacy flat wire. */
   depositProofUrl?: string;
   depositProofTimeoutMs?: number;
   depositProofResponseMaxBytes?: number;
@@ -298,7 +303,7 @@ export interface ClairveilBrowserClientOptions {
  * operations still require the method for that operation (transfer,
  * withdraw, or one-proof batch transfer).
  */
-export type BrowserProverAdapter = Partial<ProverAdapter> & Partial<BatchTransferProverAdapter>;
+export type BrowserProverAdapter = Partial<ProverAdapter> & Partial<BatchTransferProverAdapter> & Partial<DepositProverAdapter>;
 
 export interface BrowserHealthResult {
   /** `health()` resolves only after the configured chain, tree, and audit config validate. */
@@ -374,6 +379,12 @@ export interface BrowserWalletIdentityInput {
 
 export type DepositProofProvider = DepositProofProviderContract;
 
+/** Canonical Core v0.4 callback contract used by Cosmos deposit preparation. */
+export type CosmosDepositProofProvider = (
+  input: DepositProofRequestV1,
+  options?: ProverRequestOptions
+) => Promise<DepositProofProviderResult> | DepositProofProviderResult;
+
 /** The connected EVM signing wallet required before an EVM prepare request. */
 export type EvmNetworkWallet = Pick<Eip1193WalletAdapter, "getChainId">;
 
@@ -402,6 +413,11 @@ type DepositProofProviderBinding = {
   deposit_proof_provider?: DepositProofProvider;
 };
 
+type CosmosDepositProofProviderBinding = {
+  depositProofProvider?: CosmosDepositProofProvider;
+  deposit_proof_provider?: CosmosDepositProofProvider;
+};
+
 export type PrepareDepositProofInput =
   | ({ proof: Uint8Array | Hex; proofHex?: Hex; proof_hex?: Hex } & DepositProofProviderBinding)
   | ({ proof?: Uint8Array | Hex; proofHex: Hex; proof_hex?: Hex } & DepositProofProviderBinding)
@@ -420,9 +436,13 @@ export type PrepareDepositBaseInput = Omit<BrowserWalletIdentityInput, "walletTy
   fee_amount?: readonly CosmosFeeCoin[];
 };
 
-export type PrepareCosmosDepositInput = PrepareDepositBaseInput & PrepareDepositProofInput & {
+export type PrepareCosmosDepositInput = PrepareDepositBaseInput & CosmosDepositProofProviderBinding & {
   walletType?: "cosmos";
   wallet_type?: "cosmos";
+  /** Optional when a provider, depositProofUrl, or canonical proverUrl is configured. */
+  proof?: Uint8Array | Hex;
+  proofHex?: Hex;
+  proof_hex?: Hex;
   gasLimit?: number;
   gas_limit?: number;
   /** Exact profile/caller-selected fee coins embedded in the sign doc. */
@@ -1224,8 +1244,8 @@ export class ClairveilBrowserClient<
   assertEvmNetwork(): Promise<string | null>;
   /** Validate the connected EIP-1193 wallet against the active EVM profile. */
   assertEvmWalletNetwork(wallet: EvmNetworkWallet): Promise<string | null>;
-  /** Resolve an injected local/WASM provider or the active profile's pinned endpoint. */
-  depositProofProvider(provider?: DepositProofProvider | null): DepositProofProvider | null;
+  /** Resolve an injected provider, exact override, or the canonical Cosmos prover route. */
+  depositProofProvider(provider?: DepositProofProvider | null, walletType?: BrowserWalletType): DepositProofProvider | null;
   evmNativeSendTransaction(input: { to: string; amount: CoinString }): BrowserEvmNativeSendTransaction;
   /** Submit an EVM transaction while preserving prepared reservation lifecycle state. */
   sendEvmTransaction(input: BrowserEvmTransactionBroadcastInput): Promise<Hex | string>;

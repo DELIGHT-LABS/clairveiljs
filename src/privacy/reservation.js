@@ -851,6 +851,42 @@ function normalizeReservationMetadata(value) {
   return metadata;
 }
 
+const durableReservationErrorCodePattern = /^(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)*|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*)$/;
+const durableReservationErrorCodeMaxLength = 128;
+
+function normalizeDurableReservationErrorCode(value, fallback = "") {
+  const code = String(value ?? "").trim();
+  if (
+    code &&
+    code.length <= durableReservationErrorCodeMaxLength &&
+    durableReservationErrorCodePattern.test(code)
+  ) {
+    return code;
+  }
+  const safeFallback = String(fallback ?? "").trim();
+  return safeFallback &&
+    safeFallback.length <= durableReservationErrorCodeMaxLength &&
+    durableReservationErrorCodePattern.test(safeFallback)
+    ? safeFallback
+    : "";
+}
+
+function explicitDurableReservationErrorCode(input = {}, fallback = "") {
+  for (const field of ["errorCode", "error_code"]) {
+    if (!Object.prototype.hasOwnProperty.call(input, field)) continue;
+    const code = normalizeDurableReservationErrorCode(input[field]);
+    if (code) return code;
+  }
+  return normalizeDurableReservationErrorCode(fallback);
+}
+
+function durableReservationReconcileReason(input = {}, fallback = "") {
+  return normalizeDurableReservationErrorCode(
+    input?.metadata?.reconcile_reason,
+    fallback
+  );
+}
+
 function normalizeReservation(input = {}) {
   const status = normalizeStatus(input.status);
   const createdAt = input.created_at || input.createdAt || nowIso();
@@ -883,6 +919,7 @@ function normalizeReservation(input = {}) {
   if (batchItemIndexKnown && (!batchItemIndex.valid || !batchItemIndex.provided)) {
     throw new Error("batch_item_index must be a non-negative safe integer when known");
   }
+  const metadata = normalizeReservationMetadata(input.metadata);
   return {
     reservation_id: reservationID,
     operation_id: operationID,
@@ -915,10 +952,15 @@ function normalizeReservation(input = {}) {
     submitted_tx_hash: String(input.submitted_tx_hash || input.submittedTxHash || input.txHashSubmitted || ""),
     broadcast_attempt_count: broadcastAttemptCount,
     broadcast_in_flight: broadcastInFlight,
-    last_broadcast_error: String(input.last_broadcast_error || input.lastBroadcastError || ""),
+    // This record is durable. External wallet/prover/RPC prose remains on the
+    // transient thrown error and is never copied into reservation storage.
+    last_broadcast_error: normalizeDurableReservationErrorCode(
+      input.last_broadcast_error ?? input.lastBroadcastError,
+      normalizeDurableReservationErrorCode(metadata.reconcile_reason)
+    ),
     created_at: createdAt,
     updated_at: updatedAt,
-    metadata: normalizeReservationMetadata(input.metadata)
+    metadata
   };
 }
 
@@ -968,7 +1010,6 @@ const initialLifecycleMetadataFields = new Set([
   "provider_rejection_code",
   "providerRejectionCode",
   "provider_rejection_codespace",
-  "provider_rejection_log",
   "rpc_invoked",
   "check_tx_rejected",
   "broadcast_aborted_before_rpc",
@@ -1383,7 +1424,6 @@ function assertManagedLifecycleMetadataMutation(current, to, patch = {}, {
     allowed.add("wallet_rejected_before_broadcast");
     allowed.add("provider_rejection_code");
     allowed.add("provider_rejection_codespace");
-    allowed.add("provider_rejection_log");
     allowed.add("rpc_invoked");
     allowed.add("check_tx_rejected");
     allowed.add("broadcast_aborted_before_rpc");
@@ -5151,12 +5191,17 @@ export class NoteReservationManager {
       if (typeof rpcInvoked !== "boolean") {
         throw new Error("broadcast rejection resolution requires rpcInvoked boolean evidence");
       }
+      const reconcileReason = walletRejected === true
+        ? "wallet_rejected_before_broadcast"
+        : abortedBeforeRpc === true
+          ? "broadcast_aborted_before_rpc"
+          : "check_tx_rejected";
       const patch = {
         lease_owner: this.leaseOwner,
         lease_token: leaseToken,
         broadcast_in_flight: false,
         broadcast_attempt_count: Number(current.broadcast_attempt_count || 0),
-        last_broadcast_error: String(metadata.error || metadata.lastBroadcastError || metadata.last_broadcast_error || "broadcast rejected"),
+        last_broadcast_error: explicitDurableReservationErrorCode(metadata, reconcileReason),
         updated_at: now,
         metadata: {
           ...(current.metadata || {}),
@@ -5168,19 +5213,12 @@ export class NoteReservationManager {
           ...(metadata.providerCodespace != null || metadata.provider_codespace != null
             ? { provider_rejection_codespace: String(metadata.providerCodespace ?? metadata.provider_codespace) }
             : {}),
-          ...(metadata.providerLog != null || metadata.provider_log != null
-            ? { provider_rejection_log: String(metadata.providerLog ?? metadata.provider_log) }
-            : {}),
           rpc_invoked: rpcInvoked,
           check_tx_rejected: checkTxRejected === true,
           broadcast_aborted_before_rpc: abortedBeforeRpc === true,
           no_broadcast_attempt: !rpcInvoked,
           proof_discarded: true,
-          reconcile_reason: walletRejected === true
-            ? "wallet_rejected_before_broadcast"
-            : abortedBeforeRpc === true
-              ? "broadcast_aborted_before_rpc"
-              : "check_tx_rejected"
+          reconcile_reason: reconcileReason
         }
       };
       markManagedPatch(patch, managedReservationEvidenceMutation, "broadcast_rejected");
@@ -5227,7 +5265,10 @@ export class NoteReservationManager {
     }
     const patch = {
       lease_token: metadata.leaseToken || metadata.lease_token || "",
-      last_broadcast_error: metadata.error || metadata.lastBroadcastError || metadata.last_broadcast_error || "",
+      last_broadcast_error: explicitDurableReservationErrorCode(
+        metadata,
+        durableReservationReconcileReason(metadata, "broadcast_result_unknown")
+      ),
       broadcast_in_flight: false,
       metadata: {
         ...(metadata.metadata || {}),
@@ -5275,9 +5316,12 @@ export class NoteReservationManager {
       const patch = {
         broadcast_in_flight: false,
         broadcast_attempt_count: Number(current.broadcast_attempt_count || 0),
-        last_broadcast_error: String(
-          metadata.error || metadata.lastBroadcastError || metadata.last_broadcast_error ||
-          "authoritative exact broadcast failure"
+        last_broadcast_error: explicitDurableReservationErrorCode(
+          metadata,
+          durableReservationReconcileReason(
+            metadata,
+            "authoritative_exact_broadcast_failure"
+          )
         ),
         updated_at: now,
         metadata: {
@@ -5426,9 +5470,9 @@ export class NoteReservationManager {
         sign_doc_hash: identity.signDocHash,
         broadcast_in_flight: false,
         broadcast_attempt_count: Number(current.broadcast_attempt_count || 0),
-        last_broadcast_error: String(
-          input.error || input.lastBroadcastError || input.last_broadcast_error ||
-          "authoritative exact broadcast failure recovered after worker restart"
+        last_broadcast_error: explicitDurableReservationErrorCode(
+          input,
+          "expired_proof_ready_authoritative_exact_broadcast_failure"
         ),
         metadata: {
           ...(current.metadata || {}),
@@ -5487,7 +5531,10 @@ export class NoteReservationManager {
     patchIfPresent(patch, "submitted_tx_hash", metadata.txHash ?? metadata.tx_hash);
     patchIfPresent(patch, "tx_bytes_hash", metadata.txBytesHash ?? metadata.tx_bytes_hash);
     patchIfPresent(patch, "sign_doc_hash", metadata.signDocHash ?? metadata.sign_doc_hash);
-    patchIfPresent(patch, "last_broadcast_error", metadata.error ?? metadata.lastBroadcastError ?? metadata.last_broadcast_error);
+    patch.last_broadcast_error = explicitDurableReservationErrorCode(
+      metadata,
+      durableReservationReconcileReason(metadata, "replan_required")
+    );
     const nestedMetadata = metadataObject(metadata);
     if (
       Object.keys(nestedMetadata).length ||
@@ -5578,7 +5625,10 @@ export class NoteReservationManager {
     const patch = {
       lease_token: metadata.leaseToken || metadata.lease_token || "",
       lease_owner: this.leaseOwner,
-      last_broadcast_error: metadata.error || metadata.lastBroadcastError || metadata.last_broadcast_error || "",
+      last_broadcast_error: explicitDurableReservationErrorCode(
+        metadata,
+        durableReservationReconcileReason(metadata, "manual_review_required")
+      ),
       updated_at: now,
       metadata: {
         ...(metadata.metadata || {})

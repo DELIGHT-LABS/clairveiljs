@@ -27,6 +27,7 @@ import {
   validatePrivacyScanPageV2
 } from "clairveiljs/scan";
 import { createAsyncJobProverAdapter, createHttpProverAdapter } from "clairveiljs/prover";
+import { ClairveilErrorCode } from "clairveiljs/errors";
 import { createClairveilClient } from "clairveiljs/cosmos";
 import {
   decodeBatchAuditDisclosureFromScanOutput,
@@ -35,6 +36,13 @@ import {
 } from "clairveiljs/disclosure";
 import { batchTransferConformanceFixtureName } from "clairveiljs/conformance";
 import { fixtureTestOptions, readFixture } from "./helpers.js";
+
+function jsonResponse(body, status = 200, contentType = "application/json") {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: contentType == null ? {} : { "content-type": contentType }
+  });
+}
 
 function batchMerklePaths(notes) {
   const emptyRoots = emptyNoteTreeRootsV1(32);
@@ -213,7 +221,7 @@ test("one-proof batch prover uses the Clairveil v0.3.1 route and binds the respo
     baseURL: "https://prover.example",
     fetchImpl: async (url, init) => {
       call = { url: String(url), body: JSON.parse(init.body) };
-      return new Response(JSON.stringify({
+      return jsonResponse({
         version: "v1",
         proof: {
           version: preparedBatchTransferProofVersion,
@@ -221,7 +229,7 @@ test("one-proof batch prover uses the Clairveil v0.3.1 route and binds the respo
           proof: base64FromBytes(proof),
           circuit_set_id: "privacy-note-v1"
         }
-      }), { status: 200 });
+      });
     }
   });
   const response = await adapter.proveBatchTransfer(payload);
@@ -234,6 +242,42 @@ test("one-proof batch prover uses the Clairveil v0.3.1 route and binds the respo
   assert.equal(message.nullifiers.length, 1);
   assert.equal(message.outputs.length, 1);
   assert.equal(message.creator, "clair1creator");
+});
+
+test("one-proof batch HTTP prover requires JSON media type on success and error", async () => {
+  const payload = await batchPayload();
+  const successBody = {
+    version: "v1",
+    proof: {
+      version: preparedBatchTransferProofVersion,
+      request_payload_hash: payload.payload_hash,
+      proof: base64FromBytes(new Uint8Array(164).fill(7)),
+      circuit_set_id: "privacy-note-v1"
+    }
+  };
+  const errorBody = {
+    version: "v1",
+    code: "proof_failed",
+    message: "must not be parsed without the declared JSON media type",
+    retryable: false
+  };
+
+  for (const [status, body] of [
+    [200, successBody],
+    [500, errorBody]
+  ]) {
+    for (const contentType of [null, "text/plain"]) {
+      const adapter = createHttpProverAdapter({
+        baseURL: "https://prover.example",
+        fetchImpl: async () => jsonResponse(body, status, contentType)
+      });
+      await assert.rejects(
+        () => adapter.proveBatchTransfer(payload),
+        error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+          /Content-Type: application\/json/.test(error.message)
+      );
+    }
+  }
 });
 
 test("one-proof batch rejects identity disclosure targets before encryption", async () => {
@@ -250,6 +294,11 @@ test("one-proof batch rejects identity disclosure targets before encryption", as
 
 test("async prover job adapter supports a batch-only one-proof prover", async () => {
   const payload = await batchPayload();
+  const marker = "private-marker-must-not-cross-prover-boundary";
+  const requestPayload = structuredClone(payload);
+  requestPayload.private_marker = marker;
+  requestPayload.inputs[0].private_marker = marker;
+  requestPayload.outputs[0].private_marker = marker;
   const proof = new Uint8Array(164).fill(13);
   let submitted;
   const adapter = createAsyncJobProverAdapter({
@@ -275,26 +324,108 @@ test("async prover job adapter supports a batch-only one-proof prover", async ()
     intervalMs: 0
   });
 
-  const response = await adapter.proveBatchTransfer(payload);
+  const response = await adapter.proveBatchTransfer(requestPayload);
 
   assert.deepEqual(submitted, { version: "v1", payload });
+  assert.equal(JSON.stringify(submitted).includes(marker), false);
   assert.deepEqual(response.proof.proof_bytes, proof);
   assert.equal(typeof adapter.proveTransfer, "undefined");
   assert.equal(typeof adapter.proveWithdraw, "undefined");
+});
+
+test("batch prover adapters reject missing or falsy versions on explicit envelopes", async () => {
+  const payload = await batchPayload();
+  let httpCalls = 0;
+  let submissions = 0;
+  const adapters = [
+    createHttpProverAdapter({
+      baseURL: "https://prover.example",
+      fetchImpl: async () => {
+        httpCalls += 1;
+        throw new Error("invalid envelope must not reach the prover");
+      }
+    }),
+    createAsyncJobProverAdapter({
+      submitBatchTransferJob: async () => {
+        submissions += 1;
+        throw new Error("invalid envelope must not reach the prover");
+      },
+      getJob: async () => ({ status: "pending" })
+    })
+  ];
+
+  for (const adapter of adapters) {
+    for (const invalidVersion of [undefined, "", null, 0]) {
+      const envelope = invalidVersion === undefined
+        ? { payload }
+        : { version: invalidVersion, payload };
+      await assert.rejects(
+        () => adapter.proveBatchTransfer(envelope),
+        /unsupported batch transfer proof request version/
+      );
+    }
+  }
+  assert.equal(httpCalls, 0);
+  assert.equal(submissions, 0);
+});
+
+test("batch prover adapters validate with the caller's authoritative time", async () => {
+  const payload = await batchPayload();
+  const proof = {
+    version: preparedBatchTransferProofVersion,
+    request_payload_hash: payload.payload_hash,
+    proof: base64FromBytes(new Uint8Array(164).fill(17)),
+    circuit_set_id: "privacy-note-v1"
+  };
+  let httpCalls = 0;
+  let submitCalls = 0;
+  const adapters = [
+    {
+      adapter: createHttpProverAdapter({
+        baseURL: "https://prover.example",
+        fetchImpl: async () => {
+          httpCalls += 1;
+          return jsonResponse({ version: "v1", proof });
+        }
+      }),
+      calls: () => httpCalls
+    },
+    {
+      adapter: createAsyncJobProverAdapter({
+        submitBatchTransferJob: async () => {
+          submitCalls += 1;
+          return { job_id: "authoritative-batch-time" };
+        },
+        getJob: async () => ({ status: "completed", response: { version: "v1", proof } }),
+        intervalMs: 0
+      }),
+      calls: () => submitCalls
+    }
+  ];
+
+  for (const { adapter, calls } of adapters) {
+    await adapter.proveBatchTransfer(payload, { nowUnix: payload.expires_at_unix - 1 });
+    assert.equal(calls(), 1);
+    await assert.rejects(
+      () => adapter.proveBatchTransfer(payload, { nowUnix: payload.expires_at_unix }),
+      /prepared batch transfer payload expired/
+    );
+    assert.equal(calls(), 1);
+  }
 });
 
 test("one-proof batch prover rejects a proof bound to another prepared operation", async () => {
   const payload = await batchPayload();
   const adapter = createHttpProverAdapter({
     baseURL: "https://prover.example",
-    fetchImpl: async () => new Response(JSON.stringify({
+    fetchImpl: async () => jsonResponse({
       version: "v1",
       proof: {
         version: preparedBatchTransferProofVersion,
         request_payload_hash: "0000000000000000000000000000000000000000000000000000000000000006",
         proof: base64FromBytes(new Uint8Array(164))
       }
-    }), { status: 200 })
+    })
   });
   await assert.rejects(() => adapter.proveBatchTransfer(payload), /payload hash mismatch/);
 });

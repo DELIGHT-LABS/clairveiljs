@@ -67,6 +67,29 @@ export function plannerStatusToErrorCode(status) {
   }
 }
 
+const proverTransportErrorCodes = new Set([
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ETIMEDOUT"
+]);
+
+function isBrowserFetchNetworkError(error, message) {
+  if (error?.name !== "TypeError" && error?.name !== "NetworkError") return false;
+  const normalized = String(message || "").trim();
+  return /^(?:fetch failed|failed to fetch|load failed)$/i.test(normalized) ||
+    /^NetworkError when attempting to fetch resource\.?$/i.test(normalized);
+}
+
+function isProverTransportError(error, message) {
+  const transportCode = error?.code ?? error?.cause?.code;
+  return proverTransportErrorCodes.has(String(transportCode || "").toUpperCase()) ||
+    isBrowserFetchNetworkError(error, message);
+}
+
 export function wrapProverError(error) {
   const message = error?.message || String(error);
   const details = { cause: error };
@@ -86,7 +109,15 @@ export function wrapProverError(error) {
   if (/timed out|abort/i.test(message)) {
     return wrapped(ClairveilErrorCode.PROVER_TIMEOUT);
   }
-  if (error?.retryable === true || /status\s+(?:429|5\d\d)|unavailable|ECONNREFUSED|fetch failed/i.test(message)) {
+  if (error?.proverCode) {
+    if (error.proverCode === "busy" || error.proverCode === "unavailable") {
+      return wrapped(ClairveilErrorCode.PROVER_UNAVAILABLE);
+    }
+    return wrapped(ClairveilErrorCode.PROVER_REJECTED);
+  }
+  const status = Number.isInteger(error?.status) ? error.status : undefined;
+  if (error?.retryable === true || status === 429 || (status >= 500 && status <= 599) ||
+      isProverTransportError(error, message)) {
     return wrapped(ClairveilErrorCode.PROVER_UNAVAILABLE);
   }
   return wrapped(ClairveilErrorCode.PROVER_REJECTED);

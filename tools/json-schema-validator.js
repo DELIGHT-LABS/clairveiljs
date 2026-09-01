@@ -24,10 +24,17 @@ function sameJson(left, right) {
 }
 
 function validate(root, schema, value, path, errors) {
-  if (!schema || typeof schema !== "object") return;
+  if (schema === true) return;
+  if (schema === false) {
+    errors.push(`${path} is not allowed`);
+    return;
+  }
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    throw new Error(`invalid JSON Schema at ${path}`);
+  }
   if (schema.$ref) {
     const target = resolveReference(root, schema.$ref);
-    if (!target) throw new Error(`unresolved JSON Schema reference ${schema.$ref}`);
+    if (target === undefined) throw new Error(`unresolved JSON Schema reference ${schema.$ref}`);
     validate(root, target, value, path, errors);
     return;
   }
@@ -69,7 +76,16 @@ function validate(root, schema, value, path, errors) {
     if (schema.minItems != null && value.length < schema.minItems) errors.push(`${path} has fewer than minItems`);
     if (schema.maxItems != null && value.length > schema.maxItems) errors.push(`${path} has more than maxItems`);
     if (schema.uniqueItems && new Set(value.map(entry => JSON.stringify(entry))).size !== value.length) errors.push(`${path} must have unique items`);
-    if (schema.items) value.forEach((entry, index) => validate(root, schema.items, entry, `${path}[${index}]`, errors));
+    const prefixItems = Array.isArray(schema.prefixItems) ? schema.prefixItems : [];
+    for (const [index, entrySchema] of prefixItems.entries()) {
+      if (index < value.length) validate(root, entrySchema, value[index], `${path}[${index}]`, errors);
+    }
+    if (Object.hasOwn(schema, "items")) {
+      const start = prefixItems.length;
+      for (let index = start; index < value.length; index += 1) {
+        validate(root, schema.items, value[index], `${path}[${index}]`, errors);
+      }
+    }
   }
   if (value && typeof value === "object" && !Array.isArray(value)) {
     for (const required of schema.required || []) {
@@ -92,14 +108,20 @@ function validate(root, schema, value, path, errors) {
 }
 
 /** Return a concise list of schema violations for a root $ref or schema object. */
-export function validateJsonSchema(root, value, schema = root) {
+export function validateJsonSchema(root, value, schema) {
+  const selectedSchema = arguments.length >= 3 ? schema : root;
+  if (selectedSchema === undefined) {
+    throw new Error("JSON Schema selection is undefined");
+  }
   const errors = [];
-  validate(root, schema, value, "$", errors);
+  validate(root, selectedSchema, value, "$", errors);
   return errors;
 }
 
-export function assertJsonSchema(root, value, schema = root) {
-  const errors = validateJsonSchema(root, value, schema);
+export function assertJsonSchema(root, value, schema) {
+  const errors = arguments.length >= 3
+    ? validateJsonSchema(root, value, schema)
+    : validateJsonSchema(root, value);
   if (errors.length) throw new Error(`JSON Schema validation failed:\n- ${errors.join("\n- ")}`);
   return value;
 }

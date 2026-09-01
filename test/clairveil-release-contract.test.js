@@ -8,7 +8,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   verifyBundledClairveilContractSnapshot,
-  verifyVendoredClairveilContractSnapshot
+  verifyBundledClairveilProverContractSnapshot,
+  verifyVendoredClairveilContractSnapshot,
+  verifyVendoredClairveilProverContractSnapshot
 } from "../tools/verify-clairveil-source.js";
 import {
   supportedEvmCanonicalAbiSha256,
@@ -30,6 +32,28 @@ test("bundled Clairveil handoff contracts validate without a core checkout", () 
   assert.equal(result.fixtureCount, 12);
   assert.equal(result.schemaCount, 1);
   assert.equal(result.fileCount, 17);
+  assert.equal(result.prover.bundleVersion, "v0.4.0");
+  assert.equal(result.prover.sourceKind, "release_tag");
+  assert.equal(result.prover.release, "v0.4.0");
+  assert.equal(result.prover.commit, "ca85b02708fdd75259d4d2ee2d671c21198cec69");
+  assert.equal(result.prover.fixtureCount, 2);
+  assert.equal(result.prover.schemaCount, 1);
+  assert.equal(result.prover.fileCount, 3);
+  assert.equal(result.totalFileCount, 20);
+  assert.equal(result.totalFixtureCount, 14);
+  assert.equal(result.totalSchemaCount, 2);
+});
+
+test("bundled Clairveil v0.4.0 prover contract validates independently", () => {
+  const result = verifyBundledClairveilProverContractSnapshot({ packageRoot });
+
+  assert.equal(result.bundleVersion, "v0.4.0");
+  assert.equal(result.sourceKind, "release_tag");
+  assert.equal(result.release, "v0.4.0");
+  assert.equal(result.commit, "ca85b02708fdd75259d4d2ee2d671c21198cec69");
+  assert.equal(result.fixtureCount, 2);
+  assert.equal(result.schemaCount, 1);
+  assert.equal(result.fileCount, 3);
 });
 
 test("bundled generic Clairveil EVM contract validates without a downstream checkout", () => {
@@ -51,7 +75,62 @@ test("vendored Clairveil handoff contracts match the configured core commit obje
   assert.equal(result.fixtureCount, 12);
   assert.equal(result.schemaCount, 1);
   assert.equal(result.fileCount, 17);
+  assert.equal(result.prover.release, "v0.4.0");
+  assert.equal(result.prover.commit, "ca85b02708fdd75259d4d2ee2d671c21198cec69");
   assert.equal(result.clairveilSourceRoot, clairveilSourceRoot);
+});
+
+test("vendored v0.4.0 prover contracts match the exact Core release tag", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
+  const result = verifyVendoredClairveilProverContractSnapshot({
+    packageRoot,
+    clairveilSourceRoot
+  });
+
+  assert.equal(result.release, "v0.4.0");
+  assert.equal(result.commit, "ca85b02708fdd75259d4d2ee2d671c21198cec69");
+  assert.equal(result.clairveilSourceRoot, clairveilSourceRoot);
+});
+
+test("release verifier rejects a lightweight v0.4.0 tag", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "clairveiljs-lightweight-tag-"));
+  const temporaryCheckout = join(temporaryRoot, "clairveil");
+
+  try {
+    const clone = spawnSync(
+      "git",
+      ["clone", "--shared", "--no-checkout", clairveilSourceRoot, temporaryCheckout],
+      { encoding: "utf8" }
+    );
+    assert.equal(clone.status, 0, clone.stderr || clone.stdout);
+
+    const replaceTag = spawnSync(
+      "git",
+      [
+        "-C",
+        temporaryCheckout,
+        "tag",
+        "--force",
+        "v0.4.0",
+        "ca85b02708fdd75259d4d2ee2d671c21198cec69"
+      ],
+      { encoding: "utf8" }
+    );
+    assert.equal(replaceTag.status, 0, replaceTag.stderr || replaceTag.stdout);
+
+    assert.throws(
+      () => verifyVendoredClairveilProverContractSnapshot({
+        packageRoot,
+        clairveilSourceRoot: temporaryCheckout
+      }),
+      /tag v0\.4\.0 must be annotated; got commit/
+    );
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 });
 
 test("release verifier CLI checks the configured Clairveil source checkout", {
@@ -72,6 +151,7 @@ test("release verifier CLI checks the configured Clairveil source checkout", {
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /verified bundled Clairveil commit_snapshot 0ff92839/);
+  assert.match(result.stdout, /verified Clairveil v0\.4\.0 prover contract at ca85b027/);
 });
 
 test("EVM contract verifier CLI checks the SDK-owned generic interface", () => {
@@ -131,6 +211,11 @@ test("release verifier rejects a modified vendored fixture", () => {
       join(temporaryRoot, "fixtures", "clairveil-v0.3.1"),
       { recursive: true }
     );
+    cpSync(
+      join(packageRoot, "fixtures", "clairveil-v0.4.0-prover"),
+      join(temporaryRoot, "fixtures", "clairveil-v0.4.0-prover"),
+      { recursive: true }
+    );
     cpSync(join(packageRoot, "proto"), join(temporaryRoot, "proto"), {
       recursive: true
     });
@@ -170,6 +255,11 @@ test("release verifier rejects a self-consistent manifest that diverges from the
     cpSync(
       join(packageRoot, "fixtures", "clairveil-v0.3.1"),
       join(temporaryRoot, "fixtures", "clairveil-v0.3.1"),
+      { recursive: true }
+    );
+    cpSync(
+      join(packageRoot, "fixtures", "clairveil-v0.4.0-prover"),
+      join(temporaryRoot, "fixtures", "clairveil-v0.4.0-prover"),
       { recursive: true }
     );
     cpSync(join(packageRoot, "proto"), join(temporaryRoot, "proto"), {
@@ -223,11 +313,80 @@ test("release verifier rejects labeling a commit snapshot as a release tag", () 
   }
 });
 
+test("release verifier rejects a modified v0.4.0 prover fixture", () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "clairveiljs-prover-contract-"));
+
+  try {
+    mkdirSync(join(temporaryRoot, "fixtures"), { recursive: true });
+    cpSync(
+      join(packageRoot, "fixtures", "clairveil-v0.4.0-prover"),
+      join(temporaryRoot, "fixtures", "clairveil-v0.4.0-prover"),
+      { recursive: true }
+    );
+    appendFileSync(
+      join(
+        temporaryRoot,
+        "fixtures",
+        "clairveil-v0.4.0-prover",
+        "x",
+        "privacy",
+        "client",
+        "sdk",
+        "conformance",
+        "testdata",
+        "privacy_deposit_prover_contract.json"
+      ),
+      "\n"
+    );
+
+    assert.throws(
+      () => verifyBundledClairveilProverContractSnapshot({ packageRoot: temporaryRoot }),
+      /privacy_deposit_prover_contract\.json SHA-256 is/
+    );
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("release verifier rejects a false v0.4.0 prover release identity", () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "clairveiljs-prover-source-"));
+
+  try {
+    mkdirSync(join(temporaryRoot, "fixtures"), { recursive: true });
+    cpSync(
+      join(packageRoot, "fixtures", "clairveil-v0.4.0-prover"),
+      join(temporaryRoot, "fixtures", "clairveil-v0.4.0-prover"),
+      { recursive: true }
+    );
+    const manifestPath = join(
+      temporaryRoot,
+      "fixtures",
+      "clairveil-v0.4.0-prover",
+      "manifest.json"
+    );
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.source.release = "v0.3.1";
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    assert.throws(
+      () => verifyBundledClairveilProverContractSnapshot({ packageRoot: temporaryRoot }),
+      /prover manifest release is v0\.3\.1; expected v0\.4\.0/
+    );
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("required conformance refuses external fixture and schema overrides", () => {
-  for (const name of ["CLAIRVEIL_CONFORMANCE_FIXTURE_DIR", "CLAIRVEIL_WALLET_CONTRACT_SCHEMA"]) {
+  const overrideNames = [
+    "CLAIRVEIL_CONFORMANCE_FIXTURE_DIR",
+    "CLAIRVEIL_WALLET_CONTRACT_SCHEMA",
+    "CLAIRVEIL_PROVER_CONFORMANCE_FIXTURE_DIR",
+    "CLAIRVEIL_PROVER_HTTP_API_SCHEMA"
+  ];
+  for (const name of overrideNames) {
     const env = { ...process.env };
-    delete env.CLAIRVEIL_CONFORMANCE_FIXTURE_DIR;
-    delete env.CLAIRVEIL_WALLET_CONTRACT_SCHEMA;
+    for (const overrideName of overrideNames) delete env[overrideName];
     env[name] = join(packageRoot, "external-contract");
     const result = spawnSync(
       process.execPath,

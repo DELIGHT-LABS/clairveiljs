@@ -42,6 +42,13 @@ function signature(point) {
   return `${Buffer.from(packPoint(point)).toString("hex")}${field(1n)}`;
 }
 
+const canonicalGroth16ProofHex =
+  `40${"00".repeat(31)}` +
+  `40${"00".repeat(63)}` +
+  `40${"00".repeat(31)}` +
+  "00000000" +
+  `40${"00".repeat(31)}`;
+
 function pairedMerklePathProvider(notes) {
   const commitments = notes.map(computeNoteCommitmentV1);
   const emptyRoots = emptyNoteTreeRootsV1(32);
@@ -133,7 +140,7 @@ test("transfer v5 rejects stale or tampered prepared effects before MsgTransfer 
   const payload = validPayload();
   assert.equal(validatePreparedTransferV5PayloadMetadata(payload), true);
   assert.equal(validatePreparedTransferV5PayloadAt(payload, 1_700_000_000), true);
-  const proof = { version: "v2", payload_hash: payload.payload_hash, proof_hex: `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}` };
+  const proof = { version: "v2", payload_hash: payload.payload_hash, proof_hex: canonicalGroth16ProofHex };
   const message = buildTransferV5MsgFromPayloadAndProof(payload, proof, { nowUnix: 1_700_000_000 });
   assert.equal(message.expiresAtUnix, 4102448400n);
   assert.equal(message.viewTags.length, 2);
@@ -146,7 +153,7 @@ test("direct transfer message allows creator replacement while rejecting cross-c
   const proof = {
     version: "v2",
     payload_hash: payload.payload_hash,
-    proof_hex: `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}`
+    proof_hex: canonicalGroth16ProofHex
   };
   const original = buildTransferV5MsgFromPayloadAndProof(payload, proof, {
     nowUnix: 1_700_000_000,
@@ -201,7 +208,7 @@ test("transfer v5 metadata rejects identity disclosure targets before message co
   const identityHex = Buffer.from(packPoint({ x: 0n, y: 1n })).toString("hex");
   const identityTarget = { ...payload, audit_disclosure_target_pubkey_hex: identityHex, payload_hash: "" };
   identityTarget.payload_hash = computePreparedTransferV5PayloadHash(identityTarget);
-  const proof = { version: "v2", payload_hash: identityTarget.payload_hash, proof_hex: `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}` };
+  const proof = { version: "v2", payload_hash: identityTarget.payload_hash, proof_hex: canonicalGroth16ProofHex };
   assert.throws(() => validatePreparedTransferV5PayloadMetadata(identityTarget), /identity is not allowed/);
   assert.throws(() => buildTransferV5MsgFromPayloadAndProof(identityTarget, proof, { nowUnix: 1_700_000_000 }), /identity is not allowed/);
 });
@@ -241,7 +248,7 @@ test("transfer v5 proof and message builders reject expired payloads by default"
   const payload = validPayload();
   payload.expires_at_unix = 1;
   payload.payload_hash = computePreparedTransferV5PayloadHash(payload);
-  const proof = { version: "v2", payload_hash: payload.payload_hash, proof_hex: `${"c0"}${"00".repeat(31)}${"c0"}${"00".repeat(63)}${"c0"}${"00".repeat(35)}${"c0"}${"00".repeat(31)}` };
+  const proof = { version: "v2", payload_hash: payload.payload_hash, proof_hex: canonicalGroth16ProofHex };
 
   assert.throws(() => validatePreparedTransferV5Proof(payload, proof), /payload expired/);
   assert.throws(() => buildTransferV5MsgFromPayloadAndProof(payload, proof), /payload expired/);
