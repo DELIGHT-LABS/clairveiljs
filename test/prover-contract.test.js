@@ -22,10 +22,15 @@ import {
   readFixture
 } from "./helpers.js";
 
-function jsonResponse(body, status = 200, contentType = "application/json") {
+function jsonResponse(body, status = 200, contentType = "application/json", extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: contentType == null ? {} : { "content-type": contentType }
+    headers: {
+      "cache-control": "no-store",
+      ...(status === 405 ? { allow: "POST" } : {}),
+      ...(contentType == null ? {} : { "content-type": contentType }),
+      ...extraHeaders
+    }
   });
 }
 
@@ -303,7 +308,7 @@ test("common transfer and withdraw routes require exact HTTP 200 success", fixtu
   }
 });
 
-test("common transfer and withdraw routes require JSON media type on success and error", fixtureTestOptions, async () => {
+test("common transfer and withdraw routes require exact JSON Content-Type on success and error", fixtureTestOptions, async () => {
   const examples = readFixture("privacy_prover_example_bundle.json");
   const errorBody = {
     version: "v1",
@@ -321,7 +326,12 @@ test("common transfer and withdraw routes require JSON media type on success and
       [200, examples[kind].response],
       [500, errorBody]
     ]) {
-      for (const contentType of [null, "text/plain"]) {
+      for (const contentType of [
+        null,
+        "text/plain",
+        "application/json; charset=utf-8",
+        "application/json; private=unknown"
+      ]) {
         const adapter = createHttpProverAdapter({
           baseURL: "http://127.0.0.1",
           fetchImpl: async () => jsonResponse(body, status, contentType)
@@ -334,6 +344,84 @@ test("common transfer and withdraw routes require JSON media type on success and
       }
     }
   }
+});
+
+test("common prover routes require no-store responses and exact 405 Allow", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const proveTransfer = adapter => adapter.proveTransfer(examples.transfer.request, {
+    nowUnix: examples.transfer.request.payload.expires_at_unix - 1
+  });
+  const proofFailed = {
+    version: "v1",
+    code: "proof_failed",
+    message: "must not be trusted before response headers are validated",
+    retryable: false
+  };
+
+  for (const [status, body] of [
+    [200, examples.transfer.response],
+    [500, proofFailed]
+  ]) {
+    for (const fetchImpl of [
+      async () => new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" }
+      }),
+      async () => jsonResponse(body, status, "application/json", {
+        "cache-control": "public, max-age=3600"
+      })
+    ]) {
+      const adapter = createHttpProverAdapter({
+        baseURL: "http://127.0.0.1",
+        fetchImpl
+      });
+      await assert.rejects(
+        () => proveTransfer(adapter),
+        error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+          error?.proverCode === undefined &&
+          /Cache-Control: no-store/.test(error.message)
+      );
+    }
+  }
+
+  const methodNotAllowed = {
+    version: "v1",
+    code: "method_not_allowed",
+    message: "POST is required",
+    retryable: false
+  };
+  for (const fetchImpl of [
+    async () => new Response(JSON.stringify(methodNotAllowed), {
+      status: 405,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store"
+      }
+    }),
+    async () => jsonResponse(methodNotAllowed, 405, "application/json", { allow: "GET" })
+  ]) {
+    const adapter = createHttpProverAdapter({
+      baseURL: "http://127.0.0.1",
+      fetchImpl
+    });
+    await assert.rejects(
+      () => proveTransfer(adapter),
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+        error?.proverCode === undefined &&
+        /Allow: POST/.test(error.message)
+    );
+  }
+
+  const canonical405 = createHttpProverAdapter({
+    baseURL: "http://127.0.0.1",
+    fetchImpl: async () => jsonResponse(methodNotAllowed, 405)
+  });
+  await assert.rejects(
+    () => proveTransfer(canonical405),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+      error?.status === 405 &&
+      error?.proverCode === "method_not_allowed"
+  );
 });
 
 test("HTTP prover adapter follows the Go route and version contract", fixtureTestOptions, async () => {
@@ -662,6 +750,62 @@ test("generic deposit prover enforces the exact endpoint response policy", async
   }
 });
 
+test("canonical deposit adapters enforce exact response Content-Type and no-store", async () => {
+  const request = depositRequestFromContract();
+  const responseBody = {
+    version: "v1",
+    proof: {
+      version: "v1",
+      note_commitment_hex: request.payload.note_commitment_hex,
+      proof_hex: canonicalEmptyGroth16ProofHex()
+    }
+  };
+
+  for (const fetchImpl of [
+    async () => new Response(JSON.stringify(responseBody), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    }),
+    async () => jsonResponse(responseBody, 200, "application/json", {
+      "cache-control": "public"
+    })
+  ]) {
+    const providers = [
+      createHttpProverAdapter({
+        baseURL: "https://deposit.example",
+        fetchImpl
+      }).proveDeposit,
+      createHttpDepositProofProviderV1({
+        url: "https://deposit.example/v1/prover/deposit",
+        fetchImpl
+      })
+    ];
+    for (const prove of providers) {
+      await assert.rejects(
+        () => prove(request),
+        error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+          error?.proverCode === undefined &&
+          /Cache-Control: no-store/.test(error.message)
+      );
+    }
+  }
+
+  for (const contentType of [
+    "application/json; charset=utf-8",
+    "application/json; private=unknown"
+  ]) {
+    const adapter = createHttpProverAdapter({
+      baseURL: "https://deposit.example",
+      fetchImpl: async () => jsonResponse(responseBody, 200, contentType)
+    });
+    await assert.rejects(
+      () => adapter.proveDeposit(request),
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+        /Content-Type: application\/json/.test(error.message)
+    );
+  }
+});
+
 test("pinned v1 deposit provider uses an exact endpoint with the canonical nested wire", async () => {
   const request = depositRequestFromContract();
   const proofHex = canonicalEmptyGroth16ProofHex();
@@ -745,11 +889,14 @@ test("legacy pinned deposit provider preserves the flat EVM request and response
         contentType: init.headers["Content-Type"],
         body: JSON.parse(init.body)
       });
-      return jsonResponse({
+      return new Response(JSON.stringify({
         version: "v1",
         proof_hex: "ab",
         note_commitment_hex: "11".repeat(32)
-      }, 201);
+      }), {
+        status: 201,
+        headers: { "content-type": "application/json; charset=utf-8" }
+      });
     }
   });
 
@@ -903,7 +1050,10 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
     baseURL: "http://127.0.0.1",
     fetchImpl: async () => new Response("not-json", {
       status: 200,
-      headers: { "content-type": "application/json" }
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store"
+      }
     })
   });
   await assert.rejects(
@@ -915,7 +1065,10 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
     baseURL: "http://127.0.0.1",
     fetchImpl: async () => new Response("down", {
       status: 503,
-      headers: { "content-type": "application/json" }
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store"
+      }
     })
   });
   await assert.rejects(
@@ -1089,7 +1242,10 @@ test("HTTP prover adapter requires HTTPS remotely, denies redirects, and strict-
       baseURL: "http://127.0.0.1",
       fetchImpl: async () => new Response(body, {
         status: 200,
-        headers: { "content-type": "application/json" }
+        headers: {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        }
       })
     });
     await assert.rejects(
@@ -1143,7 +1299,10 @@ test("HTTP prover adapter bounds response bytes before parsing", fixtureTestOpti
     maxResponseBytes: 16,
     fetchImpl: async () => new Response("x".repeat(17), {
       status: 200,
-      headers: { "content-type": "application/json" }
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store"
+      }
     })
   });
   await assert.rejects(
@@ -1158,7 +1317,8 @@ test("HTTP prover adapter bounds response bytes before parsing", fixtureTestOpti
       status: 200,
       headers: {
         "content-length": "17",
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "cache-control": "no-store"
       }
     })
   });

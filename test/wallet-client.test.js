@@ -938,7 +938,10 @@ test("browser Cosmos profile uses its exact deposit endpoint override with the c
       }
     }), {
       status: 200,
-      headers: { "content-type": "application/json" }
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store"
+      }
     });
   };
 
@@ -1008,7 +1011,10 @@ test("browser Cosmos profile derives the canonical deposit route from proverUrl"
       }
     }), {
       status: 200,
-      headers: { "content-type": "application/json" }
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store"
+      }
     });
   };
 
@@ -1693,7 +1699,10 @@ test("browser client uses an injected prover adapter and bearer auth for the HTT
     authorization = init.headers.get("Authorization");
     return new Response(JSON.stringify(examples.transfer.response), {
       status: 200,
-      headers: { "content-type": "application/json" }
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store"
+      }
     });
   };
 

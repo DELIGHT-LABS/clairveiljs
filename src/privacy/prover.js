@@ -227,13 +227,29 @@ function responseContentLength(response) {
   return Number.isSafeInteger(value) ? value : null;
 }
 
-function assertJSONResponseContentType(response, label = "prover response") {
-  const contentType = String(response?.headers?.get?.("content-type") || "")
-    .split(";", 1)[0]
+function assertJSONResponseContentType(response, label = "prover response", { exact = false } = {}) {
+  const rawContentType = String(response?.headers?.get?.("content-type") || "")
     .trim()
     .toLowerCase();
+  const contentType = exact ? rawContentType : rawContentType.split(";", 1)[0].trim();
   if (contentType !== "application/json") {
     throw new Error(`${label} must return Content-Type: application/json`);
+  }
+}
+
+function assertCanonicalProverResponseHeaders(response, label = "prover response") {
+  assertJSONResponseContentType(response, label, { exact: true });
+  const cacheControl = String(response?.headers?.get?.("cache-control") || "")
+    .trim()
+    .toLowerCase();
+  if (cacheControl !== "no-store") {
+    throw new Error(`${label} must return Cache-Control: no-store`);
+  }
+  if (response?.status === 405) {
+    const allow = String(response?.headers?.get?.("allow") || "").trim();
+    if (allow !== "POST") {
+      throw new Error(`${label} with status 405 must return Allow: POST`);
+    }
   }
 }
 
@@ -338,7 +354,7 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
     // The common Core prover contract fixes JSON response media type for both
     // successes and errors. Reject an ambiguous body before parsing it or
     // classifying any untrusted error envelope.
-    assertJSONResponseContentType(response);
+    assertCanonicalProverResponseHeaders(response);
     const text = await readBoundedResponseText(response, maxResponseBytes);
     if (response.status !== 200) {
       throw proverRequestError(response.status, text);
@@ -363,7 +379,11 @@ async function postJSON({ baseURL, path, body, serializedBody, bearerToken, time
   }
 }
 
-function assertDirectDepositProofResponse(response, endpoint) {
+function assertDirectDepositProofResponse(
+  response,
+  endpoint,
+  { canonicalResponseHeaders = false } = {}
+) {
   if (response?.redirected === true) {
     throw new Error("deposit proof response must not redirect");
   }
@@ -371,7 +391,11 @@ function assertDirectDepositProofResponse(response, endpoint) {
   if (finalURL && new URL(finalURL).href !== endpoint.href) {
     throw new Error("deposit proof response must be served directly from its configured endpoint");
   }
-  assertJSONResponseContentType(response, "deposit proof response");
+  if (canonicalResponseHeaders) {
+    assertCanonicalProverResponseHeaders(response, "deposit proof response");
+  } else {
+    assertJSONResponseContentType(response, "deposit proof response");
+  }
 }
 
 async function postDepositProofJSON({
@@ -383,7 +407,8 @@ async function postDepositProofJSON({
   fetchImpl,
   signal,
   exactSuccessStatus,
-  noStore = false
+  noStore = false,
+  canonicalResponseHeaders = false
 }) {
   const controller = new AbortController();
   let timedOut = false;
@@ -418,7 +443,7 @@ async function postDepositProofJSON({
     };
     if (noStore) requestInit.cache = "no-store";
     const response = await fetchImpl(endpoint, requestInit);
-    assertDirectDepositProofResponse(response, endpoint);
+    assertDirectDepositProofResponse(response, endpoint, { canonicalResponseHeaders });
     const text = await readBoundedResponseText(response, maxResponseBytes);
     const succeeded = exactSuccessStatus === undefined
       ? response.ok
@@ -1026,7 +1051,8 @@ export function createHttpProverAdapter({
           fetchImpl,
           signal: signal ?? input?.signal,
           exactSuccessStatus: 200,
-          noStore: true
+          noStore: true,
+          canonicalResponseHeaders: true
         });
         return validateDepositProofResponseV1(request, response);
       } catch (error) {
@@ -1166,7 +1192,8 @@ export function createHttpDepositProofProviderV1({
         fetchImpl,
         signal: signal ?? input?.signal,
         exactSuccessStatus: 200,
-        noStore: true
+        noStore: true,
+        canonicalResponseHeaders: true
       });
       return depositProviderResponseWithLegacyAccessors(
         validateDepositProofResponseV1(request, response)

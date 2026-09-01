@@ -37,10 +37,15 @@ import {
 import { batchTransferConformanceFixtureName } from "clairveiljs/conformance";
 import { fixtureTestOptions, readFixture } from "./helpers.js";
 
-function jsonResponse(body, status = 200, contentType = "application/json") {
+function jsonResponse(body, status = 200, contentType = "application/json", extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: contentType == null ? {} : { "content-type": contentType }
+    headers: {
+      "cache-control": "no-store",
+      ...(status === 405 ? { allow: "POST" } : {}),
+      ...(contentType == null ? {} : { "content-type": contentType }),
+      ...extraHeaders
+    }
   });
 }
 
@@ -244,7 +249,7 @@ test("one-proof batch prover uses the Clairveil v0.3.1 route and binds the respo
   assert.equal(message.creator, "clair1creator");
 });
 
-test("one-proof batch HTTP prover requires JSON media type on success and error", async () => {
+test("one-proof batch HTTP prover requires exact JSON Content-Type on success and error", async () => {
   const payload = await batchPayload();
   const successBody = {
     version: "v1",
@@ -266,7 +271,12 @@ test("one-proof batch HTTP prover requires JSON media type on success and error"
     [200, successBody],
     [500, errorBody]
   ]) {
-    for (const contentType of [null, "text/plain"]) {
+    for (const contentType of [
+      null,
+      "text/plain",
+      "application/json; charset=utf-8",
+      "application/json; private=unknown"
+    ]) {
       const adapter = createHttpProverAdapter({
         baseURL: "https://prover.example",
         fetchImpl: async () => jsonResponse(body, status, contentType)
@@ -277,6 +287,39 @@ test("one-proof batch HTTP prover requires JSON media type on success and error"
           /Content-Type: application\/json/.test(error.message)
       );
     }
+  }
+});
+
+test("one-proof batch HTTP prover requires Cache-Control: no-store", async () => {
+  const payload = await batchPayload();
+  const successBody = {
+    version: "v1",
+    proof: {
+      version: preparedBatchTransferProofVersion,
+      request_payload_hash: payload.payload_hash,
+      proof: base64FromBytes(new Uint8Array(164).fill(7)),
+      circuit_set_id: "privacy-note-v1"
+    }
+  };
+
+  for (const fetchImpl of [
+    async () => new Response(JSON.stringify(successBody), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    }),
+    async () => jsonResponse(successBody, 200, "application/json", {
+      "cache-control": "private"
+    })
+  ]) {
+    const adapter = createHttpProverAdapter({
+      baseURL: "https://prover.example",
+      fetchImpl
+    });
+    await assert.rejects(
+      () => adapter.proveBatchTransfer(payload),
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+        /Cache-Control: no-store/.test(error.message)
+    );
   }
 });
 
