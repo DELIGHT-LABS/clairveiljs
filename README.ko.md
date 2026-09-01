@@ -884,8 +884,9 @@ npm run test:e2e:local
 
 필수 `test:e2e:local:one-proof-all` 릴리스 명령은 deployment, wallet,
 prover, timeout 값을 `CLAIRVEIL_E2E_LOCAL_*` 변수에서 읽습니다. 예를 들어
-`CLAIRVEIL_E2E_LOCAL_WALLET_MODULE`을 사용합니다. Canonical route 대신 local
-module을 쓰려면 `CLAIRVEIL_E2E_LOCAL_DEPOSIT_PROOF_MODULE`을 추가합니다. 위의
+`CLAIRVEIL_E2E_LOCAL_WALLET_MODULE`을 사용합니다. 인증된 prover에는
+`CLAIRVEIL_E2E_LOCAL_PROVER_BEARER_TOKEN`을 사용합니다. Canonical route 대신
+local module을 쓰려면 `CLAIRVEIL_E2E_LOCAL_DEPOSIT_PROOF_MODULE`을 추가합니다. 위의
 prefix 없는 변수는 standalone `test:e2e:local` 개발 명령에서 계속 사용할 수 있습니다.
 
 Mnemonic 기반 E2E wallet은 `CLAIRVEIL_E2E_COIN_TYPE` 또는 전체 `CLAIRVEIL_E2E_HD_PATH` 중 하나를 받을 수 있습니다. Clairveil v0.3.1 reference CLI keyring은 coin type `60`을 사용하며, 둘 다 생략하면 CosmJS 기본값 `118`을 사용합니다. Wallet module은 자체 derivation path를 책임집니다.
@@ -899,6 +900,7 @@ CLAIRVEIL_E2E_TESTNET_CHAIN_ID=<deployed-testnet-chain-id> \
 CLAIRVEIL_E2E_TESTNET_RPC=https://rpc.testnet.example \
 CLAIRVEIL_E2E_TESTNET_REST=https://rest.testnet.example \
 CLAIRVEIL_E2E_TESTNET_PROVER_URL=https://prover.testnet.example \
+CLAIRVEIL_E2E_TESTNET_PROVER_BEARER_TOKEN=<optional-prover-token> \
 CLAIRVEIL_E2E_TESTNET_ACCOUNT_PREFIX=<account-prefix> \
 CLAIRVEIL_E2E_TESTNET_SHIELDED_PREFIX=<shielded-prefix> \
 CLAIRVEIL_E2E_TESTNET_DENOM=<native-denom> \

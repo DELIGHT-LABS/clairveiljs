@@ -380,8 +380,9 @@ Set `CLAIRVEIL_E2E_ONE_PROOF_BATCH_SHAPE` to run an actual selected localnet sha
 
 The required `test:e2e:local:one-proof-all` release command reads its deployment,
 wallet, prover, and timeout values from `CLAIRVEIL_E2E_LOCAL_*` variables. For
-example, use `CLAIRVEIL_E2E_LOCAL_WALLET_MODULE`. To override the canonical
-route with a local module, set `CLAIRVEIL_E2E_LOCAL_DEPOSIT_PROOF_MODULE`.
+example, use `CLAIRVEIL_E2E_LOCAL_WALLET_MODULE`. An authenticated prover uses
+`CLAIRVEIL_E2E_LOCAL_PROVER_BEARER_TOKEN`. To override the canonical route with
+a local module, set `CLAIRVEIL_E2E_LOCAL_DEPOSIT_PROOF_MODULE`.
 The unscoped variables above remain available to the standalone
 `test:e2e:local` developer command.
 
@@ -394,6 +395,7 @@ CLAIRVEIL_E2E_TESTNET_CHAIN_ID=<deployed-testnet-chain-id> \
 CLAIRVEIL_E2E_TESTNET_RPC=https://rpc.testnet.example \
 CLAIRVEIL_E2E_TESTNET_REST=https://rest.testnet.example \
 CLAIRVEIL_E2E_TESTNET_PROVER_URL=https://prover.testnet.example \
+CLAIRVEIL_E2E_TESTNET_PROVER_BEARER_TOKEN=<optional-prover-token> \
 CLAIRVEIL_E2E_TESTNET_ACCOUNT_PREFIX=<account-prefix> \
 CLAIRVEIL_E2E_TESTNET_SHIELDED_PREFIX=<shielded-prefix> \
 CLAIRVEIL_E2E_TESTNET_DENOM=<native-denom> \
@@ -509,6 +511,7 @@ CLAIRVEIL_E2E_CHAIN_ID=clairveil-local-1
 CLAIRVEIL_E2E_RPC=http://127.0.0.1:26657
 CLAIRVEIL_E2E_REST=http://127.0.0.1:1317
 CLAIRVEIL_E2E_PROVER_URL=http://127.0.0.1:8080
+CLAIRVEIL_E2E_PROVER_BEARER_TOKEN=<optional-prover-token>
 CLAIRVEIL_E2E_ACCOUNT_PREFIX=clair
 CLAIRVEIL_E2E_SHIELDED_PREFIX=clairs
 CLAIRVEIL_E2E_DENOM=uclair

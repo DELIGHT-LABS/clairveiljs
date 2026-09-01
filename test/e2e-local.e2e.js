@@ -20,7 +20,8 @@ import {
   createSpendNoteHashSigner,
   encodeShieldedAddress,
   computeNoteCommitmentV1,
-  fieldHexV1
+  fieldHexV1,
+  parseCoin
 } from "clairveiljs/core";
 import {
   computeBatchEffectIdV1,
@@ -56,7 +57,9 @@ import {
 } from "clairveiljs/browser-crypto";
 import {
   batchTransferConformanceFixtureName,
+  depositProverConformanceFixtureName,
   readClairveilConformanceFixture,
+  readClairveilProverConformanceFixture,
   suggestClairveilConformanceFixtureDirs
 } from "clairveiljs/conformance";
 
@@ -73,6 +76,9 @@ const e2eRequired = testnetE2eEnabled || env.CLAIRVEIL_E2E_REQUIRED === "1";
 const pinnedBatchTransferContract = readClairveilConformanceFixture(
   batchTransferConformanceFixtureName,
   { fixtureDir: suggestClairveilConformanceFixtureDirs()[0] }
+);
+const pinnedDepositProverContract = readClairveilProverConformanceFixture(
+  depositProverConformanceFixtureName
 );
 
 function skipOrRequire(t, message) {
@@ -163,6 +169,7 @@ function configFromEnv() {
     rpc: String(env.CLAIRVEIL_E2E_RPC || "http://127.0.0.1:26657"),
     rest: String(env.CLAIRVEIL_E2E_REST || "http://127.0.0.1:1317"),
     proverUrl: String(env.CLAIRVEIL_E2E_PROVER_URL || "http://127.0.0.1:8080"),
+    proverBearerToken: String(env.CLAIRVEIL_E2E_PROVER_BEARER_TOKEN || "").trim(),
     accountPrefix: String(env.CLAIRVEIL_E2E_ACCOUNT_PREFIX || "clair"),
     shieldedPrefix: String(env.CLAIRVEIL_E2E_SHIELDED_PREFIX || "clairs"),
     denom,
@@ -260,7 +267,7 @@ function mnemonicWalletOptions(config) {
   };
 }
 
-async function loadDepositProofProvider(config) {
+async function loadDepositProofProvider() {
   const modulePath = String(env.CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE || "").trim();
   if (!modulePath) return null;
   const specifier = modulePath.startsWith("file:")
@@ -271,47 +278,73 @@ async function loadDepositProofProvider(config) {
   if (typeof provider !== "function") {
     throw new Error("CLAIRVEIL_E2E_DEPOSIT_PROOF_MODULE must export default, createDepositProof, or depositProofProvider");
   }
-  return input => provider(input, config);
+  return provider;
 }
 
-function depositProofProviderInput(request, material, signal) {
-  const compatible = {
-    version: request.version,
-    payload: request.payload
-  };
-  Object.defineProperties(compatible, {
-    request: { value: request, enumerable: false },
-    material: { value: material, enumerable: false },
-    amount: { value: material.amount, enumerable: false },
-    note: { value: material.note, enumerable: false },
-    noteJson: { value: material.note_json, enumerable: false },
-    note_json: { value: material.note_json, enumerable: false },
-    noteCommitmentHex: { value: material.note_commitment_hex, enumerable: false },
-    note_commitment_hex: { value: material.note_commitment_hex, enumerable: false },
-    signal: { value: signal, enumerable: false }
+function createE2eProverAdapter(config, { fetchImpl } = {}) {
+  return createHttpProverAdapter({
+    baseURL: config.proverUrl,
+    bearerToken: config.proverBearerToken,
+    timeoutMs: config.proverTimeoutMs,
+    ...(fetchImpl ? { fetchImpl } : {})
   });
-  return Object.freeze(compatible);
 }
 
-test("optional E2E deposit prover input keeps the canonical wire and legacy material view", () => {
-  const request = { version: "v1", payload: { version: "v1" } };
-  const material = {
-    amount: "1uclair",
-    note: { amount: 1n },
-    note_json: "{}",
-    note_commitment_hex: "11".repeat(32)
-  };
-  const signal = new AbortController().signal;
-  const input = depositProofProviderInput(request, material, signal);
+function callDepositProofProvider(provider, request, signal) {
+  if (signal == null) return provider(request);
+  return provider(request, Object.freeze({ signal }));
+}
 
-  assert.deepEqual(Object.keys(input), ["version", "payload"]);
-  assert.equal(input.request, request);
-  assert.equal(input.material, material);
-  assert.equal(input.amount, material.amount);
-  assert.equal(input.note, material.note);
-  assert.equal(input.noteJson, material.note_json);
-  assert.equal(input.noteCommitmentHex, material.note_commitment_hex);
-  assert.equal(input.signal, signal);
+test("optional E2E deposit prover receives only the frozen canonical request and signal control", async () => {
+  const request = Object.freeze({
+    version: "v1",
+    payload: Object.freeze({ version: "v1" })
+  });
+  const signal = new AbortController().signal;
+  let received;
+  await callDepositProofProvider((...args) => {
+    received = args;
+    return { proof_hex: "unused" };
+  }, request, signal);
+
+  assert.equal(received.length, 2);
+  assert.equal(received[0], request);
+  assert.deepEqual(Reflect.ownKeys(received[0]), ["version", "payload"]);
+  assert.equal(Object.isFrozen(received[0]), true);
+  assert.equal(Object.isFrozen(received[0].payload), true);
+  assert.deepEqual(Reflect.ownKeys(received[1]), ["signal"]);
+  assert.equal(received[1].signal, signal);
+  assert.equal(Object.isFrozen(received[1]), true);
+});
+
+test("E2E prover adapter forwards only a configured bearer credential", async () => {
+  for (const [token, expectedAuthorization] of [
+    [" testnet-secret ", "Bearer testnet-secret"],
+    ["", null]
+  ]) {
+    let authorization;
+    const adapter = createE2eProverAdapter({
+      proverUrl: "https://prover.example",
+      proverBearerToken: token.trim(),
+      proverTimeoutMs: 1000
+    }, {
+      fetchImpl: async (_url, init) => {
+        authorization = init.headers.get("Authorization");
+        return new Response(JSON.stringify({ unexpected: true }), {
+          status: 500,
+          headers: {
+            "content-type": "application/json",
+            "cache-control": "no-store"
+          }
+        });
+      }
+    });
+
+    await assert.rejects(
+      () => adapter.proveDeposit(pinnedDepositProverContract.canonical_positive_request)
+    );
+    assert.equal(authorization, expectedAuthorization);
+  }
 });
 
 async function loadWalletFromMnemonic(config) {
@@ -438,34 +471,175 @@ async function scanWallet(client, wallet, material, config) {
   });
 }
 
-async function prepareDepositAndBroadcast(client, wallet, material, amount, config, depositProofProvider) {
-  const depositMaterial = client.buildDepositMaterial({
+async function prepareDepositProof(
+  client,
+  material,
+  amount,
+  config,
+  depositProofProvider,
+  { signal } = {}
+) {
+  const requestedCoin = parseCoin(amount, config.denom);
+  if (requestedCoin.denom !== config.denom) {
+    throw new Error(`deposit amount denom mismatch: expected ${config.denom}, got ${requestedCoin.denom}`);
+  }
+
+  await client.assertProtocolPreflight(requestedCoin.denom);
+  const builtMaterial = client.buildDepositMaterial({
     creator: material.address,
     rootSeed: material.rootSeed,
-    amount,
-    assetDenom: config.denom
+    amount: requestedCoin.raw,
+    assetDenom: requestedCoin.denom
   });
+  const depositMaterial = client.validateDepositMaterial({
+    creator: material.address,
+    rootSeed: material.rootSeed,
+    depositMaterial: builtMaterial,
+    amount: requestedCoin.raw,
+    assetDenom: requestedCoin.denom
+  }).material;
   const request = buildDepositProofRequestV1({ material: depositMaterial });
   const response = normalizeDepositProofProviderResultV1(
     request,
-    await depositProofProvider(depositProofProviderInput(request, depositMaterial))
+    await callDepositProofProvider(depositProofProvider, request, signal)
+  );
+  return {
+    amount: requestedCoin.raw,
+    denom: requestedCoin.denom,
+    depositMaterial,
+    proofHex: response.proof.proof_hex
+  };
+}
+
+function canonicalEmptyDepositProofHex() {
+  return [
+    `40${"00".repeat(31)}`,
+    `40${"00".repeat(63)}`,
+    `40${"00".repeat(31)}`,
+    "00000000",
+    `40${"00".repeat(31)}`
+  ].join("");
+}
+
+test("deposit E2E rejects an explicit denom mismatch before preflight or proof", async () => {
+  let preflightCalls = 0;
+  let providerCalls = 0;
+  const client = {
+    assertProtocolPreflight: async () => { preflightCalls += 1; }
+  };
+
+  await assert.rejects(
+    () => prepareDepositProof(
+      client,
+      { address: "clair1test", rootSeed: new Uint8Array(32) },
+      "1uother",
+      { denom: "uclair" },
+      async () => { providerCalls += 1; }
+    ),
+    /deposit amount denom mismatch: expected uclair, got uother/
+  );
+  assert.equal(preflightCalls, 0);
+  assert.equal(providerCalls, 0);
+});
+
+test("deposit E2E completes protocol preflight before material or proof work", async () => {
+  let materialCalls = 0;
+  let providerCalls = 0;
+  const client = {
+    assertProtocolPreflight: async () => {
+      throw new Error("preflight rejected test denom");
+    },
+    buildDepositMaterial: () => { materialCalls += 1; }
+  };
+
+  await assert.rejects(
+    () => prepareDepositProof(
+      client,
+      { address: "clair1test", rootSeed: new Uint8Array(32) },
+      "1uclair",
+      { denom: "uclair" },
+      async () => { providerCalls += 1; }
+    ),
+    /preflight rejected test denom/
+  );
+  assert.equal(materialCalls, 0);
+  assert.equal(providerCalls, 0);
+});
+
+test("deposit E2E validates material before invoking the canonical proof provider", async () => {
+  const config = {
+    chainId: "clairveil-e2e-unit-1",
+    rpc: "http://127.0.0.1:26657",
+    rest: "http://127.0.0.1:1317",
+    accountPrefix: "clair",
+    shieldedPrefix: "clairs",
+    denom: "uclair"
+  };
+  const client = createClient(config);
+  const order = [];
+  const buildDepositMaterial = client.buildDepositMaterial.bind(client);
+  const validateDepositMaterial = client.validateDepositMaterial.bind(client);
+  client.assertProtocolPreflight = async denom => { order.push(`preflight:${denom}`); };
+  client.buildDepositMaterial = input => {
+    order.push("build");
+    return buildDepositMaterial(input);
+  };
+  client.validateDepositMaterial = input => {
+    order.push("validate");
+    return validateDepositMaterial(input);
+  };
+
+  try {
+    const result = await prepareDepositProof(
+      client,
+      { address: "clair1test", rootSeed: new Uint8Array(32).fill(7) },
+      "1uclair",
+      config,
+      async request => {
+        order.push("provider");
+        assert.deepEqual(Reflect.ownKeys(request), ["version", "payload"]);
+        assert.equal(Object.isFrozen(request), true);
+        assert.equal(Object.isFrozen(request.payload), true);
+        return {
+          note_commitment_hex: request.payload.note_commitment_hex,
+          proof_hex: canonicalEmptyDepositProofHex()
+        };
+      }
+    );
+
+    assert.deepEqual(order, ["preflight:uclair", "build", "validate", "provider"]);
+    assert.equal(result.amount, "1uclair");
+    assert.equal(result.denom, "uclair");
+    assert.equal(result.depositMaterial.amount, "1uclair");
+  } finally {
+    await client.disconnect();
+  }
+});
+
+async function prepareDepositAndBroadcast(client, wallet, material, amount, config, depositProofProvider) {
+  const proof = await prepareDepositProof(
+    client,
+    material,
+    amount,
+    config,
+    depositProofProvider
   );
   const prepared = await client.prepareDeposit({
     wallet,
     material,
-    depositMaterial,
-    amount,
-    denom: config.denom,
-    proofHex: response.proof.proof_hex
+    depositMaterial: proof.depositMaterial,
+    amount: proof.amount,
+    denom: proof.denom,
+    proofHex: proof.proofHex
   });
-  const txHash = await broadcastPrepared(client, wallet, prepared, `deposit ${amount}`, config);
+  const txHash = await broadcastPrepared(client, wallet, prepared, `deposit ${proof.amount}`, config);
   const confirmation = await client.confirmDeposit({
     txHash,
     prepared,
-    depositMaterial,
+    depositMaterial: proof.depositMaterial,
     waitOptions: config.waitOptions
   });
-  assert.equal(confirmation.status, "confirmed", `deposit ${amount} evidence should confirm`);
+  assert.equal(confirmation.status, "confirmed", `deposit ${proof.amount} evidence should confirm`);
   return txHash;
 }
 
@@ -838,11 +1012,8 @@ test("local full deposit, typed scan, disclosure, direct withdraw, and separatel
   }
 
   const client = createClient(config);
-  const proverAdapter = createHttpProverAdapter({
-    baseURL: config.proverUrl,
-    timeoutMs: config.proverTimeoutMs
-  });
-  const depositProofProvider = await loadDepositProofProvider(config)
+  const proverAdapter = createE2eProverAdapter(config);
+  const depositProofProvider = await loadDepositProofProvider()
     ?? proverAdapter.proveDeposit.bind(proverAdapter);
 
   try {
@@ -1075,11 +1246,8 @@ test("Cosmos one-proof payroll batch proves, broadcasts, and reconciles typed ou
   }
 
   const client = createClient(config);
-  const proverAdapter = createHttpProverAdapter({
-    baseURL: config.proverUrl,
-    timeoutMs: config.proverTimeoutMs
-  });
-  const depositProofProvider = await loadDepositProofProvider(config)
+  const proverAdapter = createE2eProverAdapter(config);
+  const depositProofProvider = await loadDepositProofProvider()
     ?? proverAdapter.proveDeposit.bind(proverAdapter);
   try {
     const material = await client.deriveWalletPrivacyMaterial(wallet);

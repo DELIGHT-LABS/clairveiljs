@@ -13,9 +13,11 @@ test("Cosmos release E2E isolates local and testnet deployment settings", () => 
     CLAIRVEIL_E2E_LOCAL_CHAIN_ID: "clairveil-local-1",
     CLAIRVEIL_E2E_LOCAL_RPC: "http://127.0.0.1:26657",
     CLAIRVEIL_E2E_LOCAL_MNEMONIC: "local secret",
+    CLAIRVEIL_E2E_LOCAL_PROVER_BEARER_TOKEN: "local prover secret",
     CLAIRVEIL_E2E_TESTNET_CHAIN_ID: "clairveil-testnet-1",
     CLAIRVEIL_E2E_TESTNET_RPC: "https://rpc.testnet.example",
-    CLAIRVEIL_E2E_TESTNET_MNEMONIC: "testnet secret"
+    CLAIRVEIL_E2E_TESTNET_MNEMONIC: "testnet secret",
+    CLAIRVEIL_E2E_TESTNET_PROVER_BEARER_TOKEN: "testnet prover secret"
   };
 
   const local = cosmosE2eChildEnvironment("local", sourceEnv);
@@ -23,17 +25,21 @@ test("Cosmos release E2E isolates local and testnet deployment settings", () => 
   assert.equal(local.CLAIRVEIL_E2E_CHAIN_ID, "clairveil-local-1");
   assert.equal(local.CLAIRVEIL_E2E_RPC, "http://127.0.0.1:26657");
   assert.equal(local.CLAIRVEIL_E2E_MNEMONIC, "local secret");
+  assert.equal(local.CLAIRVEIL_E2E_PROVER_BEARER_TOKEN, "local prover secret");
   assert.equal(local.CLAIRVEIL_E2E_LOCAL, "1");
   assert.equal(local.CLAIRVEIL_E2E_TESTNET, undefined);
   assert.equal(local.CLAIRVEIL_E2E_TESTNET_CHAIN_ID, undefined);
+  assert.equal(local.CLAIRVEIL_E2E_TESTNET_PROVER_BEARER_TOKEN, undefined);
 
   const testnet = cosmosE2eChildEnvironment("testnet", sourceEnv);
   assert.equal(testnet.CLAIRVEIL_E2E_CHAIN_ID, "clairveil-testnet-1");
   assert.equal(testnet.CLAIRVEIL_E2E_RPC, "https://rpc.testnet.example");
   assert.equal(testnet.CLAIRVEIL_E2E_MNEMONIC, "testnet secret");
+  assert.equal(testnet.CLAIRVEIL_E2E_PROVER_BEARER_TOKEN, "testnet prover secret");
   assert.equal(testnet.CLAIRVEIL_E2E_TESTNET, "1");
   assert.equal(testnet.CLAIRVEIL_E2E_LOCAL, undefined);
   assert.equal(testnet.CLAIRVEIL_E2E_LOCAL_CHAIN_ID, undefined);
+  assert.equal(testnet.CLAIRVEIL_E2E_LOCAL_PROVER_BEARER_TOKEN, undefined);
 
   for (const child of [local, testnet]) {
     assert.equal(child.CLAIRVEIL_E2E_FULL_FLOW, "1");
