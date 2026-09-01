@@ -1,6 +1,6 @@
 import type { BytesLike, Hex } from "../core/crypto.js";
 import type { DepositMaterial, Note } from "../core/note.js";
-import type { PreparedWithdrawProof } from "./payload.js";
+import type { PreparedWithdrawProof, PreparedWithdrawProverPayload } from "./payload.js";
 import type { PreparedTransferV5Payload, PreparedTransferV5Proof } from "./transfer-v5.js";
 import type {
   PreparedBatchTransferPayload,
@@ -8,12 +8,12 @@ import type {
 } from "./batch-transfer.js";
 
 export interface ProverAdapter {
-  proveTransfer(request: { version?: "v2"; payload?: PreparedTransferV5Payload } | PreparedTransferV5Payload, options?: ProverRequestOptions): Promise<{ version: typeof transferProofResponseVersion; proof: PreparedTransferV5Proof }>;
-  proveWithdraw(request: object, options?: ProverRequestOptions): Promise<{ version: typeof withdrawProofResponseVersion; proof: PreparedWithdrawProof }>;
+  proveTransfer(request: { version: "v2"; payload: PreparedTransferV5Payload } | PreparedTransferV5Payload, options?: ProverRequestOptions): Promise<{ version: typeof transferProofResponseVersion; proof: PreparedTransferV5Proof }>;
+  proveWithdraw(request: { version: "v2"; payload: PreparedWithdrawProverPayload } | PreparedWithdrawProverPayload, options?: ProverRequestOptions): Promise<{ version: typeof withdrawProofResponseVersion; proof: PreparedWithdrawProof }>;
 }
 
 export interface BatchTransferProverAdapter {
-  proveBatchTransfer(request: { version?: "v1"; payload?: PreparedBatchTransferPayload } | PreparedBatchTransferPayload, options?: ProverRequestOptions): Promise<{ version: "v1"; proof: PreparedBatchTransferProof & { proof_bytes: Uint8Array } }>;
+  proveBatchTransfer(request: { version: "v1"; payload: PreparedBatchTransferPayload } | PreparedBatchTransferPayload, options?: ProverRequestOptions): Promise<{ version: "v1"; proof: PreparedBatchTransferProof & { proof_bytes: Uint8Array } }>;
 }
 
 export interface DepositProverPayloadV1 {
@@ -72,7 +72,27 @@ export interface DepositProofProviderInput extends DepositProofMaterialInput {
   payload?: DepositProverPayloadV1;
 }
 
-export type DepositProofRequestInput = DepositProofRequestV1 | DepositProofMaterialInput;
+type ExactDepositProofRequestInput = DepositProofRequestV1 & {
+  signal?: never;
+  nowUnix?: never;
+  request?: never;
+  material?: never;
+  amount?: never;
+  note?: never;
+  noteJson?: never;
+  note_json?: never;
+  noteCommitmentHex?: never;
+  note_commitment_hex?: never;
+};
+
+type MaterialDepositProofRequestInput = DepositProofMaterialInput & {
+  version?: never;
+  payload?: never;
+};
+
+export type DepositProofRequestInput =
+  | ExactDepositProofRequestInput
+  | MaterialDepositProofRequestInput;
 
 export interface DepositProverAdapter {
   proveDeposit(input: DepositProofRequestInput, options?: ProverRequestOptions): Promise<DepositProofResponseV1>;

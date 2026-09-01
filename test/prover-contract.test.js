@@ -654,6 +654,13 @@ test("deposit request builder emits the canonical v0.4 memo-free payload", () =>
     }),
     /NoteV1 is required/
   );
+  assert.throws(
+    () => buildDepositProofRequestV1({
+      ...expected,
+      signal: new AbortController().signal
+    }),
+    /unknown JSON field/
+  );
 });
 
 test("HTTP prover adapter supports the canonical v0.4 deposit route", async () => {

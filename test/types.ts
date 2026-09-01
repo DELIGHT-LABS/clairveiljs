@@ -70,12 +70,14 @@ import {
   type NullifierStatusReader,
   type PreparedTransferPayload,
   type PreparedTransferProof,
+  type PreparedWithdrawProverPayload,
   type PreparedWithdrawPayload,
   type WithdrawMessage
 } from "clairveiljs/payload";
 import {
   buildPreparedTransferV5Payload,
-  validateCanonicalGroth16ProofBytes
+  validateCanonicalGroth16ProofBytes,
+  type PreparedTransferV5Payload
 } from "clairveiljs/transfer-v5";
 import {
   createPrivacyScanValidationStateV2,
@@ -239,6 +241,42 @@ createHttpProverAdapter({
 const requiredHttpProverCapabilities: ProverAdapter & BatchTransferProverAdapter & DepositProverAdapter =
   requiredHttpProverAdapter;
 void requiredHttpProverCapabilities.proveDeposit;
+declare const transferProofPayloadForTypes: PreparedTransferV5Payload;
+declare const withdrawProofPayloadForTypes: PreparedWithdrawProverPayload;
+declare const batchProofPayloadForTypes: PreparedBatchTransferPayload;
+void requiredHttpProverAdapter.proveTransfer(transferProofPayloadForTypes);
+void requiredHttpProverAdapter.proveTransfer({
+  version: "v2",
+  payload: transferProofPayloadForTypes
+});
+// @ts-expect-error Explicit transfer envelopes require their exact version.
+requiredHttpProverAdapter.proveTransfer({ payload: transferProofPayloadForTypes });
+// @ts-expect-error Explicit transfer envelopes require their payload.
+requiredHttpProverAdapter.proveTransfer({ version: "v2" });
+// @ts-expect-error Explicit transfer envelopes reject falsy versions.
+requiredHttpProverAdapter.proveTransfer({ version: "", payload: transferProofPayloadForTypes });
+void requiredHttpProverAdapter.proveWithdraw(withdrawProofPayloadForTypes);
+void requiredHttpProverAdapter.proveWithdraw({
+  version: "v2",
+  payload: withdrawProofPayloadForTypes
+});
+// @ts-expect-error Explicit withdraw envelopes require their exact version.
+requiredHttpProverAdapter.proveWithdraw({ payload: withdrawProofPayloadForTypes });
+// @ts-expect-error Explicit withdraw envelopes require their payload.
+requiredHttpProverAdapter.proveWithdraw({ version: "v2" });
+// @ts-expect-error Explicit withdraw envelopes reject falsy versions.
+requiredHttpProverAdapter.proveWithdraw({ version: "", payload: withdrawProofPayloadForTypes });
+void requiredHttpProverAdapter.proveBatchTransfer(batchProofPayloadForTypes);
+void requiredHttpProverAdapter.proveBatchTransfer({
+  version: "v1",
+  payload: batchProofPayloadForTypes
+});
+// @ts-expect-error Explicit batch envelopes require their exact version.
+requiredHttpProverAdapter.proveBatchTransfer({ payload: batchProofPayloadForTypes });
+// @ts-expect-error Explicit batch envelopes require their payload.
+requiredHttpProverAdapter.proveBatchTransfer({ version: "v1" });
+// @ts-expect-error Explicit batch envelopes reject falsy versions.
+requiredHttpProverAdapter.proveBatchTransfer({ version: "", payload: batchProofPayloadForTypes });
 const legacyDepositHttpProvider = createHttpDepositProofProvider({
   url: "https://legacy-deposit.example/prove"
 });
@@ -246,13 +284,27 @@ const canonicalDepositHttpProvider = createHttpDepositProofProviderV1({
   url: "https://cosmos-deposit.example/v1/prover/deposit",
   bearerToken: "token"
 });
+declare const exactDepositRequestForTypes: DepositProofRequestV1;
+declare const depositSignalForTypes: AbortSignal;
+void canonicalDepositHttpProvider(exactDepositRequestForTypes, {
+  signal: depositSignalForTypes
+});
+void canonicalDepositHttpProvider({
+  request: exactDepositRequestForTypes,
+  signal: depositSignalForTypes
+});
+// @ts-expect-error Canonical wire requests cannot mix in execution controls.
+canonicalDepositHttpProvider({
+  ...exactDepositRequestForTypes,
+  signal: depositSignalForTypes
+});
 // @ts-expect-error The Core v0.4 exact-endpoint constructor requires an explicit URL binding.
 createHttpDepositProofProviderV1();
 void legacyDepositHttpProvider;
 void canonicalDepositHttpProvider;
 const depositOnlyBrowserProver: BrowserProverAdapter = {
   async proveDeposit(request) {
-    const normalized = "payload" in request ? request : request.request;
+    const normalized = request.payload ? request : request.request;
     return {
       version: "v1",
       proof: {
