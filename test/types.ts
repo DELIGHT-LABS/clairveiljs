@@ -162,8 +162,11 @@ import {
   createAsyncJobProverAdapter,
   createHttpDepositProofProvider,
   createHttpDepositProofProviderV1,
+  createHttpProverAdapter,
   type BatchTransferProverAdapter,
-  type DepositProofRequestV1
+  type DepositProverAdapter,
+  type DepositProofRequestV1,
+  type ProverAdapter
 } from "clairveiljs/prover";
 
 const rootSeed = new Uint8Array(32);
@@ -195,6 +198,20 @@ const batchOnlyAsyncProver = createAsyncJobProverAdapter({
 });
 const batchOnlyAsyncProverContract: BatchTransferProverAdapter = batchOnlyAsyncProver;
 void batchOnlyAsyncProverContract;
+// @ts-expect-error The canonical HTTP prover adapter requires a base URL binding.
+createHttpProverAdapter();
+// @ts-expect-error An empty options object cannot establish a prover origin.
+createHttpProverAdapter({});
+const requiredHttpProverAdapter = createHttpProverAdapter({
+  baseURL: "https://prover.example",
+  bearerToken: "token",
+  timeoutMs: 30_000,
+  maxResponseBytes: 1_048_576,
+  fetchImpl: fetch
+});
+const requiredHttpProverCapabilities: ProverAdapter & BatchTransferProverAdapter & DepositProverAdapter =
+  requiredHttpProverAdapter;
+void requiredHttpProverCapabilities.proveDeposit;
 const legacyDepositHttpProvider = createHttpDepositProofProvider({
   url: "https://legacy-deposit.example/prove"
 });

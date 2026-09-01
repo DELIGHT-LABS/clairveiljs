@@ -152,7 +152,7 @@ export const depositProofByteLength: 164;
 export const defaultProverResponseMaxBytes: number;
 export const defaultDepositProofTimeoutMs: number;
 
-export function createHttpProverAdapter(input?: {
+export function createHttpProverAdapter(input: {
   baseURL: string;
   bearerToken?: string;
   timeoutMs?: number;
