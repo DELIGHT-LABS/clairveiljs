@@ -35,6 +35,7 @@ import {
   validatePreparedBatchTransferPayloadEnvelope
 } from "./batch-transfer.js";
 import {
+  ClairveilErrorCode,
   wrapProverError
 } from "../core/errors.js";
 
@@ -677,6 +678,7 @@ export function normalizeDepositProofProviderResultV1(request, result) {
 function proverRequestError(status, responseText) {
   let code = "";
   let retryable = false;
+  let contractRejected = false;
   try {
     const response = assertOnlyResponseFields(
       parseStrictJSON(responseText),
@@ -704,6 +706,7 @@ function proverRequestError(status, responseText) {
   } catch {
     code = "";
     retryable = false;
+    contractRejected = true;
   }
   const error = new Error(
     `prover request failed with status ${status}${code ? ` (${code})` : ""}`
@@ -711,6 +714,7 @@ function proverRequestError(status, responseText) {
   error.status = status;
   error.proverCode = code;
   error.retryable = retryable;
+  if (contractRejected) error.code = ClairveilErrorCode.PROVER_REJECTED;
   return error;
 }
 

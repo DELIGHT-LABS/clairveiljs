@@ -106,6 +106,9 @@ export function wrapProverError(error) {
   if (error?.code === ClairveilErrorCode.PROVER_CANCELLED) {
     return wrapped(ClairveilErrorCode.PROVER_CANCELLED);
   }
+  if (error?.code === ClairveilErrorCode.PROVER_REJECTED) {
+    return wrapped(ClairveilErrorCode.PROVER_REJECTED);
+  }
   if (/timed out|abort/i.test(message)) {
     return wrapped(ClairveilErrorCode.PROVER_TIMEOUT);
   }

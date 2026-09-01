@@ -1061,7 +1061,7 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
     error => error?.code === ClairveilErrorCode.PROVER_REJECTED && /not valid canonical JSON/.test(error.message)
   );
 
-  const unavailable = createHttpProverAdapter({
+  const malformedUnavailable = createHttpProverAdapter({
     baseURL: "http://127.0.0.1",
     fetchImpl: async () => new Response("down", {
       status: 503,
@@ -1072,11 +1072,77 @@ test("HTTP prover adapter reports non-JSON and error status responses", fixtureT
     })
   });
   await assert.rejects(
-    () => unavailable.proveWithdraw(examples.withdraw.request),
-    error => error?.code === ClairveilErrorCode.PROVER_UNAVAILABLE &&
+    () => malformedUnavailable.proveWithdraw(examples.withdraw.request),
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
       /status 503/.test(error.message) &&
+      error?.status === 503 &&
+      error?.proverCode === undefined &&
+      error?.retryable === false &&
       !error.message.includes("down")
   );
+});
+
+test("malformed prover error envelopes are rejected before 5xx availability classification", fixtureTestOptions, async () => {
+  const examples = readFixture("privacy_prover_example_bundle.json");
+  const malformedBodies = [
+    { unexpected: true },
+    {
+      version: "v2",
+      code: "proof_failed",
+      message: "unsupported envelope version",
+      retryable: false
+    },
+    {
+      version: "v1",
+      code: "future_code",
+      message: "unsupported envelope code",
+      retryable: false
+    },
+    {
+      version: "v1",
+      code: "unavailable",
+      message: "status-code mismatch",
+      retryable: false
+    }
+  ];
+
+  for (const body of malformedBodies) {
+    const adapter = createHttpProverAdapter({
+      baseURL: "http://127.0.0.1",
+      fetchImpl: async () => jsonResponse(body, 500)
+    });
+    await assert.rejects(
+      () => adapter.proveTransfer(examples.transfer.request),
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+        error?.status === 500 &&
+        error?.proverCode === undefined &&
+        error?.retryable === false &&
+        !error.message.includes("unsupported") &&
+        !error.message.includes("status-code")
+    );
+  }
+
+  const depositRequest = depositRequestFromContract();
+  const canonicalDepositProviders = [
+    createHttpProverAdapter({
+      baseURL: "http://127.0.0.1",
+      fetchImpl: async () => jsonResponse({ unexpected: true }, 500)
+    }).proveDeposit,
+    createHttpDepositProofProviderV1({
+      url: "http://127.0.0.1/v1/prover/deposit",
+      fetchImpl: async () => jsonResponse({ unexpected: true }, 500)
+    })
+  ];
+  for (const proveDeposit of canonicalDepositProviders) {
+    await assert.rejects(
+      () => proveDeposit(depositRequest),
+      error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
+        error?.status === 500 &&
+        error?.proverCode === undefined &&
+        error?.retryable === false &&
+        !error.message.includes("unexpected")
+    );
+  }
 });
 
 test("HTTP prover adapter classifies exact browser fetch failures as unavailable", fixtureTestOptions, async () => {
@@ -1148,7 +1214,7 @@ test("prover failures preserve only safe error metadata and never echo server or
   });
   await assert.rejects(
     () => incompleteBusy.proveDeposit(depositRequestFromContract()),
-    error => error?.code === ClairveilErrorCode.PROVER_UNAVAILABLE &&
+    error => error?.code === ClairveilErrorCode.PROVER_REJECTED &&
       error?.status === 429 &&
       error?.proverCode === undefined &&
       error?.retryable === false
