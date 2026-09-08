@@ -5832,6 +5832,24 @@ export async function preparePlanReservation(reservationManager, {
 }
 
 export async function rollbackPlanReservation(reservationManager, batch) {
+  return rollbackPlanReservationWithFailure(reservationManager, batch);
+}
+
+// Diagnostics only: these labels never authorize release or prove that a
+// remote solver stopped. Do not persist arbitrary provider messages/codes,
+// which can contain witness material.
+function preparationFailureKind(error) {
+  try {
+    if (error?.name === "AbortError" || error?.code === "ABORT_ERR") return "cancelled";
+    if (error?.name === "TimeoutError" || error?.code === "ETIMEDOUT") return "timeout";
+    if (String(error?.code ?? error?.data?.code ?? "") === "4001") return "wallet_rejected";
+  } catch {
+    // Diagnostics must not prevent reservation quarantine.
+  }
+  return "unknown";
+}
+
+async function rollbackPlanReservationWithFailure(reservationManager, batch, error) {
   if (!reservationManager || !batch?.reservation_ids?.length) return;
   if (typeof reservationManager.getReservations !== "function") {
     throw new Error("reservationManager.getReservations is required for safe rollback");
@@ -5866,14 +5884,16 @@ export async function rollbackPlanReservation(reservationManager, batch) {
     error: "preparation_outcome_unknown_after_proving",
     metadata: {
       reconcile_reason: "preparation_outcome_unknown_after_proving",
-      rollback_error: "proof_or_solver_may_still_exist"
+      rollback_error: "proof_or_solver_may_still_exist",
+      preparation_failure_kind: preparationFailureKind(error),
+      preparation_failure_status: status
     }
   });
 }
 
 export async function rollbackPlanReservationPreservingError(reservationManager, batch, error) {
   try {
-    await rollbackPlanReservation(reservationManager, batch);
+    await rollbackPlanReservationWithFailure(reservationManager, batch, error);
   } catch (cleanupError) {
     if (error && typeof error === "object") {
       const existing = Array.isArray(error.reservationCleanupErrors)

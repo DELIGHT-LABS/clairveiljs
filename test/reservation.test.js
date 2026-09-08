@@ -3880,6 +3880,26 @@ test("getReservations reads an exact owned set through one store snapshot", asyn
   );
 });
 
+test("preparation rollback records bounded diagnostics without authorizing release", async () => {
+  for (const [error, expected] of [
+    [Object.assign(new Error("secret witness"), { name: "AbortError" }), "cancelled"],
+    [Object.assign(new Error("secret witness"), { code: "ETIMEDOUT" }), "timeout"],
+    [Object.assign(new Error("secret witness"), { code: 4001 }), "wallet_rejected"],
+    [Object.assign(new Error("secret witness"), { code: "secret witness" }), "unknown"]
+  ]) {
+    let captured;
+    await rollbackPlanReservationPreservingError({
+      async getReservations() { return [{ status: reservationStatuses.Proving }]; },
+      async markManualReview(ids, patch) { captured = patch; },
+      async releaseReservedOrProving() { assert.fail("uncertain proof must remain locked"); }
+    }, { reservation_ids: ["reservation-1"], lease_token: "lease-token" }, error);
+    assert.equal(captured.metadata.preparation_failure_kind, expected);
+    assert.equal(captured.metadata.preparation_failure_status, "Proving");
+    assert.equal(captured.error, "preparation_outcome_unknown_after_proving");
+    assert.doesNotMatch(JSON.stringify(captured), /secret witness/);
+  }
+});
+
 test("rollback cleanup errors do not replace the original prepare error", async () => {
   const original = new Error("prover response is invalid");
   await rollbackPlanReservationPreservingError(
