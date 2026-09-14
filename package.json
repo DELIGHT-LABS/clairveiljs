@@ -49,12 +49,12 @@
     "check:proto-freshness": "node tools/check-generated-proto-freshness.js",
     "check:codegen": "node tools/patch-generated-helpers.js --check codegen/generated/helpers.ts codegen/generated/varint.ts src/generated/helpers.js",
     "check:generated": "find src/generated -name '*.js' -exec node --check {} \\;",
-    "check": "find src -path src/generated -prune -o -name '*.js' -exec node --check {} \\; && find examples -name '*.js' -exec node --check {} \\; && find tools -name '*.js' -exec node --check {} \\; && npm run check:generated && npm run check:codegen && npm run docs:diagram:check",
+    "check": "find src -path src/generated -prune -o -name '*.js' -exec node --check {} \\; && find examples -name '*.js' -exec node --check {} \\; && find tools -name '*.js' -exec node --check {} \\; && npm run check:generated && npm run check:codegen && npm run docs:diagram:check && npm run check:wallet-api",
     "typecheck": "tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --strict test/types.ts",
     "test": "npm run test:unit",
     "test:unit": "node --import ./tools/skip-conformance-fixtures.js --test test/*.test.js",
-    "test:conformance": "node --test test/conformance.test.js test/prover-contract.test.js test/prover-http-contract-schema.test.js test/disclosure-conformance.test.js test/batch-transfer.test.js test/v0.3.1-fixture-contract.test.js test/wallet-contract-schema.test.js test/wallet-kernel.test.js test/chain-wallet.test.js",
-    "test:conformance:required": "node --import ./tools/require-conformance-fixtures.js --test test/conformance.test.js test/prover-contract.test.js test/prover-http-contract-schema.test.js test/disclosure-conformance.test.js test/batch-transfer.test.js test/v0.3.1-fixture-contract.test.js test/wallet-contract-schema.test.js test/wallet-kernel.test.js test/chain-wallet.test.js",
+    "test:conformance": "node --test test/conformance.test.js test/prover-contract.test.js test/prover-http-contract-schema.test.js test/disclosure-conformance.test.js test/batch-transfer.test.js test/v0.3.1-fixture-contract.test.js test/wallet-contract-schema.test.js test/wallet-kernel.test.js test/chain-wallet.test.js test/wallet-api.test.js test/custody-provider.test.js test/dapp-submission.test.js test/wallet-kernel-workflows.test.js test/public-boundary.test.js",
+    "test:conformance:required": "node --import ./tools/require-conformance-fixtures.js --test test/conformance.test.js test/prover-contract.test.js test/prover-http-contract-schema.test.js test/disclosure-conformance.test.js test/batch-transfer.test.js test/v0.3.1-fixture-contract.test.js test/wallet-contract-schema.test.js test/wallet-kernel.test.js test/chain-wallet.test.js test/wallet-api.test.js test/custody-provider.test.js test/dapp-submission.test.js test/wallet-kernel-workflows.test.js test/public-boundary.test.js",
     "test:e2e:local": "node --test test/e2e-local.e2e.js",
     "test:e2e:local:one-proof-all": "node tools/run-cosmos-e2e.js local",
     "test:e2e:cosmos:testnet": "node tools/run-cosmos-e2e.js testnet",
@@ -68,7 +68,9 @@
     "verify:release": "npm run verify:package && npm run check:proto-freshness && npm run verify:clairveil-source && npm run verify:evm-contract && npm run test:release-source && npm run test:conformance:required",
     "verify:release:integration": "npm run verify:release && npm run test:e2e:local:one-proof-all && npm run test:e2e:cosmos:testnet && npm run test:e2e:evm:one-proof-all && CLAIRVEIL_EVM_PAYABLE_E2E_REQUIRED=1 npm run test:e2e:evm-payable",
     "prepack": "npm run verify:package",
-    "prepublishOnly": "npm run verify:release:integration"
+    "prepublishOnly": "npm run verify:release:integration",
+    "generate:wallet-api": "node tools/generate-wallet-api.js",
+    "check:wallet-api": "node tools/generate-wallet-api.js --check"
   },
   "exports": {
     ".": {
@@ -214,6 +216,22 @@
     "./generated/*": {
       "types": "./src/generated/*.d.ts",
       "import": "./src/generated/*.js"
+    },
+    "./wallet-api": {
+      "types": "./src/wallet-api/index.d.ts",
+      "import": "./src/wallet-api/index.js"
+    },
+    "./custody-provider": {
+      "types": "./src/custody-provider/index.d.ts",
+      "import": "./src/custody-provider/index.js"
+    },
+    "./dapp": {
+      "types": "./src/dapp/index.d.ts",
+      "import": "./src/dapp/index.js"
+    },
+    "./legacy-browser": {
+      "types": "./src/browser/wallet-client.d.ts",
+      "import": "./src/browser/wallet-client.js"
     }
   },
   "dependencies": {
@@ -224,6 +242,7 @@
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
+    "ajv": "8.17.1",
     "cosmjs-types": "^0.11.0",
     "js-sha3": "^0.9.3"
   },

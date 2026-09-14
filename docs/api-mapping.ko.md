@@ -17,7 +17,7 @@
 
 반환되는 `WalletPrivacyIdentity`에는 복사한 RootSeed와 비공개 key pair가 포함되므로 신뢰된 runtime 안에 유지한다. 동결한 `publicIdentity` projection은 `shieldedAddress`, `spendPubKeyHex`, `viewPubKeyHex`, `disclosurePubKeyHex`만 포함한다. 이는 내부 SDK 타입이며 custody RPC 계정 DTO나 공개 권한이 아니다. Grant·public DTO projection·vault 저장·비밀 수명은 계속 custody가 담당하며 JavaScript는 모든 key 사본의 삭제를 보장하지 않는다.
 
-일반 계정·네트워크 선택은 별도로 유지하며 생성자 입력이 아니다. 같은 RootSeed는 같은 privacy key를 만들고 `shieldedPrefix`는 주소 인코딩만 바꾼다. 새 진입점은 legacy `PrivacyMaterial`을 감싸거나 상속하지 않으며 기존 transaction builder 형식을 맞추기 위한 주소·서명 placeholder를 추가하지 않는다. 일반 chain adapter는 아래처럼 분리했으며 private workflow에 두 독립 입력을 적용하는 작업은 후속 CC-002 범위다. 기존 legacy 진입점·정확한 파생 vector는 유지하고 새 표면을 broad root나 DApp 진입점에서 재export하지 않는다.
+일반 계정·네트워크 선택은 별도로 유지하며 생성자 입력이 아니다. 같은 RootSeed는 같은 privacy key를 만들고 `shieldedPrefix`는 주소 인코딩만 바꾼다. 새 진입점은 legacy `PrivacyMaterial`을 감싸거나 상속하지 않으며 기존 transaction builder 형식을 맞추기 위한 주소·서명 placeholder를 추가하지 않는다. 일반 chain adapter는 아래처럼 분리했으며 private workflow도 아래처럼 두 독립 입력을 받는다. 기존 legacy 진입점·정확한 파생 vector는 유지하고 새 표면을 broad root나 DApp 진입점에서 재export하지 않는다.
 
 `test/wallet-kernel.test.js`는 skip 경로 없이 고정한 sender/recipient Go vector를 직접 읽는다. 정확한 scalar/public-key/address 일치, 독립 합성 seed 생성, 입력 사본 소유권, public projection과 legacy/잘못된 입력 거절을 검사한다. `test:conformance:required`에도 포함하며 TypeScript 검사로 새 package export와 비공개/actor 필드 거절을 확인한다.
 
@@ -36,6 +36,22 @@ EVM은 `to`가 필수이며 `from`·`chainId`를 actor에 고정하고 그 외�
 이 provider 조회는 외부 지갑 UI가 열린 동안 지갑 상태를 원자적으로 고정할 수 없다. Custody의 grant/epoch 검사·`beginSubmission` journal·signed-artifact 검증·finality/effect reconciliation은 계속 workflow 계층에서 필요하며 이 primitive의 구현 범위가 아니다. 이 adapter와 RootSeed 생성자만으로 기존 DApp client가 custody-ready가 되지 않는다.
 
 `test/chain-wallet.test.js`는 합성 provider로 stale 계정·키·네트워크, 조회 대기 중 입력 변경, 명시적 연결, 공개 필드 추출, 재전송 없는 실패와 독립 identity 유지를 검사한다. Source import-graph 검사는 로컬 chain-wallet 모듈과 `@cosmjs/encoding`만 허용하며 의존성이 바뀔 때 실제 browser bundle도 검사해야 한다. 필수 conformance에 포함하고 TypeScript 검사로 누락·잘못된 actor, 비공개 필드, legacy root-signing 호출을 거절한다. 실제 지갑·chain/prover 검증은 별도 gate다.
+
+## Custody SDK 제공면 (CC-002)
+
+`clairveiljs/wallet-api`의 `src/wallet-api/schema/`가 단일 편집 원본이다. `npm run generate:wallet-api`는 DTO type·registry·Ajv 8.17.1 Draft 2020-12 standalone validator를 생성하고 `npm run check:wallet-api`는 오래된 산출물을 거절한다. 15개 메서드는 닫힌 DTO이며 생성 타입은 형태를 표현하고 조건부 제약은 runtime에서도 검증한다. 엄격한 JSON parser는 중복 키·잘못된 UTF-8/Unicode·accessor·prototype·byte/depth/list 초과를 거절한다. 결과는 복사·동결하고 method/ID·검토한 digest·요청 balance asset과 대조한다. `node tools/sync-wallet-api-mirror.js --check|--write CUSTODY_REPOSITORY`로 custody 생성 mirror 4개를 검사/갱신하며 SDK 원본만 수정한다.
+
+`createWalletKernel({ identity, client, evmClient?, evmChainId?, checkpoint, assertAuthority, reservationManager? })`는 신뢰 runtime 전용이다. `scan`·`proveDeposit`·`prepareDeposit`·`prepareTransfer`·`prepareWithdraw`·공개 identity 조회·dispose를 제공한다. 거래에는 별도 `actor`·`operationId`가 필요하며 scan 소유자는 privacy identity다. 기존 private client도 legacy `material`/`wallet`과 별개로 `privacyIdentity`/`chainActor`를 받는다. Note·intent 서명·audit/self-view·Merkle·nullifier·planner·proof·reservation 알고리즘을 재사용한다. EVM 숫자 wallet chain ID와 protocol chain 문자열은 별도로 고정한다. Own deposit과 native transfer/withdraw는 기존 Cosmos/EVM builder를 사용하며 third-party deposit·relay·batch는 새 facade에 없다.
+
+Host는 authoritative profile/time·암호화 저장소·활성 permission/epoch 검사를 제공한다. `checkpoint`는 정확한 operation/export barrier와 reservation을 원자적으로 영구 기록한 뒤 resolve해야 한다. Kernel은 이를 기다리고 권한을 재확인한 뒤 명시적 prover만 호출하며 checkpoint 실패 시 export하지 않는다. 기존 rollback은 proving 시작 뒤 실패한 reservation을 격리한다. Hook은 연동 의무이며 구현된 vault/journal이 아니다. Kernel 결과의 private note/witness는 공개 DTO로 보내면 안 된다. Dispose는 새 작업과 소유 byte 배열을 정리하지만 모든 JavaScript 비밀 사본 소거를 보장하지 않는다.
+
+`clairveiljs/custody-provider`는 `createCustodyProvider`·`createDirectBridgeTransport`를 export한다. Transport·invalidation 구독은 명시적이다. Exchange host가 origin/document 또는 topic을 인증하며 adapter 자체가 확장 인증·grant·WalletConnect responder를 구현하지 않는다. 생성 시 I/O가 없다. 고정 schema와 discovery가 일치해야 다른 메서드를 사용한다. Pending·timeout·polling을 제한하고 무효화 시 capability/revision 상태와 늦은 응답을 버리며 dispose는 영구적이다. 오류는 고정 schema 필드만 포함한다.
+
+`clairveiljs/dapp`의 `createClairveilDappClient({ custodyProvider })`는 15개 논리 메서드를 제공하며 `.cosmos`·private callback·자동 legacy fallback이 없다. `chainWallet`·명시적 `validateArtifact`를 추가하면 `submit`을 제공하며 Cosmos는 `broadcastCosmos`도 필요하다. `createArtifactVerifier`는 chain/asset/profile digest와 EVM contract/protocol chain을 고정하고 허용한 protobuf/ABI를 decode해 공개 effect를 확인한다. 승인 digest는 모든 bytes·actor·fee를 결속하며 private intent와 최신 chain 상태 확인은 custody 책임이다. 악성 페이지의 digest는 승인이 아니다.
+
+Submission은 허용된 begin 응답을 provider attachment당 한 번 소비한 뒤 wallet을 호출한다. 여러 client가 in-flight/attempt guard를 공유하고 stale revision/epoch/account를 거절한다. Cosmos는 정확한 signed document·key·secp256k1 서명을 확인한 뒤 한 번 broadcast하며 EVM은 명시적 EIP-1559 artifact만 받는다. 불명확/거절 응답은 unknown으로 보고하고 dispatch를 재시도하지 않는다. 메모리 guard는 host의 durable `beginSubmission` journal을 보완하며 process loss 후 journal을 대신하지 못한다. `clairveiljs/legacy-browser`는 기존 비밀 포함 browser client의 명시적 alias다. 기존 `browser-dapp`도 legacy이며 자동 선택하지 않는다.
+
+새 wallet-api/provider/submission/kernel-workflow/public-boundary 테스트는 기본/필수 conformance에 포함한다. 합성 Cosmos/EVM deposit·transfer·withdraw 준비는 기존 private 알고리즘과 mock chain read·형식에 맞는 proof 응답을 사용한다. Checkpoint 실패·actor/epoch 변경·signature/calldata 변조·공개 import graph도 검사한다. 실제 proving·실제 wallet/chain 결제·암호화 host 장애 주입·WalletConnect 검증은 별도다. Browser bundle/CSP·불변 package 측정은 custody CC-002 작업에 기록한다. Package version은 그대로이며 새 export는 미출시다.
 
 ## 계약 분류
 

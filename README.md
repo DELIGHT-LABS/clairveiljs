@@ -50,7 +50,7 @@ import { createEvmFinalityPolicy } from "clairveiljs/evm-finality";
 import { createNoteReservationManager } from "clairveiljs/reservation";
 ```
 
-The unreleased CC-002 work adds `clairveiljs/wallet-kernel` for trusted-runtime identity construction from an existing RootSeed and `clairveiljs/chain-wallet` for ordinary Keplr, OfflineSigner and EIP-1193 operations without legacy root signing. It is not part of the published `0.3.1` package or a custody-ready DApp client. See the [API mapping](./docs/api-mapping.md#trusted-rootseed-identity-cc-002) for its exact boundary.
+The unreleased CC-002 preview adds `clairveiljs/wallet-api`, `clairveiljs/custody-provider` and `clairveiljs/dapp` for the public contract/client, `clairveiljs/wallet-kernel` for independent RootSeed workflows, and `clairveiljs/chain-wallet` for ordinary wallets. `clairveiljs/legacy-browser` explicitly preserves the old page-secret client. These exports are not published under `0.3.1`; the [API mapping](./docs/api-mapping.md#custody-sdk-surfaces-cc-002) defines required host hooks and qualification limits.
 
 ## Install
 

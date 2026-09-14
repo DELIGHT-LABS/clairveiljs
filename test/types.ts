@@ -2311,3 +2311,23 @@ void {
   bech32,
   evmAddress
 };
+
+import { createCustodyProvider, type CustodyTransport } from 'clairveiljs/custody-provider';
+import { createClairveilDappClient } from 'clairveiljs/dapp';
+import { createWalletKernel } from 'clairveiljs/wallet-kernel';
+function custodyPublicTypes(transport: CustodyTransport) {
+  const provider = createCustodyProvider({ transport });
+  const client = createClairveilDappClient({ custodyProvider: provider });
+  client.getCapabilities({ protocolVersion: '1' });
+  // @ts-expect-error The new DApp facade has no private Cosmos client.
+  client.cosmos;
+  // @ts-expect-error Public operations cannot accept legacy root material.
+  client.prepareDeposit({ rootSeed: new Uint8Array(32), signatureBase64: 'synthetic' });
+  // @ts-expect-error The registry does not allow generic signer RPCs.
+  provider.request({ method: 'personal_sign', params: {} });
+  // @ts-expect-error Full schema-generated params keep required fields.
+  client.beginSubmission({ operationId: 'fixture' });
+  // @ts-expect-error Kernel construction needs host authority and durable checkpoint hooks.
+  createWalletKernel({ identity: custodyIdentity, client: cosmos });
+}
+void custodyPublicTypes;

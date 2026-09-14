@@ -37,7 +37,7 @@ Note reservation 상태 전이: [docs/reservation-state-machine.ko.md](./docs/re
 - EIP-1193 wallet용 Clairveil-compatible `IPrivacy` EVM precompile calldata adapter
 - runtime shape assertion과 TypeScript declaration
 
-미출시 CC-002 작업은 기존 RootSeed로 신뢰된 runtime의 identity를 생성하는 `clairveiljs/wallet-kernel`과 legacy root 서명 없이 일반 Keplr·OfflineSigner·EIP-1193 작업을 수행하는 `clairveiljs/chain-wallet`을 추가한다. 배포된 `0.3.1` package나 custody-ready DApp client에 포함된 기능은 아니다. 정확한 경계는 [API 매핑](./docs/api-mapping.ko.md)을 따른다.
+미출시 CC-002 preview는 공개 계약/client용 `clairveiljs/wallet-api`·`clairveiljs/custody-provider`·`clairveiljs/dapp`, 독립 RootSeed workflow용 `clairveiljs/wallet-kernel`, 일반 지갑용 `clairveiljs/chain-wallet`을 제공한다. `clairveiljs/legacy-browser`는 기존 page-secret client를 명시적으로 유지한다. `0.3.1`로 출시되지 않았으며 필수 host hook·검증 한계는 [API mapping](./docs/api-mapping.ko.md#custody-sdk-제공면-cc-002)에 있다.
 
 ## 설치
 

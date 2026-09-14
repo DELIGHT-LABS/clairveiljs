@@ -1,0 +1,207 @@
+{
+  "profile": "cvpriv-draft",
+  "status": "synthetic_not_run",
+  "network": {
+    "chainId": "eip155:31337",
+    "genesisHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "poolId": "0x1111111111111111111111111111111111111111"
+  },
+  "route": "cvpriv:66516780fd20384f83e61aa3c407dd1d",
+  "alias": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "connectOptions": {
+    "optionalNamespaces": {
+      "cvpriv": {
+        "chains": [
+          "cvpriv:66516780fd20384f83e61aa3c407dd1d"
+        ],
+        "methods": [
+          "clairveil_getCapabilities",
+          "clairveil_connect",
+          "clairveil_disconnect",
+          "clairveil_getPublicAccount",
+          "clairveil_sync",
+          "clairveil_getBalances",
+          "clairveil_prepareDeposit",
+          "clairveil_authorizeTransfer",
+          "clairveil_authorizeWithdraw",
+          "clairveil_requestDisclosure",
+          "clairveil_getOperation",
+          "clairveil_cancelOperation",
+          "clairveil_beginSubmission",
+          "clairveil_recordSubmission",
+          "clairveil_reconcile"
+        ],
+        "events": []
+      }
+    },
+    "sessionProperties": {
+      "clairveil_profile": "cvpriv-draft",
+      "clairveil_schema": "draft",
+      "clairveil_schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+      "clairveil_routeFingerprint": "66516780fd20384f83e61aa3c407dd1d15d7e0792f5b55ca472474246fad36d6",
+      "clairveil_privacyContract": "privacy-wallet-draft",
+      "clairveil_binding": "clairveil-draft",
+      "clairveil_execution": "client-handoff-v1"
+    }
+  },
+  "approveOptions": {
+    "id": 1,
+    "namespaces": {
+      "cvpriv": {
+        "chains": [
+          "cvpriv:66516780fd20384f83e61aa3c407dd1d"
+        ],
+        "accounts": [
+          "cvpriv:66516780fd20384f83e61aa3c407dd1d:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "methods": [
+          "clairveil_getCapabilities",
+          "clairveil_connect",
+          "clairveil_disconnect",
+          "clairveil_getPublicAccount",
+          "clairveil_sync",
+          "clairveil_getBalances",
+          "clairveil_prepareDeposit",
+          "clairveil_authorizeTransfer",
+          "clairveil_authorizeWithdraw",
+          "clairveil_requestDisclosure",
+          "clairveil_getOperation",
+          "clairveil_cancelOperation",
+          "clairveil_beginSubmission",
+          "clairveil_recordSubmission",
+          "clairveil_reconcile"
+        ],
+        "events": []
+      }
+    },
+    "sessionProperties": {
+      "clairveil_profile": "cvpriv-draft",
+      "clairveil_schema": "draft",
+      "clairveil_schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+      "clairveil_routeFingerprint": "66516780fd20384f83e61aa3c407dd1d15d7e0792f5b55ca472474246fad36d6",
+      "clairveil_privacyContract": "privacy-wallet-draft",
+      "clairveil_binding": "clairveil-draft",
+      "clairveil_execution": "client-handoff-v1"
+    }
+  },
+  "requestOptions": {
+    "topic": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "chainId": "cvpriv:66516780fd20384f83e61aa3c407dd1d",
+    "request": {
+      "method": "clairveil_getCapabilities",
+      "params": {
+        "protocolVersion": "1"
+      }
+    }
+  },
+  "respondOptions": {
+    "topic": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "protocolVersion": "1",
+        "schemaRevision": "draft",
+        "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+        "methods": [
+          "clairveil_getCapabilities",
+          "clairveil_connect",
+          "clairveil_disconnect",
+          "clairveil_getPublicAccount",
+          "clairveil_sync",
+          "clairveil_getBalances",
+          "clairveil_prepareDeposit",
+          "clairveil_authorizeTransfer",
+          "clairveil_authorizeWithdraw",
+          "clairveil_requestDisclosure",
+          "clairveil_getOperation",
+          "clairveil_cancelOperation",
+          "clairveil_beginSubmission",
+          "clairveil_recordSubmission",
+          "clairveil_reconcile"
+        ],
+        "privacyTransports": [
+          "extension-v1",
+          "walletconnect-sign-v2"
+        ],
+        "networks": [
+          {
+            "networkId": "synthetic-evm",
+            "chainId": "eip155:31337",
+            "profileDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "privacyRoute": "cvpriv:66516780fd20384f83e61aa3c407dd1d"
+          }
+        ],
+        "trust": {
+          "keyCustody": "independent-extension",
+          "rootMode": "fresh-internal",
+          "proving": "remote-witness",
+          "ordinarySigning": "external-wallet"
+        },
+        "limits": {
+          "requestBytes": 32768,
+          "responseBytes": 524288,
+          "maxArrayEntries": 64,
+          "maxDepth": 8,
+          "pollIntervalMs": 1000
+        },
+        "submissionMode": "client-handoff-v1",
+        "contracts": {
+          "privacy": "privacy-wallet-draft",
+          "binding": "clairveil-draft",
+          "execution": "client-handoff-v1"
+        }
+      }
+    }
+  },
+  "notes": [
+    "Options for an already initialized pinned SDK, not complete network envelopes.",
+    "Synthetic IDs, account alias and network profile are not usable credentials or a deployed chain.",
+    "Responder matches SDK event request ID (2 here), not proposal ID (1).",
+    "Privacy action options use the same composed method/params as the direct bridge; id 3 is an illustrative SDK request ID, not dispatch authority."
+  ],
+  "privacyActionRequestOptions": {
+    "topic": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "chainId": "cvpriv:66516780fd20384f83e61aa3c407dd1d",
+    "request": {
+      "method": "clairveil_authorizeTransfer",
+      "params": {
+        "protocolVersion": "1",
+        "schemaRevision": "draft",
+        "sessionHandle": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "accountHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+        "networkHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+        "idempotencyKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "chainActorHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+        "binding": "clairveil-draft",
+        "protocol": {
+          "recipientShieldedAddress": "clairs1qqqqqqqq",
+          "assetDenom": "uclair",
+          "amountBaseUnits": "10",
+          "expiresAtUnix": "1900000000",
+          "disclosure": {
+            "policy": "all-private",
+            "mode": "none"
+          }
+        },
+        "privacyConstraints": {
+          "allowRemoteWitness": true,
+          "allowPublicChainActor": true
+        }
+      }
+    }
+  },
+  "privacyActionRespondOptions": {
+    "topic": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+        "state": "awaiting_approval",
+        "statusRevision": "1",
+        "durable": true
+      }
+    }
+  }
+}
