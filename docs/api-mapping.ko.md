@@ -17,9 +17,25 @@
 
 반환되는 `WalletPrivacyIdentity`에는 복사한 RootSeed와 비공개 key pair가 포함되므로 신뢰된 runtime 안에 유지한다. 동결한 `publicIdentity` projection은 `shieldedAddress`, `spendPubKeyHex`, `viewPubKeyHex`, `disclosurePubKeyHex`만 포함한다. 이는 내부 SDK 타입이며 custody RPC 계정 DTO나 공개 권한이 아니다. Grant·public DTO projection·vault 저장·비밀 수명은 계속 custody가 담당하며 JavaScript는 모든 key 사본의 삭제를 보장하지 않는다.
 
-일반 계정·네트워크 선택은 별도로 유지하며 생성자 입력이 아니다. 같은 RootSeed는 같은 privacy key를 만들고 `shieldedPrefix`는 주소 인코딩만 바꾼다. 새 진입점은 legacy `PrivacyMaterial`을 감싸거나 상속하지 않으며 기존 transaction builder 형식을 맞추기 위한 주소·서명 placeholder를 추가하지 않는다. Chain adapter 분리와 해당 workflow 적용은 후속 CC-002 범위다. 기존 legacy 진입점·정확한 파생 vector는 유지하고 새 표면을 broad root나 DApp 진입점에서 재export하지 않는다.
+일반 계정·네트워크 선택은 별도로 유지하며 생성자 입력이 아니다. 같은 RootSeed는 같은 privacy key를 만들고 `shieldedPrefix`는 주소 인코딩만 바꾼다. 새 진입점은 legacy `PrivacyMaterial`을 감싸거나 상속하지 않으며 기존 transaction builder 형식을 맞추기 위한 주소·서명 placeholder를 추가하지 않는다. 일반 chain adapter는 아래처럼 분리했으며 private workflow에 두 독립 입력을 적용하는 작업은 후속 CC-002 범위다. 기존 legacy 진입점·정확한 파생 vector는 유지하고 새 표면을 broad root나 DApp 진입점에서 재export하지 않는다.
 
 `test/wallet-kernel.test.js`는 skip 경로 없이 고정한 sender/recipient Go vector를 직접 읽는다. 정확한 scalar/public-key/address 일치, 독립 합성 seed 생성, 입력 사본 소유권, public projection과 legacy/잘못된 입력 거절을 검사한다. `test:conformance:required`에도 포함하며 TypeScript 검사로 새 package export와 비공개/actor 필드 거절을 확인한다.
+
+## 일반 chain wallet (CC-002)
+
+미출시 `clairveiljs/chain-wallet` 진입점은 `createKeplrChainWalletAdapter`, `createOfflineSignerChainWalletAdapter`, `createEip1193ChainWalletAdapter`를 export한다. Legacy root-signing adapter와 분리한 일반 지갑 primitive다. Wallet kernel·private workflow·prover 모듈을 import하지 않고 privacy-root·typed-data 서명 메서드를 노출하지 않으며 broad root나 DApp 진입점에서 재export하지 않는다. 기존 legacy adapter와 vector는 유지한다.
+
+모든 생성자는 명시적 `chainId`가 필요하며 지갑을 호출하지 않는다. `connect()`는 명시적으로 Keplr enable 또는 EIP-1193 계정 접근을 요청하고 offline signer는 계정만 읽는다. `getActor()`는 접근 요청 없이 이미 이용 가능한 계정을 읽는다. Cosmos는 `{ namespace: "cosmos", chainId, address, pubKeyHex }`, EVM은 `{ namespace: "eip155", chainId, address }`를 반환한다. 동결한 공개 snapshot은 로컬 SDK 타입이며 custody RPC DTO·CAIP 정규화 계정 ID·grant·인증된 privacy-account 연결이 아니다. Cosmos는 native chain ID·선택적 고정 주소·Bech32 prefix(기본 `clair`)와 20바이트 주소를 사용한다. EVM은 canonical 16진수 chain ID를 요구하고 주소를 소문자로 정규화하며 선택적으로 계정을 고정한다.
+
+`signDirect(signDoc, actor)`와 `sendTransaction(transaction, actor)`는 별도로 확보한 actor가 필요하다. 계정 조회를 await하기 전에 actor를 복사하고 입력의 공개 필드만 추출한다. 호출 직전에 현재 계정·네트워크와 Cosmos 공개키를 해당 actor와 비교하며 EVM은 계정 조회 전후 네트워크도 확인한다. 감지한 불일치는 서명·전송 전에 실패한다. 메서드 호출당 최대 한 번만 dispatch하며 root 서명·다른 지갑·다른 네트워크로 fallback하지 않는다.
+
+Cosmos는 `bodyBytes`·`authInfoBytes`를 복사하고 설정한 chain ID와 uint64 `bigint` 계정 번호를 요구하며 추가 필드를 제외한다. Keplr에 `preferNoSetFee`·`preferNoSetMemo`를 전달한다. Direct-sign 응답은 지갑이 제공한 값이므로 호출자가 broadcast 전에 signed bytes·공개키·서명·의도한 effect를 검증해야 한다. 이 adapter는 broadcast하거나 지갑 응답이 검증됐다고 주장하지 않는다.
+
+EVM은 `to`가 필수이며 `from`·`chainId`를 actor에 고정하고 그 외에는 `data`, `value`, `gas`, `gasPrice`, `maxFeePerGas`, `maxPriorityFeePerGas`, `nonce`만 받는다. Data는 16진수 bytes, 수량은 canonical 16진수여야 한다. 추가 metadata는 제외한다. Contract 생성·access list·typed-data 서명은 첫 구현 범위에 없다. `eth_sendTransaction`은 32바이트 transaction hash를 반환해야 하며 dispatch 이후 거절이나 잘못된 응답이 발생해도 자동 재전송하지 않는다. 호출자는 reconciliation으로 결과를 확인할 때까지 제출을 미해결 상태로 유지해야 한다.
+
+이 provider 조회는 외부 지갑 UI가 열린 동안 지갑 상태를 원자적으로 고정할 수 없다. Custody의 grant/epoch 검사·`beginSubmission` journal·signed-artifact 검증·finality/effect reconciliation은 계속 workflow 계층에서 필요하며 이 primitive의 구현 범위가 아니다. 이 adapter와 RootSeed 생성자만으로 기존 DApp client가 custody-ready가 되지 않는다.
+
+`test/chain-wallet.test.js`는 합성 provider로 stale 계정·키·네트워크, 조회 대기 중 입력 변경, 명시적 연결, 공개 필드 추출, 재전송 없는 실패와 독립 identity 유지를 검사한다. Source import-graph 검사는 로컬 chain-wallet 모듈과 `@cosmjs/encoding`만 허용하며 의존성이 바뀔 때 실제 browser bundle도 검사해야 한다. 필수 conformance에 포함하고 TypeScript 검사로 누락·잘못된 actor, 비공개 필드, legacy root-signing 호출을 거절한다. 실제 지갑·chain/prover 검증은 별도 gate다.
 
 ## 계약 분류
 

@@ -1,4 +1,45 @@
 import { createPrivacyIdentity, type PublicPrivacyIdentity } from "clairveiljs/wallet-kernel";
+import {
+  createKeplrChainWalletAdapter, createOfflineSignerChainWalletAdapter, createEip1193ChainWalletAdapter,
+  type KeplrChainProvider, type Eip1193ChainProvider, type CosmosSignDoc
+} from "clairveiljs/chain-wallet";
+// Check the installed signer contract directly: the 0.39.0 package barrel also
+// loads registry declarations that reference development-only dependencies.
+import type { OfflineDirectSigner } from "../node_modules/@cosmjs/proto-signing/build/signer.js";
+
+async function ordinaryChainWalletTypes(keplr: KeplrChainProvider, offline: OfflineDirectSigner, provider: Eip1193ChainProvider) {
+  const chainKeplr = createKeplrChainWalletAdapter({ keplr, chainId: "synthetic-chain-1" });
+  const chainOffline = createOfflineSignerChainWalletAdapter({ signer: offline, chainId: "synthetic-chain-1" });
+  const chainEvm = createEip1193ChainWalletAdapter({ provider, chainId: "0x539" });
+  const cosmosActor = await chainKeplr.connect();
+  const evmActor = await chainEvm.getActor();
+  const document: CosmosSignDoc = { bodyBytes: new Uint8Array(), authInfoBytes: new Uint8Array(), chainId: cosmosActor.chainId, accountNumber: 0n };
+  const response = await chainOffline.signDirect(document, await chainOffline.getActor());
+  const accountNumber: bigint = response.signed.accountNumber;
+  await chainKeplr.signDirect(document, cosmosActor);
+  await chainEvm.sendTransaction({ to: "0x" + "12".repeat(20), value: "0x1" }, evmActor);
+  // @ts-expect-error Dispatch requires a separately captured actor.
+  chainKeplr.signDirect(document);
+  // @ts-expect-error Dispatch requires a separately captured actor.
+  chainEvm.sendTransaction({ to: evmActor.address });
+  // @ts-expect-error Actor namespaces cannot be substituted.
+  chainKeplr.signDirect(document, evmActor);
+  // @ts-expect-error Actor namespaces cannot be substituted.
+  chainEvm.sendTransaction({ to: evmActor.address }, cosmosActor);
+  // @ts-expect-error The ordinary adapter exposes no legacy root signer.
+  chainKeplr.signPrivacyRoot();
+  // @ts-expect-error The ordinary EVM adapter exposes no legacy root signer.
+  chainEvm.signPrivacyRoot();
+  // @ts-expect-error Public actors have no RootSeed.
+  void cosmosActor.rootSeed;
+  // @ts-expect-error Public transaction inputs have no private payload.
+  chainEvm.sendTransaction({ to: evmActor.address, rootSeed: new Uint8Array(32) }, evmActor);
+  // @ts-expect-error An explicit network is required.
+  createEip1193ChainWalletAdapter({ provider });
+  void accountNumber;
+}
+void ordinaryChainWalletTypes;
+
 const custodyIdentity = createPrivacyIdentity({ rootSeed: new Uint8Array(32) });
 const custodyPublicIdentity: PublicPrivacyIdentity = custodyIdentity.publicIdentity;
 void custodyPublicIdentity.shieldedAddress;
