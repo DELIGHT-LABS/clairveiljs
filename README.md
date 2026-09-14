@@ -50,6 +50,8 @@ import { createEvmFinalityPolicy } from "clairveiljs/evm-finality";
 import { createNoteReservationManager } from "clairveiljs/reservation";
 ```
 
+The unreleased CC-002 work adds `clairveiljs/wallet-kernel` for trusted-runtime identity construction from an existing RootSeed. It is not part of the published `0.3.1` package or a custody-ready DApp client. See the [API mapping](./docs/api-mapping.md#trusted-rootseed-identity-cc-002) for its exact boundary.
+
 ## Install
 
 ```bash

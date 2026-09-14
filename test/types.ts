@@ -1,3 +1,16 @@
+import { createPrivacyIdentity, type PublicPrivacyIdentity } from "clairveiljs/wallet-kernel";
+const custodyIdentity = createPrivacyIdentity({ rootSeed: new Uint8Array(32) });
+const custodyPublicIdentity: PublicPrivacyIdentity = custodyIdentity.publicIdentity;
+void custodyPublicIdentity.shieldedAddress;
+// @ts-expect-error Public identity projections do not expose RootSeed.
+void custodyPublicIdentity.rootSeed;
+// @ts-expect-error Public identity projections do not expose private key pairs.
+void custodyPublicIdentity.spend;
+// @ts-expect-error Ordinary chain actors are separate from privacy identity construction.
+createPrivacyIdentity({ rootSeed: new Uint8Array(32), address: "synthetic-actor" });
+// @ts-expect-error Root signatures are not accepted by the independent constructor.
+createPrivacyIdentity({ signatureBase64: "synthetic-signature" });
+
 import { deriveShieldedAddress, derivePrivacyMaterial, hexFromBytes } from "clairveiljs/core";
 import { createNoteReservationManager as createRootNoteReservationManager } from "clairveiljs";
 import { createClairveilPublicClient } from "clairveiljs/browser-public";

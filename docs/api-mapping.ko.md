@@ -11,6 +11,16 @@
 - endpoint와 client option: [배포·클라이언트 설정](./configuration.ko.md)
 - 오류 형태와 재시도 판단: [오류·복구](./errors-and-recovery.ko.md)
 
+## 신뢰된 RootSeed identity (CC-002)
+
+미출시 `clairveiljs/wallet-kernel` 진입점은 `createPrivacyIdentity({ rootSeed, shieldedPrefix? })`로 CC-002 추출을 시작한다. 신뢰된 지갑 runtime이 이미 보유한 32바이트 `Uint8Array`를 받아 복사한 뒤 기존 protocol 알고리즘으로 spend·view·disclosure key를 파생한다. 새로운 entropy 생성·백업은 custody가 담당하며 이 생성자는 seed 생성·루트 서명 요청·일반 지갑 호출을 하지 않는다. Legacy 서명 자료·chain actor를 포함한 다른 입력 필드는 거절한다.
+
+반환되는 `WalletPrivacyIdentity`에는 복사한 RootSeed와 비공개 key pair가 포함되므로 신뢰된 runtime 안에 유지한다. 동결한 `publicIdentity` projection은 `shieldedAddress`, `spendPubKeyHex`, `viewPubKeyHex`, `disclosurePubKeyHex`만 포함한다. 이는 내부 SDK 타입이며 custody RPC 계정 DTO나 공개 권한이 아니다. Grant·public DTO projection·vault 저장·비밀 수명은 계속 custody가 담당하며 JavaScript는 모든 key 사본의 삭제를 보장하지 않는다.
+
+일반 계정·네트워크 선택은 별도로 유지하며 생성자 입력이 아니다. 같은 RootSeed는 같은 privacy key를 만들고 `shieldedPrefix`는 주소 인코딩만 바꾼다. 새 진입점은 legacy `PrivacyMaterial`을 감싸거나 상속하지 않으며 기존 transaction builder 형식을 맞추기 위한 주소·서명 placeholder를 추가하지 않는다. Chain adapter 분리와 해당 workflow 적용은 후속 CC-002 범위다. 기존 legacy 진입점·정확한 파생 vector는 유지하고 새 표면을 broad root나 DApp 진입점에서 재export하지 않는다.
+
+`test/wallet-kernel.test.js`는 skip 경로 없이 고정한 sender/recipient Go vector를 직접 읽는다. 정확한 scalar/public-key/address 일치, 독립 합성 seed 생성, 입력 사본 소유권, public projection과 legacy/잘못된 입력 거절을 검사한다. `test:conformance:required`에도 포함하며 TypeScript 검사로 새 package export와 비공개/actor 필드 거절을 확인한다.
+
 ## 계약 분류
 
 | 분류 | 의미 | 예시 |

@@ -53,8 +53,8 @@
     "typecheck": "tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --strict test/types.ts",
     "test": "npm run test:unit",
     "test:unit": "node --import ./tools/skip-conformance-fixtures.js --test test/*.test.js",
-    "test:conformance": "node --test test/conformance.test.js test/prover-contract.test.js test/prover-http-contract-schema.test.js test/disclosure-conformance.test.js test/batch-transfer.test.js test/v0.3.1-fixture-contract.test.js test/wallet-contract-schema.test.js",
-    "test:conformance:required": "node --import ./tools/require-conformance-fixtures.js --test test/conformance.test.js test/prover-contract.test.js test/prover-http-contract-schema.test.js test/disclosure-conformance.test.js test/batch-transfer.test.js test/v0.3.1-fixture-contract.test.js test/wallet-contract-schema.test.js",
+    "test:conformance": "node --test test/conformance.test.js test/prover-contract.test.js test/prover-http-contract-schema.test.js test/disclosure-conformance.test.js test/batch-transfer.test.js test/v0.3.1-fixture-contract.test.js test/wallet-contract-schema.test.js test/wallet-kernel.test.js",
+    "test:conformance:required": "node --import ./tools/require-conformance-fixtures.js --test test/conformance.test.js test/prover-contract.test.js test/prover-http-contract-schema.test.js test/disclosure-conformance.test.js test/batch-transfer.test.js test/v0.3.1-fixture-contract.test.js test/wallet-contract-schema.test.js test/wallet-kernel.test.js",
     "test:e2e:local": "node --test test/e2e-local.e2e.js",
     "test:e2e:local:one-proof-all": "node tools/run-cosmos-e2e.js local",
     "test:e2e:cosmos:testnet": "node tools/run-cosmos-e2e.js testnet",
@@ -74,6 +74,10 @@
     ".": {
       "types": "./src/index.d.ts",
       "import": "./src/index.js"
+    },
+    "./wallet-kernel": {
+      "types": "./src/wallet-kernel/index.d.ts",
+      "import": "./src/wallet-kernel/index.js"
     },
     "./core": {
       "types": "./src/core/index.d.ts",

@@ -11,6 +11,16 @@ It covers high-level flows that communicate with external systems or create tran
 - Endpoint and client options: [Deployment and client configuration](./configuration.md)
 - Error forms and retry decisions: [Errors and recovery](./errors-and-recovery.md)
 
+## Trusted RootSeed identity (CC-002)
+
+The unreleased `clairveiljs/wallet-kernel` entrypoint starts the CC-002 extraction with `createPrivacyIdentity({ rootSeed, shieldedPrefix? })`. It accepts a 32-byte `Uint8Array` already held by the trusted wallet runtime and copies it before deriving spend, view and disclosure keys with the existing protocol algorithms. Custody generates and backs up fresh entropy; this constructor does not generate a seed, request a root signature or contact an ordinary wallet. Other input fields, including legacy signature material and chain actors, are rejected.
+
+The returned `WalletPrivacyIdentity` contains the copied RootSeed and private key pairs and stays inside the trusted runtime. Its frozen `publicIdentity` projection contains only `shieldedAddress`, `spendPubKeyHex`, `viewPubKeyHex` and `disclosurePubKeyHex`. This projection is an internal SDK type, not a custody RPC account DTO or a permission to disclose it. Custody still owns grants, public DTO projection, vault persistence and secret lifetime; JavaScript does not guarantee erasure of all key copies.
+
+Ordinary account/network selection is maintained separately and is not constructor input. Reusing the same RootSeed preserves the privacy keys; `shieldedPrefix` changes address encoding only. The new entrypoint does not wrap or inherit the legacy `PrivacyMaterial` object, and does not add address/signature placeholders to satisfy existing transaction builders. Chain adapter separation and adapting those workflows remain later CC-002 work. Existing legacy entrypoints and their exact derivation vectors remain unchanged; the new surface is not reexported through the broad root or DApp entrypoints.
+
+`test/wallet-kernel.test.js` directly loads the pinned sender/recipient Go vectors without a skip path. It checks exact scalar/public-key/address correspondence, independent synthetic seed construction, copied input ownership, public projection and rejected legacy/invalid input. The test also runs under `test:conformance:required`; TypeScript checks cover the new package export and rejected secret/actor fields.
+
 ## Contract categories
 
 | Category | Meaning | Example |
