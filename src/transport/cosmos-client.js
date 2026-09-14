@@ -1,3 +1,4 @@
+import { createPrivacyIdentity } from "../wallet-kernel/identity.js";
 import { toBech32 } from "@cosmjs/encoding";
 import { Registry, encodePubkey, makeAuthInfoBytes, makeSignDoc } from "@cosmjs/proto-signing";
 import { BroadcastTxError, defaultRegistryTypes, StargateClient } from "@cosmjs/stargate";
@@ -1926,6 +1927,27 @@ function indexedTxToRestish(tx) {
   };
 }
 
+async function resolvePreparationContext(client, { privacyIdentity, chainActor, material, wallet, executionBuilder, scanOnly = false }) {
+  if (privacyIdentity !== undefined || chainActor !== undefined) {
+    if (!privacyIdentity || material !== undefined || wallet !== undefined) throw new Error("independent identity cannot mix legacy material or wallet setup");
+    const identity = createPrivacyIdentity({ rootSeed: privacyIdentity.rootSeed, shieldedPrefix: client.shieldedPrefix });
+    if (Object.keys(identity.publicIdentity).some(key => identity.publicIdentity[key] !== privacyIdentity.publicIdentity?.[key])) throw new Error("privacy identity keys or prefix mismatch");
+    let actor;
+    if (chainActor) {
+      actor = Object.freeze({ namespace: chainActor.namespace, chainId: chainActor.chainId, address: chainActor.address, ...(chainActor.namespace === "cosmos" ? { pubKeyHex: chainActor.pubKeyHex } : {}) });
+      if (actor.namespace === "cosmos") {
+        if (actor.chainId !== client.chainId) throw new Error("chain actor network mismatch");
+        assertSignerPubKey(actor.address, actor.pubKeyHex, client.accountPrefix);
+      } else if (actor.namespace === "eip155") {
+        if (!/^0x[0-9a-f]{40}$/.test(actor.address) || !/^0x(?:0|[1-9a-f][0-9a-f]*)$/.test(actor.chainId) || (!scanOnly && typeof executionBuilder !== "function")) throw new Error("EVM actor requires an explicit execution builder");
+      } else throw new Error("unsupported chain actor namespace");
+    } else if (!scanOnly) throw new Error("chain actor is required for transaction preparation");
+    return { identity, actor, creator: actor?.namespace === "eip155" ? toBech32(client.accountPrefix, rawBytesFromHex(actor.address.slice(2), "EVM actor")) : actor?.address, publicAccount: identity.publicIdentity, ownerId: identity.publicIdentity.shieldedAddress };
+  }
+  const legacy = material || await client.deriveWalletPrivacyMaterial(wallet);
+  return { identity: { rootSeed: legacy.rootSeed, publicIdentity: { shieldedAddress: legacy.shieldedAddress } }, actor: { address: legacy.address, pubKeyHex: legacy.pubKeyHex }, creator: legacy.address, publicAccount: publicPrivacyAccount(legacy), ownerId: legacy.address };
+}
+
 function publicPrivacyAccount(material) {
   return {
     address: material.address,
@@ -1954,7 +1976,7 @@ function preparedExecutionTransport(execution = {}) {
   return transport;
 }
 
-async function buildPreparedExecutionArtifact({ executionBuilder, executionInput, buildSignDoc }) {
+async function buildPreparedExecutionArtifact({ executionBuilder, executionInput, buildSignDoc, bindSignDoc = true }) {
   if (executionBuilder) {
     const execution = await executionBuilder(executionInput);
     const camelTxBytesHash = execution?.txBytesHash;
@@ -1976,6 +1998,7 @@ async function buildPreparedExecutionArtifact({ executionBuilder, executionInput
     };
   }
   const signDoc = await buildSignDoc();
+  if (!bindSignDoc) return { signDoc };
   return {
     signDoc,
     executionBinding: {
@@ -3913,6 +3936,8 @@ export class ClairveilJS {
   async scanWalletNotes({
     wallet,
     material,
+    privacyIdentity,
+    chainActor,
     after,
     limit = 200,
     maxPages,
@@ -3964,7 +3989,7 @@ export class ClairveilJS {
       strictPrivacyScan,
       strict_privacy_scan
     });
-    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
+    const context = await resolvePreparationContext(this, { privacyIdentity, chainActor, material, wallet, scanOnly: true });
     const resolvedMaxPages = resolveScanMaxPagesAlias(maxPages, max_pages) ?? 1;
     let resolvedAfter = walletScanOptions.after;
     let resolvedAfterHeight = walletScanOptions.afterHeight;
@@ -4019,7 +4044,7 @@ export class ClairveilJS {
       }
     }
     const scan = await this.scanNotes({
-      rootSeed: privacy.rootSeed,
+      rootSeed: context.identity.rootSeed,
       after: resolvedAfter,
       limit,
       maxPages: resolvedMaxPages,
@@ -4036,19 +4061,19 @@ export class ClairveilJS {
       includeFoundNotes: true
     });
     if (noteStore) {
-      await noteStore.mergeScanResult(scan, { owner: privacy.address });
+      await noteStore.mergeScanResult(scan, { owner: context.ownerId });
       await this.refreshNoteStoreSpentStatuses(noteStore);
     }
     if (includeFoundNotes) {
       return {
         ...scan,
-        privacyAccount: publicPrivacyAccount(privacy)
+        privacyAccount: context.publicAccount
       };
     }
     const { foundNotes: _foundNotes, ...safeScan } = scan;
     return {
       ...safeScan,
-      privacyAccount: publicPrivacyAccount(privacy)
+      privacyAccount: context.publicAccount
     };
   }
 
@@ -4141,6 +4166,8 @@ export class ClairveilJS {
   async prepareDeposit({
     wallet,
     material,
+    privacyIdentity,
+    chainActor,
     depositMaterial,
     deposit_material,
     amount,
@@ -4153,15 +4180,16 @@ export class ClairveilJS {
     assetDenom,
     proof,
     proofHex,
-    proof_hex
+    proof_hex,
+    executionBuilder
   } = {}) {
     const resolvedGasLimit = resolveCosmosGasLimit(gasLimit, gas_limit, 2500000);
     const resolvedFeeAmount = resolveCosmosFeeAmount(feeAmount, fee_amount);
-    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
+    const context = await resolvePreparationContext(this, { privacyIdentity, chainActor, material, wallet, executionBuilder });
     const prepared = this.buildDepositMessage({
       depositMaterial: depositMaterial ?? deposit_material,
-      creator: privacy.address,
-      rootSeed: privacy.rootSeed,
+      creator: context.creator,
+      rootSeed: context.identity.rootSeed,
       amount,
       assetDenom: assetDenom ?? denom ?? this.defaultDenom,
       memo,
@@ -4169,9 +4197,13 @@ export class ClairveilJS {
       proofHex: proofHex ?? proof_hex
     });
     await this.assertProtocolPreflight(assetDenom ?? denom ?? this.defaultDenom);
-    const signDoc = await this.buildDirectSignDoc({
-      signer: privacy.address,
-      pubKeyHex: privacy.pubKeyHex,
+    const artifact = await buildPreparedExecutionArtifact({
+      executionBuilder,
+      executionInput: { message: prepared.message, material: prepared.material },
+      bindSignDoc: false,
+      buildSignDoc: () => this.buildDirectSignDoc({
+      signer: context.actor.address,
+      pubKeyHex: context.actor.pubKeyHex,
       gasLimit: resolvedGasLimit,
       feeAmount: resolvedFeeAmount,
       messages: [
@@ -4181,14 +4213,15 @@ export class ClairveilJS {
         }
       ],
       memo
+      })
     });
 
     return {
       status: "ready",
-      signDoc,
+      ...(artifact.signDoc ? { signDoc: artifact.signDoc } : { execution: artifact.execution }),
       message: prepared.message,
       material: prepared.material,
-      privacyAccount: publicPrivacyAccount(privacy)
+      privacyAccount: context.publicAccount
     };
   }
 
@@ -4261,6 +4294,8 @@ export class ClairveilJS {
   async prepareTransfer({
     wallet,
     material,
+    privacyIdentity,
+    chainActor,
     amount,
     recipient,
     proverAdapter,
@@ -4392,12 +4427,12 @@ export class ClairveilJS {
       strictPrivacyScan,
       strict_privacy_scan
     });
-    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
+    const context = await resolvePreparationContext(this, { privacyIdentity, chainActor, material, wallet, executionBuilder });
     const transferProtocolConfig = await this.assertTransferProtocolConfig(
       denom ?? this.defaultDenom
     );
     const scanResult = await this.scanNotes({
-      rootSeed: privacy.rootSeed,
+      rootSeed: context.identity.rootSeed,
       ...scanOptions,
       limit: scanOptions.limit ?? 200,
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
@@ -4414,7 +4449,7 @@ export class ClairveilJS {
         status: plan.status,
         plan,
         scan: scanResult,
-        privacyAccount: publicPrivacyAccount(privacy)
+        privacyAccount: context.publicAccount
       };
     }
     if (!plan.canBuildTx) {
@@ -4422,7 +4457,7 @@ export class ClairveilJS {
         status: plan.status,
         plan,
         scan: scanResult,
-        privacyAccount: publicPrivacyAccount(privacy)
+        privacyAccount: context.publicAccount
       };
     }
     const isFinal = plan.status === "final_transfer_ready";
@@ -4444,7 +4479,7 @@ export class ClairveilJS {
       throw new Error("transfer audit disclosure target must exactly match the active chain audit config");
     }
     const auditPubKeyHex = transferProtocolConfig.audit_config.audit_master_pubkey_hex;
-    const stepRecipient = isFinal ? recipient : privacy.shieldedAddress;
+    const stepRecipient = isFinal ? recipient : context.identity.publicIdentity.shieldedAddress;
     const stepAmount = isFinal ? amount : plan.nextAmount;
     const operationEvidence = isFinal
       ? finalOperationEvidence
@@ -4470,12 +4505,12 @@ export class ClairveilJS {
       const heartbeatResult = await withReservationHeartbeat(resolvedReservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
         const built = await this.buildTransferMessage({
           proverAdapter,
-          creator: privacy.address,
+          creator: context.creator,
           inputs: plan.selection.inputs,
           recipient: stepRecipient,
           amount: stepAmount,
           transferDenom: denom ?? this.defaultDenom,
-          rootSeed: privacy.rootSeed,
+          rootSeed: context.identity.rootSeed,
           shieldedPrefix: this.shieldedPrefix,
           userPrivacyPolicy: isFinal ? userPrivacyPolicy : "all-private",
           userDisclosureMode: isFinal ? userDisclosureMode : "none",
@@ -4499,8 +4534,8 @@ export class ClairveilJS {
             reservation: reservationBatchSummary(reservationBatch)
           },
           buildSignDoc: () => this.buildDirectSignDoc({
-            signer: privacy.address,
-            pubKeyHex: privacy.pubKeyHex,
+            signer: context.actor.address,
+            pubKeyHex: context.actor.pubKeyHex,
             gasLimit: resolvedGasLimit,
             feeAmount: resolvedFeeAmount,
             messages: [
@@ -4559,7 +4594,7 @@ export class ClairveilJS {
           chainNowUnix: transferTime.chainNowUnix,
           reservation: reservationBatchSummary(reservationBatch)
         },
-        privacyAccount: publicPrivacyAccount(privacy)
+        privacyAccount: context.publicAccount
       };
     } catch (error) {
       await rollbackPlanReservationPreservingError(resolvedReservationManager, reservationBatch, error);
@@ -5605,6 +5640,8 @@ export class ClairveilJS {
   async prepareWithdraw({
     wallet,
     material,
+    privacyIdentity,
+    chainActor,
     amount,
     recipient,
     proverAdapter,
@@ -5685,9 +5722,9 @@ export class ClairveilJS {
       strictPrivacyScan,
       strict_privacy_scan
     });
-    const privacy = material || await this.deriveWalletPrivacyMaterial(wallet);
+    const context = await resolvePreparationContext(this, { privacyIdentity, chainActor, material, wallet, executionBuilder });
     const scanResult = await this.scanNotes({
-      rootSeed: privacy.rootSeed,
+      rootSeed: context.identity.rootSeed,
       ...scanOptions,
       limit: scanOptions.limit ?? 200,
       maxPages: scanOptions.maxPages ?? defaultPrepareScanMaxPages,
@@ -5704,7 +5741,7 @@ export class ClairveilJS {
         status: plan.status,
         plan,
         scan: scanResult,
-        privacyAccount: publicPrivacyAccount(privacy)
+        privacyAccount: context.publicAccount
       };
     }
     assertPlanCanBuildTx(plan);
@@ -5723,12 +5760,12 @@ export class ClairveilJS {
       const heartbeatResult = await withReservationHeartbeat(resolvedReservationManager, reservationBatch, async ({ assertHeartbeatHealthy, heartbeatNow }) => {
         const built = await this.buildWithdrawMessage({
           proverAdapter,
-          creator: privacy.address,
+          creator: context.creator,
           notes: [plan.selectedNote],
           amount,
           assetDenom: assetDenom ?? denom ?? this.defaultDenom,
           recipient,
-          rootSeed: privacy.rootSeed,
+          rootSeed: context.identity.rootSeed,
           chainId: this.chainId,
           expiresAtUnix: resolvedExpiresAtUnix,
           chainNowUnix: resolvedChainNowUnix,
@@ -5747,8 +5784,8 @@ export class ClairveilJS {
             reservation: reservationBatchSummary(reservationBatch)
           },
           buildSignDoc: () => this.buildDirectSignDoc({
-            signer: privacy.address,
-            pubKeyHex: privacy.pubKeyHex,
+            signer: context.actor.address,
+            pubKeyHex: context.actor.pubKeyHex,
             gasLimit: resolvedGasLimit,
             feeAmount: resolvedFeeAmount,
             messages: [
@@ -5798,7 +5835,7 @@ export class ClairveilJS {
         message: built.message,
         selectedNote: built.selectedNote,
         reservation: reservationBatchSummary(reservationBatch),
-        privacyAccount: publicPrivacyAccount(privacy)
+        privacyAccount: context.publicAccount
       };
     } catch (error) {
       await rollbackPlanReservationPreservingError(resolvedReservationManager, reservationBatch, error);

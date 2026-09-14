@@ -89,5 +89,5 @@ test("wallet-kernel prefix selection changes only address encoding and rejects i
 });
 
 test("wallet-kernel entrypoint exposes no legacy root setup, wallet adapter or broad core facade", () => {
-  assert.deepEqual(Object.keys(kernel), ["createPrivacyIdentity"]);
+  assert.deepEqual(Object.keys(kernel).sort(), ["createPrivacyIdentity", "createWalletKernel"]);
 });

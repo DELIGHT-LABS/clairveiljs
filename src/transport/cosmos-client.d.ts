@@ -1,3 +1,5 @@
+import type { WalletPrivacyIdentity, PublicPrivacyIdentity } from '../wallet-kernel/identity.js';
+import type { ChainActor } from '../chain-wallet/index.js';
 import type {
   PrivacyScanValidationStateV2,
   PrivacyScanValidationStateSnapshotV2,
@@ -712,9 +714,18 @@ export interface ValidatedDepositMaterial {
 
 export type BuildDepositMessageInput = ValidateDepositMaterialInput & DepositProofInput;
 
-export type PrepareDepositInput = {
-  wallet?: WalletAdapterLike;
-  material?: PrivacyMaterial;
+export type PrivacyPreparationResult<Input, Result> = Input extends { privacyIdentity: WalletPrivacyIdentity }
+  ? Result extends unknown ? Omit<Result, 'privacyAccount'> & { privacyAccount: PublicPrivacyIdentity } : never
+  : Result;
+
+export type WalletPreparationContext =
+  | { wallet?: WalletAdapterLike; material?: PrivacyMaterial; privacyIdentity?: never; chainActor?: never }
+  | { wallet?: never; material?: never; privacyIdentity: WalletPrivacyIdentity; chainActor: ChainActor };
+export type WalletScanContext =
+  | { wallet?: WalletAdapterLike; material?: PrivacyMaterial; privacyIdentity?: never; chainActor?: never }
+  | { wallet?: never; material?: never; privacyIdentity: WalletPrivacyIdentity; chainActor?: ChainActor };
+
+export type PrepareDepositInput = WalletPreparationContext & {
   depositMaterial?: object;
   deposit_material?: object;
   amount: CoinString;
@@ -1218,9 +1229,7 @@ export class ClairveilJS {
   } & DepositRootSeedBinding): DepositMaterial;
   /** Validate every proof-independent Cosmos deposit binding before proving or signing. */
   validateDepositMaterial(input: ValidateDepositMaterialInput): ValidatedDepositMaterial;
-  scanWalletNotes(input: TypedWalletScanOptions & {
-    wallet?: WalletAdapterLike;
-    material?: PrivacyMaterial;
+  scanWalletNotes(input: TypedWalletScanOptions & WalletScanContext & {
     limit?: number;
     maxPages?: number;
     noteStore?: MemoryNoteStore;
@@ -1253,11 +1262,9 @@ export class ClairveilJS {
     scan_source?: "privacy_scan";
   }): Promise<{ plan: WithdrawPlan; scan: ScanResult }>;
   buildDepositMessage(input: BuildDepositMessageInput): object;
-  prepareDeposit(input: PrepareDepositInput): Promise<PreparedDeposit>;
+  prepareDeposit<Input extends PrepareDepositInput>(input: Input): Promise<PrivacyPreparationResult<Input, PreparedDeposit>>;
   confirmDeposit(input: ConfirmDepositInput): Promise<ConfirmedDeposit>;
-  prepareTransfer(input: {
-    wallet?: WalletAdapterLike;
-    material?: PrivacyMaterial;
+  prepareTransfer<Input extends WalletPreparationContext & {
     amount: CoinString;
     recipient: ShieldedAddress;
     proverAdapter: ProverAdapter;
@@ -1294,7 +1301,7 @@ export class ClairveilJS {
     fee_amount?: readonly CosmosFeeCoin[];
     reservationManager?: NoteReservationManager | null;
     reservation_manager?: NoteReservationManager | null;
-  } & TypedWalletScanOptions & DirectOperationEvidenceHashes & AuthoritativeTransferPreparationTime): Promise<PreparedTransfer>;
+  } & TypedWalletScanOptions & DirectOperationEvidenceHashes & AuthoritativeTransferPreparationTime>(input: Input): Promise<PrivacyPreparationResult<Input, PreparedTransfer>>;
   prepareTransferBatch(input: PrepareTransferBatchInput): Promise<PreparedTransferBatch>;
   provePreparedBatchTransfer(input: {
     payload: PreparedBatchTransferPayload;
@@ -1316,9 +1323,7 @@ export class ClairveilJS {
     reservationFinalizationRequired: true;
   }>;
   finalizePreparedBatchTransfer(input: FinalizePreparedBatchTransferInput): Promise<FinalizedPreparedBatchTransfer>;
-  prepareWithdraw<TExecutionBuilder extends PreparedWithdrawExecutionBuilder | undefined = undefined>(input: {
-    wallet?: WalletAdapterLike;
-    material?: PrivacyMaterial;
+  prepareWithdraw<Input extends WalletPreparationContext & {
     amount: CoinString;
     recipient: ClairAddress;
     proverAdapter: ProverAdapter;
@@ -1343,7 +1348,7 @@ export class ClairveilJS {
     fee_amount?: readonly CosmosFeeCoin[];
     reservationManager?: NoteReservationManager | null;
     reservation_manager?: NoteReservationManager | null;
-  } & TypedWalletScanOptions): Promise<PreparedWithdraw>;
+  } & TypedWalletScanOptions>(input: Input): Promise<PrivacyPreparationResult<Input, PreparedWithdraw>>;
   prepareRelayWithdraw(input: {
     wallet?: WalletAdapterLike;
     material?: PrivacyMaterial;
