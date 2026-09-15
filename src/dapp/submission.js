@@ -105,9 +105,11 @@ export function createSubmissionCoordinator({ custodyProvider, chainWallet, vali
       const options = { signal: dispatchController.signal };
       if (artifact.transport === 'evm') return chainWallet.sendTransaction(artifact.transaction, actor, options);
 
-      const document = signDocFromArtifact(artifact);
-      const response = await chainWallet.signDirect(document, actor, options);
-      const bytes = verifyCosmosSignResponse(document, response, actor);
+      // Keep the verification baseline private: custom adapters may mutate
+      // their input object or its byte arrays while obtaining a signature.
+      const expectedDocument = signDocFromArtifact(artifact);
+      const response = await chainWallet.signDirect(signDocFromArtifact(artifact), actor, options);
+      const bytes = verifyCosmosSignResponse(expectedDocument, response, actor);
       assertCurrent();
       await assertWalletMatches();
       assertCurrent();

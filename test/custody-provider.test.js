@@ -140,3 +140,38 @@ test('disabled capability is distinct from missing discovery, invalidation and u
   await assert.rejects(h.provider.request(request), error => error.code === 4103);
   assert.equal(h.calls.length, 2);
 });
+
+test('capability object order preserves attachment, polling and revision guards; value changes revoke', async () => {
+  const reorder = value => Array.isArray(value) ? value.map(reorder)
+    : value && typeof value === 'object'
+      ? Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reorder(item)])) : value;
+  const h = harness();
+  const discovery = { method: 'clairveil_getCapabilities', params: { protocolVersion: '1' } };
+  const poll = { method: 'clairveil_getOperation', params: fixture('getOperation', 'request') };
+  let invalidations = 0;
+  h.provider.onInvalidation(() => invalidations++);
+  const original = await h.provider.request(discovery);
+  await h.provider.request(poll);
+  const reordered = reorder(original);
+  assert.deepEqual(reordered, original);
+  h.setHandler(async () => reordered);
+  await h.provider.request(discovery);
+  assert.equal(h.provider.generation, 0);
+  assert.equal(invalidations, 0);
+  await assert.rejects(h.provider.request(poll), /RESOURCE_LIMIT/);
+  h.advance();
+  h.setHandler(async () => ({ ...fixture('getOperation', 'response'), statusRevision: '0' }));
+  await assert.rejects(h.provider.request(poll), /Internal error/);
+
+  for (const change of [value => { value.networks[0].profileDigest = 'ff'.repeat(32); },
+    value => { value.methods = value.methods.filter(method => method !== 'clairveil_requestDisclosure'); value.privacyTransports = ['extension-v1']; },
+    value => { value.methods.reverse(); }]) {
+    const changed = structuredClone(reordered);
+    change(changed);
+    h.setHandler(async () => changed);
+    const before = h.provider.generation;
+    await h.provider.request(discovery);
+    assert.equal(h.provider.generation, before + 1);
+    assert.equal(invalidations, h.provider.generation);
+  }
+});

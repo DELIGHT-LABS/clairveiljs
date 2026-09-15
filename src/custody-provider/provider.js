@@ -52,6 +52,17 @@ function operationKey(params, operationId = params.operationId ?? '') {
   return `${params.sessionHandle ?? 'bootstrap'}:${operationId}`;
 }
 
+// Inputs are already bounded, frozen JSON. Object member order is not a
+// capability change; array positions and actual values still matter.
+function sameJsonValue(left, right) {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (Array.isArray(left) !== Array.isArray(right)) return false;
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length
+    && keys.every(key => Object.hasOwn(right, key) && sameJsonValue(left[key], right[key]));
+}
+
 export function createCustodyProvider({ transport, subscribeInvalidation, timeoutMs = 30000, clock = Date.now } = {}) {
   if (typeof transport?.request !== 'function' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) {
     throw new TypeError('explicit transport and bounded timeout are required');
@@ -98,7 +109,7 @@ export function createCustodyProvider({ transport, subscribeInvalidation, timeou
   function acceptResult({ method, params }, raw) {
     const result = validateWalletResult(method, raw, params);
     if (method === discoveryMethod) {
-      if (capabilities && JSON.stringify(capabilities) !== JSON.stringify(result)) invalidate();
+      if (capabilities && !sameJsonValue(capabilities, result)) invalidate();
       capabilities = result;
     }
     if (result.operationId && result.statusRevision !== undefined) {

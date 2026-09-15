@@ -272,3 +272,80 @@ test('submission removes its invalidation listener after success, rejection and 
     assert.equal(listeners, 0);
   }
 });
+
+test('custom Cosmos adapters cannot mutate the approved document used for verification', async () => {
+  const { TxBody, AuthInfo } = await import('cosmjs-types/cosmos/tx/v1beta1/tx');
+  const { MsgDeposit } = await import('../src/generated/clairveil/privacy/v1/tx.js');
+  for (const mode of ['unchanged', 'fee', 'body_in_place', 'auth_in_place', 'chain', 'account']) {
+    const { h, key, actor, TxRaw } = await cosmosSubmissionFixture();
+    const artifactBefore = structuredClone(h.input.operation.publicArtifact);
+    let signatures = 0, broadcasts = 0;
+    const client = clientFor(h, {
+      chainWallet: { connect: async () => actor, getActor: async () => actor, signDirect: async document => {
+        signatures++;
+        if (mode === 'fee') {
+          const auth = AuthInfo.decode(document.authInfoBytes);
+          auth.fee.amount = [{ denom: 'uclair', amount: '77' }];
+          document.authInfoBytes = AuthInfo.encode(auth).finish();
+        }
+        if (mode === 'body_in_place') {
+          const body = TxBody.decode(document.bodyBytes);
+          const message = MsgDeposit.decode(body.messages[0].value);
+          message.amount = '8uclair';
+          body.messages[0].value = MsgDeposit.encode(message).finish();
+          // Retain the actual input buffer, not only the outer document object.
+          const changed = TxBody.encode(body).finish();
+          assert.equal(changed.length, document.bodyBytes.length);
+          document.bodyBytes.set(changed);
+        }
+        if (mode === 'auth_in_place') {
+          const auth = AuthInfo.decode(document.authInfoBytes);
+          auth.fee.gasLimit += 1n;
+          const changed = AuthInfo.encode(auth).finish();
+          assert.equal(changed.length, document.authInfoBytes.length);
+          document.authInfoBytes.set(changed);
+        }
+        if (mode === 'chain') document.chainId = 'changed-chain';
+        if (mode === 'account') document.accountNumber += 1n;
+        return signCosmosDocument(document, key);
+      } },
+      broadcastCosmos: async raw => {
+        broadcasts++;
+        assert.deepEqual(TxRaw.decode(raw).authInfoBytes,
+          Uint8Array.from(Buffer.from(artifactBefore.signDoc.authInfoBytesBase64, 'base64')));
+        return 'ab'.repeat(32);
+      }
+    });
+    if (mode === 'unchanged') await client.submit(h.input);
+    else await assert.rejects(client.submit(h.input), /Submission unresolved/, mode);
+    assert.equal(signatures, 1, mode);
+    assert.equal(broadcasts, mode === 'unchanged' ? 1 : 0, mode);
+    assert.deepEqual(h.input.operation.publicArtifact, artifactBefore);
+  }
+});
+
+test('capability key reordering preserves an in-flight submission while a changed profile revokes it', async () => {
+  for (const changeProfile of [false, true]) {
+    const h = await fixture();
+    const next = Object.fromEntries(Object.entries(structuredClone(capabilities)).reverse());
+    if (changeProfile) next.networks[0].profileDigest = 'ff'.repeat(32);
+    else assert.deepEqual(next, capabilities);
+    let discoveries = 0, invalidations = 0;
+    const provider = createCustodyProvider({ transport: { request: async ({ method }) => {
+      if (method === 'clairveil_getCapabilities') return ++discoveries === 1 ? capabilities : next;
+      if (method === 'clairveil_beginSubmission') {
+        await provider.request({ method: 'clairveil_getCapabilities', params: { protocolVersion: '1' } });
+        return { operationId: h.input.operation.operationId, attemptId: handle(7), statusRevision: '2', state: 'submission_unknown', invokeWallet: true };
+      }
+      if (method === 'clairveil_recordSubmission') return { operationId: h.input.operation.operationId, attemptId: handle(7), statusRevision: '3', state: 'submitted' };
+      throw new Error('unexpected synthetic method');
+    } } });
+    provider.onInvalidation(() => invalidations++);
+    await provider.request({ method: 'clairveil_getCapabilities', params: { protocolVersion: '1' } });
+    const client = clientFor(h, { custodyProvider: provider });
+    if (changeProfile) await assert.rejects(client.submit(h.input), /Submission unresolved/);
+    else assert.equal((await client.submit(h.input)).invoked, true);
+    assert.equal(h.calls.filter(call => call === 'wallet.send').length, changeProfile ? 0 : 1);
+    assert.equal(invalidations, changeProfile ? 1 : 0);
+  }
+});
