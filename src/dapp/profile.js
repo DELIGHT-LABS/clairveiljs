@@ -2,7 +2,7 @@ import { snapshotJson, validateWalletValue } from '../wallet-api/index.js';
 import { decodePrivacyCall } from './evm-abi.js';
 import { validateCosmosArtifact, signDocFromArtifact } from '../chain-wallet/verification.js';
 import { TxBody } from 'cosmjs-types/cosmos/tx/v1beta1/tx';
-import { MsgDeposit, MsgWithdraw } from '../generated/clairveil/privacy/v1/tx.js';
+import { MsgDeposit, MsgTransfer, MsgWithdraw } from '../generated/clairveil/privacy/v1/tx.js';
 
 /** Pinned default protocol profile; exact bytes are additionally bound by the custody artifact digest. */
 export function createArtifactVerifier(input) {
@@ -31,6 +31,8 @@ export function createArtifactVerifier(input) {
       const msg=MsgWithdraw.decode(body.messages[0].value);
       return msg.amount===`${summary.amountBaseUnits}${profile.assetDenom}` && msg.recipient===summary.recipientAddress && msg.chainId===actor.chainId && msg.expiresAtUnix===BigInt(summary.expiresAtUnix);
     }
-    return true; // Confidential values/recipient are enforced by the approved exact artifact and kernel intent validator.
+    // Expiry is public even when amounts/recipients remain confidential.
+    const msg=MsgTransfer.decode(body.messages[0].value);
+    return summary.expiresAtUnix!==undefined && msg.expiresAtUnix===BigInt(summary.expiresAtUnix);
   };
 }

@@ -8,6 +8,23 @@ const fixture=(name,side)=>structuredClone(cases.find(c=>c.name===name+'.'+side)
 function harness(){let now=0;const calls=[];let handler=async ({method})=>fixture(method.slice(10),'response');
  const provider=createCustodyProvider({transport:{request:input=>{calls.push(input);return handler(input);}},clock:()=>now,timeoutMs:1000});
  return{provider,calls,setHandler:fn=>handler=fn,advance:()=>now+=1000};}
+test('provider and direct bridge reject unsupported versions before discovery or transport work', async () => {
+  let calls = 0;
+  const unexpected = async () => { calls++; throw new Error('unexpected transport'); };
+  const provider = createCustodyProvider({ transport: { request: unexpected } });
+  const bridge = createDirectBridgeTransport({ exchange: unexpected });
+  for (const client of [provider, bridge]) {
+    for (const request of [
+      { method: 'clairveil_getCapabilities', params: { protocolVersion: '2' } },
+      { method: 'clairveil_connect', params: { ...fixture('connect', 'request'), schemaRevision: 'future' } }
+    ]) {
+      await assert.rejects(client.request(request), error => error.code === 4101
+        && error.message === 'UNSUPPORTED_VERSION' && error.rpcError.data.retryable === false);
+    }
+    await assert.rejects(client.request({ method: 'clairveil_getCapabilities', params: {} }), error => error.code === -32602);
+  }
+  assert.equal(calls, 0);
+});
 test('public client has all 15 typed methods with no private facade, and does not connect on construction',async()=>{
  const {provider,calls}=harness();const client=createClairveilDappClient({custodyProvider:provider});
  assert.equal(calls.length,0);assert.equal(Object.keys(client).length,15);

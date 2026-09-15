@@ -25,7 +25,18 @@ export function validateWalletValue(definition, input, { response = false } = {}
 }
 export function validateWalletParams(method, params) {
   if (!Object.hasOwn(methodRegistry, method)) throw new WalletRpcError({ code: -32601, message: 'Method not found' });
-  return validateWalletValue(methodRegistry[method].params, params);
+  let value;
+  // Bound and copy the input before inspecting versions; never invoke accessors.
+  try { value = snapshotJson(params); } catch { throw invalidWalletData(); }
+  if ((typeof value?.protocolVersion === 'string' && value.protocolVersion !== '1')
+    || (method !== 'clairveil_getCapabilities' && typeof value?.schemaRevision === 'string' && value.schemaRevision !== 'draft')) {
+    throw new WalletRpcError({
+      code: 4101,
+      message: 'UNSUPPORTED_VERSION',
+      data: { label: 'UNSUPPORTED_VERSION', retryable: false }
+    });
+  }
+  return validateWalletValue(methodRegistry[method].params, value);
 }
 export function validateWalletResult(method, result, params) {
   if (!Object.hasOwn(methodRegistry, method)) throw invalidWalletData(true);

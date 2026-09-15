@@ -61,20 +61,54 @@ async function fixture(){
  return result;
 }
 
-async function cosmosSubmissionFixture() {
+async function cosmosSubmissionFixture({ kind = 'deposit', expiresAtUnix = 1900000000n } = {}) {
  const {TxBody,AuthInfo,TxRaw}=await import('cosmjs-types/cosmos/tx/v1beta1/tx');
  const {PubKey}=await import('cosmjs-types/cosmos/crypto/secp256k1/keys');
- const {MsgDeposit}=await import('../src/generated/clairveil/privacy/v1/tx.js');
+ const {MsgDeposit,MsgTransfer}=await import('../src/generated/clairveil/privacy/v1/tx.js');
  const {cosmosAddressFromPubKey}=await import('clairveiljs/cosmos');
   const h=await fixture(),key=bytes(32,1),pub=secp256k1.getPublicKey(key),pubKeyHex=Buffer.from(pub).toString('hex');
   const actor={namespace:'cosmos',chainId:'synthetic-1',address:cosmosAddressFromPubKey(pubKeyHex,'clair'),pubKeyHex};
-  const body=TxBody.encode(TxBody.fromPartial({messages:[{typeUrl:MsgDeposit.typeUrl,value:MsgDeposit.encode(MsgDeposit.fromPartial({creator:actor.address,amount:'7uclair',noteCommitment:bytes(32),encryptedNote:bytes(430),proof:bytes(164)})).finish()}]})).finish();
+  const codec = kind === 'deposit' ? MsgDeposit : MsgTransfer;
+  const message = kind === 'deposit'
+    ? { creator: actor.address, amount: '7uclair', noteCommitment: bytes(32), encryptedNote: bytes(430), proof: bytes(164) }
+    : { creator: actor.address, root: bytes(32), nullifiers: [bytes(32, 2), bytes(32, 3)], newCommitments: [bytes(32, 4), bytes(32, 5)], cipherTexts: [bytes(430), bytes(430)], proof: bytes(164), expiresAtUnix };
+  const body=TxBody.encode(TxBody.fromPartial({messages:[{typeUrl:codec.typeUrl,value:codec.encode(codec.fromPartial(message)).finish()}]})).finish();
   const auth=AuthInfo.encode(AuthInfo.fromPartial({signerInfos:[{publicKey:{typeUrl:'/cosmos.crypto.secp256k1.PubKey',value:PubKey.encode({key:pub}).finish()},modeInfo:{single:{mode:1}},sequence:0n}],fee:{amount:[],gasLimit:100000n}})).finish();
   h.input.actor=actor;h.input.chainActorAccountId=`cosmos:${actor.chainId}:${actor.address}`;
+  h.input.operation.kind = kind;
+  h.input.operation.stepKind = kind;
+  if (kind !== 'deposit') h.input.operation.summary.expiresAtUnix = expiresAtUnix.toString();
   h.input.operation.publicArtifact={transport:'cosmos',chainId:`cosmos:${actor.chainId}`,chainActorHandle:handle(2),bindingVersion:'cv-artifact-jcs-sha256-v1',artifactBindingHash:'00'.repeat(32),signDoc:{bodyBytesBase64:Buffer.from(body).toString('base64'),authInfoBytesBase64:Buffer.from(auth).toString('base64'),chainId:actor.chainId,accountNumber:'0'}};
   h.input.operation.publicArtifact.artifactBindingHash=await computeArtifactBinding({...h.input,operationId:h.input.operation.operationId,artifact:h.input.operation.publicArtifact});
   h.profile = { profileDigest: h.input.networkProfileDigest, chainId: `cosmos:${actor.chainId}`, assetDenom: 'uclair' };
   return { h, key, pub, actor, body, TxRaw };
+}
+
+for (const kind of ['final_transfer', 'self_merge']) {
+  test(`Cosmos ${kind} rejects mismatched or missing public expiry before begin, signing or broadcast`, async () => {
+    for (const summaryExpiry of ['1900000000', '1899999999', '1900000900', undefined]) {
+      const { h, key, actor } = await cosmosSubmissionFixture({ kind });
+      if (summaryExpiry === undefined) delete h.input.operation.summary.expiresAtUnix;
+      else h.input.operation.summary.expiresAtUnix = summaryExpiry;
+      // The exact transaction digest remains valid: the public summary is not
+      // part of that digest, so the profile verifier must compare its expiry.
+      validateWalletValue('ClairveilOperation', h.input.operation, { response: true });
+      let signatures = 0, broadcasts = 0;
+      const client = clientFor(h, {
+        chainWallet: { getActor: async () => actor, signDirect: async doc => {
+          signatures++;
+          return signCosmosDocument(doc, key);
+        } },
+        broadcastCosmos: async () => { broadcasts++; return 'ab'.repeat(32); }
+      });
+      const matches = summaryExpiry === '1900000000';
+      if (matches) await client.submit(h.input);
+      else await assert.rejects(client.submit(h.input), /Submission unresolved/);
+      assert.equal(h.calls.filter(call => call === 'clairveil_beginSubmission').length, matches ? 1 : 0);
+      assert.equal(signatures, matches ? 1 : 0);
+      assert.equal(broadcasts, matches ? 1 : 0);
+    }
+  });
 }
 test('valid EVM artifact consumes durable begin before exactly one ordinary-wallet call',async()=>{
  const h=await fixture();await h.client.submit(h.input);
