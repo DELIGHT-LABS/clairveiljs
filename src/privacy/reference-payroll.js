@@ -1688,7 +1688,7 @@ function payrollDirectSignerPublicKey(authInfo, creator) {
     throw new Error(`one-proof payroll artifact signer public key is invalid: ${error.message}`);
   }
   try {
-    const decodedCreator = fromBech32(creator);
+    const decodedCreator = fromBech32(creator, 90);
     if (toBech32(decodedCreator.prefix, decodedCreator.data) !== creator) {
       throw new Error("creator address is not canonical");
     }

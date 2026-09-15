@@ -49,3 +49,77 @@ test('admission rejects hostile wrappers, throttles polling and permanently clos
  await h.provider.request(input);await assert.rejects(h.provider.request(input),/RESOURCE_LIMIT/);
  h.provider.dispose();await assert.rejects(h.provider.request({method:'clairveil_getCapabilities',params:{protocolVersion:'1'}}),/UNAUTHORIZED/);
 });
+
+test('pending admission reserves two control slots and releases capacity after completion', async () => {
+  const h = harness();
+  await h.provider.request({ method: 'clairveil_getCapabilities', params: { protocolVersion: '1' } });
+  const completions = [];
+  h.setHandler(({ method }) => new Promise(resolve => completions.push(() => resolve(fixture(method.slice(10), 'response')))));
+  const connect = { method: 'clairveil_connect', params: fixture('connect', 'request') };
+  const cancel = { method: 'clairveil_cancelOperation', params: fixture('cancelOperation', 'request') };
+  const pending = Array.from({ length: 16 }, () => h.provider.request(connect));
+  await assert.rejects(h.provider.request(connect), /RESOURCE_LIMIT/);
+  pending.push(h.provider.request(cancel), h.provider.request(cancel));
+  await assert.rejects(h.provider.request(cancel), /RESOURCE_LIMIT/);
+  assert.equal(completions.length, 18);
+  completions.forEach(complete => complete());
+  await Promise.all(pending);
+  h.setHandler(async () => fixture('connect', 'response'));
+  await h.provider.request(connect);
+});
+
+test('timed-out requests release every pending slot without replaying the transport', async () => {
+  let stalled = true;
+  let requests = 0;
+  const provider = createCustodyProvider({
+    timeoutMs: 10,
+    transport: {
+      request({ method }) {
+        if (method === 'clairveil_getCapabilities') return Promise.resolve(fixture('getCapabilities', 'response'));
+        requests++;
+        return stalled ? new Promise(() => {}) : Promise.resolve(fixture('connect', 'response'));
+      }
+    }
+  });
+  await provider.request({ method: 'clairveil_getCapabilities', params: { protocolVersion: '1' } });
+  const input = { method: 'clairveil_connect', params: fixture('connect', 'request') };
+  const expired = await Promise.allSettled(Array.from({ length: 16 }, () => provider.request(input)));
+  assert.ok(expired.every(result => result.status === 'rejected' && result.reason.code === 4112));
+  assert.equal(requests, 16);
+  stalled = false;
+  await Promise.all(Array.from({ length: 16 }, () => provider.request(input)));
+  assert.equal(requests, 32);
+});
+
+
+test('transport envelope mutation cannot change response validation or invalidate the provider', async () => {
+  const h = harness();
+  h.setHandler(async request => {
+    request.method = 'clairveil_disconnect';
+    request.params = fixture('disconnect', 'request');
+    return fixture('getCapabilities', 'response');
+  });
+  const result = await h.provider.request({ method: 'clairveil_getCapabilities', params: { protocolVersion: '1' } });
+  assert.equal(result.methods.length, 15);
+  assert.equal(h.provider.generation, 0);
+});
+
+test('disabled capability is distinct from missing discovery, invalidation and unknown methods', async () => {
+  const h = harness();
+  const request = { method: 'clairveil_requestDisclosure', params: fixture('requestDisclosure', 'request') };
+  await assert.rejects(h.provider.request(request), error => error.code === 4103);
+  const capabilities = fixture('getCapabilities', 'response');
+  capabilities.methods = capabilities.methods.filter(method => method !== request.method);
+  capabilities.privacyTransports = ['extension-v1'];
+  h.setHandler(async () => capabilities);
+  await h.provider.request({ method: 'clairveil_getCapabilities', params: { protocolVersion: '1' } });
+  await assert.rejects(h.provider.request(request), error => error.code === 4102
+    && error.message === 'UNSUPPORTED_CAPABILITY' && error.rpcError.data.retryable === false);
+  await assert.rejects(h.provider.request({ method: 'clairveil_unknown', params: {} }), error => error.code === -32601);
+  assert.equal(h.calls.length, 1);
+  h.setHandler(async () => fixture('connect', 'response'));
+  await h.provider.request({ method: 'clairveil_connect', params: fixture('connect', 'request') });
+  h.provider.invalidate();
+  await assert.rejects(h.provider.request(request), error => error.code === 4103);
+  assert.equal(h.calls.length, 2);
+});

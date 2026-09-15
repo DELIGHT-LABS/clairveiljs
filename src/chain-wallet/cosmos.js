@@ -1,20 +1,6 @@
 import { fromBech32, toHex } from "@cosmjs/encoding";
-import { assertSameActor, expectedActor, requireString } from "./actor.js";
-
-function snapshotSignDoc(value, chainId) {
-  const { chainId: documentChainId, bodyBytes, authInfoBytes, accountNumber } = value ?? {};
-  if (documentChainId !== chainId) throw new Error("signDoc chain ID mismatch");
-  if (!(bodyBytes instanceof Uint8Array) || !(authInfoBytes instanceof Uint8Array)
-    || typeof accountNumber !== "bigint" || accountNumber < 0n || accountNumber > 0xffffffffffffffffn) {
-    throw new TypeError("invalid Cosmos direct sign document");
-  }
-  return {
-    bodyBytes: Uint8Array.from(bodyBytes),
-    authInfoBytes: Uint8Array.from(authInfoBytes),
-    chainId,
-    accountNumber
-  };
-}
+import { dispatchToActor, expectedActor, requireString } from "./actor.js";
+import { snapshotSignDoc, toKeplrSignDoc, fromKeplrSignResponse } from "./cosmos-signing.js";
 
 function cosmosAdapter({ chainId, address, accountPrefix, readAccount, connect, sign }) {
   chainId = requireString(chainId, "chainId");
@@ -25,7 +11,7 @@ function cosmosAdapter({ chainId, address, accountPrefix, readAccount, connect, 
     if (typeof currentAddress !== "string" || (address !== undefined && currentAddress !== address)) {
       throw new Error("chain wallet account mismatch");
     }
-    const decoded = fromBech32(currentAddress);
+    const decoded = fromBech32(currentAddress, 90);
     if (decoded.prefix !== accountPrefix || decoded.data.length !== 20) throw new Error("chain wallet address prefix or length mismatch");
     if (!(pubkey instanceof Uint8Array) || !pubkey.length) throw new Error("chain wallet public key is required");
     return Object.freeze({ namespace: "cosmos", chainId, address: currentAddress, pubKeyHex: toHex(pubkey) });
@@ -33,12 +19,10 @@ function cosmosAdapter({ chainId, address, accountPrefix, readAccount, connect, 
   return Object.freeze({
     async connect() { await connect(); return getActor(); },
     getActor,
-    async signDirect(signDoc, actor) {
+    async signDirect(signDoc, actor, { signal } = {}) {
       const expected = expectedActor(actor, "cosmos", chainId);
       const document = snapshotSignDoc(signDoc, chainId);
-      assertSameActor(expected, await getActor());
-      // Dispatch once with the captured public document and actor. No root signing or retries.
-      return sign(expected.address, document);
+      return dispatchToActor(expected, getActor, signal, () => sign(expected.address, document));
     }
   });
 }
@@ -55,7 +39,11 @@ export function createKeplrChainWalletAdapter({ keplr, chainId, address, account
       const key = await keplr.getKey(selectedChainId);
       return { address: key?.bech32Address, pubkey: key?.pubKey };
     },
-    sign: (signer, document) => keplr.signDirect(selectedChainId, signer, document, { preferNoSetFee: true, preferNoSetMemo: true })
+    async sign(signer, document) {
+      const external = toKeplrSignDoc(document);
+      const response = await keplr.signDirect(selectedChainId, signer, external, { preferNoSetFee: true, preferNoSetMemo: true });
+      return fromKeplrSignResponse(response);
+    }
   });
 }
 

@@ -1,4 +1,5 @@
 import { createPrivacyIdentity, type PublicPrivacyIdentity } from "clairveiljs/wallet-kernel";
+import type { Keplr } from "@keplr-wallet/types";
 import {
   createKeplrChainWalletAdapter, createOfflineSignerChainWalletAdapter, createEip1193ChainWalletAdapter,
   type KeplrChainProvider, type Eip1193ChainProvider, type CosmosSignDoc
@@ -7,7 +8,8 @@ import {
 // loads registry declarations that reference development-only dependencies.
 import type { OfflineDirectSigner } from "../node_modules/@cosmjs/proto-signing/build/signer.js";
 
-async function ordinaryChainWalletTypes(keplr: KeplrChainProvider, offline: OfflineDirectSigner, provider: Eip1193ChainProvider) {
+async function ordinaryChainWalletTypes(keplr: Keplr, offline: OfflineDirectSigner, provider: Eip1193ChainProvider) {
+  const injected: KeplrChainProvider = keplr;
   const chainKeplr = createKeplrChainWalletAdapter({ keplr, chainId: "synthetic-chain-1" });
   const chainOffline = createOfflineSignerChainWalletAdapter({ signer: offline, chainId: "synthetic-chain-1" });
   const chainEvm = createEip1193ChainWalletAdapter({ provider, chainId: "0x539" });
@@ -17,7 +19,11 @@ async function ordinaryChainWalletTypes(keplr: KeplrChainProvider, offline: Offl
   const response = await chainOffline.signDirect(document, await chainOffline.getActor());
   const accountNumber: bigint = response.signed.accountNumber;
   await chainKeplr.signDirect(document, cosmosActor);
+  await chainKeplr.signDirect(document, cosmosActor, { signal: new AbortController().signal });
   await chainEvm.sendTransaction({ to: "0x" + "12".repeat(20), value: "0x1" }, evmActor);
+  await chainEvm.sendTransaction({ to: "0x" + "12".repeat(20) }, evmActor, { signal: new AbortController().signal });
+  // @ts-expect-error Cancellation options require an actual AbortSignal.
+  chainKeplr.signDirect(document, cosmosActor, { signal: true });
   // @ts-expect-error Dispatch requires a separately captured actor.
   chainKeplr.signDirect(document);
   // @ts-expect-error Dispatch requires a separately captured actor.
@@ -37,6 +43,7 @@ async function ordinaryChainWalletTypes(keplr: KeplrChainProvider, offline: Offl
   // @ts-expect-error An explicit network is required.
   createEip1193ChainWalletAdapter({ provider });
   void accountNumber;
+  void injected;
 }
 void ordinaryChainWalletTypes;
 
@@ -2314,7 +2321,7 @@ void {
 
 import { createCustodyProvider, type CustodyTransport } from 'clairveiljs/custody-provider';
 import { createClairveilDappClient } from 'clairveiljs/dapp';
-import { createWalletKernel } from 'clairveiljs/wallet-kernel';
+import { createWalletKernel, type WalletKernel } from 'clairveiljs/wallet-kernel';
 function custodyPublicTypes(transport: CustodyTransport) {
   const provider = createCustodyProvider({ transport });
   const client = createClairveilDappClient({ custodyProvider: provider });
@@ -2331,3 +2338,23 @@ function custodyPublicTypes(transport: CustodyTransport) {
   createWalletKernel({ identity: custodyIdentity, client: cosmos });
 }
 void custodyPublicTypes;
+
+async function kernelWorkflowTypes(kernel: WalletKernel, actor: import('clairveiljs/chain-wallet').ChainActor, prover: Parameters<WalletKernel['proveDeposit']>[0]['prover']) {
+  const input = { operationId: 'synthetic-deposit', actor, amount: '7uclair' };
+  const proven = await kernel.proveDeposit({ ...input, prover });
+  const prepared = await kernel.prepareDeposit({ ...input, ...proven });
+  const material: import('clairveiljs/note').DepositMaterial = proven.depositMaterial;
+  const proof: string | Uint8Array = proven.proofHex ?? proven.proof;
+  const preparedIdentity: PublicPrivacyIdentity = prepared.privacyAccount;
+  const scanned = await kernel.scan({ operationId: 'synthetic-scan', includeFoundNotes: true });
+  const scanIdentity: PublicPrivacyIdentity = scanned.privacyAccount;
+  const address: string = scanned.privacyAccount.shieldedAddress;
+  // @ts-expect-error Scans expose the public identity, not secret root material.
+  scanned.privacyAccount.rootSeed;
+  // @ts-expect-error A malformed proof cannot be handed to deposit preparation.
+  kernel.prepareDeposit({ ...input, ...proven, proof: {} });
+  // @ts-expect-error The kernel does not accept a legacy wallet override.
+  kernel.scan({ operationId: 'legacy-scan', wallet: {} });
+  return { material, proof, preparedIdentity, scanIdentity, address };
+}
+void kernelWorkflowTypes;

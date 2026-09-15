@@ -18,3 +18,12 @@ export function assertSameActor(expected, current) {
     throw new Error("chain wallet account or network changed");
   }
 }
+
+export async function dispatchToActor(expected, getActor, signal, dispatch) {
+  signal?.throwIfAborted();
+  assertSameActor(expected, await getActor());
+  // Account lookup can outlive custody authority. Keep the final check and
+  // actual wallet invocation in the same synchronous continuation.
+  signal?.throwIfAborted();
+  return dispatch();
+}

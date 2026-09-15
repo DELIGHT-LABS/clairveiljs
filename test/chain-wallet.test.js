@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 import { toBech32 } from "@cosmjs/encoding";
+import Long from "long";
 import * as chainWallet from "clairveiljs/chain-wallet";
 import { createPrivacyIdentity } from "clairveiljs/wallet-kernel";
 
@@ -12,6 +13,33 @@ const chainId = "synthetic-chain-1";
 const signDoc = () => ({ bodyBytes: new Uint8Array([1, 2]), authInfoBytes: new Uint8Array([3]), chainId, accountNumber: 1n });
 const transaction = () => ({ to: evmAddress(3), data: "0x1234", value: "0x1" });
 const signResponse = signed => ({ signed, signature: { pub_key: { type: "tendermint/PubKeySecp256k1", value: "Ag==" }, signature: "AQ==" } });
+
+test('Keplr uint64 input/output conversion preserves exact Long words and bigint values', async () => {
+  for (const unsigned of [true, false]) for (const value of [0n, 1n, 0xffffffffn, (1n << 53n) + 7n, 1n << 63n, 0xffffffffffffffffn]) {
+    const number = { low: Number(value & 0xffffffffn) | 0, high: Number(value >> 32n) | 0, unsigned,
+      toString() { throw new Error('must not coerce wallet objects'); } };
+    const adapter = chainWallet.createKeplrChainWalletAdapter({ chainId, keplr: {
+      enable: async () => {}, getKey: async () => ({ bech32Address: cosmosAddress(1), pubKey: new Uint8Array(33).fill(2) }),
+      signDirect: async (_chain, _address, doc) => {
+        assert.equal(Long.isLong(doc.accountNumber), true);
+        assert.equal(doc.accountNumber.unsigned, true);
+        assert.equal(doc.accountNumber.toString(), value.toString());
+        return signResponse({ ...doc, accountNumber: number });
+      }
+    } });
+    const document = { ...signDoc(), accountNumber: value };
+    const signed = await adapter.signDirect(document, await adapter.getActor());
+    assert.equal(signed.signed.accountNumber, value);
+    assert.equal(document.accountNumber, value);
+  }
+  for (const number of [{ low: 0, high: -1, unsigned: 'false' }, { low: 0.5, high: 0, unsigned: true }, { low: 0, high: 0x100000000, unsigned: true }, '1', 1, -1n, 1n << 64n]) {
+    const adapter = chainWallet.createKeplrChainWalletAdapter({ chainId, keplr: {
+      enable: async () => {}, getKey: async () => ({ bech32Address: cosmosAddress(1), pubKey: new Uint8Array(33).fill(2) }),
+      signDirect: async (_chain, _address, doc) => signResponse({ ...doc, accountNumber: number })
+    } });
+    await assert.rejects(adapter.signDirect(signDoc(), await adapter.getActor()), /invalid Keplr account number/);
+  }
+});
 
 function cosmosFixture(kind, options = {}) {
   const state = { index: 1, pubkey: new Uint8Array(33).fill(2), beforeRead: undefined, failSigning: false };
@@ -95,7 +123,21 @@ for (const kind of ["keplr", "offline"]) {
     await adapter.signDirect(document, actor);
     const args = calls.find(call => call.method === "signDirect").args;
     assert.equal(args[kind === "keplr" ? 1 : 0], cosmosAddress(1));
-    assert.deepEqual(args[kind === "keplr" ? 2 : 1], signDoc());
+    const external = args[kind === "keplr" ? 2 : 1];
+    assert.deepEqual({ ...external, accountNumber: BigInt(external.accountNumber.toString()) }, signDoc());
+  });
+
+  test(`${kind} captures the cancellation signal and fences signing after account lookup`, async () => {
+    const { adapter, state, calls } = cosmosFixture(kind);
+    const actor = await adapter.getActor();
+    const controller = new AbortController(), reason = new Error('CUSTODY_REVOKED');
+    const options = { signal: controller.signal };
+    state.beforeRead = async () => {
+      controller.abort(reason);
+      options.signal = new AbortController().signal;
+    };
+    await assert.rejects(adapter.signDirect(signDoc(), actor, options), error => error === reason);
+    assert.equal(calls.some(call => call.method === 'signDirect'), false);
   });
 
   test(`${kind} keeps a configured actor pinned and does not retry rejected signing`, async () => {
@@ -206,6 +248,21 @@ test("ordinary Cosmos/EVM account and network selection leaves the independent p
   assert.deepEqual(identity.rootSeed, seed);
 });
 
+test('EVM cancellation at every account/network await blocks the actual provider send', async () => {
+  for (const phase of [0, 1, 2, 3]) {
+    const { adapter, state, calls } = evmFixture();
+    const actor = await adapter.getActor();
+    calls.length = 0;
+    const controller = new AbortController();
+    let reads = 0;
+    state.onRead = async () => { if (++reads === phase) controller.abort(); };
+    if (phase === 0) controller.abort();
+    await assert.rejects(adapter.sendTransaction(transaction(), actor, { signal: controller.signal }), { name: 'AbortError' });
+    assert.equal(calls.some(call => call.method === 'eth_sendTransaction'), false);
+    if (phase === 0) assert.equal(reads, 0);
+  }
+});
+
 test("chain-wallet entrypoint has a closed public-only import graph", () => {
   const visited = new Set();
   const base = new URL("../src/chain-wallet/", import.meta.url);
@@ -218,7 +275,7 @@ test("chain-wallet entrypoint has a closed public-only import graph", () => {
       if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
         const specifier = node.moduleSpecifier.text;
         if (specifier.startsWith(".")) inspect(new URL(specifier, url));
-        else assert.equal(specifier, "@cosmjs/encoding");
+        else assert.ok(["@cosmjs/encoding", "long"].includes(specifier), `unreviewed public dependency: ${specifier}`);
       }
       if (ts.isCallExpression(node)) {
         assert.notEqual(node.expression.kind, ts.SyntaxKind.ImportKeyword, "dynamic imports require a new boundary review");

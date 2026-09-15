@@ -1,4 +1,4 @@
-import { assertSameActor, expectedActor } from "./actor.js";
+import { dispatchToActor, expectedActor } from "./actor.js";
 
 function address(value) {
   if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value)) throw new TypeError("invalid EVM address");
@@ -52,11 +52,11 @@ export function createEip1193ChainWalletAdapter({ provider, chainId, account } =
       return getActor();
     },
     getActor,
-    async sendTransaction(transaction, actor) {
+    async sendTransaction(transaction, actor, { signal } = {}) {
       const expected = expectedActor(actor, "eip155", chainId);
       const external = snapshotTransaction(transaction, expected);
-      assertSameActor(expected, await getActor());
-      const hash = await provider.request({ method: "eth_sendTransaction", params: [external] });
+      const hash = await dispatchToActor(expected, getActor, signal,
+        () => provider.request({ method: "eth_sendTransaction", params: [external] }));
       if (typeof hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(hash)) throw new Error("chain wallet returned an invalid transaction hash");
       return hash;
     }

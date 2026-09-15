@@ -507,7 +507,7 @@ export function hashTransparentRecipient(recipient, options = {}) {
   }
   let decoded;
   try {
-    decoded = fromBech32(normalizedRecipient);
+    decoded = fromBech32(normalizedRecipient, 90);
   } catch {
     throw new Error("transparent recipient must be a valid Cosmos account address");
   }

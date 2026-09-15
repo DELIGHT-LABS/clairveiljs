@@ -631,7 +631,7 @@ export async function buildPreparedWithdrawProverPayload({
     throw new Error(`withdraw requires one exact-match note for ${coin.raw}; spendable ${coin.denom} total is ${total}${coin.denom} across ${sameDenom.length} notes`);
   }
   const commitmentHex = canonicalFieldHex(computeNoteCommitmentV1(selected.note));
-  const recipientDecoded = fromBech32(recipient);
+  const recipientDecoded = fromBech32(recipient, 90);
   const expectedAccountPrefix = normalizeBech32Prefix(accountPrefix ?? defaultAccountPrefix, "accountPrefix");
   if (recipientDecoded.prefix !== expectedAccountPrefix) {
     throw new Error(`withdraw recipient prefix mismatch: expected ${expectedAccountPrefix}, got ${recipientDecoded.prefix}`);
@@ -761,7 +761,7 @@ export function validatePreparedWithdrawProverPayloadMetadata(payload, nowUnix =
   if (canonicalFieldHex(computeAssetIdV1(payload.asset_denom)) !== normalizeHex(payload.asset_id_hex, "withdraw asset ID")) {
     throw new Error("withdraw prover payload asset_denom does not match asset_id_hex");
   }
-  const recipientBytes = Uint8Array.from(fromBech32(payload.recipient).data);
+  const recipientBytes = Uint8Array.from(fromBech32(payload.recipient, 90).data);
   if (hexFromBytes(recipientBytes) !== normalizeHex(payload.recipient_bytes_hex, "withdraw recipient bytes")) {
     throw new Error("withdraw prover payload recipient_bytes_hex does not match recipient");
   }
@@ -822,7 +822,7 @@ export function validateRelayWithdrawPayload(payload, {
   if (normalizeHex(payload.nullifier_hex, "withdraw nullifier").length !== 64) {
     throw new Error("withdraw nullifier must be a 32-byte hex string");
   }
-  const recipientDecoded = fromBech32(payload.recipient);
+  const recipientDecoded = fromBech32(payload.recipient, 90);
   if (accountPrefix != null) {
     const expectedPrefix = normalizeBech32Prefix(accountPrefix, "accountPrefix");
     if (recipientDecoded.prefix !== expectedPrefix) {
@@ -858,7 +858,7 @@ export function buildRelayWithdrawMsgFromPayload(payload, relayer, options = {})
   if (!creator) {
     throw new Error("relayer is required for relay withdraw");
   }
-  const relayerDecoded = fromBech32(creator);
+  const relayerDecoded = fromBech32(creator, 90);
   if (options.accountPrefix != null) {
     const expectedPrefix = normalizeBech32Prefix(options.accountPrefix, "accountPrefix");
     if (relayerDecoded.prefix !== expectedPrefix) {

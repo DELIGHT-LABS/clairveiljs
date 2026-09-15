@@ -5,18 +5,45 @@ import {createClairveilClient,cosmosAddressFromPubKey} from 'clairveiljs/cosmos'
 import {createClairveilEvmClient} from 'clairveiljs/evm';
 import {secp256k1} from '@noble/curves/secp256k1.js';
 const proofHex=`40${'00'.repeat(31)}40${'00'.repeat(63)}40${'00'.repeat(35)}40${'00'.repeat(31)}`;
-function fixture(){
- const identity=createPrivacyIdentity({rootSeed:new Uint8Array(32).fill(7),shieldedPrefix:'clairs'});
- const pubKeyHex=Buffer.from(secp256k1.getPublicKey(new Uint8Array(32).fill(1))).toString('hex');
- const actor={namespace:'cosmos',chainId:'synthetic-1',address:cosmosAddressFromPubKey(pubKeyHex,'clair'),pubKeyHex};
- const client=createClairveilClient({rpc:'https://synthetic.invalid',rest:'https://synthetic.invalid',chainId:actor.chainId,accountPrefix:'clair',shieldedPrefix:'clairs',defaultDenom:'uclair'});
- client.deriveWalletPrivacyMaterial=async()=>{throw new Error('LEGACY_ROOT_SETUP_FORBIDDEN');};
- client.assertProtocolPreflight=async()=>({});
- client.buildDirectSignDoc=async args=>({captured:args});
- const events=[];
- const hooks={checkpoint:async()=>events.push('checkpoint'),assertAuthority:async()=>events.push('authority')};
- const kernel=createWalletKernel({identity,client,...hooks});
- return{identity,actor,client,kernel,events,hooks};
+function fixture() {
+  const identity = createPrivacyIdentity({ rootSeed: new Uint8Array(32).fill(7), shieldedPrefix: 'clairs' });
+  const pubKeyHex = Buffer.from(secp256k1.getPublicKey(new Uint8Array(32).fill(1))).toString('hex');
+  const actor = { namespace: 'cosmos', chainId: 'synthetic-1', address: cosmosAddressFromPubKey(pubKeyHex, 'clair'), pubKeyHex };
+  const client = createClairveilClient({
+    rpc: 'https://synthetic.invalid', rest: 'https://synthetic.invalid',
+    chainId: actor.chainId, accountPrefix: 'clair', shieldedPrefix: 'clairs', defaultDenom: 'uclair'
+  });
+  client.deriveWalletPrivacyMaterial = async () => { throw new Error('LEGACY_ROOT_SETUP_FORBIDDEN'); };
+  client.assertProtocolPreflight = async () => ({});
+  client.buildDirectSignDoc = async args => ({ captured: args });
+  const events = [];
+  const hooks = { checkpoint: async () => events.push('checkpoint'), assertAuthority: async () => events.push('authority') };
+  const createKernel = (options = {}) => createWalletKernel({ identity, client, ...hooks, ...options });
+  return { identity, actor, client, kernel: createKernel(), events, createKernel };
+}
+
+function evmContext(h) {
+  const actor = { namespace: 'eip155', chainId: '0x539', address: '0x' + '01'.repeat(20) };
+  const evmClient = createClairveilEvmClient({
+    contractAddress: '0x' + '09'.repeat(20), chainId: h.client.chainId, nativeDenom: 'uclair'
+  });
+  return { actor, evmClient, evmChainId: actor.chainId };
+}
+
+function cosmosDepositProof(request) {
+  return { version: 'v1', proof: {
+    version: 'v1', note_commitment_hex: request.payload.note_commitment_hex, proof_hex: proofHex
+  } };
+}
+
+function afterMicrotasks(count, callback) {
+  // Use microtasks directly; an async helper would change the race being tested.
+  let next = callback;
+  for (let index = 1; index < count; index++) {
+    const pending = next;
+    next = () => queueMicrotask(pending);
+  }
+  queueMicrotask(next);
 }
 test('independent RootSeed builds an own Cosmos deposit through existing note/effect validators',async()=>{
  const h=fixture();const result=await h.kernel.prepareDeposit({operationId:'synthetic-deposit',actor:h.actor,amount:'7uclair',proofHex});
@@ -50,25 +77,24 @@ test('transfer and withdraw retain existing planner behavior with separate ident
 test('kernel checkpoints a signed private request before prover invocation and fails closed on checkpoint loss',async()=>{
  const h=fixture();const calls=[];
  h.client.prepareTransfer=async input=>{assert.ok(input.privacyIdentity);assert.equal(input.material,undefined);return input.proverAdapter.proveTransfer({syntheticWitness:'private-test-only'});};
- const kernel=createWalletKernel({identity:h.identity,client:h.client,reservationManager:{},assertAuthority:async()=>{},checkpoint:async()=>calls.push('checkpoint')});
+ const kernel=h.createKernel({reservationManager:{},assertAuthority:async()=>{},checkpoint:async()=>calls.push('checkpoint')});
  await kernel.prepareTransfer({operationId:'transfer',actor:h.actor,amount:'1uclair',recipient:h.identity.publicIdentity.shieldedAddress,prover:{async proveTransfer(){calls.push('prover');return{};}}});
  assert.deepEqual(calls,['checkpoint','prover']);
- const failed=createWalletKernel({identity:h.identity,client:h.client,reservationManager:{},assertAuthority:async()=>{},checkpoint:async()=>{throw new Error('storage failure');}});
+ const failed=h.createKernel({reservationManager:{},assertAuthority:async()=>{},checkpoint:async()=>{throw new Error('storage failure');}});
  await assert.rejects(failed.prepareTransfer({operationId:'failed',actor:h.actor,amount:'1uclair',recipient:h.identity.publicIdentity.shieldedAddress,prover:{async proveTransfer(){calls.push('unexpected');}}}),/storage failure/);
  assert.equal(calls.includes('unexpected'),false);
 });
 test('deposit proof uses the existing canonical Cosmos wire after checkpoint and validates commitment correspondence',async()=>{
  const h=fixture();const result=await h.kernel.proveDeposit({operationId:'prove-deposit',actor:h.actor,amount:'7uclair',prover:async request=>{
  assert.deepEqual(Object.keys(request),['version','payload']);assert.equal(h.events.at(-2),'checkpoint');
- return{version:'v1',proof:{version:'v1',note_commitment_hex:request.payload.note_commitment_hex,proof_hex:proofHex}};
+ return cosmosDepositProof(request);
  }});
  assert.equal(result.proofHex,proofHex);
  await h.kernel.prepareDeposit({operationId:'deposit',actor:h.actor,amount:'7uclair',...result});
 });
 test('same identity builds an EVM payable deposit without creating legacy signature material',async()=>{
- const h=fixture();const evmClient=createClairveilEvmClient({contractAddress:'0x'+'09'.repeat(20),chainId:'synthetic-1',nativeDenom:'uclair'});
- const actor={namespace:'eip155',chainId:'0x539',address:'0x'+'01'.repeat(20)};
- const kernel=createWalletKernel({identity:h.identity,client:h.client,evmClient,evmChainId:'0x539',...h.hooks});
+ const h=fixture();const {actor,...execution}=evmContext(h);
+ const kernel=h.createKernel(execution);
  const result=await kernel.prepareDeposit({operationId:'evm-deposit',actor,amount:'7uclair',proofHex});
  assert.equal(result.execution.transaction.from,actor.address);assert.equal(result.execution.transaction.value,'0x7');assert.ok(result.execution.txBytesHash);
  assert.deepEqual(result.privacyAccount,h.identity.publicIdentity);
@@ -136,13 +162,113 @@ for(const transport of ['cosmos','evm'])for(const kind of ['Transfer','Withdraw'
  h.client.checkNullifiers=async nullifiers=>new Map(nullifiers.map(n=>[n,false]));
  h.client.buildDirectSignDoc=async input=>({bodyBytes:Buffer.from(h.client.registry.encodeTxBody({messages:input.messages,memo:input.memo})).toString('base64'),authInfoBytes:'',chainId:h.actor.chainId,accountNumber:'0'});
  const store=new MemoryReservationStore(),reservationManager=createNoteReservationManager({store,ownerKeyId:h.identity.publicIdentity.shieldedAddress,indexKey:'synthetic-index-key'});
- const actor=transport==='cosmos'?h.actor:{namespace:'eip155',chainId:'0x539',address:'0x'+'01'.repeat(20)};
- const evmClient=transport==='evm'?createClairveilEvmClient({contractAddress:'0x'+'09'.repeat(20),chainId:h.actor.chainId,nativeDenom:'uclair'}):undefined;
+ const {actor,...execution}=transport==='evm'?evmContext(h):{actor:h.actor};
  const order=[];let request;
- const kernel=createWalletKernel({identity:h.identity,client:h.client,evmClient,evmChainId:'0x539',reservationManager,assertAuthority:async()=>{},checkpoint:async record=>{order.push('checkpoint');request=record.payload;}});
+ const kernel=h.createKernel({...execution,reservationManager,assertAuthority:async()=>{},checkpoint:async record=>{order.push('checkpoint');request=record.payload;}});
  const prover={async ['prove'+kind](input){order.push('prover');assert.deepEqual(input,request);return{version:'v2',payload_hash:input.payload.payload_hash,proof_hex:proofHex};}};
  const result=await kernel['prepare'+kind]({operationId:`synthetic-${kind}`,actor,amount:'7uclair',recipient:kind==='Transfer'?h.identity.publicIdentity.shieldedAddress:actor.address,chainNowUnix:1700000000,expiresAtUnix:1700001800,prover});
  assert.equal(result.status,'ready');assert.deepEqual(order,['checkpoint','prover']);
  assert.deepEqual(result.privacyAccount,h.identity.publicIdentity);assert.ok(result.proof);assert.ok(transport==='cosmos'?result.signDoc:result.execution.transaction);
  assert.ok((await store.load()).reservations.every(r=>r.status===reservationStatuses.ProofReady));
+});
+
+test('disposal during a committed checkpoint blocks subsequent prover export', async () => {
+  const h = fixture();
+  let exported = false;
+  let kernel;
+  kernel = h.createKernel({
+    assertAuthority: async () => {},
+    checkpoint: async () => kernel.dispose()
+  });
+  await assert.rejects(kernel.proveDeposit({
+    operationId: 'disposed-at-checkpoint', actor: h.actor, amount: '7uclair',
+    prover: async () => { exported = true; }
+  }), /disposed/);
+  assert.equal(exported, false);
+  assert.notEqual(h.identity.rootSeed[0], 0);
+});
+
+for (const kind of ['Deposit', 'Transfer', 'Withdraw']) test(`${kind} blocks disposal after the final authority hook before prover invocation`, async () => {
+  // Exercise revocation inside the hook and after authorize() itself resumes.
+  for (const microtasks of [1, 2]) {
+    const h = fixture();
+    const calls = [];
+    let committed = false;
+    let kernel;
+    if (kind !== 'Deposit') {
+      h.client[`prepare${kind}`] = input => input.proverAdapter[`prove${kind}`]({ syntheticWitness: 'private-test-only' });
+    }
+    kernel = h.createKernel({
+      reservationManager: {},
+      checkpoint: async () => { committed = true; calls.push('checkpoint'); },
+      assertAuthority: async () => {
+        if (!committed) return;
+        afterMicrotasks(microtasks, () => { kernel.dispose(); calls.push('dispose'); });
+      }
+    });
+    const prove = async () => { calls.push('prover'); throw new Error('unexpected export'); };
+    await assert.rejects(kernel[kind === 'Deposit' ? 'proveDeposit' : `prepare${kind}`]({
+      operationId: 'synthetic-disposal-race', actor: h.actor, amount: '7uclair',
+      prover: kind === 'Deposit' ? prove : { [`prove${kind}`]: prove }
+    }), /disposed/);
+    assert.deepEqual(calls, ['checkpoint', 'dispose']);
+  }
+});
+
+for (const method of ['scan', 'proveDeposit', 'prepareDeposit', 'prepareTransfer', 'prepareWithdraw']) {
+  test(`${method} rejects a completed result when disposed after the final authority helper`, async () => {
+    const h = fixture();
+    const events = [];
+    let completed = false;
+    let kernel;
+    // Keep real scan/deposit material validation. Spend algorithms have separate
+    // coverage above; here their completed private result exercises the return fence.
+    h.client.scanNotes = async () => ({ foundNotes: [], scanCursor: { has_more: false } });
+    if (method !== 'proveDeposit') {
+      const clientMethod = method === 'scan' ? 'scanWalletNotes' : method;
+      const run = method === 'prepareTransfer' || method === 'prepareWithdraw'
+        ? async () => ({ status: 'ready', privacyAccount: h.identity.publicIdentity, syntheticPrivateResult: true })
+        : h.client[clientMethod].bind(h.client);
+      h.client[clientMethod] = async input => {
+        const result = await run(input);
+        completed = true;
+        return result;
+      };
+    }
+    kernel = h.createKernel({
+      reservationManager: {},
+      checkpoint: async () => {},
+      assertAuthority: async () => {
+        if (completed) afterMicrotasks(2, () => {
+          kernel.dispose();
+          events.push('dispose');
+        });
+      }
+    });
+    const operation = kernel[method]({
+      operationId: 'synthetic-result-race', actor: h.actor, amount: '7uclair', proofHex,
+      prover: async request => {
+        completed = true;
+        return cosmosDepositProof(request);
+      }
+    }).then(result => { events.push('fulfilled'); return result; });
+    await assert.rejects(operation, /disposed/);
+    assert.equal(completed, true);
+    assert.deepEqual(events, ['dispose']);
+  });
+}
+
+test('EVM deposit proof results preserve supported strings/bytes and reject non-string proofHex', async () => {
+  const h = fixture();
+  const { actor, ...execution } = evmContext(h);
+  const kernel = h.createKernel(execution);
+  const input = { operationId: 'synthetic-evm-proof', actor, amount: '7uclair' };
+  for (const response of [{ proofHex }, { proof_hex: proofHex }, { proof: { proof_hex: proofHex } }, { proof: proofHex }, { depositProof: Uint8Array.from(Buffer.from(proofHex, 'hex')) }]) {
+    const proven = await kernel.proveDeposit({ ...input, prover: async () => response });
+    const prepared = await kernel.prepareDeposit({ ...input, ...proven });
+    assert.equal(prepared.execution.transaction.value, '0x7');
+  }
+  for (const invalid of [42, true, {}, new Uint8Array([1])]) {
+    await assert.rejects(kernel.proveDeposit({ ...input, prover: async () => ({ proofHex: invalid }) }), /invalid EVM deposit proof response/);
+  }
 });

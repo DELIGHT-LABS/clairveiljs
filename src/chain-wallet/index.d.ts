@@ -1,3 +1,5 @@
+import type Long from "long";
+
 export interface CosmosChainActor {
   readonly namespace: "cosmos";
   readonly chainId: string;
@@ -26,10 +28,15 @@ export interface CosmosDirectSignResponse {
   signature: { pub_key: { type: string; value: string }; signature: string };
 }
 
+/** Capture the signal before any await; check it immediately before wallet dispatch. */
+export interface ChainWalletDispatchOptions {
+  signal?: AbortSignal;
+}
+
 export interface CosmosChainWalletAdapter {
   connect(): Promise<CosmosChainActor>;
   getActor(): Promise<CosmosChainActor>;
-  signDirect(signDoc: CosmosSignDoc, actor: CosmosChainActor): Promise<CosmosDirectSignResponse>;
+  signDirect(signDoc: CosmosSignDoc, actor: CosmosChainActor, options?: ChainWalletDispatchOptions): Promise<CosmosDirectSignResponse>;
 }
 
 export interface EvmChainTransaction {
@@ -48,14 +55,22 @@ export interface EvmChainTransaction {
 export interface EvmChainWalletAdapter {
   connect(): Promise<EvmChainActor>;
   getActor(): Promise<EvmChainActor>;
-  sendTransaction(transaction: EvmChainTransaction, actor: EvmChainActor): Promise<string>;
+  sendTransaction(transaction: EvmChainTransaction, actor: EvmChainActor, options?: ChainWalletDispatchOptions): Promise<string>;
+}
+
+/** Keplr's injected API uses protobufjs Long; the ordinary SDK adapter uses bigint. */
+export interface KeplrSignDoc extends Omit<CosmosSignDoc, 'accountNumber'> {
+  accountNumber: Long;
 }
 
 export interface KeplrChainProvider {
   enable(chainId: string): Promise<void>;
   getKey(chainId: string): Promise<{ bech32Address: string; pubKey: Uint8Array }>;
-  signDirect(chainId: string, signer: string, signDoc: CosmosSignDoc,
-    options: { preferNoSetFee: boolean; preferNoSetMemo: boolean }): Promise<CosmosDirectSignResponse>;
+  signDirect(chainId: string, signer: string, signDoc: KeplrSignDoc,
+    options: { preferNoSetFee: boolean; preferNoSetMemo: boolean }): Promise<{
+      signed: Omit<CosmosSignDoc, 'accountNumber'> & { accountNumber: bigint | { low: number; high: number; unsigned: boolean } };
+      signature: CosmosDirectSignResponse['signature'];
+    }>;
 }
 
 export interface OfflineChainSigner {

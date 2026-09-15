@@ -435,7 +435,7 @@ export function encodeShieldedAddress(spendPubKey, viewPubKey, options = {}) {
 
 export function decodeShieldedAddress(address, options = {}) {
   const shieldedPrefix = shieldedPrefixFromOptions(options);
-  const decoded = fromBech32(String(address || "").trim());
+  const decoded = fromBech32(String(address || "").trim(), 200);
   if (decoded.prefix !== shieldedPrefix) {
     throw new Error(`invalid shielded address prefix: expected ${shieldedPrefix}, got ${decoded.prefix}`);
   }
@@ -473,7 +473,7 @@ function unpackPointForGoOperationHash(bytesLike) {
 // helper and rejects compressed points that do not decode onto the curve.
 export function canonicalizeShieldedAddressForOperationHash(address, options = {}) {
   const shieldedPrefix = shieldedPrefixFromOptions(options);
-  const decoded = fromBech32(String(address || "").trim());
+  const decoded = fromBech32(String(address || "").trim(), 200);
   if (decoded.prefix !== shieldedPrefix || decoded.data.length !== 64) {
     throw new Error("invalid shielded address");
   }

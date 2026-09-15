@@ -884,7 +884,7 @@ export function evmAddressToBech32(address, prefix) {
 }
 
 export function bech32AddressToEvm(address, expectedPrefix) {
-  const decoded = fromBech32(String(address || "").trim());
+  const decoded = fromBech32(String(address || "").trim(), 90);
   if (expectedPrefix) {
     const normalizedPrefix = normalizeBech32Prefix(expectedPrefix, "accountPrefix");
     if (decoded.prefix !== normalizedPrefix) {
