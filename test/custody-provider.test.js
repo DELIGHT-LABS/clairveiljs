@@ -175,3 +175,46 @@ test('capability object order preserves attachment, polling and revision guards;
     assert.equal(invalidations, h.provider.generation);
   }
 });
+
+test('cancel replies must match the operation through both provider and direct bridge', async () => {
+  const h = harness();
+  await h.provider.request({ method: 'clairveil_getCapabilities', params: { protocolVersion: '1' } });
+  const params = fixture('cancelOperation', 'request');
+  const wrong = fixture('cancelOperation', 'response');
+  wrong.operation.operationId = 'D'.repeat(42) + 'A';
+  h.setHandler(async () => wrong);
+  const bridge = createDirectBridgeTransport({ exchange: async ({ id }) => ({ jsonrpc: '2.0', id, result: wrong }) });
+  for (const client of [h.provider, bridge]) {
+    await assert.rejects(client.request({ method: 'clairveil_cancelOperation', params }), error => error.code === -32603);
+  }
+  h.provider.dispose();
+});
+
+test('a lower cancel revision cannot overwrite newer operation state', async () => {
+  const h = harness();
+  await h.provider.request({ method: 'clairveil_getCapabilities', params: { protocolVersion: '1' } });
+  const poll = { method: 'clairveil_getOperation', params: fixture('getOperation', 'request') };
+  h.setHandler(async () => ({ ...fixture('getOperation', 'response'), statusRevision: '10' }));
+  await h.provider.request(poll);
+  h.setHandler(async () => fixture('cancelOperation', 'response'));
+  await assert.rejects(h.provider.request({ method: 'clairveil_cancelOperation', params: fixture('cancelOperation', 'request') }), error => error.code === -32603);
+  h.provider.dispose();
+});
+
+test('a newer cancel revision fences an in-flight older poll and preserves the nested result', async () => {
+  const h = harness();
+  await h.provider.request({ method: 'clairveil_getCapabilities', params: { protocolVersion: '1' } });
+  const poll = { method: 'clairveil_getOperation', params: fixture('getOperation', 'request') };
+  let reply;
+  const cancelled = fixture('cancelOperation', 'response');
+  cancelled.operation.statusRevision = '20';
+  h.setHandler(({ method }) => method === poll.method ? new Promise(resolve => { reply = resolve; }) : cancelled);
+  const pending = h.provider.request(poll);
+  const rejected = assert.rejects(pending, error => error.code === -32603);
+  const result = await h.provider.request({ method: 'clairveil_cancelOperation', params: fixture('cancelOperation', 'request') });
+  assert.deepEqual(result, cancelled);
+  assert.equal(Object.isFrozen(result.operation), true);
+  reply({ ...fixture('getOperation', 'response'), statusRevision: '10' });
+  await rejected;
+  h.provider.dispose();
+});

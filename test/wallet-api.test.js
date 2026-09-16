@@ -70,3 +70,11 @@ test('request/response bounds and public projection reject oversize or hidden pa
  const response=structuredClone(cases.find(c=>c.name==='getBalances.response').value.result);
  if(request.protocol.assets){response.rows[0].assetDenom='uother';assert.throws(()=>validateWalletResult('clairveil_getBalances',response,request));}
 });
+
+test('cancel results correlate their nested operation with the requested operation', () => {
+  const params = structuredClone(cases.find(c => c.name === 'cancelOperation.request').value.params);
+  const result = structuredClone(cases.find(c => c.name === 'cancelOperation.response').value.result);
+  assert.deepEqual(validateWalletResult('clairveil_cancelOperation', result, params), result);
+  result.operation.operationId = 'D'.repeat(42) + 'A';
+  assert.throws(() => validateWalletResult('clairveil_cancelOperation', result, params), error => error.code === -32603);
+});

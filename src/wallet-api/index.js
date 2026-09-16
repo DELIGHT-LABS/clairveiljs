@@ -42,8 +42,9 @@ export function validateWalletResult(method, result, params) {
   if (!Object.hasOwn(methodRegistry, method)) throw invalidWalletData(true);
   const value = validateWalletValue(methodRegistry[method].result, result, { response: true });
   if (method === 'clairveil_getCapabilities' && value.schemaDigest !== schemaDigest) throw invalidWalletData(true);
+  const operation = method === 'clairveil_cancelOperation' ? value.operation : value;
   for (const key of ['operationId', 'accountHandle', 'networkHandle', 'attemptId']) {
-    if (params?.[key] !== undefined && value[key] !== undefined && params[key] !== value[key]) throw invalidWalletData(true);
+    if (params?.[key] !== undefined && operation[key] !== undefined && params[key] !== operation[key]) throw invalidWalletData(true);
   }
   if (method === 'clairveil_getBalances' && params?.protocol?.assets) {
     const requested = new Set(params.protocol.assets);

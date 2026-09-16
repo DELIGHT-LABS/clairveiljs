@@ -112,9 +112,10 @@ export function createCustodyProvider({ transport, subscribeInvalidation, timeou
       if (capabilities && !sameJsonValue(capabilities, result)) invalidate();
       capabilities = result;
     }
-    if (result.operationId && result.statusRevision !== undefined) {
-      const key = operationKey(params, result.operationId);
-      const revision = BigInt(result.statusRevision);
+    const operation = method === 'clairveil_cancelOperation' ? result.operation : result;
+    if (operation.operationId && operation.statusRevision !== undefined) {
+      const key = operationKey(params, operation.operationId);
+      const revision = BigInt(operation.statusRevision);
       const previous = revisions.get(key);
       if (previous !== undefined && revision < previous) throw invalidWalletData(true);
       if (!revisions.has(key) && revisions.size >= limits.trackedOperations) throw limited();
