@@ -45,17 +45,22 @@ async function fixture(){
  const input={operation,actor,context:{sessionHandle:handle(3),accountHandle:handle(4),networkHandle:handle(5)},idempotencyKey:handle(6),networkProfileDigest:profile.profileDigest,chainActorAccountId:`eip155:1337:${actor.address}`};
  operation.publicArtifact.artifactBindingHash=await computeArtifactBinding({...input,operationId:operation.operationId,artifact:operation.publicArtifact});
  validateWalletValue('ClairveilOperation',operation,{response:true});
- const calls=[],state={hash:'0x'+'ab'.repeat(32),reject:false,replay:false,beforeBegin:null,beforeSend:null,beginRevision:'2'};
+ const calls=[],requests=[],accepted=new Map(),state={hash:'0x'+'ab'.repeat(32),reject:false,replay:false,beforeBegin:null,beforeSend:null,beginRevision:'2',loseReport:false};
  const provider=createCustodyProvider({transport:{async request({method,params}){
   calls.push(method);
   if(method==='clairveil_getCapabilities')return capabilities;
+  requests.push({ method, params: structuredClone(params) });
+  // Model the real origin/account/pool/key namespace, shared across methods.
+  const intent=JSON.stringify([method,params.operationId,params.attemptId,params.outcome,params.transactionHash]);
+  if(accepted.has(params.idempotencyKey))assert.equal(accepted.get(params.idempotencyKey),intent,'IDEMPOTENCY_CONFLICT');
+  accepted.set(params.idempotencyKey,intent);
   if(method==='clairveil_beginSubmission'){await state.beforeBegin?.();return{operationId:operation.operationId,attemptId:handle(7),statusRevision:state.beginRevision,state:'submission_unknown',invokeWallet:!state.replay};}
-  if(method==='clairveil_recordSubmission')return{operationId:operation.operationId,attemptId:handle(7),statusRevision:'3',state:params.outcome==='reported_submitted'?'submitted':'submission_unknown'};
+  if(method==='clairveil_recordSubmission'){if(state.loseReport&&params.outcome==='reported_submitted')throw new Error('LOST_REPORT_REPLY');return{operationId:operation.operationId,attemptId:handle(7),statusRevision:'3',state:params.outcome==='reported_submitted'?'submitted':'submission_unknown'};}
   throw new Error('unexpected synthetic method');
  }}});
  await provider.request({method:'clairveil_getCapabilities',params:{protocolVersion:'1'}});
  const chainWallet={async getActor(){return{...actor};},async sendTransaction(){calls.push('wallet.send');await state.beforeSend?.();if(state.reject)throw new Error('synthetic rejection');return state.hash;}};
- const result = { input, provider, chainWallet, calls, state, profile };
+ const result = { input, provider, chainWallet, calls, state, profile, requests };
  result.client = clientFor(result);
  result.secondClient = () => clientFor(result);
  return result;
@@ -114,6 +119,33 @@ test('valid EVM artifact consumes durable begin before exactly one ordinary-wall
  const h=await fixture();await h.client.submit(h.input);
  assert.deepEqual(h.calls,['clairveil_getCapabilities','clairveil_beginSubmission','wallet.send','clairveil_recordSubmission']);
  await assert.rejects(h.client.submit(h.input));assert.equal(h.calls.filter(c=>c==='wallet.send').length,1);
+});
+test('submission reports have stable keys distinct from begin, hash and unknown intents', async () => {
+ const successful=await fixture();await successful.client.submit(successful.input);
+ const same=await fixture();await same.client.submit(same.input);
+ const lost=await fixture();lost.state.loseReport=true;await assert.rejects(lost.client.submit(lost.input),/Submission unresolved/);
+ const changed=await fixture();changed.state.hash='0x'+'cd'.repeat(32);await changed.client.submit(changed.input);
+ const reports=h=>h.requests.filter(r=>r.method==='clairveil_recordSubmission').map(r=>r.params);
+ const [submitted,unknown]=reports(lost);
+ assert.equal(submitted.idempotencyKey,reports(successful)[0].idempotencyKey);
+ assert.equal(submitted.idempotencyKey,reports(same)[0].idempotencyKey);
+ assert.notEqual(submitted.idempotencyKey,reports(changed)[0].idempotencyKey);
+ assert.equal(new Set([lost.input.idempotencyKey,submitted.idempotencyKey,unknown.idempotencyKey]).size,3);
+ assert.equal(unknown.outcome,'unknown');assert.equal(submitted.transactionHash,lost.state.hash);
+ for(const value of [submitted,unknown])validateWalletValue('Handle',value.idempotencyKey);
+ assert.equal(lost.calls.filter(c=>c==='wallet.send').length,1);
+});
+test('attachment invalidation during report-key derivation suppresses the late report', async () => {
+ const h=await fixture(),original=crypto.subtle.digest.bind(crypto.subtle);
+ const mock=test.mock.method(crypto.subtle,'digest',async (algorithm,data)=>{
+  const bytes=await original(algorithm,data);
+  if(new TextDecoder().decode(data).includes('clairveil-custody/submission-report/v1'))h.provider.invalidate();
+  return bytes;
+ });
+ try {await assert.rejects(h.client.submit(h.input),/Submission unresolved/);}
+ finally {mock.mock.restore();}
+ assert.equal(h.calls.filter(c=>c==='wallet.send').length,1);
+ assert.equal(h.calls.filter(c=>c==='clairveil_recordSubmission').length,0);
 });
 test('concurrent submissions through two clients on the same attachment cannot duplicate dispatch',async()=>{
  const h=await fixture();const result=await Promise.allSettled([h.client.submit(h.input),h.secondClient().submit(h.input)]);

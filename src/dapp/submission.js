@@ -94,9 +94,17 @@ export function createSubmissionCoordinator({ custodyProvider, chainWallet, vali
 
     async function report(outcome, hash) {
       assertCurrent();
+      // The host indexes request keys across methods. Derive a stable report
+      // key from the random begin key and exact report intent, including the
+      // outcome, so an unknown fallback cannot collide with a submitted report.
+      const intent = JSON.stringify(['clairveil-custody/submission-report/v1', idempotencyKey,
+        checked.operationId, attempt.attemptId, outcome, hash ?? null]);
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(intent)));
+      const reportKey = btoa(String.fromCharCode(...digest)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+      assertCurrent();
       return custodyProvider.request({
         method: 'clairveil_recordSubmission',
-        params: params({ attemptId: attempt.attemptId, outcome, ...(hash ? { transactionHash: hash } : {}) })
+        params: params({ idempotencyKey: reportKey, attemptId: attempt.attemptId, outcome, ...(hash ? { transactionHash: hash } : {}) })
       });
     }
 
