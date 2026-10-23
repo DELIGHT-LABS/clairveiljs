@@ -37,7 +37,7 @@
     "sessionProperties": {
       "clairveil_profile": "cvpriv-draft",
       "clairveil_schema": "draft",
-      "clairveil_schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+      "clairveil_schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
       "clairveil_routeFingerprint": "66516780fd20384f83e61aa3c407dd1d15d7e0792f5b55ca472474246fad36d6",
       "clairveil_privacyContract": "privacy-wallet-draft",
       "clairveil_binding": "clairveil-draft",
@@ -77,7 +77,7 @@
     "sessionProperties": {
       "clairveil_profile": "cvpriv-draft",
       "clairveil_schema": "draft",
-      "clairveil_schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+      "clairveil_schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
       "clairveil_routeFingerprint": "66516780fd20384f83e61aa3c407dd1d15d7e0792f5b55ca472474246fad36d6",
       "clairveil_privacyContract": "privacy-wallet-draft",
       "clairveil_binding": "clairveil-draft",
@@ -102,7 +102,7 @@
       "result": {
         "protocolVersion": "1",
         "schemaRevision": "draft",
-        "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+        "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
         "methods": [
           "clairveil_getCapabilities",
           "clairveil_connect",

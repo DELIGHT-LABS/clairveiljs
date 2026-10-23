@@ -25,7 +25,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4538,7 +4538,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4599,7 +4599,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4660,7 +4660,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4721,7 +4721,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4783,7 +4783,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4845,7 +4845,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4907,7 +4907,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4969,7 +4969,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6472,7 +6472,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6525,7 +6525,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6585,7 +6585,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6646,7 +6646,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6707,7 +6707,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6768,7 +6768,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -7345,7 +7345,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "c5d414630307c16755c1253161e17018eaacbb0829f83f2961be4685eaeba912",
+          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -7400,6 +7400,335 @@
           "state": "awaiting_approval",
           "statusRevision": "1",
           "durable": true
+        }
+      }
+    },
+    {
+      "name": "getOperation.restored-funding.approval",
+      "schema": "#/$defs/getOperationResponse",
+      "valid": true,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-getOperation",
+        "result": {
+          "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "state": "awaiting_approval",
+          "statusRevision": "1",
+          "durable": true,
+          "kind": "deposit",
+          "stepKind": "deposit",
+          "runtimeState": "recovery_required",
+          "jobState": "queued",
+          "nextAction": "approve_privacy",
+          "summary": {
+            "assetDenom": "usynthetic",
+            "amountBaseUnits": "1"
+          }
+        }
+      }
+    },
+    {
+      "name": "getOperation.restored-funding.ready",
+      "schema": "#/$defs/getOperationResponse",
+      "valid": true,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-getOperation",
+        "result": {
+          "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "state": "awaiting_chain_signature",
+          "statusRevision": "1",
+          "durable": true,
+          "kind": "deposit",
+          "stepKind": "deposit",
+          "runtimeState": "recovery_required",
+          "jobState": "queued",
+          "nextAction": "sign_chain",
+          "summary": {
+            "assetDenom": "usynthetic",
+            "amountBaseUnits": "1"
+          },
+          "publicArtifact": {
+            "transport": "cosmos",
+            "chainId": "cosmos:synthetic-1",
+            "chainActorHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+            "artifactBindingHash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "bindingVersion": "cv-artifact-jcs-sha256-v1",
+            "signDoc": {
+              "bodyBytesBase64": "TQ==",
+              "authInfoBytesBase64": "TQ==",
+              "chainId": "synthetic-1",
+              "accountNumber": "0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "getOperation.restored-funding.zero-denied",
+      "schema": "#/$defs/getOperationResponse",
+      "valid": false,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-getOperation",
+        "result": {
+          "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "state": "awaiting_chain_signature",
+          "statusRevision": "1",
+          "durable": true,
+          "kind": "deposit",
+          "stepKind": "deposit",
+          "runtimeState": "recovery_required",
+          "jobState": "queued",
+          "nextAction": "sign_chain",
+          "summary": {
+            "assetDenom": "usynthetic",
+            "amountBaseUnits": "0"
+          },
+          "publicArtifact": {
+            "transport": "cosmos",
+            "chainId": "cosmos:synthetic-1",
+            "chainActorHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+            "artifactBindingHash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "bindingVersion": "cv-artifact-jcs-sha256-v1",
+            "signDoc": {
+              "bodyBytesBase64": "TQ==",
+              "authInfoBytesBase64": "TQ==",
+              "chainId": "synthetic-1",
+              "accountNumber": "0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "getOperation.restored-funding.helper-denied",
+      "schema": "#/$defs/getOperationResponse",
+      "valid": false,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-getOperation",
+        "result": {
+          "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "state": "awaiting_chain_signature",
+          "statusRevision": "1",
+          "durable": true,
+          "kind": "zero_helper",
+          "stepKind": "zero_helper",
+          "runtimeState": "recovery_required",
+          "jobState": "queued",
+          "nextAction": "sign_chain",
+          "summary": {
+            "assetDenom": "usynthetic",
+            "amountBaseUnits": "1"
+          },
+          "publicArtifact": {
+            "transport": "cosmos",
+            "chainId": "cosmos:synthetic-1",
+            "chainActorHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+            "artifactBindingHash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "bindingVersion": "cv-artifact-jcs-sha256-v1",
+            "signDoc": {
+              "bodyBytesBase64": "TQ==",
+              "authInfoBytesBase64": "TQ==",
+              "chainId": "synthetic-1",
+              "accountNumber": "0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "getOperation.restored-funding.summary-required",
+      "schema": "#/$defs/getOperationResponse",
+      "valid": false,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-getOperation",
+        "result": {
+          "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "state": "awaiting_chain_signature",
+          "statusRevision": "1",
+          "durable": true,
+          "kind": "deposit",
+          "stepKind": "deposit",
+          "runtimeState": "recovery_required",
+          "jobState": "queued",
+          "nextAction": "sign_chain",
+          "publicArtifact": {
+            "transport": "cosmos",
+            "chainId": "cosmos:synthetic-1",
+            "chainActorHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+            "artifactBindingHash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "bindingVersion": "cv-artifact-jcs-sha256-v1",
+            "signDoc": {
+              "bodyBytesBase64": "TQ==",
+              "authInfoBytesBase64": "TQ==",
+              "chainId": "synthetic-1",
+              "accountNumber": "0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "getOperation.restored-funding.early-artifact-denied",
+      "schema": "#/$defs/getOperationResponse",
+      "valid": false,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-getOperation",
+        "result": {
+          "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "state": "proof_ready",
+          "statusRevision": "1",
+          "durable": true,
+          "kind": "deposit",
+          "stepKind": "deposit",
+          "runtimeState": "recovery_required",
+          "jobState": "queued",
+          "nextAction": "wait",
+          "summary": {
+            "assetDenom": "usynthetic",
+            "amountBaseUnits": "1"
+          },
+          "publicArtifact": {
+            "transport": "cosmos",
+            "chainId": "cosmos:synthetic-1",
+            "chainActorHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+            "artifactBindingHash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "bindingVersion": "cv-artifact-jcs-sha256-v1",
+            "signDoc": {
+              "bodyBytesBase64": "TQ==",
+              "authInfoBytesBase64": "TQ==",
+              "chainId": "synthetic-1",
+              "accountNumber": "0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "getOperation.restored-funding.recovery-grant-denied",
+      "schema": "#/$defs/getOperationResponse",
+      "valid": false,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-getOperation",
+        "result": {
+          "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "state": "awaiting_chain_signature",
+          "statusRevision": "1",
+          "durable": true,
+          "kind": "deposit",
+          "stepKind": "deposit",
+          "runtimeState": "recovery_required",
+          "jobState": "queued",
+          "nextAction": "sign_chain",
+          "summary": {
+            "assetDenom": "usynthetic",
+            "amountBaseUnits": "1"
+          },
+          "publicArtifact": {
+            "transport": "cosmos",
+            "chainId": "cosmos:synthetic-1",
+            "chainActorHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+            "artifactBindingHash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "bindingVersion": "cv-artifact-jcs-sha256-v1",
+            "signDoc": {
+              "bodyBytesBase64": "TQ==",
+              "authInfoBytesBase64": "TQ==",
+              "chainId": "synthetic-1",
+              "accountNumber": "0"
+            }
+          },
+          "accessMode": "recovery-only"
+        }
+      }
+    },
+    {
+      "name": "getOperation.restored-funding.recovery-grant-projection",
+      "schema": "#/$defs/getOperationResponse",
+      "valid": true,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-getOperation",
+        "result": {
+          "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "state": "awaiting_chain_signature",
+          "statusRevision": "1",
+          "durable": true,
+          "kind": "deposit",
+          "stepKind": "deposit",
+          "runtimeState": "recovery_required",
+          "jobState": "queued",
+          "nextAction": "recover",
+          "summary": {
+            "assetDenom": "usynthetic",
+            "amountBaseUnits": "1"
+          },
+          "accessMode": "recovery-only"
+        }
+      }
+    },
+    {
+      "name": "getOperation.restored-funding.policy-suppressed",
+      "schema": "#/$defs/getOperationResponse",
+      "valid": true,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-getOperation",
+        "result": {
+          "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "state": "awaiting_chain_signature",
+          "statusRevision": "1",
+          "durable": true,
+          "kind": "deposit",
+          "stepKind": "deposit",
+          "runtimeState": "recovery_required",
+          "jobState": "queued",
+          "nextAction": "recover",
+          "summary": {
+            "assetDenom": "usynthetic",
+            "amountBaseUnits": "1"
+          }
+        }
+      }
+    },
+    {
+      "name": "getOperation.restored-funding.suppressed-artifact-denied",
+      "schema": "#/$defs/getOperationResponse",
+      "valid": false,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-getOperation",
+        "result": {
+          "operationId": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "state": "awaiting_chain_signature",
+          "statusRevision": "1",
+          "durable": true,
+          "kind": "deposit",
+          "stepKind": "deposit",
+          "runtimeState": "recovery_required",
+          "jobState": "queued",
+          "nextAction": "recover",
+          "summary": {
+            "assetDenom": "usynthetic",
+            "amountBaseUnits": "1"
+          },
+          "publicArtifact": {
+            "transport": "cosmos",
+            "chainId": "cosmos:synthetic-1",
+            "chainActorHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+            "artifactBindingHash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "bindingVersion": "cv-artifact-jcs-sha256-v1",
+            "signDoc": {
+              "bodyBytesBase64": "TQ==",
+              "authInfoBytesBase64": "TQ==",
+              "chainId": "synthetic-1",
+              "accountNumber": "0"
+            }
+          }
         }
       }
     }

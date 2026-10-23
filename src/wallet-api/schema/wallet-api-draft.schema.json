@@ -5977,15 +5977,431 @@
                 ]
               },
               "then": {
-                "properties": {
-                  "nextAction": {
-                    "const": "recover"
+                "if": {
+                  "properties": {
+                    "kind": {
+                      "const": "deposit"
+                    },
+                    "stepKind": {
+                      "const": "deposit"
+                    },
+                    "summary": {
+                      "properties": {
+                        "amountBaseUnits": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      },
+                      "required": [
+                        "amountBaseUnits"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "stepKind",
+                    "summary"
+                  ],
+                  "not": {
+                    "required": [
+                      "accessMode"
+                    ]
                   }
                 },
-                "not": {
-                  "required": [
-                    "publicArtifact"
+                "then": {
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "nextAction": {
+                          "const": "recover"
+                        }
+                      },
+                      "not": {
+                        "required": [
+                          "publicArtifact"
+                        ]
+                      }
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "created"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "wait"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "awaiting_approval"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "approve_privacy"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "preparing"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "wait"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "authorization_exported"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "wait"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "proof_ready"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "wait"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "awaiting_chain_signature"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "sign_chain"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "submission_unknown"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "check_chain"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "submitted"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "check_chain"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "confirmed"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "none"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "completed"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "none"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "failed"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "none"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "cancelled"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "none"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "expired"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "none"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "reconciliation_required"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "nextAction": {
+                                "const": "check_chain"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "state": {
+                                "const": "awaiting_chain_signature"
+                              }
+                            },
+                            "required": [
+                              "state"
+                            ],
+                            "not": {
+                              "required": [
+                                "accessMode"
+                              ]
+                            }
+                          },
+                          "then": {
+                            "required": [
+                              "publicArtifact"
+                            ],
+                            "not": {
+                              "required": [
+                                "submissionAttempt"
+                              ]
+                            }
+                          }
+                        }
+                      ]
+                    }
                   ]
+                },
+                "else": {
+                  "properties": {
+                    "nextAction": {
+                      "const": "recover"
+                    }
+                  },
+                  "not": {
+                    "required": [
+                      "publicArtifact"
+                    ]
+                  }
                 }
               }
             },

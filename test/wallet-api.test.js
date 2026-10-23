@@ -36,7 +36,7 @@ test('all methods distinguish unsupported versions from malformed params without
   assert.throws(() => validateWalletParams('clairveil_getCapabilities', { protocolVersion: '1', schemaRevision: 'future' }), invalidParams);
   assert.throws(() => validateWalletParams('clairveil_getCapabilities', { protocolVersion: 'future', oversized: 'x'.repeat(4097) }), invalidParams);
 });
-test('all 337 draft fixtures agree with full Draft 2020-12 and standalone validation',()=>{
+test('all draft fixtures agree with full Draft 2020-12 and standalone validation',()=>{
  assert.equal(Object.keys(methodRegistry).length,15);
  for(const c of cases){
   assert.equal(ajv.getSchema(schema.$id+c.schema)(c.value),c.valid,c.name+' full validator');
@@ -77,4 +77,75 @@ test('cancel results correlate their nested operation with the requested operati
   assert.deepEqual(validateWalletResult('clairveil_cancelOperation', result, params), result);
   result.operation.operationId = 'D'.repeat(42) + 'A';
   assert.throws(() => validateWalletResult('clairveil_cancelOperation', result, params), error => error.code === -32603);
+});
+
+const restoredFundingActions = {
+  created: 'wait', awaiting_approval: 'approve_privacy', preparing: 'wait',
+  authorization_exported: 'wait', proof_ready: 'wait', awaiting_chain_signature: 'sign_chain',
+  submission_unknown: 'check_chain', submitted: 'check_chain', reconciliation_required: 'check_chain',
+  confirmed: 'none', failed: 'none', cancelled: 'none', expired: 'none'
+};
+function restoredFundingSnapshot(state = 'awaiting_chain_signature') {
+  const value = structuredClone(cases.find(c => c.name === 'getOperation.response').value.result);
+  Object.assign(value, { state, runtimeState: 'recovery_required', nextAction: restoredFundingActions[state],
+    summary: { assetDenom: 'usynthetic', amountBaseUnits: '1' },
+    jobState: state === 'failed' ? 'failed' : ['confirmed', 'cancelled', 'expired'].includes(state) ? 'completed' : 'queued' });
+  if (state === 'failed') value.failure = { code: 4113, message: 'STORAGE_UNAVAILABLE', data: { label: 'STORAGE_UNAVAILABLE', retryable: true } };
+  if (state === 'awaiting_chain_signature') value.publicArtifact = {
+    transport: 'cosmos', chainId: 'cosmos:synthetic-1', chainActorHandle: value.operationId,
+    artifactBindingHash: '0'.repeat(64), bindingVersion: 'cv-artifact-jcs-sha256-v1',
+    signDoc: { bodyBytesBase64: 'TQ==', authInfoBytesBase64: 'TQ==', chainId: 'synthetic-1', accountNumber: '0' }
+  };
+  return value;
+}
+
+test('restored funding permits safe policy suppression in every state', () => {
+  for (const state of Object.keys(restoredFundingActions)) {
+    const value = { ...restoredFundingSnapshot(state), nextAction: 'recover' };
+    delete value.publicArtifact;
+    assert.deepEqual(validateWalletResult('clairveil_getOperation', value), value, state);
+    value.publicArtifact = restoredFundingSnapshot().publicArtifact;
+    assert.throws(() => validateWalletResult('clairveil_getOperation', value), state);
+  }
+});
+
+test('restored funding keeps truthful runtime state and exact normal state actions', () => {
+  for (const [state, action] of Object.entries(restoredFundingActions)) {
+    const value = restoredFundingSnapshot(state);
+    assert.deepEqual(validateWalletResult('clairveil_getOperation', value), value, state);
+    for (const nextAction of new Set([...Object.values(restoredFundingActions), 'recover'])) {
+      if (nextAction === action || nextAction === 'recover' && !value.publicArtifact) continue;
+      assert.throws(() => validateWalletResult('clairveil_getOperation', { ...value, nextAction }), state + ': ' + nextAction);
+    }
+  }
+  const missingArtifact = restoredFundingSnapshot(); delete missingArtifact.publicArtifact;
+  assert.throws(() => validateWalletResult('clairveil_getOperation', missingArtifact));
+  const withAttempt = { ...restoredFundingSnapshot(), submissionAttempt: { attemptId: missingArtifact.operationId, state: 'unresolved' } };
+  assert.throws(() => validateWalletResult('clairveil_getOperation', withAttempt));
+  for (const state of ['created', 'awaiting_approval', 'preparing', 'authorization_exported', 'proof_ready', 'failed', 'cancelled', 'expired']) {
+    assert.throws(() => validateWalletResult('clairveil_getOperation', { ...restoredFundingSnapshot(state), publicArtifact: restoredFundingSnapshot().publicArtifact }), state);
+  }
+});
+
+test('restored funding exception never expands helpers, missing amounts or recovery-only grants', () => {
+  for (const amount of ['0', '', '01', '-1', '1.0', 1, null, undefined]) {
+    const value = restoredFundingSnapshot();
+    if (amount === undefined) delete value.summary.amountBaseUnits;
+    else value.summary.amountBaseUnits = amount;
+    assert.throws(() => validateWalletResult('clairveil_getOperation', value), String(amount));
+  }
+  const missingSummary = restoredFundingSnapshot(); delete missingSummary.summary;
+  assert.throws(() => validateWalletResult('clairveil_getOperation', missingSummary));
+  for (const kind of ['zero_helper', 'self_merge', 'final_transfer', 'withdraw']) {
+    assert.throws(() => validateWalletResult('clairveil_getOperation', { ...restoredFundingSnapshot(), kind, stepKind: kind }), kind);
+  }
+  assert.throws(() => validateWalletResult('clairveil_getOperation', { ...restoredFundingSnapshot(), stepKind: 'zero_helper' }));
+  for (const state of Object.keys(restoredFundingActions)) {
+    const value = { ...restoredFundingSnapshot(state), accessMode: 'recovery-only' };
+    assert.throws(() => validateWalletResult('clairveil_getOperation', value), state);
+    value.nextAction = 'recover'; delete value.publicArtifact;
+    assert.deepEqual(validateWalletResult('clairveil_getOperation', value), value, state);
+    value.publicArtifact = restoredFundingSnapshot().publicArtifact;
+    assert.throws(() => validateWalletResult('clairveil_getOperation', value), state);
+  }
 });
