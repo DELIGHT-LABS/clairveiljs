@@ -5,6 +5,11 @@ export const clairveilConformanceBundleVersion: "v0.3.1";
 export const supportedClairveilRelease: typeof clairveilConformanceBundleVersion;
 export const supportedClairveilSourceKind: "commit_snapshot";
 export const supportedClairveilCommit: "0ff92839872de26b787a60d8e4d5822cc459855b";
+/** Protobuf bindings only; independent of the legacy wallet/prover contracts. */
+export const clairveilProtoBundleVersion: "v0.6.1";
+export const supportedClairveilProtoRelease: typeof clairveilProtoBundleVersion;
+export const supportedClairveilProtoSourceKind: "release_tag";
+export const supportedClairveilProtoCommit: "fad307abddd0daa1c880f2e423668f5c58a0e578";
 export const clairveilProverConformanceBundleVersion: "v0.4.0";
 export const supportedClairveilProverRelease: typeof clairveilProverConformanceBundleVersion;
 export const supportedClairveilProverSourceKind: "release_tag";

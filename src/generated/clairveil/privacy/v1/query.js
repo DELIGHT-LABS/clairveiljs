@@ -1548,7 +1548,11 @@ function createBaseQueryReserveResponse() {
         totalDeposited: "",
         totalWithdrawn: "",
         expectedModuleBalance: "",
-        invariantHolds: false
+        invariantHolds: false,
+        liability: "",
+        collateralized: false,
+        surplus: "",
+        shortfall: ""
     };
 }
 /**
@@ -1577,6 +1581,18 @@ export const QueryReserveResponse = {
         if (message.invariantHolds === true) {
             writer.uint32(48).bool(message.invariantHolds);
         }
+        if (message.liability !== "") {
+            writer.uint32(58).string(message.liability);
+        }
+        if (message.collateralized === true) {
+            writer.uint32(64).bool(message.collateralized);
+        }
+        if (message.surplus !== "") {
+            writer.uint32(74).string(message.surplus);
+        }
+        if (message.shortfall !== "") {
+            writer.uint32(82).string(message.shortfall);
+        }
         return writer;
     },
     decode(input, length) {
@@ -1604,6 +1620,18 @@ export const QueryReserveResponse = {
                 case 6:
                     message.invariantHolds = reader.bool();
                     break;
+                case 7:
+                    message.liability = reader.string();
+                    break;
+                case 8:
+                    message.collateralized = reader.bool();
+                    break;
+                case 9:
+                    message.surplus = reader.string();
+                    break;
+                case 10:
+                    message.shortfall = reader.string();
+                    break;
                 default:
                     reader.skipType(tag & 7);
                     break;
@@ -1619,6 +1647,10 @@ export const QueryReserveResponse = {
         message.totalWithdrawn = object.totalWithdrawn ?? "";
         message.expectedModuleBalance = object.expectedModuleBalance ?? "";
         message.invariantHolds = object.invariantHolds ?? false;
+        message.liability = object.liability ?? "";
+        message.collateralized = object.collateralized ?? false;
+        message.surplus = object.surplus ?? "";
+        message.shortfall = object.shortfall ?? "";
         return message;
     }
 };

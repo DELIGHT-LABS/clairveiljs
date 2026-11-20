@@ -9,7 +9,7 @@ test('public DApp/provider import closure excludes private SDK implementations a
  const external=new Set(['@cosmjs/encoding','@noble/curves/secp256k1.js','@noble/hashes/sha2.js','@noble/hashes/legacy.js','@noble/hashes/sha3.js','cosmjs-types/cosmos/tx/v1beta1/tx','cosmjs-types/cosmos/crypto/secp256k1/keys','ajv/dist/runtime/ucs2length.js','ajv/dist/runtime/equal.js']);
  while(queue.length){
   const file=queue.pop();if(seen.has(file))continue;seen.add(file);
-  assert.match(file,/^src\/(?:dapp|custody-provider|wallet-api|chain-wallet|generated)\//);
+  assert.match(file,/^src\/(?:dapp|custody-provider|wallet-api|chain-wallet|generated|public)\//);
   const source=readFileSync(resolve(root,file),'utf8');
   assert.doesNotMatch(source,/\b(?:eval\s*\(|new\s+Function\s*\(|import\s*\(|require\s*\()/);
   for(const [,specifier] of source.matchAll(/(?:from\s+|import\s*)['"]([^'"]+)['"]/g)){

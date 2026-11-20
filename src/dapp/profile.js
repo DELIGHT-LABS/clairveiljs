@@ -3,12 +3,17 @@ import { decodePrivacyCall } from './evm-abi.js';
 import { validateCosmosArtifact, signDocFromArtifact } from '../chain-wallet/verification.js';
 import { TxBody } from 'cosmjs-types/cosmos/tx/v1beta1/tx';
 import { MsgDeposit, MsgTransfer, MsgWithdraw } from '../generated/clairveil/privacy/v1/tx.js';
+import { MsgDeposit as MsgDepositV2, MsgTransfer as MsgTransferV2, MsgWithdraw as MsgWithdrawV2 } from '../generated/clairveil/privacy/v2/tx.js';
+import { decodeEvmPrivacyRequestV2 } from '../public/evm-v2.js';
+import { validateAuditWireV2 as auditWire } from '../public/audit-wire-v2.js';
 
 /** Pinned default protocol profile; exact bytes are additionally bound by the custody artifact digest. */
 export function createArtifactVerifier(input) {
   const profile = snapshotJson(input);
   validateWalletValue('Hex32',profile.profileDigest);
   if (typeof profile.chainId!=='string' || typeof profile.assetDenom!=='string')throw new Error('chain and asset profile required');
+  if (profile.protocol !== undefined && !['note-v1','audit-field-v2'].includes(profile.protocol))throw new Error('unsupported protocol profile');
+  const audit = profile.protocol === 'audit-field-v2';
   return ({operation,artifact,actor,networkProfileDigest})=>{
     if(networkProfileDigest!==profile.profileDigest || artifact.chainId!==profile.chainId)return false;
     const action=['deposit','zero_helper'].includes(operation.kind)?'deposit':['self_merge','final_transfer'].includes(operation.kind)?'transfer':operation.kind==='withdraw'?'withdraw':null;
@@ -18,6 +23,12 @@ export function createArtifactVerifier(input) {
     if(artifact.transport==='evm') {
       const tx=artifact.transaction;
       if(tx.to!==profile.contractAddress)return false;
+      if(audit) {
+        const message=decodeEvmPrivacyRequestV2(action,tx.data);auditWire(action,message);
+        if(action==='deposit')return summary.amountBaseUnits!==undefined && BigInt(tx.value)===BigInt(summary.amountBaseUnits);
+        if(BigInt(tx.value)!==0n || message.expiresAtUnix!==BigInt(summary.expiresAtUnix))return false;
+        return action!=='withdraw' || message.amount===`${summary.amountBaseUnits}${profile.assetDenom}` && message.recipient===summary.recipientAddress;
+      }
       const values=decodePrivacyCall(tx.data,action);
       if(action==='deposit')return summary.amountBaseUnits!==undefined && BigInt(tx.value)===BigInt(summary.amountBaseUnits);
       if(BigInt(tx.value)!==0n)return false;
@@ -26,6 +37,15 @@ export function createArtifactVerifier(input) {
     }
     validateCosmosArtifact(artifact,actor,operation.kind);
     const body=TxBody.decode(signDocFromArtifact(artifact).bodyBytes);
+    if(audit) {
+      const codec={deposit:MsgDepositV2,transfer:MsgTransferV2,withdraw:MsgWithdrawV2}[action];
+      if(body.messages[0].typeUrl!==codec.typeUrl)return false;
+      const message=codec.decode(body.messages[0].value);auditWire(action,message);
+      if(action==='deposit')return message.amount===`${summary.amountBaseUnits}${profile.assetDenom}`;
+      if(message.expiresAtUnix!==BigInt(summary.expiresAtUnix))return false;
+      return action!=='withdraw' || message.amount===`${summary.amountBaseUnits}${profile.assetDenom}` && message.recipient===summary.recipientAddress;
+    }
+    if(body.messages[0].typeUrl!=={deposit:MsgDeposit,transfer:MsgTransfer,withdraw:MsgWithdraw}[action].typeUrl)return false;
     if(action==='deposit')return MsgDeposit.decode(body.messages[0].value).amount===`${summary.amountBaseUnits}${profile.assetDenom}`;
     if(action==='withdraw') {
       const msg=MsgWithdraw.decode(body.messages[0].value);

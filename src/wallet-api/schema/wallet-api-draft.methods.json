@@ -641,6 +641,7 @@
     "privacy": [
       "#/$defs/Handle",
       "#/$defs/Uint64",
+      "#/$defs/Uint128",
       "#/$defs/Uint32",
       "#/$defs/Aggregate",
       "#/$defs/Hex32",

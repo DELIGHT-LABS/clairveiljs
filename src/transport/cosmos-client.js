@@ -1,4 +1,5 @@
 import { createPrivacyIdentity } from "../wallet-kernel/identity.js";
+import { queryActiveAuditSnapshotV2 } from "../privacy/audit-config-v2.js";
 import { toBech32 } from "@cosmjs/encoding";
 import { Registry, encodePubkey, makeAuthInfoBytes, makeSignDoc } from "@cosmjs/proto-signing";
 import { BroadcastTxError, defaultRegistryTypes, StargateClient } from "@cosmjs/stargate";
@@ -3082,6 +3083,24 @@ export class ClairveilJS {
   /** Fetch and fail-closed validate the active audit recipient identity. */
   async queryAuditConfig() {
     return normalizeAuditConfigV1(await this.fetchAuditConfig());
+  }
+
+  /** Explicit V2 preflight. Pin one endpoint and one height across all queries;
+   * a pruned/unsupported height fails rather than falling back to latest/V1. */
+  async queryActiveAuditSnapshotV2(options) {
+    const endpoint = this.activeRestEndpoint;
+    const query = (path, height) => this.fetchJson(`/clairveil/privacy/v2/audit/${path}`, {
+      endpoint, updateActiveEndpoint: false, failover: false,
+      ...(height === undefined ? {} : { headers: { "x-cosmos-block-height": height } })
+    });
+    return queryActiveAuditSnapshotV2({
+      ...options, chainId: this.chainId,
+      query: {
+        configuration: () => query("configuration"),
+        keySchedule: ({ height }) => query("key_schedule", height),
+        key: ({ epoch, height }) => query(`keys/${epoch}`, height)
+      }
+    });
   }
 
   /** Fetch and fail-closed validate disclosure policy/mode compatibility. */

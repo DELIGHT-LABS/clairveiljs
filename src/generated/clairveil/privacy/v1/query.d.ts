@@ -316,6 +316,10 @@ export interface QueryReserveResponse {
     totalWithdrawn: string;
     expectedModuleBalance: string;
     invariantHolds: boolean;
+    liability: string;
+    collateralized: boolean;
+    surplus: string;
+    shortfall: string;
 }
 /**
  * @name QueryAssetByDenomRequest

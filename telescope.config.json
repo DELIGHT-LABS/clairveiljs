@@ -40,7 +40,7 @@
         "autoFixUndefinedEnumDefault": true
       },
       "includes": {
-        "packages": ["clairveil.privacy.v1"]
+        "packages": ["clairveil.privacy.v1", "clairveil.privacy.v2"]
       }
     },
     "aminoEncoding": {

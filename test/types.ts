@@ -1,4 +1,115 @@
 import { createPrivacyIdentity, type PublicPrivacyIdentity } from "clairveiljs/wallet-kernel";
+import { prepareAuditWitnessV2, type AuditWitnessInputV2 } from "clairveiljs/audit-witness-v2";
+import { createAuditWitnessNativeBackendV2 } from "clairveiljs/audit-witness-node";
+import { prepareDepositMaterialV2 } from "clairveiljs/preparation-v2";
+import { encodeEvmPrivacyRequestV2, type EvmDepositRequestV2 } from "clairveiljs/evm-v2";
+import { assertReserveCollateralizedV2 } from "clairveiljs/reserve-v2";
+import { scanNotes as scanAuditNotesV2 } from "clairveiljs/scan-v2";
+import { serializeFoundNoteV2,deserializeFoundNoteV2 } from "clairveiljs/note-store-v2";
+
+async function auditWorkflowTypes(input: AuditWitnessInputV2, request: EvmDepositRequestV2) {
+  const backend=await createAuditWitnessNativeBackendV2({executablePath:"/trusted/native",sha256:"00".repeat(32)});
+  const prepared=await prepareAuditWitnessV2({...input,backend});prepared.clear();
+  const material=prepareDepositMaterialV2({rootSeed:input.rootSeed,amount:1n<<64n,denom:"uclair"});material.clear();
+  const encoded:string=encodeEvmPrivacyRequestV2("deposit",request);
+  const reserve=assertReserveCollateralizedV2({},"uclair");
+  const scan=await scanAuditNotesV2({rootSeed:input.rootSeed,preprocessedFoundNotes:input.notes,includeFoundNotes:true});
+  if(scan.foundNotes?.[0]){const note=deserializeFoundNoteV2(serializeFoundNoteV2(scan.foundNotes[0]));const height:string=note.height;void height;}
+  // @ts-expect-error amounts must not be lossy JS numbers.
+  prepareDepositMaterialV2({rootSeed:input.rootSeed,amount:1,denom:"uclair"});
+  return {encoded,reserve};
+}
+void auditWorkflowTypes;
+import {
+  marshalNotePlaintextV2, unmarshalNotePlaintextV2, encryptNoteForTransferV2,
+  decryptTransferNoteV2, unmarshalDisclosurePlaintextV2, computeDisclosureDigestV2,
+  verifyDisclosureDigestV2, decryptDisclosureV2, type NoteV2Input
+} from "clairveiljs/protocol-v2";
+import { privacyFixedV2 as rootPrivacyFixedV2 } from "clairveiljs";
+
+function fixedV2TypeContract(input: NoteV2Input, ciphertext: Uint8Array, digest: string) {
+  const format: "privacy-fixed-v2" = rootPrivacyFixedV2;
+  const note = unmarshalNotePlaintextV2(marshalNotePlaintextV2(input));
+  const amount: bigint = note.amount;
+  const encrypted = encryptNoteForTransferV2(note, digest, 0);
+  decryptTransferNoteV2(encrypted.ciphertext, 19n, { outputCommitment: digest, outputIndex: 0, viewTag: encrypted.viewTag });
+  const disclosure = unmarshalDisclosurePlaintextV2(ciphertext);
+  const localDigest: bigint = computeDisclosureDigestV2(disclosure, "batch");
+  const verified: true = verifyDisclosureDigestV2(disclosure, digest, "transfer");
+  // @ts-expect-error amounts cannot be lossy JS numbers.
+  marshalNotePlaintextV2({ ...input, amount: 1 });
+  // @ts-expect-error digest scheme must be explicitly selected.
+  computeDisclosureDigestV2(disclosure);
+  // @ts-expect-error deposit envelopes cannot be decoded as disclosures.
+  decryptDisclosureV2(ciphertext, 19n, 1);
+  // @ts-expect-error canonical private scalars are bigint, never JS numbers.
+  decryptTransferNoteV2(ciphertext, 19);
+  void [format, amount, localDigest, verified];
+}
+import { parseAmount128, amount128ToJSON, sumAmounts128, sumAmountTotals } from "clairveiljs/amount";
+import { createNote128, normalizeNote128, normalizeFoundNote128 } from "clairveiljs/note128";
+import { planTransferNotesV2, planTransferBatchNotesV2, planWithdrawNotesV2 } from "clairveiljs/planner-v2";
+import { planOneProofPayrollV2, type PayrollInputV2 } from "clairveiljs/reference-payroll-v2";
+import { prepareOneProofPayrollOperation as prepareLegacyPayrollOperation } from "clairveiljs/reference-payroll";
+import { CURVE_BASE as amountTestPoint, parseAmount128 as rootParseAmount128 } from "clairveiljs";
+
+function uint128PlanningTypes(input: PayrollInputV2) {
+  const amount: bigint = parseAmount128("18446744073709551616");
+  const json: string = amount128ToJSON(amount);
+  const value = createNote128({ spendPubKey: amountTestPoint, viewPubKey: amountTestPoint, amount });
+  const found = normalizeFoundNote128({ note: value, nullifier: "00".repeat(32), height: 1n });
+  const height: string = found.height;
+  const normalizedAmount: bigint = normalizeNote128(value).amount;
+  // @ts-expect-error Compact V1 note aliases are retired.
+  normalizeNote128({ am: "1" });
+  // @ts-expect-error PascalCase inventory aliases are retired.
+  normalizeFoundNote128({ Note: value, Nullifier: "00".repeat(32) });
+  void [height, normalizedAmount];
+  const plan = planTransferNotesV2({ notes: [], amount });
+  const model: "uint128" = plan.amountModel;
+  planTransferBatchNotesV2({ amounts: [amount, "1uclair"] });
+  planWithdrawNotesV2({ amount });
+  sumAmountTotals([sumAmounts128([amount, 0n]), rootParseAmount128(amount)]);
+  const payroll = planOneProofPayrollV2(input, []);
+  const total: bigint = payroll.total_payroll_amount;
+  const treasuryAmount: bigint = payroll.operations[0].input_notes[0].amount;
+  void treasuryAmount;
+  // @ts-expect-error V2 planning has no circuit identity and cannot feed the V1 preparer.
+  prepareLegacyPayrollOperation({ operation: payroll.operations[0] });
+  // @ts-expect-error Reject JS numbers even when currently safe.
+  parseAmount128(1);
+  // @ts-expect-error Numeric note amounts cannot enter the uint128 model.
+  createNote128({ spendPubKey: amountTestPoint, viewPubKey: amountTestPoint, amount: 1 });
+  // @ts-expect-error Numeric planning amounts are not accepted.
+  planTransferNotesV2({ amount: 1 });
+  // @ts-expect-error Aggregate inputs are arrays, not a decimal string iterable.
+  sumAmounts128("12");
+  void [json, value, model, total];
+}
+void uint128PlanningTypes;
+import {
+  AuditAuthorizationV2, MsgDepositV2, QueryAuditConfigurationResponseV2,
+  createClairveilV2Registry, msgDepositV2TypeUrl
+} from "clairveiljs/cosmos-v2";
+import { MsgTransferV2 as RootMsgTransferV2 } from "clairveiljs";
+import { MsgDeposit as GeneratedMsgDepositV2 } from "clairveiljs/generated/clairveil/privacy/v2/tx.js";
+import { QueryAuditKeyRequest as GeneratedQueryAuditKeyV2 } from "clairveiljs/generated/clairveil/privacy/v2/query";
+
+const auditV2: AuditAuthorizationV2 = { keyId: new Uint8Array(), epoch: 18446744073709551615n, envelope: new Uint8Array() };
+const depositV2: GeneratedMsgDepositV2 = MsgDepositV2.fromPartial({
+  amount: "340282366920938463463374607431768211455uclair", expiresAtUnix: 9223372036854775807n, audit: auditV2
+});
+const auditHeightV2: bigint = QueryAuditConfigurationResponseV2.fromPartial({ initialHeight: auditV2.epoch }).initialHeight;
+const v2TypeUrl: "/clairveil.privacy.v2.MsgDeposit" = msgDepositV2TypeUrl;
+createClairveilV2Registry().encode({ typeUrl: v2TypeUrl, value: depositV2 });
+RootMsgTransferV2.fromPartial({ audit: auditV2 });
+GeneratedQueryAuditKeyV2.fromPartial({ epoch: auditHeightV2 });
+// @ts-expect-error Amounts remain exact strings, never JS numbers.
+MsgDepositV2.fromPartial({ amount: 1 });
+// @ts-expect-error uint64 fields require bigint to preserve precision.
+AuditAuthorizationV2.fromPartial({ epoch: Number.MAX_SAFE_INTEGER });
+// @ts-expect-error int64 fields require bigint to preserve precision.
+MsgDepositV2.fromPartial({ expiresAtUnix: 1 });
 import type { Keplr } from "@keplr-wallet/types";
 import {
   createKeplrChainWalletAdapter, createOfflineSignerChainWalletAdapter, createEip1193ChainWalletAdapter,
@@ -2358,3 +2469,61 @@ async function kernelWorkflowTypes(kernel: WalletKernel, actor: import('clairvei
   return { material, proof, preparedIdentity, scanIdentity, address };
 }
 void kernelWorkflowTypes;
+
+import { queryActiveAuditSnapshotV2, assertAuditSnapshotCurrentV2, parseAuditKeyRecordV2, type AuditSnapshotOptionsV2, type AuditQueryProviderV2 } from 'clairveiljs/audit-config-v2';
+async function auditSnapshotTypes(options: AuditSnapshotOptionsV2, query: AuditQueryProviderV2) {
+  const snapshot = await queryActiveAuditSnapshotV2({ ...options, query, chainId: 'synthetic' });
+  const viaClient = await cosmos.queryActiveAuditSnapshotV2(options);
+  const epoch: string = snapshot.epoch;
+  const current = assertAuditSnapshotCurrentV2(snapshot, viaClient);
+  // @ts-expect-error Public snapshots are immutable.
+  snapshot.keyRecord.origin.height = '2';
+  // @ts-expect-error Unsafe number input is forbidden at the 64-bit boundary.
+  parseAuditKeyRecordV2(new Uint8Array(261), { networkDigest: new Uint8Array(32), initialHeight: 10 });
+  // @ts-expect-error An explicit independent artifact digest is required.
+  queryActiveAuditSnapshotV2({ query, chainId: 'synthetic', expectedCircuitIdentity: options.expectedCircuitIdentity, artifactManifestBytes: options.artifactManifestBytes });
+  // @ts-expect-error Arbitrary cached objects are not branded query snapshots.
+  assertAuditSnapshotCurrentV2({}, snapshot);
+  return { epoch, current };
+}
+void auditSnapshotTypes;
+
+// Wallet-only V2 audit construction is independent of V1 execution declarations.
+import { buildAuditPublicInputsV2, prepareAuditAuthorizationV2, createAuditOutputEffectV2, type AuditBindingInputV2, type AuditEncryptionBackendV2 } from "clairveiljs/audit-authorization-v2";
+import { createAuditNativeBackendV2 } from "clairveiljs/audit-native-node";
+declare const auditBindingInput: AuditBindingInputV2;
+declare const auditEncryptionBackend: AuditEncryptionBackendV2;
+const auditPi: bigint[] = buildAuditPublicInputsV2(auditBindingInput);
+void auditPi;
+void createAuditOutputEffectV2(1, 0, { commitment: new Uint8Array(32), ciphertext: new Uint8Array(406) });
+void prepareAuditAuthorizationV2({ ...auditBindingInput, plaintext: [], backend: auditEncryptionBackend, getCurrentSnapshot: async () => auditBindingInput.snapshot });
+void createAuditNativeBackendV2({ executablePath: "/trusted/native", sha256: "a".repeat(64) });
+
+// V2 proving consumes full witness bytes and requires an exact-artifact local verifier.
+import { createAuditProverV2, type AuditProofVerifierV2, type AuditProverV2 } from "clairveiljs/audit-prover-v2";
+import { createAuditNativeVerifierV2 } from "clairveiljs/audit-verifier-node";
+import type { PreparedAuditAuthorizationV2 } from "clairveiljs/audit-authorization-v2";
+async function auditProverTypes(prepared: PreparedAuditAuthorizationV2, verifier: AuditProofVerifierV2, witness: Uint8Array) {
+  const prover: AuditProverV2 = createAuditProverV2({baseUrl:"https://prover.example.invalid", verifier});
+  const result = await prover.prove({prepared,witness});
+  const proofBytes: Uint8Array = result.proof; void proofBytes;
+  // @ts-expect-error local verifier is mandatory
+  createAuditProverV2({baseUrl:"https://prover.example.invalid"});
+  // @ts-expect-error witness must be encoded bytes, never a JSON record
+  prover.prove({prepared,witness:{secret:1}});
+  // @ts-expect-error verifier must report literal true after verification
+  createAuditProverV2({baseUrl:"https://prover.example.invalid",verifier:{verify:async()=>false}});
+}
+void auditProverTypes; void createAuditNativeVerifierV2;
+
+// Explicit V2 transaction construction stays separate from signing and submission.
+import { buildCosmosTransactionV2, buildEvmTransactionV2 } from "clairveiljs/transactions-v2";
+void buildCosmosTransactionV2; void buildEvmTransactionV2;
+
+import { prepareAuditTransactionV2, type AuditTransactionInputV2 } from 'clairveiljs/wallet-kernel-v2';
+import { decodeUserDisclosureFromScanOutputV2, type AuditDisclosureReportV2 } from 'clairveiljs/disclosure-v2';
+declare const auditTransactionInput: AuditTransactionInputV2;
+void prepareAuditTransactionV2(auditTransactionInput);
+declare const auditDisclosureReport: AuditDisclosureReportV2;
+const auditDisclosureVersion: 'privacy-fixed-v2' = auditDisclosureReport.payload.version;
+void auditDisclosureVersion; void decodeUserDisclosureFromScanOutputV2;

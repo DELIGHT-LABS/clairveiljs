@@ -1,3 +1,4 @@
+import type { NoteFields, DisclosureFields } from "./protocol-fields.js";
 import type { Hex, Point } from "../core/crypto.js";
 
 export const privacyFixedV1: "privacy-fixed-v1";
@@ -11,37 +12,11 @@ export const transferPayloadDomainV1: "clairveil.transfer-payload.v1";
 export const batchVectorKindV1: Readonly<{ nullifier: "nullifier"; commitment: "commitment"; userDisclosure: "user_disclosure"; fullDisclosure: "full_disclosure" }>;
 export const encryptedEnvelopeKindV1: Readonly<{ depositNote: 1; transferNote: 2; userDisclosure: 3; auditDisclosure: 4; selfViewDisclosure: 5 }>;
 
-export interface NoteV1 {
-  receiverSpendPubKeyX: bigint;
-  receiverSpendPubKeyY: bigint;
-  receiverViewPubKeyX: bigint;
-  receiverViewPubKeyY: bigint;
-  amount: bigint;
-  assetID: bigint;
-  randomness: bigint;
-  memo: string;
-}
+export interface NoteV1 extends NoteFields {}
 
 export interface DigestLimbsV1 { bytes: Uint8Array; hex: Hex; hi: bigint; lo: bigint; }
 
-export interface DisclosurePlaintextV1 {
-  plane: 1 | 2;
-  outputIndex: number;
-  policy: number;
-  disclosedFieldBitmap: number;
-  commitment: bigint;
-  amount: bigint;
-  assetID: bigint;
-  senderSpendKeyX: bigint;
-  senderSpendKeyY: bigint;
-  senderViewKeyX: bigint;
-  senderViewKeyY: bigint;
-  recipientSpendKeyX: bigint;
-  recipientSpendKeyY: bigint;
-  recipientViewKeyX: bigint;
-  recipientViewKeyY: bigint;
-  disclosureBlinding: bigint;
-}
+export interface DisclosurePlaintextV1 extends DisclosureFields {}
 
 export function domainFieldV1(label: string): bigint;
 export function computeAssetIdV1(denom: string): bigint;

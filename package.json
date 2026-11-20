@@ -1,6 +1,6 @@
 {
   "name": "clairveiljs",
-  "version": "0.3.1",
+  "version": "0.6.1",
   "description": "Clairveil JavaScript SDK for privacy core, Cosmos transport, EVM transport, wallet, note, transfer, withdraw, disclosure, and prover flows.",
   "type": "module",
   "license": "Apache-2.0",
@@ -66,11 +66,15 @@
     "verify:evm-contract": "node tools/verify-evm-contract.js",
     "verify:package": "npm run check && npm run typecheck && npm test",
     "verify:release": "npm run verify:package && npm run check:proto-freshness && npm run verify:clairveil-source && npm run verify:evm-contract && npm run test:release-source && npm run test:conformance:required",
-    "verify:release:integration": "npm run verify:release && npm run test:e2e:local:one-proof-all && npm run test:e2e:cosmos:testnet && npm run test:e2e:evm:one-proof-all && CLAIRVEIL_EVM_PAYABLE_E2E_REQUIRED=1 npm run test:e2e:evm-payable",
+    "verify:release:integration": "npm run verify:release && npm run verify:release:audit && npm run test:e2e:local:one-proof-all && npm run test:e2e:cosmos:testnet && npm run test:e2e:evm:one-proof-all && CLAIRVEIL_EVM_PAYABLE_E2E_REQUIRED=1 npm run test:e2e:evm-payable",
+    "verify:release:audit": "node tools/verify-audit-release.js",
+    "build:audit-native": "node tools/build-audit-native.js",
     "prepack": "npm run verify:package",
     "prepublishOnly": "npm run verify:release:integration",
     "generate:wallet-api": "node tools/generate-wallet-api.js",
-    "check:wallet-api": "node tools/generate-wallet-api.js --check"
+    "check:wallet-api": "node tools/generate-wallet-api.js --check",
+    "verify:audit-native": "node tools/verify-audit-native.js",
+    "verify:audit-prover": "node tools/verify-audit-prover.js"
   },
   "exports": {
     ".": {
@@ -84,6 +88,14 @@
     "./wallet-kernel": {
       "types": "./src/wallet-kernel/index.d.ts",
       "import": "./src/wallet-kernel/index.js"
+    },
+    "./wallet-kernel-v2": {
+      "types": "./src/wallet-kernel/audit-workflow.d.ts",
+      "import": "./src/wallet-kernel/audit-workflow.js"
+    },
+    "./disclosure-v2": {
+      "types": "./src/core/disclosure-v2.d.ts",
+      "import": "./src/core/disclosure-v2.js"
     },
     "./core": {
       "types": "./src/core/index.d.ts",
@@ -100,6 +112,10 @@
     "./cosmos-client": {
       "types": "./src/transport/cosmos-client.d.ts",
       "import": "./src/transport/cosmos-client.js"
+    },
+    "./cosmos-v2": {
+      "types": "./src/transport/cosmos-v2.d.ts",
+      "import": "./src/transport/cosmos-v2.js"
     },
     "./evm": {
       "types": "./src/transport/evm.d.ts",
@@ -232,6 +248,84 @@
     "./legacy-browser": {
       "types": "./src/browser/wallet-client.d.ts",
       "import": "./src/browser/wallet-client.js"
+    },
+    "./amount": {
+      "types": "./src/core/amount.d.ts",
+      "import": "./src/core/amount.js"
+    },
+    "./note128": {
+      "types": "./src/core/note128.d.ts",
+      "import": "./src/core/note128.js"
+    },
+    "./planner-v2": {
+      "types": "./src/privacy/planner-v2.d.ts",
+      "import": "./src/privacy/planner-v2.js"
+    },
+    "./reference-payroll-v2": {
+      "types": "./src/privacy/reference-payroll-v2.d.ts",
+      "import": "./src/privacy/reference-payroll-v2.js"
+    },
+    "./protocol-v2": {
+      "types": "./src/privacy/protocol-v2.d.ts",
+      "import": "./src/privacy/protocol-v2.js"
+    },
+    "./audit-config-v2": {
+      "types": "./src/privacy/audit-config-v2.d.ts",
+      "import": "./src/privacy/audit-config-v2.js"
+    },
+    "./audit-authorization-v2": {
+      "types": "./src/privacy/audit-authorization-v2.d.ts",
+      "import": "./src/privacy/audit-authorization-v2.js"
+    },
+    "./audit-native-node": {
+      "types": "./src/privacy/audit-native-node.d.ts",
+      "node": {
+        "import": "./src/privacy/audit-native-node.js"
+      }
+    },
+    "./audit-prover-v2": {
+      "types": "./src/privacy/audit-prover-v2.d.ts",
+      "import": "./src/privacy/audit-prover-v2.js"
+    },
+    "./audit-verifier-node": {
+      "types": "./src/privacy/audit-verifier-node.d.ts",
+      "node": {
+        "import": "./src/privacy/audit-verifier-node.js"
+      }
+    },
+    "./evm-v2": {
+      "types": "./src/transport/evm-v2.d.ts",
+      "import": "./src/transport/evm-v2.js"
+    },
+    "./preparation-v2": {
+      "types": "./src/privacy/preparation-v2.d.ts",
+      "import": "./src/privacy/preparation-v2.js"
+    },
+    "./audit-witness-v2": {
+      "types": "./src/privacy/audit-witness-v2.d.ts",
+      "import": "./src/privacy/audit-witness-v2.js"
+    },
+    "./audit-witness-node": {
+      "types": "./src/privacy/audit-witness-node.d.ts",
+      "node": {
+        "import": "./src/privacy/audit-witness-node.js"
+      }
+    },
+    "./reserve-v2": {
+      "types": "./src/privacy/reserve-v2.d.ts",
+      "import": "./src/privacy/reserve-v2.js"
+    },
+    "./scan-v2": {
+      "types": "./src/privacy/scan-v2.d.ts",
+      "import": "./src/privacy/scan-v2.js"
+    },
+    "./note-store-v2": {
+      "types": "./src/privacy/note-store-v2.d.ts",
+      "import": "./src/privacy/note-store-v2.js"
+    },
+    "./transactions-v2": {
+      "types": "./src/transport/transactions-v2.d.ts",
+      "import": "./src/transport/transactions-v2.js"
     }
   },
   "dependencies": {

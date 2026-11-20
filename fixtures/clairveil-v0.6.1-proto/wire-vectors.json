@@ -1,0 +1,62 @@
+{
+  "source": {
+    "commit": "fad307abddd0daa1c880f2e423668f5c58a0e578",
+    "release": "v0.6.1",
+    "repository": "https://github.com/DELIGHT-LABS/clairveil"
+  },
+  "scope": "synthetic protobuf encoding only",
+  "vectors": [
+    {
+      "type_url": "/clairveil.privacy.v2.AuditAuthorization",
+      "hex": "0a02010210ffffffffffffffffff011a03030405"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.OutputEffect",
+      "hex": "0a020607120208091a020a0b2007280232010c3a010d42010e4a010f520110"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.MsgDeposit",
+      "hex": "0a056163746f72122d33343032383233363639323039333834363334363333373436303734333137363832313134353575636c6169721a1f0a020607120208091a020a0b2007280232010c3a010d42010e4a010f5201102202111228ffffffffffffffff7f32140a02010210ffffffffffffffffff011a03030405"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.MsgWithdraw",
+      "hex": "0a056163746f7212073175636c6169721a09726563697069656e742201132a011432011538ffffffffffffffff7f42140a02010210ffffffffffffffffff011a03030405"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.MsgTransfer",
+      "hex": "0a056163746f721201161a01171a0118221f0a020607120208091a020a0b2007280232010c3a010d42010e4a010f520110221f0a020607120208091a020a0b2007280232010c3a010d42010e4a010f5201102a011930ffffffffffffffff7f3a140a02010210ffffffffffffffffff011a03030405"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.MsgBatchTransfer",
+      "hex": "0a056163746f7212011a1a011b1a011c221f0a020607120208091a020a0b2007280232010c3a010d42010e4a010f520110221f0a020607120208091a020a0b2007280232010c3a010d42010e4a010f5201102a011d30ffffffffffffffff7f3a140a02010210ffffffffffffffffff011a03030405"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.MsgScheduleAuditKeyEpoch",
+      "hex": "0a09617574686f7269747910ffffffffffffffffff0118ffffffffffffffffff0122011e280232011f"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.MsgCancelPendingAuditEpoch",
+      "hex": "0a09617574686f7269747910ffffffffffffffffff01"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.MsgSetPrivacyHalt",
+      "hex": "0a09617574686f726974791001"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.QueryAuditKeyRequest",
+      "hex": "08ffffffffffffffffff01"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.QueryAuditRecordResponse",
+      "hex": "0a012012012118ffffffffffffffff7f"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.QueryAuditKeyScheduleResponse",
+      "hex": "08ffffffffffffffffff0110ffffffffffffffffff0118ffffffffffffffffff01200128ffffffffffffffff7f"
+    },
+    {
+      "type_url": "/clairveil.privacy.v2.QueryAuditConfigurationResponse",
+      "hex": "0a012210ffffffffffffffffff011a012320ffffffffffffffff7f"
+    }
+  ]
+}

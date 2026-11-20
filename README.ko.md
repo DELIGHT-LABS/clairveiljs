@@ -2,6 +2,12 @@
 
 ClairveilJS는 Clairveil privacy 기능을 브라우저와 Node.js 환경에서 사용할 수 있게 해주는 JavaScript SDK입니다.
 
+`v0.6.1` Git 소스 태그는 Core v0.6.1을 지원하며 uint128/fixed-v2 준비, 입금·전송·출금의 native witness, V2 HTTP prover와 고정된 로컬 검증기, Maroo V2 직접 거래 ABI 인코딩, Reserve 검증, V2 스캔·캐시 API를 포함합니다. 계약과 host가 소유하는 browser/native 설치·일반 지갑 handoff 범위는 [V2 증명 생성과 로컬 검증](./docs/api-mapping.ko.md#v2-증명-생성과-로컬-검증)을 참고하세요. Native witness·proof 테스트 통과가 실제 체인 제출을 의미하지는 않습니다.
+
+v0.6.1 후보를 사용하는 DApp은 `clairveiljs/dapp`과 명시적인 `protocol: "audit-field-v2"`를 사용합니다. 예제는 `examples/custody-v2-flow.js`입니다. 신뢰하는 지갑 런타임은 `clairveiljs/wallet-kernel-v2`의 `prepareAuditTransactionV2`, V2 거래 builder, 사용자·self-view typed disclosure용 `clairveiljs/disclosure-v2`를 사용합니다. 기존 root·Cosmos·browser-wallet 준비 API는 V1 호환 경로로 유지되며 자동으로 V2를 선택하지 않습니다. 후보는 정확한 소스·패키지 무결성으로 소비하고 registry의 `0.3.1`에는 미출시 추가 기능이 없습니다.
+
+Native helper는 `npm run build:audit-native -- CORE_GIT_DIRECTORY NEW_BINARY witness` 또는 `verify`로 빌드합니다. 저장소의 작업 브랜치가 이전 버전이어도 고정된 v0.6.1 커밋을 추출하고 annotated tag·protobuf 소스를 검증합니다. 기존 출력 파일은 덮어쓰지 않습니다. `npm run verify:release:audit -- CORE_GIT_DIRECTORY VERIFIED_PROOF_CACHE`는 릴리스 통합의 필수 검사입니다. Native known-answer test, 회로 4종 fixture·로컬 검증, 전체 native witness·proof·인코딩 6개 경로를 실행해야 합니다. 필수 입력이 없으면 실패하며 일반 지갑·실제 체인 검증을 대신하지 않습니다.
+
 English documentation: [README.md](./README.md)
 
 시스템 아키텍처: [docs/architecture.ko.md](./docs/architecture.ko.md)
@@ -40,6 +46,8 @@ Note reservation 상태 전이: [docs/reservation-state-machine.ko.md](./docs/re
 미출시 CC-002 preview는 공개 계약/client용 `clairveiljs/wallet-api`·`clairveiljs/custody-provider`·`clairveiljs/dapp`, 독립 RootSeed workflow용 `clairveiljs/wallet-kernel`, 일반 지갑용 `clairveiljs/chain-wallet`을 제공한다. `clairveiljs/legacy-browser`는 기존 page-secret client를 명시적으로 유지한다. `0.3.1`로 출시되지 않았으며 필수 host hook·검증 한계는 [API mapping](./docs/api-mapping.ko.md#custody-sdk-제공면-cc-002)에 있다.
 
 ## 설치
+
+`v0.6.1` 소스 태그는 이 저장소에서 제공하며 npm에는 게시하지 않았습니다. 아래 registry 명령은 V2 추가 기능이 없는 이전 패키지를 선택합니다.
 
 ```bash
 npm install clairveiljs@0.3.1

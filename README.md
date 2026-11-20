@@ -2,6 +2,12 @@
 
 ClairveilJS is a JavaScript SDK for using Clairveil privacy features in browser and Node.js environments.
 
+The `v0.6.1` Git source tag supports Core v0.6.1 and includes uint128/fixed-v2 preparation, native witnesses for deposit/transfer/withdraw, V2 HTTP proving and pinned local verification, direct Maroo V2 ABI encoding, reserve accounting and V2 scan/cache APIs. See [V2 proving and local verification](./docs/api-mapping.md#v2-proving-and-local-verification) for the host-owned browser/native installation and ordinary-wallet handoff contracts. Native witness/proof tests do not imply live chain submission.
+
+For the v0.6.1 candidate, DApps use `clairveiljs/dapp` with explicit `protocol: "audit-field-v2"`; see `examples/custody-v2-flow.js`. Trusted wallets use `clairveiljs/wallet-kernel-v2` (`prepareAuditTransactionV2`), the V2 transaction builders, and `clairveiljs/disclosure-v2` for user/self-view typed disclosure. Existing root/Cosmos/browser-wallet preparation APIs remain V1 compatibility surfaces, not automatic V2 selectors. The candidate is consumed by its exact source/package integrity; registry `0.3.1` does not contain these unreleased additions.
+
+Build native helpers with `npm run build:audit-native -- CORE_GIT_DIRECTORY NEW_BINARY witness` (or `verify`). The builder extracts the pinned v0.6.1 commit and validates its annotated tag/protobuf source even when that repository's working branch is older. It refuses existing output paths. `npm run verify:release:audit -- CORE_GIT_DIRECTORY VERIFIED_PROOF_CACHE` is a mandatory release-integration gate: native known-answer tests, four-circuit fixture/local verification and six full native witness/proof/encoding paths must run. Missing inputs fail; no ordinary-wallet or live-chain claim follows from this gate.
+
 Korean documentation: [README.ko.md](./README.ko.md)
 
 Design and operations documents: [System architecture](./docs/architecture.md), [API mapping](./docs/api-mapping.md), [Note reservation lifecycle](./docs/reservation-state-machine.md), [Storage and persistence](./docs/storage-and-persistence.md), [Configuration](./docs/configuration.md), [Errors and recovery](./docs/errors-and-recovery.md)
@@ -53,6 +59,8 @@ import { createNoteReservationManager } from "clairveiljs/reservation";
 The unreleased CC-002 preview adds `clairveiljs/wallet-api`, `clairveiljs/custody-provider` and `clairveiljs/dapp` for the public contract/client, `clairveiljs/wallet-kernel` for independent RootSeed workflows, and `clairveiljs/chain-wallet` for ordinary wallets. `clairveiljs/legacy-browser` explicitly preserves the old page-secret client. These exports are not published under `0.3.1`; the [API mapping](./docs/api-mapping.md#custody-sdk-surfaces-cc-002) defines required host hooks and qualification limits.
 
 ## Install
+
+The `v0.6.1` source tag is available from this repository; it has not been published to npm. The registry command below selects the older package and does not include the V2 additions.
 
 ```bash
 npm install clairveiljs@0.3.1

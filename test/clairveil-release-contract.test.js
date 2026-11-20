@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  verifyBundledClairveilProtoContractSnapshot,
+  verifyVendoredClairveilProtoContractSnapshot,
   verifyBundledClairveilContractSnapshot,
   verifyBundledClairveilProverContractSnapshot,
   verifyVendoredClairveilContractSnapshot,
@@ -62,7 +64,10 @@ test("bundled Clairveil handoff contracts validate without a core checkout", () 
   assert.equal(result.prover.fixtureCount, 2);
   assert.equal(result.prover.schemaCount, 1);
   assert.equal(result.prover.fileCount, 3);
-  assert.equal(result.totalFileCount, 20);
+  assert.equal(result.proto.release, "v0.6.1");
+  assert.equal(result.proto.commit, "fad307abddd0daa1c880f2e423668f5c58a0e578");
+  assert.equal(result.proto.protobufCount, 6);
+  assert.equal(result.totalFileCount, 26);
   assert.equal(result.totalFixtureCount, 14);
   assert.equal(result.totalSchemaCount, 2);
 });
@@ -77,6 +82,91 @@ test("bundled Clairveil v0.4.0 prover contract validates independently", () => {
   assert.equal(result.fixtureCount, 2);
   assert.equal(result.schemaCount, 1);
   assert.equal(result.fileCount, 3);
+});
+
+test("Core v0.6.1 proto identity and hashes validate independently", () => {
+  const result = verifyBundledClairveilProtoContractSnapshot({ packageRoot });
+  assert.equal(result.release, "v0.6.1");
+  assert.equal(result.commit, "fad307abddd0daa1c880f2e423668f5c58a0e578");
+  assert.equal(result.protobufCount, 6);
+});
+
+test("uint128 reference vectors identify the exact Core v0.6.1 amount implementation", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
+  const fixture = JSON.parse(readFileSync(join(packageRoot, "fixtures/clairveil-v0.6.1-amount/vectors.json"), "utf8"));
+  assert.equal(fixture.source.commit, "fad307abddd0daa1c880f2e423668f5c58a0e578");
+  assert.equal(fixture.source.path, "x/privacy/amount/amount.go");
+  const source = spawnSync("git", ["-C", clairveilSourceRoot, "cat-file", "blob", `${fixture.source.commit}:${fixture.source.path}`]);
+  assert.equal(source.status, 0);
+  assert.equal(createHash("sha256").update(source.stdout).digest("hex"), fixture.source.sha256);
+});
+
+test("fixed-v2 codec vectors identify exact Core v0.6.1 serialization and crypto sources", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
+  const fixture = JSON.parse(readFileSync(join(packageRoot, "fixtures/clairveil-v0.6.1-fixed/vectors.json"), "utf8"));
+  assert.equal(fixture.source.release, "v0.6.1");
+  assert.equal(fixture.source.commit, "fad307abddd0daa1c880f2e423668f5c58a0e578");
+  assert.equal(Object.keys(fixture.source.files).length, 12);
+  for (const [path, digest] of Object.entries(fixture.source.files)) {
+    const source = spawnSync("git", ["-C", clairveilSourceRoot, "cat-file", "blob", `${fixture.source.commit}:${path}`]);
+    assert.equal(source.status, 0);
+    assert.equal(createHash("sha256").update(source.stdout).digest("hex"), digest, path);
+  }
+});
+
+test("audit-v2 snapshot vectors identify exact Core v0.6.1 query, key, PoP and artifact sources", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
+  const fixture = JSON.parse(readFileSync(join(packageRoot, "fixtures/clairveil-v0.6.1-audit/vectors.json"), "utf8"));
+  assert.equal(fixture.source.release, "v0.6.1");
+  assert.equal(fixture.source.commit, "fad307abddd0daa1c880f2e423668f5c58a0e578");
+  assert.equal(Object.keys(fixture.source.files).length, 10);
+  for (const [path, digest] of Object.entries(fixture.source.files)) {
+    const source = spawnSync("git", ["-C", clairveilSourceRoot, "cat-file", "blob", `${fixture.source.commit}:${path}`]);
+    assert.equal(source.status, 0);
+    assert.equal(createHash("sha256").update(source.stdout).digest("hex"), digest, path);
+  }
+});
+
+test("proto verifier rejects tampering even after the local manifest hash is updated", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "clairveiljs-proto-tamper-"));
+  try {
+    cpSync(join(packageRoot, "fixtures/clairveil-v0.6.1-proto"),
+      join(temporaryRoot, "fixtures/clairveil-v0.6.1-proto"), { recursive: true });
+    cpSync(join(packageRoot, "proto"), join(temporaryRoot, "proto"), { recursive: true });
+    const relativePath = "proto/clairveil/privacy/v2/tx.proto";
+    const protoPath = join(temporaryRoot, relativePath);
+    appendFileSync(protoPath, "\n// tampered\n");
+    assert.throws(() => verifyBundledClairveilProtoContractSnapshot({ packageRoot: temporaryRoot }), /tx\.proto SHA-256 is/);
+    const manifestPath = join(temporaryRoot, "fixtures/clairveil-v0.6.1-proto/manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.files.find(entry => entry.local_path === relativePath).sha256 =
+      createHash("sha256").update(readFileSync(protoPath)).digest("hex");
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    assert.throws(() => verifyVendoredClairveilProtoContractSnapshot({
+      packageRoot: temporaryRoot, clairveilSourceRoot
+    }), /does not match .* at Clairveil v0\.6\.1 commit/);
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("proto verifier rejects a lightweight v0.6.1 tag", {
+  skip: !releaseSourceTestsEnabled
+}, () => {
+  const { temporaryRoot, temporaryCheckout } = temporaryClairveilCheckout("clairveiljs-proto-tag-");
+  try {
+    gitInCheckout(temporaryCheckout, ["tag", "--force", "v0.6.1", "fad307abddd0daa1c880f2e423668f5c58a0e578"]);
+    assert.throws(() => verifyVendoredClairveilProtoContractSnapshot({
+      packageRoot, clairveilSourceRoot: temporaryCheckout
+    }), /tag v0\.6\.1 must be annotated; got commit/);
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 });
 
 test("bundled generic Clairveil EVM contract validates without a downstream checkout", () => {
@@ -324,6 +414,8 @@ test("release verifier rejects a modified vendored fixture", () => {
       join(temporaryRoot, "fixtures", "clairveil-v0.4.0-prover"),
       { recursive: true }
     );
+    cpSync(join(packageRoot, "fixtures/clairveil-v0.6.1-proto"),
+      join(temporaryRoot, "fixtures/clairveil-v0.6.1-proto"), { recursive: true });
     cpSync(join(packageRoot, "proto"), join(temporaryRoot, "proto"), {
       recursive: true
     });
@@ -370,6 +462,8 @@ test("release verifier rejects a self-consistent manifest that diverges from the
       join(temporaryRoot, "fixtures", "clairveil-v0.4.0-prover"),
       { recursive: true }
     );
+    cpSync(join(packageRoot, "fixtures/clairveil-v0.6.1-proto"),
+      join(temporaryRoot, "fixtures/clairveil-v0.6.1-proto"), { recursive: true });
     cpSync(join(packageRoot, "proto"), join(temporaryRoot, "proto"), {
       recursive: true
     });
@@ -514,5 +608,17 @@ test("required conformance refuses external fixture and schema overrides", () =>
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, new RegExp(name));
     assert.equal(result.stdout, "");
+  }
+});
+
+
+test("audit authorization vectors identify exact Core v0.6.1 public binding and cipher sources", {skip: !releaseSourceTestsEnabled}, () => {
+  const fixture = JSON.parse(readFileSync(join(packageRoot, "fixtures/clairveil-v0.6.1-audit-authorization/vectors.json"), "utf8"));
+  assert.equal(fixture.source.commit, "fad307abddd0daa1c880f2e423668f5c58a0e578");
+  assert.equal(Object.keys(fixture.source.files).length, 14);
+  for (const [path, digest] of Object.entries(fixture.source.files)) {
+    const source = spawnSync("git", ["-C", clairveilSourceRoot, "cat-file", "blob", `${fixture.source.commit}:${path}`]);
+    assert.equal(source.status, 0);
+    assert.equal(createHash("sha256").update(source.stdout).digest("hex"), digest, path);
   }
 });

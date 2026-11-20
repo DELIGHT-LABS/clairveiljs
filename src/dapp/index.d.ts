@@ -8,4 +8,4 @@ export type ArtifactVerifier = (context: { operation: ClairveilOperation; artifa
 export function createClairveilDappClient(input: { custodyProvider: CustodyProvider }): Readonly<PublicWalletMethods>;
 export function createClairveilDappClient(input: { custodyProvider: CustodyProvider; chainWallet: CosmosChainWalletAdapter | EvmChainWalletAdapter; validateArtifact: ArtifactVerifier; broadcastCosmos?: (bytes: Uint8Array, actor: ChainActor) => Promise<string> }): Readonly<PublicWalletMethods & { submit(input: SubmissionInput): Promise<{ attempt: object; invoked: boolean; result?: object }> }>;
 export function computeArtifactBinding(input: { operationId: string; networkProfileDigest: string; chainActorAccountId: string; artifact: object }): Promise<string>;
-export function createArtifactVerifier(profile: { profileDigest: string; chainId: string; assetDenom: string; protocolChainId?: string; contractAddress?: string }): ArtifactVerifier;
+export function createArtifactVerifier(profile: { profileDigest: string; chainId: string; assetDenom: string; protocolChainId?: string; contractAddress?: string; protocol?: "note-v1" | "audit-field-v2" }): ArtifactVerifier;

@@ -122,49 +122,8 @@ export const MsgWithdraw: typeof import("../generated/clairveil/privacy/v1/tx.js
  * Structural protobuf codec accepted by the Clairveil Cosmos registry.
  * Kept local so consumers do not inherit CosmJS' optional code-generator types.
  */
-export interface ClairveilRegistryCodecBase {
-  readonly typeUrl?: string;
-  readonly encode: (...args: any[]) => { finish(): Uint8Array };
-  readonly decode: (...args: any[]) => any;
-}
-
-export type ClairveilRegistryGeneratedType = ClairveilRegistryCodecBase & (
-  | {
-      readonly fromPartial: (...args: any[]) => any;
-      readonly create?: (...args: any[]) => any;
-    }
-  | {
-      readonly create: (...args: any[]) => any;
-      readonly fromPartial?: (...args: any[]) => any;
-    }
-);
-
-export interface ClairveilRegistryEncodeObject<T = unknown> {
-  readonly typeUrl: string;
-  readonly value: T;
-}
-
-export interface ClairveilRegistryDecodeObject {
-  readonly typeUrl: string;
-  readonly value: Uint8Array;
-}
-
-/** Public, dependency-safe structural surface of CosmJS Registry. */
-export interface ClairveilRegistry {
-  register(typeUrl: string, type: ClairveilRegistryGeneratedType): void;
-  lookupType(typeUrl: string): ClairveilRegistryGeneratedType | undefined;
-  encode<T>(encodeObject: ClairveilRegistryEncodeObject<T>): Uint8Array;
-  encodeAsAny<T>(encodeObject: ClairveilRegistryEncodeObject<T>): ClairveilRegistryDecodeObject;
-  encodeTxBody(txBodyFields: {
-    readonly messages: readonly ClairveilRegistryEncodeObject[];
-    readonly memo?: string;
-    readonly timeoutHeight?: bigint;
-    readonly extensionOptions?: readonly ClairveilRegistryDecodeObject[];
-    readonly nonCriticalExtensionOptions?: readonly ClairveilRegistryDecodeObject[];
-  }): Uint8Array;
-  decode(decodeObject: ClairveilRegistryDecodeObject): unknown;
-  decodeTxBody(txBody: Uint8Array): unknown;
-}
+import type { ClairveilRegistry, ClairveilRegistryGeneratedType } from "./cosmos-registry.js";
+export type * from "./cosmos-registry.js";
 
 export interface SignDocBase64 {
   bodyBytes: Base64;
@@ -1168,6 +1127,8 @@ export class ClairveilJS {
   fetchAuditConfig(): Promise<object>;
   fetchDisclosureConfig(): Promise<object>;
   queryAuditConfig(): Promise<import("../privacy/network-config.js").ValidatedAuditConfigV1>;
+  /** Explicit V2 preflight with a single REST endpoint and pinned query height. */
+  queryActiveAuditSnapshotV2(options: import("../privacy/audit-config-v2.js").AuditSnapshotOptionsV2): Promise<import("../privacy/audit-config-v2.js").AuditSnapshotV2>;
   queryDisclosureConfig(): Promise<import("../privacy/network-config.js").ValidatedDisclosureConfigV1>;
   fetchCircuitConfig(options?: { expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<ValidatedCircuitConfigV1>;
   assertCircuitConfig(options?: { expectedCircuitIdentity?: ValidatedCircuitConfigV1["circuit_set_identity"] }): Promise<ValidatedCircuitConfigV1>;

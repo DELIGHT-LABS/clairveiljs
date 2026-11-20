@@ -25,7 +25,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4538,7 +4538,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4599,7 +4599,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4660,7 +4660,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4721,7 +4721,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4783,7 +4783,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4845,7 +4845,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4907,7 +4907,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -4969,7 +4969,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6472,7 +6472,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6525,7 +6525,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6585,7 +6585,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6646,7 +6646,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6707,7 +6707,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -6768,7 +6768,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -7345,7 +7345,7 @@
         "result": {
           "protocolVersion": "1",
           "schemaRevision": "draft",
-          "schemaDigest": "13720bbbf46d01d23a8841a8b186f54d0d87ef7264c3273cb9bb70da57e62e18",
+          "schemaDigest": "33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b",
           "methods": [
             "clairveil_getCapabilities",
             "clairveil_connect",
@@ -7728,6 +7728,240 @@
               "chainId": "synthetic-1",
               "accountNumber": "0"
             }
+          }
+        }
+      }
+    },
+    {
+      "name": "uint128.0",
+      "schema": "#/$defs/Uint128",
+      "valid": true,
+      "value": "0"
+    },
+    {
+      "name": "uint128.18446744073709551616",
+      "schema": "#/$defs/Uint128",
+      "valid": true,
+      "value": "18446744073709551616"
+    },
+    {
+      "name": "uint128.340282366920938463463374607431768211455",
+      "schema": "#/$defs/Uint128",
+      "valid": true,
+      "value": "340282366920938463463374607431768211455"
+    },
+    {
+      "name": "uint128.340282366920938463463374607431768211456",
+      "schema": "#/$defs/Uint128",
+      "valid": false,
+      "value": "340282366920938463463374607431768211456"
+    },
+    {
+      "name": "uint128.01",
+      "schema": "#/$defs/Uint128",
+      "valid": false,
+      "value": "01"
+    },
+    {
+      "name": "uint128.-1",
+      "schema": "#/$defs/Uint128",
+      "valid": false,
+      "value": "-1"
+    },
+    {
+      "name": "uint128.1.0",
+      "schema": "#/$defs/Uint128",
+      "valid": false,
+      "value": "1.0"
+    },
+    {
+      "name": "uint128.1.number",
+      "schema": "#/$defs/Uint128",
+      "valid": false,
+      "value": 1
+    },
+    {
+      "name": "prepareDeposit.uint128-maximum",
+      "schema": "#/$defs/prepareDepositRequest",
+      "valid": true,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-prepareDeposit",
+        "method": "clairveil_prepareDeposit",
+        "params": {
+          "protocolVersion": "1",
+          "schemaRevision": "draft",
+          "sessionHandle": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "networkHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "idempotencyKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "chainActorHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "binding": "clairveil-draft",
+          "protocol": {
+            "assetDenom": "uclair",
+            "amountBaseUnits": "340282366920938463463374607431768211455",
+            "purpose": "funding"
+          },
+          "privacyConstraints": {
+            "allowRemoteWitness": true,
+            "allowPublicChainActor": true
+          }
+        }
+      }
+    },
+    {
+      "name": "prepareDeposit.uint128-overflow",
+      "schema": "#/$defs/prepareDepositRequest",
+      "valid": false,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-prepareDeposit",
+        "method": "clairveil_prepareDeposit",
+        "params": {
+          "protocolVersion": "1",
+          "schemaRevision": "draft",
+          "sessionHandle": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "networkHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "idempotencyKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "chainActorHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "binding": "clairveil-draft",
+          "protocol": {
+            "assetDenom": "uclair",
+            "amountBaseUnits": "340282366920938463463374607431768211456",
+            "purpose": "funding"
+          },
+          "privacyConstraints": {
+            "allowRemoteWitness": true,
+            "allowPublicChainActor": true
+          }
+        }
+      }
+    },
+    {
+      "name": "authorizeTransfer.uint128-maximum",
+      "schema": "#/$defs/authorizeTransferRequest",
+      "valid": true,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-authorizeTransfer",
+        "method": "clairveil_authorizeTransfer",
+        "params": {
+          "protocolVersion": "1",
+          "schemaRevision": "draft",
+          "sessionHandle": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "networkHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "idempotencyKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "chainActorHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "binding": "clairveil-draft",
+          "protocol": {
+            "recipientShieldedAddress": "clairs1qqqqqqqq",
+            "assetDenom": "uclair",
+            "amountBaseUnits": "340282366920938463463374607431768211455",
+            "expiresAtUnix": "1900000000",
+            "disclosure": {
+              "policy": "all-private",
+              "mode": "none"
+            }
+          },
+          "privacyConstraints": {
+            "allowRemoteWitness": true,
+            "allowPublicChainActor": true
+          }
+        }
+      }
+    },
+    {
+      "name": "authorizeTransfer.uint128-overflow",
+      "schema": "#/$defs/authorizeTransferRequest",
+      "valid": false,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-authorizeTransfer",
+        "method": "clairveil_authorizeTransfer",
+        "params": {
+          "protocolVersion": "1",
+          "schemaRevision": "draft",
+          "sessionHandle": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "networkHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "idempotencyKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "chainActorHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "binding": "clairveil-draft",
+          "protocol": {
+            "recipientShieldedAddress": "clairs1qqqqqqqq",
+            "assetDenom": "uclair",
+            "amountBaseUnits": "340282366920938463463374607431768211456",
+            "expiresAtUnix": "1900000000",
+            "disclosure": {
+              "policy": "all-private",
+              "mode": "none"
+            }
+          },
+          "privacyConstraints": {
+            "allowRemoteWitness": true,
+            "allowPublicChainActor": true
+          }
+        }
+      }
+    },
+    {
+      "name": "authorizeWithdraw.uint128-maximum",
+      "schema": "#/$defs/authorizeWithdrawRequest",
+      "valid": true,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-authorizeWithdraw",
+        "method": "clairveil_authorizeWithdraw",
+        "params": {
+          "protocolVersion": "1",
+          "schemaRevision": "draft",
+          "sessionHandle": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "networkHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "idempotencyKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "chainActorHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "binding": "clairveil-draft",
+          "protocol": {
+            "recipientAddress": "0x2222222222222222222222222222222222222222",
+            "assetDenom": "uclair",
+            "amountBaseUnits": "340282366920938463463374607431768211455",
+            "expiresAtUnix": "1900000000"
+          },
+          "privacyConstraints": {
+            "allowRemoteWitness": true,
+            "allowPublicChainActor": true
+          }
+        }
+      }
+    },
+    {
+      "name": "authorizeWithdraw.uint128-overflow",
+      "schema": "#/$defs/authorizeWithdrawRequest",
+      "valid": false,
+      "value": {
+        "jsonrpc": "2.0",
+        "id": "example-authorizeWithdraw",
+        "method": "clairveil_authorizeWithdraw",
+        "params": {
+          "protocolVersion": "1",
+          "schemaRevision": "draft",
+          "sessionHandle": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "networkHandle": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA",
+          "idempotencyKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "chainActorHandle": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA",
+          "binding": "clairveil-draft",
+          "protocol": {
+            "recipientAddress": "0x2222222222222222222222222222222222222222",
+            "assetDenom": "uclair",
+            "amountBaseUnits": "340282366920938463463374607431768211456",
+            "expiresAtUnix": "1900000000"
+          },
+          "privacyConstraints": {
+            "allowRemoteWitness": true,
+            "allowPublicChainActor": true
           }
         }
       }

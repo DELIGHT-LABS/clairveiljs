@@ -11,6 +11,114 @@
 - endpoint와 client option: [배포·클라이언트 설정](./configuration.ko.md)
 - 오류 형태와 재시도 판단: [오류·복구](./errors-and-recovery.ko.md)
 
+
+## Core v0.6.1 protobuf 바인딩
+
+미출시 `clairveiljs/cosmos-v2` 진입점은 `AuditAuthorizationV2`, `OutputEffectV2`, 7종 `Msg*V2` codec과 응답, audit query codec 6종, `msg*V2TypeUrl` 상수 7종, `createClairveilV2Registry(extraTypes?)`를 제공한다. Root도 V2 접미사가 붙은 이름을 export한다. 원본 생성 바인딩은 `clairveiljs/generated/clairveil/privacy/v2/tx`와 `/query`에서 `.js` 확장자 유무와 관계없이 import할 수 있다.
+
+이 범위는 wire 바인딩이다. Amount는 문자열, protobuf `uint64`/`int64`는 `bigint`, byte 필드는 `Uint8Array`다. V2 registry는 표준 Cosmos 메시지와 자산 메시지 4종·관리 메시지 3종을 등록하며 privacy V1 메시지는 등록하지 않는다. 기존 `MsgDeposit`과 `createClairveilRegistry`는 V1을 유지한다. 아래 전용 V2 workflow는 준비·audit authorization·proving을 연결하며 일반 체인 서명·제출은 host가 담당한다. Codec import만으로 해당 흐름이 활성화되거나 거래 의미가 검증되지는 않는다.
+
+생성 입력은 Core `v0.6.1`, commit `fad307abddd0daa1c880f2e423668f5c58a0e578`의 V1/V2 proto 6개이며 `fixtures/clairveil-v0.6.1-proto/manifest.json`으로 고정한다. V1 reserve query에는 `liability`, `collateralized`, `surplus`, `shortfall`이 추가된다. 과거 V1 proto 원본은 `fixtures/clairveil-v0.3.1/proto/`로 옮겼다. 기존 lifecycle fixture와 v0.4.0 deposit prover의 기준 소스는 각각 유지한다. `supportedClairveilProtoRelease`/`supportedClairveilProtoCommit`은 proto 출처만 나타내며 실제 protocol 지원 선언이 아니다.
+
+`npm run codegen:proto`로 TypeScript·JavaScript·선언을 재생성하고, `npm run check:proto-freshness`로 격리된 clean 재생성과 비교한다. `npm run verify:clairveil-source`는 정확한 Core commit object와 annotated release tag에서 원본 byte를 대조한다. `test/cosmos-v2.test.js`는 중첩·반복 필드와 64비트 최댓값을 포함한 V2 메시지·audit 응답을 독립 Go vector 13개와 비교한다. 주소·proof는 합성 값으로, 실행 가능한 거래가 아니다.
+
+Go vector 재현 시 Core에서 `git archive v0.6.1 go.mod go.sum x/privacy/types/v2`로 임시 디렉터리에 module을 추출한다. 해당 디렉터리에서 `go run -mod=readonly /absolute/path/to/clairveiljs/tools/generate-v2-proto-vectors.go`를 실행한다. 표준 출력이 `fixtures/clairveil-v0.6.1-proto/wire-vectors.json`과 정확히 같아야 한다. 검증 대상 JS codec으로 기준 byte를 생성하지 않는다.
+
+## Uint128 금액 계획 (Core v0.6.1)
+
+`clairveiljs/amount`는 `parseAmount128`, `sumAmounts128`, `sumAmountTotals`, `amount128ToJSON`, `amount128FromJSON`과 `maxShieldedAmountV2 = 2^128 - 1`을 제공한다. 새 금액 입력은 canonical decimal string 또는 `bigint`만 받으며 JavaScript number는 거절한다. JSON 금액은 따옴표가 있는 decimal string이다. `sumAmounts128`은 한 거래의 개별 입력과 합계를 검사한다. `sumAmountTotals`는 지갑·payroll·누적 합계를 uint128 상한 없이 음이 아닌 임의 정밀도로 계산한다. Height·epoch·account number와 기존 uint64 wire 필드의 폭은 유지한다.
+
+`clairveiljs/note128`는 독립적인 `Note128`·`FoundNote128Input`·`NormalizedFoundNote128` 타입과 생성/정규화 함수를 제공한다. Canonical 필드만 허용하며 compact note(`am`, `rsx` 등)와 구형 cache alias(`Note`, `NullifierStatus`, `spent` 등)는 canonical 필드와 함께 있어도 거절한다. 명시적인 32바이트 nullifier가 필수이고 status 누락은 `unverified`, `isSpent: true`는 `spent`가 된다. 높이·sequence는 uint64 범위의 정확한 10진 문자열로 정규화하며 큰 높이도 숫자 순서로 정렬한다. 지정한 randomness를 사용하면 새 난수를 요청하지 않는다. 필드/금액 모델 검증이며 curve·memo·commitment를 포함한 완전한 검증은 `protocol-v2`가 담당한다. 구형 note/cache 자동 이관은 제공하지 않는다.
+
+`clairveiljs/planner-v2`는 `planTransferNotesV2`, `planTransferBatchNotesV2`, `planWithdrawNotesV2`, `selectTransferInputsV2`, `selectBatchTransferInputsV2`, `summarizeSpendableNotesByDenomV2`를 제공한다. 기존 탐색 한도가 있는 선택 알고리즘에 Core v0.6.1 금액 정책을 적용한다. 개별 note·요청 금액·선택 입력 합계·payment와 change 합계가 uint128 범위여야 한다. Transfer는 입력 2개가 필요하며 상황에 따라 명시적인 0원 helper를 사용한다. Batch는 입력 1..16개, change 포함 출력 최대 32개다. 잘못된 금액은 `invalid_amount`, 충분한 잔액이 있지만 가능한 입력 쌍이 없으면 `note_preparation_required`를 반환한다. 지갑 합계는 uint128을 넘어도 되며 중복된 spendable nullifier는 거절한다.
+
+`clairveiljs/reference-payroll-v2`는 `normalizePayrollInputV2`, `planOneProofPayrollV2`를 제공한다. 전체 payroll이 uint128을 넘으면 현재 존재하는 서로 다른 note를 사용해 거래별로 나눈다. Owner·reservation·output capacity를 유지하고 `total_payroll_amount`와 `total_spendable_amount`는 상한 없는 합계를 반환한다. 아직 생성되지 않은 future change를 사용하지 않는다. Plan/operation에는 `amount_model: "uint128"`, operation ID에는 `:uint128` 접미사가 붙고 circuit identity는 선언하지 않는다. 소액이라도 V1 preparer에 넘기면 거절한다. 이는 금액 계획이며 proof 준비가 완료된 거래가 아니다. Note planner의 `canBuildTx`는 금액·입력 조건 충족만 뜻한다.
+
+01–04 구현의 V2 전용 진입점(`amount`, `note128`, `planner-v2`, `reference-payroll-v2`, `protocol-v2`, `audit-config-v2`, `cosmos-v2`)은 런타임과 타입 선언 모두 V1 실행 모듈에 의존하지 않는다. 순수한 계획/DTO·해시 domain·검증 primitive를 공유하고 payroll 실행 및 audit 조회를 분리한다. V2 payroll은 전용 진입점 또는 root/core에서 가져온다. 구형 `reference-payroll`의 V2 재수출은 폐기했다. 미출시 V1의 입력/캐시 호환을 V2에 추가하지 않는다. 기존 지갑·scan·증명·제출 구현의 교체는 후속 workflow 범위이며 현재 broad root에는 이 코드가 남아 있다. Core가 현재 규격에 사용하는 `v1` 해시 domain과 config protobuf namespace는 그대로 유지한다.
+
+금액 규칙은 Core `v0.6.1@fad307abddd0daa1c880f2e423668f5c58a0e578`의 `x/privacy/amount/amount.go`, `x/privacy/types/amount.go`, `x/privacy/client/sdk/transfer/transfer.go`, `x/privacy/client/sdk/payroll/batch_plan.go`가 소유한다. `test/amount-planner-v2.test.js`는 0·2^64·uint128 최댓값·잘못된/numeric JSON·overflow·정확한 change·제한된 입력 선택·큰 지갑 합계·payroll 분할을 검사한다. `fixtures/clairveil-v0.6.1-amount/vectors.json`의 parse 18개·addition 6개 기준은 Go로 생성했으며 문자열 JSON 표현도 대조한다. Source 검증은 고정 commit의 원본 파일 hash를 확인한다. 재현하려면 해당 tag의 `go.mod`, `go.sum`, `x/privacy/amount`를 임시 디렉터리에 추출하고 그곳에서 `go run -mod=readonly /absolute/path/to/clairveiljs/tools/generate-amount-vectors.go`를 실행한다. 표준 출력은 fixture byte와 같아야 한다.
+
+## Fixed-v2 codec (Core v0.6.1)
+
+`clairveiljs/protocol-v2`와 root/core export는 `privacy-fixed-v2`, binary version 2를 구현한다. Note·disclosure 금액은 big-endian 16바이트다. SHA-256으로 만든 16바이트 tag는 `clairveil.note-plaintext.v2`, `clairveil.disclosure-plaintext.v2`, `clairveil.encrypted-envelope.v2`를 사용한다. Core는 `Note`, `MarshalNotePlaintextV1` 같은 Go 이름을 유지하며 JS에서는 명시적인 V2 이름으로 새 wire byte를 선택한다. Note commitment/nullifier·asset·view-tag hash domain은 기존 Core 식별자를 유지한다.
+
+| Payload | 정확한 바이트 수 |
+| --- | ---: |
+| Note 평문 / disclosure 평문 | 358 / 400 |
+| Deposit note envelope / transfer note envelope | 406 / 438 |
+| User / audit / self-view disclosure envelope | 480 |
+
+`validateNoteV2`, `marshalNotePlaintextV2`, `unmarshalNotePlaintextV2`, `computeNoteCommitmentV2`, `computeNoteNullifierV2`는 uint128 금액, canonical BN254 field, identity가 아닌 prime-subgroup key, 최대 128바이트 UTF-8 memo를 검사한다. `validateDisclosurePlaintextV2`, `marshalDisclosurePlaintextV2`, `unmarshalDisclosurePlaintextV2`는 user policy 1..7·동일 bitmap·숨긴 필드의 0 sentinel 또는 full-disclosure marker를 강제한다. Decoder는 잘못된 길이·domain·version·reserved bit·비정규 field·구형 payload를 거절한다. `decodeEncryptedEnvelopeV2`는 분리된 ciphertext 사본을 반환하고 `unwrapEncryptedEnvelopeV2`는 예상 kind까지 요구한다.
+
+`encryptDepositNoteV2`/`decryptDepositNoteV2`는 32바이트 RootSeed와 Core의 AES-GCM seed-key 형식을 사용한다. `encryptNoteForTransferV2`/`decryptTransferNoteV2`, `encryptDisclosureV2`/`decryptDisclosureV2`는 기존 Edwards ECIES/AES-GCM primitive를 사용한다. Transfer 암호화는 제공된 commitment와 note의 일치를 검사한다. 선택적인 transfer 복호화 binding은 commitment·output index·2바이트 view tag를 함께 요구하며 tag와 복구 note commitment를 모두 검사한다. Disclosure 암복호화는 예상 user/full plane을 검사한다. 비밀 scalar는 0보다 크고 subgroup order보다 작아야 하며 난수 생성 실패는 fallback 없이 전파한다.
+
+`computeDisclosureDigestV2(payload, scheme)`, `verifyDisclosureDigestV2(payload, expectedDigest, scheme)`는 circuit마다 필드 순서·domain이 다르므로 `"transfer"` 또는 `"batch"` scheme을 명시해야 한다. Digest 검증은 canonical 0이 아닌 32바이트 expected digest와 불일치하면 거절한다. Raw decode/복호화만으로 외부 digest나 chain metadata를 검증하지 않는다. 이 API는 고정 wire·암호 호환 helper이며 scan admission·audit-field authorization·거래 준비 또는 native constant-time 실행 보장을 뜻하지 않는다. 기존 V1 진입점은 원래 wire 동작을 유지한다.
+
+`test/protocol-v2.test.js`는 note 경계값 4건, user policy 7종, full disclosure를 독립 Core Go 출력과 비교한다. 정확한 평문·commitment/nullifier·두 disclosure digest scheme·deposit/transfer/disclosure ciphertext·view-tag byte와 잘못된 입력·V1/V2 교차 사용 거절을 검사한다. `fixtures/clairveil-v0.6.1-fixed/vectors.json`의 key·seed·고정 entropy는 공개 합성 시험 데이터다. 운영 함수는 runtime CSPRNG를 사용하며 고정 난수 시험 hook을 export하지 않는다.
+
+재생성은 Core `v0.6.1@fad307abddd0daa1c880f2e423668f5c58a0e578`에서 `git archive v0.6.1 go.mod go.sum types internal/strictjson x/privacy/amount x/privacy/types x/privacy/crypto`로 임시 디렉터리에 추출한 뒤 그 위치에서 `go run -mod=readonly /absolute/path/to/clairveiljs/tools/generate-fixed-v2-vectors.go`를 실행한다. Core native secret profile이 지원하는 플랫폼이 필요하며 표준 출력은 fixture와 정확히 같아야 한다. Release source 시험은 기록된 source hash 12개를 해당 commit과 대조한다. Go fixed-v2 함수가 기준 byte를 생성하고 암호문을 복호화하며 JS 시험도 이 암호문 byte를 정확히 재현한다.
+
+## V2 감사 설정과 키 snapshot
+
+`clairveiljs/audit-config-v2`와 root/core는 `queryActiveAuditSnapshotV2`, `computeAuditNetworkDigestV2`, `parseAuditKeyRecordV2`, `validateAuditCircuitIdentityV2`, `validateAuditArtifactManifestV2`, `assertAuditSnapshotCurrentV2`를 제공한다. `ClairveilJS.queryActiveAuditSnapshotV2(options)`는 설정된 chain ID와 하나의 REST endpoint를 조회 내내 사용한다. 배포자가 별도로 확보한 완전한 circuit identity, 로컬 artifact manifest 원본 bytes, 독립적으로 고정한 SHA-256 digest가 필수다. 선택적인 `expectedNetworkNonce`·`expectedInitialHeight` pin으로 예상과 다른 genesis namespace를 거부할 수 있다. 체인 출처 인증은 호출자의 책임이다.
+
+사전 검증은 `/clairveil/privacy/v2/audit/configuration`을 먼저 조회하고 `/clairveil/privacy/v2/audit/key_schedule`과 `/clairveil/privacy/v2/audit/keys/{epoch}`에 설정 응답 높이를 `x-cosmos-block-height`로 보낸다. 세 응답의 높이가 모두 같아야 한다. Halt, 없거나 0인 epoch, 잘못된 pending schedule, pruning되거나 무시된 높이, alias 충돌, circuit/VK/schema 불일치, 로컬 artifact digest 불일치, 잘못된 키 기록은 준비용 snapshot을 반환하기 전에 promise를 거절한다. 최신 높이·V1·다른 endpoint로 fallback하지 않는다. 사용자 provider는 `configuration({})`, `keySchedule({height})`, `key({epoch,height})`를 구현하고 지정된 높이를 지켜야 한다. REST 응답은 canonical base64·십진 문자열, generated 응답은 bytes·bigint를 사용할 수 있다. `halted`는 명시적인 boolean이어야 하며 정수에 JS number를 사용할 수 없다.
+
+정확히 261바이트인 Core 키 기록은 suite 2와 Point64(big-endian x||y)를 사용하며 기존 compressed key와 구분된다. 파서는 metadata, 초기·교체 epoch 규칙, canonical 좌표, identity 거부와 prime-subgroup, 결정적 KeyID, network·epoch·activation height에 결합된 Schnorr PoP를 검증한다. Network digest는 chain ID·32바이트 genesis nonce·audit circuit set을 결합한다. Snapshot의 모든 정수는 전체 uint64 epoch·int64 블록 높이를 포함해 십진 문자열이며 byte identity는 소문자 hex다. 반환값과 내부 객체는 immutable이며 비밀 자료를 포함하지 않는다.
+
+Manifest 검증은 네 audit circuit과 R1CS/PK/VK descriptor 12개의 순서·Core schema·배포 pin을 대조하고 Core CLI처럼 정확한 로컬 원본 bytes를 해시한다. Development marker를 반환하지만 artifact 파일 로딩·proof 검증·setup 신뢰성 검증을 수행하지 않는다. 독립적으로 인증한 체인 상태와 신뢰할 수 있는 로컬 artifact 확보는 호스트 책임이며 RPC 응답의 일치만으로 consensus 인증이 되지 않는다.
+
+증명·브로드캐스트 직전에 다시 조회하고 `assertAuditSnapshotCurrentV2(previous, current)`를 호출한다. Network·epoch·key·artifact namespace가 같은 더 높은 높이는 허용하고 rollback·namespace 변경·복사하거나 역직렬화한 snapshot은 거절한다. 비교 함수 자체는 최신 상태를 조회하지 않는다. 이번 API는 V2 준비 사전 검증이며 기존 V1 wallet/prover/submission 경로는 유지된다. 전체 proof witness 구성과 V2 transaction 제출은 후속 범위다. Audit authorization 생성·prover 연결·로컬 proof 검증은 아래 절에서 설명한다.
+
+`fixtures/clairveil-v0.6.1-audit/vectors.json`은 공개 합성 Core Go 기준값으로 초기·교체·안전 정수 초과·uint64 최대 epoch의 키 기록 네 개, 잘못된 기록 11개, network digest, protobuf identity와 manifest bytes를 담는다. `git archive v0.6.1 go.mod go.sum types internal x/privacy`로 임시 디렉터리에 추출하고 지원되는 Core native profile에서 `go run -mod=readonly /absolute/path/to/clairveiljs/tools/generate-audit-v2-vectors.go`를 실행하면 stdout이 fixture와 정확히 같아야 한다. Release 시험은 source hash 10개를 `fad307abddd0daa1c880f2e423668f5c58a0e578`과 대조하며 집중 시험은 같은 높이 REST header·halt·잘못된 입력·키 교체·artifact 변경을 확인한다.
+
+## V2 감사 authorization과 공개 데이터 결합
+
+`clairveiljs/audit-authorization-v2`는 deposit(1), withdraw(2), transfer2x2(3), batch16x32(4)의 지갑 내부 생성 계층이다. `createAuditOutputEffectV2(kind, index, effect)`는 fixed-v2 복구/disclosure byte를 generated `OutputEffect`로 복사하고 정책·위치·정확한 framing·canonical field/point·공개 disclosure metadata/digest를 검사한다. 실제 note/disclosure 암호 byte는 `protocol-v2`로 생성한다. Deposit과 2x2 change 출력의 disclosure 필드는 생략해야 한다. `encodeAuditAuxV2`는 출력 개수·순서·중복 commitment를 검사하고 Core와 동일한 Aux framing을 사용한다.
+
+`buildAuditPublicInputsV2({kind, snapshot, message})`는 proof 없는 generated V2 메시지 필드로 PI21을 만들고 `message.audit`가 있으면 PI23을 만든다. 인증된 snapshot namespace·만료·root·nullifier·순서가 있는 effect·disclosure vector root·공개 금액/asset/address를 결합한다. Cosmos 주소는 현재 `clair` prefix를 사용하고 deposit은 0을 허용하며 withdraw는 양수여야 한다. 공개 coin 금액은 uint128이다. `parseAuditEnvelopeV2`는 suite/version·예약 byte·개수·크기·canonical field·subgroup point를 엄격히 검사한다. 공개 Poseidon2 cipher root·context hash·owner intent는 Core와 일치한다. `verifyAuditMessageBindingV2`는 PI23을 재구성하며 proof 검증이나 암호문 인증/복호화는 수행하지 않는다. Deposit 이외의 creator는 Core PI23에 포함되지 않으므로 준비 객체가 원래 creator를 별도로 대조한다.
+
+`prepareAuditAuthorizationV2`는 proof 없는 `message`, branded `snapshot`, 비공개 `plaintext` BE32 field, 신뢰하는 로컬 `backend`, 필수 `getCurrentSnapshot`을 받는다. Plaintext는 Core 순서의 정확히 6/2/13/177 field다. Deposit은 `[asset, amount, spendX, spendY, viewX, viewY]`, withdrawal은 `[asset, inputCommitment]`, transfer/batch는 `[asset, inputCommitments..., output(amount, spendX, spendY, viewX, viewY)...]`다. Batch는 입력 16개·출력 32개 slot을 사용하고 비활성 slot은 0으로 채운다. 여기서는 canonical field와 개수를 검사한다. Note 소유권·금액 보존·경로·private field와 전체 witness의 일치는 후속 circuit/proving 단계에서 검증한다. 이 객체는 증명된 거래가 아니다.
+
+Backend는 Core가 지원하는 native secret profile에서 암호 난수와 nonce를 독립적으로 새로 생성한다. 준비 과정은 암호화 전후에 snapshot과 만료를 다시 확인한다. `messageData()`, `publicInputs()`, `ownerIntent()`는 분리된 공개 복사본을 반환한다. 비공개 난수는 명시적인 `exportEncryptionWitness()`로만 꺼내며 신뢰하는 prover coordinator가 복사본을 지워야 한다. `assertCurrent()`는 다시 조회하고 실패하면 객체를 비운다. 사용 시 만료/취소와 `clear()`도 객체를 무효화한다. JSON 직렬화는 금지하고 inspection은 가린다. 삭제는 최선 노력이며 JS/Go GC의 모든 복사본 삭제를 보장하지 않는다. Plaintext·난수·준비 객체를 DApp provider 경계로 전달하거나 JSON으로 저장하지 않는다.
+
+`clairveiljs/audit-native-node`는 Node 전용이다. `node tools/build-audit-native.js /path/to/clairveil /path/to/output/encrypt`로 로컬 binary를 빌드하고 신뢰하는 빌드에서 독립적으로 고정한 SHA256으로 `createAuditNativeBackendV2({executablePath, sha256})`를 호출한다. 빌드는 정확한 Core commit `fad307abddd0daa1c880f2e423668f5c58a0e578`을 추출하고 네 가지 native 기준값 시험이 모두 통과해야 하며 binary 옆에 비밀 없는 provenance를 기록한다. Adapter는 검증한 byte의 비공개 복사본을 실행하고 크기가 제한된 binary stdin/stdout을 사용한다. Secret argument/log/file 없이 timeout·취소를 적용하고 임시 실행 파일을 삭제한다. HTTP·JS/WASM secret crypto·미지원 profile fallback은 없다. Browser 공개 API 번들은 가능하지만 실제 extension/native-host transport는 별도 host 작업이며 여기서 설치하지 않는다.
+
+`npm run verify:audit-native -- /path/to/clairveil`은 지원되는 Core Go/native toolchain에서 빌드와 native 통합 시험을 실행한다. 일반 unit suite는 binary를 요구하지 않으며 native integration case는 binary/hash 환경 pin이 없으면 명시적으로 skip한다. `test/audit-authorization-v2.test.js`는 독립 Go 합성 사례 10개, disclosure 세 모드, 0/최대 uint128, 최대 batch, 잘못된 frame·변조·키 교체·만료·비밀 수명을 검사한다. 추출한 Core module에서 `go run -mod=readonly /path/to/clairveiljs/tools/generate-audit-authorization-v2-vectors.go /path/to/clairveiljs/fixtures/clairveil-v0.6.1-audit/vectors.json`으로 fixture를 재생성한다. Fixture와 bridge에 사용자 데이터는 없다. 전체 note-to-witness 구성·서명·거래 제출은 후속 범위다. Prover coordinator와 로컬 검증은 아래 절에서 설명한다.
+
+
+## V2 증명 생성과 로컬 검증
+
+`clairveiljs/audit-prover-v2`는 `createAuditProverV2({baseUrl, verifier, fetch?, timeoutMs?, bearerToken?})`를 제공한다. 명시적으로 선택한 prover가 전체 private witness를 받으므로 로컬 또는 독립적으로 관리하는 prover를 사용한다. HTTPS origin 또는 HTTP loopback origin만 허용한다. 현재 Core envelope의 `version: "v1"`, 정확한 circuit/set/artifact identity, canonical base64 PI23과 witness로 `POST /v2/prover/audit-field`를 한 번 호출한다. 이 envelope 값은 현재 V2 규격이다. Redirect·재시도·endpoint 탐색·암묵적 cookie·V1 호출은 없다.
+
+`await prover.prove({prepared, witness, signal?})`는 `prepareAuditAuthorizationV2`가 만든 실제 준비 객체를 소비한다. Witness는 gnark BN254의 전체 binary여야 한다. BE uint32 세 개(public=23, secret>0, total=public+secret) 뒤에 public, secret 순서의 canonical BE32 field가 온다. 최대 4 MiB이며 공개 field 23개가 준비된 PI23과 같아야 하고 후행 byte는 거절한다. 신뢰된 지갑/Core builder가 만든 witness를 받는 API이며 note 비밀·Merkle path·owner signature를 생성하지 않는다. 입력 배열은 첫 await 전에 복사하고 지운다. 준비 객체는 동기적으로 한 시도에 귀속되며 성공·실패·timeout·취소 모두 정리한다. 동시·반복 호출로 재사용할 수 없다. 호출자가 가진 다른 비밀 복사본도 직접 정리해야 한다.
+
+기본 120초 deadline(1..3,600,000 ms 설정 가능)은 snapshot 갱신·HTTP header/body·로컬 검증 전체에 적용된다. 전송 전, 응답 후, 검증 후에 snapshot과 만료를 확인하고 전송·반환 직전에 동기적 abort/preparation 검사를 수행한다. 응답 stream은 16 KiB로 제한하며 중복·미지 JSON key, UTF-8, canonical base64, 정확한 PI23 순서를 검증한다. 164-byte proof framing만으로 성공 처리하지 않으며, 필수 신뢰된 `AuditProofVerifierV2`가 로컬 curve/pairing 검증을 마치고 literal `true`를 반환해야 한다. 이후 proof가 포함된 독립적인 generated V2 메시지를 반환하며 서명·제출하지 않는다. `AuditProverErrorV2.code`는 request/snapshot/transport/response/verification/aborted/timeout을 구분하고 원격 body·bearer token·비밀 abort reason·verifier 진단문은 포함하지 않는다.
+
+Node 전용 `clairveiljs/audit-verifier-node`는 `createAuditNativeVerifierV2({executablePath, sha256, artifactDirectory, expectedArtifactHash, expectedCircuitIdentity, timeoutMs?, executionMode?})`를 제공한다. `node tools/build-audit-native.js /path/to/clairveil /path/to/verify verify`로 빌드한다. 신뢰된 실행 파일 SHA256, 정확한 manifest SHA256과 전체 circuit identity를 독립적으로 고정해야 한다. 생성 시 manifest와 네 VK 해시를 확인하고 이후 같은 복사본과 지정 회로로 검증한다. PK/R1CS·download·artifact 환경 override를 사용하지 않는다. Core registry가 VK/proof의 canonical decode/re-encode와 PI23 기반 BN254 Groth16 검증을 수행한다. Core v0.6.1은 이 audit bundle에 명시적인 development marker를 요구하며 이 API는 production setup 자격을 부여하지 않는다.
+
+`npm run verify:audit-prover -- /path/to/clairveil`은 고정된 Core commit을 추출하고 **실제 Core 회로 네 가지**의 임시 단일 참여자 개발용 artifact를 생성해 각각 증명·검증한다. PI 23개 각각의 변조와 circuit/key/artifact/proof 교체 거절도 검사한다. JavaScript authorization → 실제 Core loopback HTTP prover → 고정된 로컬 verifier → generated V2 deposit 인코딩을 uint64보다 큰 uint128 금액으로 실행한다. Native timeout·취소·출력 제한도 검사한다. 필수 사례가 없거나 skip하면 실패하고 임시 setup을 삭제한다. 선택적 두 번째 인자는 정확한 source/hash가 일치하는 개발용 fixture cache다. 일반 unit suite에서는 fixture/binary pin이 없으면 native 통합 사례 세 개를 명시적으로 skip한다. Test server는 합성 데이터만 사용하며 제품 서비스로 설치하지 않는다.
+
+Browser용 transport와 타입은 V1 실행 모듈 및 Node 전용 binary와 독립적으로 bundle된다. Browser host는 검증된 로컬 verifier bridge를 제공해야 하며 이 변경은 extension native-host transport를 설치하지 않는다. 준비 객체·plaintext·full witness를 DApp provider 경계에 전달하거나 저장·기록하면 안 된다. JavaScript string·호출자 복사본·GC 때문에 완전한 비밀 소거는 보장할 수 없다. Native 설치·origin 접수·일반 지갑 UI·제출 연동은 host 책임이며 이 SDK가 확장이나 native host를 설치하지 않는다.
+
+`preparation-v2`는 fixed-v2 입금 자료를 만들고 선택된 uint128 지출 입력의 소유자·자산·nullifier·합계 금액과 출금 금액의 정확한 일치를 검증한다. `audit-witness-v2`의 `prepareAuditWitnessV2`는 승인된 의도와 예약을 checkpoint에 기록하고 snapshot을 갱신한 뒤 신뢰된 native backend를 호출한다. 반환된 입금·출금·전송의 전체 witness는 승인된 입력과 감사 메시지에 결합된다. `audit-witness-node`는 고정된 Core 내부에서 빌드한 `tools/audit-witness-bridge.go`의 해시 고정 실행 파일을 사용한다. 출력 복구 데이터·공개 데이터·최종 소유자 서명·witness 구성은 Core가 담당한다. Snapshot은 호스트 계정 접두사도 고정한다. 기본값은 `clair`이며 Maroo는 명시적으로 `maroo`를 지정한다. 이전 codec이나 기존 이벤트 경로로 자동 전환하지 않는다.
+
+`createAuditWitnessNativeBackendV2`와 `createAuditNativeVerifierV2` 모두 `executionMode: "staged" | "installed"`를 받으며 기본값은 불변 복사본을 사용하는 staged다. Installed는 운영자가 준비한 native host용이다. 절대 경로·symlink가 아닌 실행 파일, 현재 사용자/root 소유, 파일과 상위 디렉터리의 group/world 쓰기 금지, 일반 실행 파일 여부와 고정 SHA-256을 실행 전에 검증한다. 파일 읽기는 크기를 제한하고 `O_NOFOLLOW`를 사용한다. Browser 프로세스 아래 새 실행 파일을 만들지 않고 설치한 binary를 직접 실행한다. OS 보안 기능을 끄거나 같은 OS 소유자·관리자의 침해를 방어하지는 않는다. Native helper는 신뢰하는 Custody 안에서 선택 노트·파생 spend scalar를 받을 수 있으나 RootSeed는 받지 않는다. 별도로 승인한 prover는 검토한 witness만 받는다. `test/native-installed.test.js`는 pin·변조·symlink·안전하지 않은 권한 거부를 검사한다.
+
+`transactions-v2`는 로컬 검증을 마친 공개 proof 필드로 세 가지 명시적 Cosmos V2 메시지·sign document와 EVM transaction을 만든다. DApp artifact verifier는 `protocol: "audit-field-v2"`를 명시적으로 선택하고 승인한 정확한 actor·효과·금액·transport envelope를 결합한다. Protocol을 생략하면 `note-v1`을 유지한다. 공개 wire·ABI 모듈은 비공개 준비·codec 암호 연산·witness 모듈과 분리한다. 공개 구조 검사가 신뢰 host의 전체 암호 검증을 대체하지 않는다.
+
+공개 wallet API schema는 개별 노트·작업·공개 결과 금액에 canonical uint128을 허용하며 digest는 `33be71b39bfe6a974a8ce1154e5fcf28b25a898deb72eb26a10214587d65313b`다. 높이·epoch·만료·revision은 uint64를 유지한다. Legacy 실행 profile의 금액도 uint64로 제한한다. Host는 지원하는 메서드만 광고하며 V2 거래 감사 데이터 지원이 선택적 페이지 disclosure 조회 지원을 의미하지는 않는다.
+
+`evm-v2`는 Maroo `823f6752e89a8d7157bd90973e7b1f9093e0ec10`(Core v0.6.1)의 `IPrivacy.json`에 맞춰 세 직접 거래 요청을 인코딩한다. 독립 go-ethereum 벡터로 ABI를 검증하며 인코딩 자체가 proof·체인 계정·계약 주소·정확한 입금 value를 검증하지는 않는다. `reserve-v2`는 Core의 부채·담보 산술을 따르며 초과 담보를 허용하고 부족을 별도로 반환한다. `scan-v2`는 공통 페이지 검증 엔진으로 감사 식별자와 fixed-v2 출력 형식을 검증한다. `note-store-v2`는 호스트가 암호화해서 저장해야 하는 비공개 표현이다. nullifier 재조회가 실패하거나 누락되면 저장된 지출 가능 상태를 유지하지 않는다. V2 페이지 연속성·캐시 식별자는 이전 데이터를 거부하며, 알려진 미결 거래의 예약을 버리지 않고 재스캔해야 한다.
+
+## 신뢰된 V2 workflow와 disclosure
+
+`clairveiljs/wallet-kernel-v2`는 `prepareAuditTransactionV2`를 제공한다. 명시적 V2 witness 입력·native backend·`assertAuthority`·영속 `checkpoint`·같은 배포의 `getCurrentSnapshot`, 필수 로컬 검증기를 포함한 prover 설정을 받는다. RootSeed를 복사하고 비동기 경계 전후에 권한을 검사하며 native 소유자 서명 전에 승인·예약을 저장한다. 전체 witness를 V2 prover에 소비하고 proof를 로컬에서 검증한 뒤 snapshot을 다시 확인해 `{kind, message, snapshot}`을 반환한다. 성공·실패 모두 소유한 seed·요청·witness 버퍼를 지우며 원본 seed와 비공개 입력은 호출자가 소유한다. 일반 지갑 서명·자동 재제출·예약 해제를 수행하지 않는다. 최종 host·계정·수수료 사전 검사 후 `transactions-v2`를 사용한다. 페이지 예제 `examples/custody-v2-flow.js`는 공개 DApp 코드만 import하며 privacy material을 파생하거나 받지 않는다.
+
+`clairveiljs/disclosure-v2`는 `decodeUserDisclosureFromScanOutputV2`와 `decodeSelfViewDisclosureFromScanOutputV2`를 제공한다. `scan-v2`가 발급하고 무결성을 확인한 출력만 받는다. 직접 전송 output 0, plane·policy, tx hash, commitment, fixed-v2 평문, 인증 복호화, transfer digest, 선택적 asset-denom 결합이 일치해야 한다. 공개·수신자 암호화 사용자 공개와 self-view 모두 uint128을 지원한다. 신뢰된 결과에는 decoder 메타데이터가 포함되므로 custody host는 페이지 전달 전에 승인된 필드 allowlist만 투영해야 한다. 별도 필수 감사 field를 복호화하거나 batch·원본 event 대체 경로를 활성화하지 않는다.
+
+`verify:release:integration`은 이제 `verify:release:audit`를 필수로 실행한다. `CLAIRVEIL_SOURCE_DIR`와 `CLAIRVEIL_AUDIT_ARTIFACT_CACHE`를 지정하거나 독립 검사 명령에 두 경로를 전달한다. 캐시는 정확한 Core archive·generator 바이트와 회로 4종의 파일 해시가 일치해야 한다. 과거 raw-generator·정규화 generator 출처는 각 선언 해시가 일치할 때만 인정하며 기존 출처를 다시 쓰지 않는다. Native 검증 및 전체 준비·proof·인코딩 6개 경로를 건너뛸 수 없다. 이는 개발 암호 검증이며 실제 일반 지갑·체인 검증은 소비 host에서 별도로 수행한다.
+
 ## 신뢰된 RootSeed identity (CC-002)
 
 미출시 `clairveiljs/wallet-kernel` 진입점은 `createPrivacyIdentity({ rootSeed, shieldedPrefix? })`로 CC-002 추출을 시작한다. 신뢰된 지갑 runtime이 이미 보유한 32바이트 `Uint8Array`를 받아 복사한 뒤 기존 protocol 알고리즘으로 spend·view·disclosure key를 파생한다. 새로운 entropy 생성·백업은 custody가 담당하며 이 생성자는 seed 생성·루트 서명 요청·일반 지갑 호출을 하지 않는다. Legacy 서명 자료·chain actor를 포함한 다른 입력 필드는 거절한다.

@@ -3,6 +3,7 @@ export * from "./transport/cosmos-client.js";
 export * from "./transport/evm.js";
 export * from "./privacy/reservation.js";
 export * from "./privacy/network-config.js";
+export * from "./transport/cosmos-v2.js";
 
 export {
   ClairveilJS,

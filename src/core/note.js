@@ -35,7 +35,9 @@ import {
   encryptDepositNoteV1
 } from "../privacy/protocol-v1.js";
 
-export const defaultAssetDenom = "uclair";
+import { defaultAssetDenom } from "./coin.js";
+export { defaultAssetDenom, parseCoin } from "./coin.js";
+import { parseCoin } from "./coin.js";
 
 const maxUint256 = 1n << 256n;
 const scalarLimit = maxUint256 - (maxUint256 % CURVE_ORDER);
@@ -95,19 +97,6 @@ function pointCoordinate(point, coordinate) {
     throw new Error(`point ${coordinate} coordinate is required`);
   }
   return BigInt(value);
-}
-
-export function parseCoin(value, defaultDenom = defaultAssetDenom) {
-  const text = String(value || "").trim();
-  const match = text.match(/^(0|[1-9][0-9]*)([a-zA-Z][a-zA-Z0-9/:._-]*)?$/);
-  if (!match) {
-    throw new Error(`invalid coin amount ${JSON.stringify(value)}`);
-  }
-  return {
-    amount: match[1],
-    denom: match[2] || defaultDenom,
-    raw: `${match[1]}${match[2] || defaultDenom}`
-  };
 }
 
 export function noteFromShieldedAddress({ shieldedAddress, amount, assetDenom = defaultAssetDenom, randomness, memo = "", shieldedPrefix } = {}) {

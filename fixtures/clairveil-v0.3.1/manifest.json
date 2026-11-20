@@ -8,25 +8,25 @@
   "files": [
     {
       "kind": "protobuf",
-      "local_path": "proto/clairveil/privacy/v1/batch_feasibility.proto",
+      "local_path": "fixtures/clairveil-v0.3.1/proto/clairveil/privacy/v1/batch_feasibility.proto",
       "upstream_path": "proto/clairveil/privacy/v1/batch_feasibility.proto",
       "sha256": "e277b7436f0d23c8a38902c7ffba6135430d40d33ecb448a1af4d82b0226cee7"
     },
     {
       "kind": "protobuf",
-      "local_path": "proto/clairveil/privacy/v1/genesis.proto",
+      "local_path": "fixtures/clairveil-v0.3.1/proto/clairveil/privacy/v1/genesis.proto",
       "upstream_path": "proto/clairveil/privacy/v1/genesis.proto",
       "sha256": "aba42cd163f319c3213bb728e8a4db44eba690c2fc9d40fffaddb644690e7861"
     },
     {
       "kind": "protobuf",
-      "local_path": "proto/clairveil/privacy/v1/query.proto",
+      "local_path": "fixtures/clairveil-v0.3.1/proto/clairveil/privacy/v1/query.proto",
       "upstream_path": "proto/clairveil/privacy/v1/query.proto",
       "sha256": "c1a577560432add4057040bb920233a4a030bcdf380d6f4a23d6e02ac4efba05"
     },
     {
       "kind": "protobuf",
-      "local_path": "proto/clairveil/privacy/v1/tx.proto",
+      "local_path": "fixtures/clairveil-v0.3.1/proto/clairveil/privacy/v1/tx.proto",
       "upstream_path": "proto/clairveil/privacy/v1/tx.proto",
       "sha256": "61e7c9479355ac6a0f6e50e9d9ce46bbf0765b88847d3b43a62fb6c55ca378e3"
     },

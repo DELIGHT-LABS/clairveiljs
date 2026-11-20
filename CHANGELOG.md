@@ -2,10 +2,50 @@
 
 All notable changes to ClairveilJS are documented in this file.
 
-## Unreleased
+## 0.6.1 - 2026-11-20
+
+Git source version for Core v0.6.1 integration. npm publication remains separate.
+
+### Changed
+
+- Isolated the V2 runtime and declarations from V1 execution modules; extracted
+  pure payroll planning, protocol domains and shared validation, and separated
+  audit identity/manifest, key-record verification and query orchestration.
+- Retired compact/PascalCase V1 note/cache aliases in `note128` and V2 payroll
+  forwarding exports from `reference-payroll`. V2 inventory heights are exact
+  decimal strings; explicit note randomness no longer requests fresh entropy.
+- Fixed note selection ordering for block heights above JavaScript's safe integer
+  limit. Core protocol bytes and current hash domains remain unchanged.
 
 ### Added
 
+- Added explicit trusted `wallet-kernel-v2` preparation/proving orchestration,
+  typed `disclosure-v2` user/self-view decoding and a public-only V2 DApp example.
+- Required actual native proofs and all six witness/encoding paths in the V2
+  release gate; native builds use the exact annotated Core v0.6.1 source.
+
+- Added `audit-prover-v2` for single-use full-witness V2 HTTP proving, strict
+  response/PI23 binding, deadline/cancellation and fresh-snapshot checks.
+  Node-only `audit-verifier-node` verifies canonical BN254 Groth16 proofs with
+  pinned Core code, manifest and verification keys. Real four-circuit development
+  proofs and a Core HTTP deposit round trip are required by `verify:audit-prover`.
+- Added V2 OutputEffect/AuditAuthorization construction, PI23/context/owner-intent
+  binding for all four audit shapes and a pinned Core native Node encryption
+  adapter. Independent Go vectors and native KATs cover the current wire contract;
+  full note-to-witness builders and V2 wallet submission remain separate work.
+
+- Added explicit `privacy-fixed-v2` note/disclosure codecs, uint128 binary
+  amounts, envelope encryption/decryption and transfer/batch digest verification
+  against independent Core v0.6.1 Go vectors. V1 wire behavior is preserved.
+- Added explicit uint128 amount/note models, V2 transfer/batch/withdraw planners
+  and bounded payroll planning with unbounded wallet/payroll totals. Existing
+  V1 planners and binary codecs retain their original contracts.
+
+- Added Core v0.6.1 protobuf bindings, explicit `clairveiljs/cosmos-v2`
+  exports and a V2 registry for all seven messages, preserving V1 defaults.
+- Pinned current proto sources separately from historical lifecycle/prover
+  fixtures; verified V2 encoding against independently generated Go vectors.
+- Added the four additive Core v0.6.1 reserve query accounting fields.
 - Added Cosmos support for Clairveil Core v0.4.0's canonical
   `POST /v1/prover/deposit` request, response, bearer-auth, and error contract.
 - Added strict local validation for canonical 164-byte gnark BN254 Groth16

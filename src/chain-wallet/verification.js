@@ -5,6 +5,7 @@ import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { ripemd160 } from '@noble/hashes/legacy.js';
 import { MsgDeposit, MsgTransfer, MsgWithdraw } from '../generated/clairveil/privacy/v1/tx.js';
+import { MsgDeposit as MsgDepositV2, MsgTransfer as MsgTransferV2, MsgWithdraw as MsgWithdrawV2 } from '../generated/clairveil/privacy/v2/tx.js';
 const equalBytes = (a, b) => a.length === b.length && a.every((value, index) => value === b[index]);
 function canonicalBase64(value) {
   if (typeof value !== 'string') throw new Error('base64 bytes required');
@@ -27,7 +28,9 @@ export function validateCosmosArtifact(artifact, actor, kind) {
   const body = decodeCanonical(TxBody, doc.bodyBytes);
   const auth = decodeCanonical(AuthInfo, doc.authInfoBytes);
   if (body.messages.length !== 1 || body.extensionOptions.length || body.nonCriticalExtensionOptions.length || auth.signerInfos.length !== 1) throw new Error('unsupported Cosmos calls/signers');
-  const expected = ['deposit', 'zero_helper'].includes(kind) ? MsgDeposit : ['self_merge','final_transfer'].includes(kind) ? MsgTransfer : kind === 'withdraw' ? MsgWithdraw : null;
+  const audit = body.messages[0].typeUrl.startsWith('/clairveil.privacy.v2.');
+  const types = audit ? [MsgDepositV2,MsgTransferV2,MsgWithdrawV2] : [MsgDeposit,MsgTransfer,MsgWithdraw];
+  const expected = ['deposit', 'zero_helper'].includes(kind) ? types[0] : ['self_merge','final_transfer'].includes(kind) ? types[1] : kind === 'withdraw' ? types[2] : null;
   if (!expected || body.messages[0].typeUrl !== expected.typeUrl) throw new Error('Cosmos action mismatch');
   const message = decodeCanonical(expected, body.messages[0].value);
   if (message.creator !== actor.address) throw new Error('Cosmos creator mismatch');

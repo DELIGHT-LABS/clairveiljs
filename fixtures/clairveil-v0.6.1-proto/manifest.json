@@ -1,0 +1,47 @@
+{
+  "manifest_version": 2,
+  "source": {
+    "repository": "https://github.com/DELIGHT-LABS/clairveil",
+    "kind": "release_tag",
+    "release": "v0.6.1",
+    "commit": "fad307abddd0daa1c880f2e423668f5c58a0e578"
+  },
+  "files": [
+    {
+      "kind": "protobuf",
+      "local_path": "proto/clairveil/privacy/v1/batch_feasibility.proto",
+      "upstream_path": "proto/clairveil/privacy/v1/batch_feasibility.proto",
+      "sha256": "e277b7436f0d23c8a38902c7ffba6135430d40d33ecb448a1af4d82b0226cee7"
+    },
+    {
+      "kind": "protobuf",
+      "local_path": "proto/clairveil/privacy/v1/genesis.proto",
+      "upstream_path": "proto/clairveil/privacy/v1/genesis.proto",
+      "sha256": "5a4d4ebfad77b4c9f3c1f58e7891ecf4643af4a64e0f5b6cc3312c6f51cfbbe6"
+    },
+    {
+      "kind": "protobuf",
+      "local_path": "proto/clairveil/privacy/v1/query.proto",
+      "upstream_path": "proto/clairveil/privacy/v1/query.proto",
+      "sha256": "19b42f600b9811ba76a16b12096f7e6340aaad57182b25782902cc87c2ce45b1"
+    },
+    {
+      "kind": "protobuf",
+      "local_path": "proto/clairveil/privacy/v1/tx.proto",
+      "upstream_path": "proto/clairveil/privacy/v1/tx.proto",
+      "sha256": "61e7c9479355ac6a0f6e50e9d9ce46bbf0765b88847d3b43a62fb6c55ca378e3"
+    },
+    {
+      "kind": "protobuf",
+      "local_path": "proto/clairveil/privacy/v2/tx.proto",
+      "upstream_path": "proto/clairveil/privacy/v2/tx.proto",
+      "sha256": "7af68ae2644477c905182f2da38f01a4a9c4b5b21785f9544c198255d538d5ec"
+    },
+    {
+      "kind": "protobuf",
+      "local_path": "proto/clairveil/privacy/v2/query.proto",
+      "upstream_path": "proto/clairveil/privacy/v2/query.proto",
+      "sha256": "a9a4d0b1b9c4d65c3cf9a192d478690ac3cb143217bf05c49b5410b584e7815c"
+    }
+  ]
+}

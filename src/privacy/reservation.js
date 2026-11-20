@@ -11,9 +11,8 @@ import {
 import {
   normalizeFoundNote
 } from "../core/note.js";
-import {
-  canonicalizeShieldedAddressForOperationHash
-} from "../core/crypto.js";
+import { hashRecipient } from "./operation-hash.js";
+export { hashRecipient };
 import {
   OperationEvidenceConflictError,
   OperationStateMixedError
@@ -470,21 +469,6 @@ export function nullifierLookupKeyFromHex(indexKey, nullifierHex) {
     throw new Error("nullifier must be exactly 32 bytes of hex");
   }
   return nullifierLookupKey(indexKey, bytesFromHex(normalized, "nullifier"));
-}
-
-/** Go-compatible SHA-256 commitment used by payment/payroll operation evidence. */
-export function hashRecipient(recipient, options = {}) {
-  const normalizedRecipient = String(recipient ?? "").trim();
-  if (!normalizedRecipient) {
-    throw new Error("recipient is required");
-  }
-  let canonicalRecipient;
-  try {
-    canonicalRecipient = canonicalizeShieldedAddressForOperationHash(normalizedRecipient, options);
-  } catch {
-    throw new Error("recipient must be a valid shielded address");
-  }
-  return hexFromBytes(sha256(utf8Bytes(canonicalRecipient)));
 }
 
 /**

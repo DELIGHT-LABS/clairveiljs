@@ -21,7 +21,8 @@ import {
   utf8Bytes,
   utf8String
 } from "../core/browser-crypto.js";
-import { canonicalAssetDenomV1 } from "./asset-denom.js";
+import { domainField as domainFieldV1, computeAssetId as computeAssetIdV1 } from "./protocol-domain.js";
+export { domainFieldV1, computeAssetIdV1 };
 
 export const privacyFixedV1 = "privacy-fixed-v1";
 export const activeCircuitSetIdV1 = "privacy-note-v1";
@@ -180,25 +181,6 @@ function envelopeCiphertextSize(kind) {
     default:
       throw new Error(`unsupported encrypted envelope kind ${kind}`);
   }
-}
-
-export function domainFieldV1(label) {
-  const name = String(label || "");
-  return bytesToBigIntBE(sha256(concatBytes(
-    utf8Bytes("clairveil.field-domain.v1"),
-    u32be(utf8Bytes(name).length),
-    utf8Bytes(name)
-  ))) % FIELD_MODULUS;
-}
-
-export function computeAssetIdV1(denom) {
-  const canonicalDenom = canonicalAssetDenomV1(denom);
-  const encoded = utf8Bytes(canonicalDenom);
-  return bytesToBigIntBE(sha256(concatBytes(
-    utf8Bytes("clairveil.asset-id.v1"),
-    u32be(encoded.length),
-    encoded
-  ))) % FIELD_MODULUS;
 }
 
 export function computeNoteCommitmentV1(note) {

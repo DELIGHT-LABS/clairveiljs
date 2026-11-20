@@ -15,6 +15,12 @@ export const clairveilConformanceBundleVersion = "v0.3.1";
 export const supportedClairveilRelease = clairveilConformanceBundleVersion;
 export const supportedClairveilSourceKind = "commit_snapshot";
 export const supportedClairveilCommit = "0ff92839872de26b787a60d8e4d5822cc459855b";
+// Current protobuf bindings have a separate release identity. This does not
+// promote the legacy wallet/prover fixtures or claim live V2 workflow support.
+export const clairveilProtoBundleVersion = "v0.6.1";
+export const supportedClairveilProtoRelease = clairveilProtoBundleVersion;
+export const supportedClairveilProtoSourceKind = "release_tag";
+export const supportedClairveilProtoCommit = "fad307abddd0daa1c880f2e423668f5c58a0e578";
 export const defaultConformanceFixtureDir = `fixtures/clairveil-${clairveilConformanceBundleVersion}/${conformanceFixtureRelativePath}`;
 
 // Clairveil v0.4.0 added the canonical deposit prover route after the SDK's
