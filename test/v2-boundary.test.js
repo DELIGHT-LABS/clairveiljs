@@ -19,6 +19,7 @@ const retiredDependencies = new Set([
 ]);
 function dependencyGraph(entry, types) {
   const seen = new Set();
+  const external = new Set();
   function visit(path) {
     if (seen.has(path)) return;
     seen.add(path);
@@ -27,16 +28,20 @@ function dependencyGraph(entry, types) {
       let target;
       if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) target = node.moduleSpecifier;
       if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) target = node.argument.literal;
-      if (target && ts.isStringLiteral(target) && target.text.startsWith(".")) {
-        const next = resolve(dirname(path), types ? target.text.replace(/\.js$/, ".d.ts") : target.text);
-        visit(next);
+      if (target && ts.isStringLiteral(target)) {
+        if (target.text.startsWith(".")) {
+          const next = resolve(dirname(path), types ? target.text.replace(/\.js$/, ".d.ts") : target.text);
+          visit(next);
+        } else {
+          external.add(target.text);
+        }
       }
       ts.forEachChild(node, walk);
     }
     walk(source);
   }
   visit(resolve(root, entry));
-  return [...seen].map(path => relative(root, path));
+  return [...Array.from(seen, path => relative(root, path)), ...external];
 }
 for (const kind of ["import", "types"]) {
   test(`V2 ${kind} entrypoints have no dependency on retired V1 execution modules`, () => {
@@ -47,6 +52,14 @@ for (const kind of ["import", "types"]) {
     }
   });
 }
+
+test("audit witness preparation has no dependency on the Cosmos transaction registry", () => {
+  const dependencies = dependencyGraph(manifest.exports["./audit-witness-v2"].import, false);
+  const registry = dependencies.filter(name =>
+    name === "src/transport/cosmos-v2.js" || /^@cosmjs\/(proto-signing|stargate)(\/|$)/.test(name));
+  assert.deepEqual(registry, []);
+});
+
 const input = () => ({ spendPubKey: CURVE_BASE, viewPubKey: CURVE_BASE, amount: "1", randomness: 7n });
 const found = overrides => ({ note: createNote128(input()), nullifier: "01".padStart(64,"0"), nullifierStatus: "unspent", isSpent: false, height: "1", sequence: "1", txHash: "synthetic", ...overrides });
 test("an explicit note randomness value never requests fresh entropy", t => {

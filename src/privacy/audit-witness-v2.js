@@ -7,7 +7,12 @@ import { prepareDepositMaterialV2, prepareSpendInputsV2 } from "./preparation-v2
 import { prepareAuditAuthorizationV2 } from "./audit-authorization-v2.js";
 import { assertAuditSnapshotCurrentV2 } from "./audit-config-v2.js";
 import { validateFullAuditWitness } from "./audit-prover-wire.js";
-import { MsgDepositV2, MsgWithdrawV2, MsgTransferV2, OutputEffectV2 } from "../transport/cosmos-v2.js";
+import {
+  MsgDeposit as MsgDepositV2,
+  MsgWithdraw as MsgWithdrawV2,
+  MsgTransfer as MsgTransferV2,
+  OutputEffect as OutputEffectV2
+} from "../generated/clairveil/privacy/v2/tx.js";
 
 const kinds = {deposit:1, withdraw:2, transfer:3};
 const codecs = {deposit:MsgDepositV2, withdraw:MsgWithdrawV2, transfer:MsgTransferV2};

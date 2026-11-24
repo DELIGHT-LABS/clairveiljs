@@ -105,6 +105,8 @@ Browser용 transport와 타입은 V1 실행 모듈 및 Node 전용 binary와 독
 
 `preparation-v2`는 fixed-v2 입금 자료를 만들고 선택된 uint128 지출 입력의 소유자·자산·nullifier·합계 금액과 출금 금액의 정확한 일치를 검증한다. `audit-witness-v2`의 `prepareAuditWitnessV2`는 승인된 의도와 예약을 checkpoint에 기록하고 snapshot을 갱신한 뒤 신뢰된 native backend를 호출한다. 반환된 입금·출금·전송의 전체 witness는 승인된 입력과 감사 메시지에 결합된다. `audit-witness-node`는 고정된 Core 내부에서 빌드한 `tools/audit-witness-bridge.go`의 해시 고정 실행 파일을 사용한다. 출력 복구 데이터·공개 데이터·최종 소유자 서명·witness 구성은 Core가 담당한다. Snapshot은 호스트 계정 접두사도 고정한다. 기본값은 `clair`이며 Maroo는 명시적으로 `maroo`를 지정한다. 이전 codec이나 기존 이벤트 경로로 자동 전환하지 않는다.
 
+지갑은 `clairveiljs/audit-witness-v2`를 가져와 V2 protobuf 코덱으로 witness를 준비할 수 있다. Cosmos 거래 레지스트리는 `clairveiljs/cosmos-v2`에서 별도로 가져온다.
+
 `createAuditWitnessNativeBackendV2`와 `createAuditNativeVerifierV2` 모두 `executionMode: "staged" | "installed"`를 받으며 기본값은 불변 복사본을 사용하는 staged다. Installed는 운영자가 준비한 native host용이다. 절대 경로·symlink가 아닌 실행 파일, 현재 사용자/root 소유, 파일과 상위 디렉터리의 group/world 쓰기 금지, 일반 실행 파일 여부와 고정 SHA-256을 실행 전에 검증한다. 파일 읽기는 크기를 제한하고 `O_NOFOLLOW`를 사용한다. Browser 프로세스 아래 새 실행 파일을 만들지 않고 설치한 binary를 직접 실행한다. OS 보안 기능을 끄거나 같은 OS 소유자·관리자의 침해를 방어하지는 않는다. Native helper는 신뢰하는 Custody 안에서 선택 노트·파생 spend scalar를 받을 수 있으나 RootSeed는 받지 않는다. 별도로 승인한 prover는 검토한 witness만 받는다. `test/native-installed.test.js`는 pin·변조·symlink·안전하지 않은 권한 거부를 검사한다.
 
 `transactions-v2`는 로컬 검증을 마친 공개 proof 필드로 세 가지 명시적 Cosmos V2 메시지·sign document와 EVM transaction을 만든다. DApp artifact verifier는 `protocol: "audit-field-v2"`를 명시적으로 선택하고 승인한 정확한 actor·효과·금액·transport envelope를 결합한다. Protocol을 생략하면 `note-v1`을 유지한다. 공개 wire·ABI 모듈은 비공개 준비·codec 암호 연산·witness 모듈과 분리한다. 공개 구조 검사가 신뢰 host의 전체 암호 검증을 대체하지 않는다.
