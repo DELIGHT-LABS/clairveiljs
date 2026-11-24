@@ -56,6 +56,7 @@ export interface AuditSnapshotV2 {
 }
 /** Implementations must honor height; results may be REST snake_case/base64 or generated camelCase/bytes/bigint. */
 export interface AuditQueryProviderV2 {
+  /** circuitIdentity (or circuit_identity) accepts canonical protobuf as bytes or base64, or an AuditCircuitIdentityInputV2 object. */
   configuration(options: Record<string, never>): Promise<object>;
   keySchedule(options: { height: string }): Promise<object>;
   key(options: { epoch: string; height: string }): Promise<object>;

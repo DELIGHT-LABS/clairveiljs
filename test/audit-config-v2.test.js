@@ -87,6 +87,61 @@ test("snapshot also accepts generated camelCase protobuf responses", async () =>
   responses.key={record:bytesFromHex(f.records[1].record_hex),stateHeight:21n};
   assert.equal((await queryActiveAuditSnapshotV2(options)).epoch,"2");
 });
+
+test("structured and encoded circuit identities produce the same pinned snapshot", async () => {
+  const reference = setup();
+  const expected = await queryActiveAuditSnapshotV2(reference.options);
+  const bytes = bytesFromBase64(f.identity_base64);
+  const camel = CircuitSetIdentity.decode(bytes);
+  for (const fields of [
+    { circuitIdentity: camel },
+    { circuit_identity: f.identity },
+    { circuit_identity: bytes, circuitIdentity: camel }
+  ]) {
+    const { options, responses, calls } = setup();
+    delete responses.configuration.circuit_identity;
+    Object.assign(responses.configuration, fields);
+    assert.deepEqual(await queryActiveAuditSnapshotV2(options), expected);
+    assert.deepEqual(calls, reference.calls);
+  }
+});
+
+test("structured circuit identities enforce the schema, deployment pin and alias agreement", async () => {
+  const bytes = bytesFromBase64(f.identity_base64);
+  const camel = CircuitSetIdentity.decode(bytes);
+  const otherKey = structuredClone(camel);
+  otherKey.circuits[0].verifyingKeySha256 = "e".repeat(64);
+  const missingKey = structuredClone(camel);
+  delete missingKey.circuits[0].verifyingKeySha256;
+  const unknownCircuitField = structuredClone(camel);
+  unknownCircuitField.circuits[0].extra = true;
+  const noncanonical = Uint8Array.from([...bytes, 0x28, 1]);
+  for (const [fields, error] of [
+    [{ circuitIdentity: otherKey }, /verifier identity/],
+    [{ circuitIdentity: missingKey }, /SHA256/],
+    [{ circuitIdentity: { ...camel, circuits: [...camel.circuits].reverse() } }, /order/],
+    [{ circuitIdentity: { ...camel, schema_version: "other" } }, /aliases conflict/],
+    [{ circuitIdentity: { ...camel, extra: true } }, /unknown.*field/],
+    [{ circuitIdentity: unknownCircuitField }, /unknown.*field/],
+    [{ circuit_identity: bytes, circuitIdentity: otherKey }, /aliases conflict/],
+    [{ circuit_identity: noncanonical }, /canonical protobuf/],
+    [{ circuit_identity: noncanonical, circuitIdentity: camel }, /canonical protobuf/]
+  ]) {
+    const { options, responses, calls } = setup();
+    delete responses.configuration.circuit_identity;
+    Object.assign(responses.configuration, fields);
+    await assert.rejects(queryActiveAuditSnapshotV2(options), error);
+    assert.equal(calls.length, 1);
+  }
+});
+
+test("structured circuit identities still require the audit key at the configuration height", async () => {
+  const { options, responses } = setup();
+  responses.configuration.circuit_identity = f.identity;
+  responses.key.state_height = "22";
+  await assert.rejects(queryActiveAuditSnapshotV2(options), /audit key query height mismatch/);
+});
+
 test("halt and missing active epoch stop before the key query", async () => {
   for (const patch of [{halted:true},{halted:"false"},{halted:undefined},{active_epoch:"0"}]) {
     const {options,responses,calls}=setup();Object.assign(responses.keySchedule,patch);

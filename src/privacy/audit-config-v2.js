@@ -2,7 +2,7 @@ import { hexFromBytes } from "../core/browser-crypto.js";
 import { normalizeBech32Prefix } from "../core/crypto.js";
 import { CircuitSetIdentity } from "../generated/clairveil/privacy/v1/genesis.js";
 import { object, bytes, wireBytes, integer, alias, equal, maxHeight, maxUint64 } from "./audit-encoding.js";
-import { validateAuditArtifactManifestV2, validateAuditCircuitIdentityV2, sameIdentity } from "./audit-circuit-v2.js";
+import { auditCircuitOrderV2, validateAuditArtifactManifestV2, validateAuditCircuitIdentityV2, sameIdentity } from "./audit-circuit-v2.js";
 import { computeAuditNetworkDigestV2, parseAuditKeyRecordV2 } from "./audit-key-v2.js";
 
 export { auditCircuitSetIdV2, auditCircuitOrderV2, auditPublicInputSchemaSHA256V2,
@@ -10,6 +10,45 @@ export { auditCircuitSetIdV2, auditCircuitOrderV2, auditPublicInputSchemaSHA256V
 export { computeAuditNetworkDigestV2, parseAuditKeyRecordV2 } from "./audit-key-v2.js";
 
 const snapshots = new WeakSet();
+const identityFields = ["schemaVersion", "schema_version", "circuitSetId", "circuit_set_id", "curve", "circuits"];
+const circuitFields = ["circuitId", "circuit_id", "verifyingKeySha256", "verifying_key_sha256",
+  "publicInputSchemaSha256", "public_input_schema_sha256"];
+
+function decodeCircuitIdentity(encoded) {
+  if (encoded.length > 16384) throw new Error("audit circuit identity is too large");
+  const decoded = CircuitSetIdentity.decode(encoded);
+  if (!equal(CircuitSetIdentity.encode(decoded).finish(), encoded)) throw new Error("audit circuit identity is not canonical protobuf");
+  return validateAuditCircuitIdentityV2(decoded);
+}
+
+function copyIdentityFields(value, fields) {
+  const record = Object.create(null);
+  for (const key of Object.keys(object(value, "audit circuit identity"))) {
+    if (!fields.includes(key)) throw new Error("unknown audit circuit identity field");
+    record[key] = value[key];
+  }
+  return record;
+}
+
+function isStructuredIdentity(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && !ArrayBuffer.isView(value);
+}
+
+function readConfigurationIdentity({ circuit_identity, circuitIdentity }) {
+  const aliases = { circuit_identity, circuitIdentity };
+  // Preserve the byte-level comparison for existing providers that supply both aliases.
+  if (!isStructuredIdentity(circuit_identity) && !isStructuredIdentity(circuitIdentity)) {
+    return decodeCircuitIdentity(alias(aliases, "circuit_identity", "circuitIdentity", wireBytes));
+  }
+  return alias(aliases, "circuit_identity", "circuitIdentity", (value, label) => {
+    if (!isStructuredIdentity(value)) return decodeCircuitIdentity(wireBytes(value, label));
+    const identity = copyIdentityFields(value, identityFields);
+    const circuits = identity.circuits;
+    if (!Array.isArray(circuits) || circuits.length !== auditCircuitOrderV2.length) throw new Error("audit circuit identity requires four circuits");
+    identity.circuits = auditCircuitOrderV2.map((_, i) => copyIdentityFields(circuits[i], circuitFields));
+    return validateAuditCircuitIdentityV2(identity);
+  });
+}
 
 export function normalizeDisclosureConfigV2(response) {
   const value = object(response, "V2 disclosure configuration");
@@ -46,11 +85,7 @@ export async function queryActiveAuditSnapshotV2({ query, chainId, accountPrefix
   if (BigInt(height) < BigInt(initial)) throw new Error("configuration height precedes initial height");
   if (pinnedNonce && !equal(pinnedNonce, nonce)) throw new Error("audit network nonce mismatch");
   if (pinnedInitial !== undefined && pinnedInitial !== initial) throw new Error("audit initial height mismatch");
-  const encodedIdentity = alias(c, "circuit_identity", "circuitIdentity", wireBytes);
-  if (encodedIdentity.length > 16384) throw new Error("audit circuit identity is too large");
-  const decoded = CircuitSetIdentity.decode(encodedIdentity);
-  if (!equal(CircuitSetIdentity.encode(decoded).finish(), encodedIdentity)) throw new Error("audit circuit identity is not canonical protobuf");
-  const identity = validateAuditCircuitIdentityV2(decoded);
+  const identity = readConfigurationIdentity(c);
   if (!sameIdentity(identity, artifact.circuitIdentity)) throw new Error("audit verifier identity does not match on-chain configuration");
 
   const s = object(await query.keySchedule({ height }), "audit key schedule");
